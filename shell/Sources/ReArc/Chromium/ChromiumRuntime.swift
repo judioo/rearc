@@ -122,6 +122,26 @@ struct ChromiumServiceEvent {
         security = e.security
         href = e.href.map { String(cString: $0) }
     }
+
+    var mediaSnapshot: ChromiumMediaSnapshot {
+        ChromiumMediaSnapshot(
+            playback: playback,
+            audible: audible,
+            hasMetadata: hasMetadata,
+            title: title,
+            artist: artist,
+            album: album
+        )
+    }
+}
+
+/// Owned copy of one `ReArcScriptCallback` invocation.
+struct ChromiumScriptResult {
+    var status: ReArcStatus
+    var tabID: UInt64
+    var contentGeneration: UInt64
+    var json: String?
+    var errorJSON: String?
 }
 
 private final class WeakRef<T: AnyObject> {
@@ -138,6 +158,38 @@ private final class CompletionBox {
 private let completionTrampoline: ReArcCompletion = { context, status, cancelled in
     guard let context else { return }
     Unmanaged<CompletionBox>.fromOpaque(context).takeRetainedValue().body(status, cancelled)
+}
+
+/// Context for one accepted `ReArcTabEvaluateScript`. Retained (+1) across the
+/// C call; released exactly once, by the callback or on synchronous rejection.
+private final class ScriptEvaluationBox {
+    /// Contexts not yet released; the self-test asserts this returns to zero.
+    static var live = 0
+
+    let body: (ChromiumScriptResult) -> Void
+
+    init(_ body: @escaping (ChromiumScriptResult) -> Void) {
+        self.body = body
+        Self.live += 1
+    }
+
+    deinit {
+        Self.live -= 1
+    }
+}
+
+private let scriptCallback: ReArcScriptCallback = { context, status, tab, generation, json, errorJSON in
+    guard let context else { return }
+    // Both strings are borrowed for this call only and are never ReArcBufferFree storage.
+    let result = ChromiumScriptResult(
+        status: status,
+        tabID: tab,
+        contentGeneration: generation,
+        json: json.map { String(cString: $0) },
+        errorJSON: errorJSON.map { String(cString: $0) }
+    )
+    let box = Unmanaged<ScriptEvaluationBox>.fromOpaque(context).takeRetainedValue()
+    MainActor.assumeIsolated { box.body(result) }
 }
 
 private func runtime(from context: UnsafeMutableRawPointer?) -> ChromiumRuntime {
@@ -185,6 +237,9 @@ final class ChromiumRuntime {
     private(set) var isStopping = false
     private(set) var defaultProfileID: UInt64 = 0
     private(set) var shutdownCompleted = false
+    /// ABI 1.5 features in use; probed when the engine is ready.
+    private(set) var capabilities = ChromiumCapabilities.none
+    private(set) var keychainMode = ChromiumLaunchArguments.KeychainMode.system
     /// After a beforeunload veto, the next quit request forces shutdown.
     private var shutdownVetoed = false
 
@@ -213,8 +268,9 @@ final class ChromiumRuntime {
 
     /// Configures the ABI and blocks in `ReArcEngineRun` (which calls ChromeMain).
     /// Must run before any NSApplication exists.
-    func run(arguments: [String]) -> Int32 {
+    func run(arguments: [String], keychain: ChromiumLaunchArguments.KeychainMode) -> Int32 {
         precondition(Thread.isMainThread && !isConfigured)
+        keychainMode = keychain
         var callbacks = ReArcCallbacks(
             ready: readyCallback,
             tab_event: tabEventCallback,
@@ -240,12 +296,24 @@ final class ChromiumRuntime {
 
     fileprivate func handleReady(defaultProfileID profile: UInt64) {
         defaultProfileID = profile
+        capabilities = Self.probeCapabilities()
         isReady = true
         ChromiumLog.info(
             "ready: ABI \(ReArcEngineABIVersion()), bridge \(String(cString: ReArcEngineBridgeVersion())), "
                 + "Chromium \(String(cString: ReArcEngineVersion())), default profile \(profile)"
         )
+        ChromiumLog.info("capabilities: \(capabilities.summary)")
         onReady?()
+    }
+
+    /// The wave-11 engine (ABI 1.0) has no `ReArcEngineABIMinorVersion` export,
+    /// and the framework is weak-linked, so probe the symbol before calling it.
+    private static func probeCapabilities() -> ChromiumCapabilities {
+        let hasMinorExport = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcEngineABIMinorVersion") != nil
+        let minor = hasMinorExport ? ReArcEngineABIMinorVersion() : nil
+        return ChromiumCapabilities(abiMinorVersion: minor) { name in
+            name.withCString { ReArcEngineHasFeature($0) }
+        }
     }
 
     // MARK: ID mapping
@@ -371,6 +439,34 @@ final class ChromiumRuntime {
         let status = start(box, completionTrampoline)
         if status != .rearcOK {
             Unmanaged<CompletionBox>.fromOpaque(box).release()
+        }
+        return status
+    }
+
+    /// Evaluation contexts still awaiting their callback.
+    var liveScriptContexts: Int { ScriptEvaluationBox.live }
+
+    /// `ReArcTabEvaluateScript` with a retained context. An accepted call
+    /// completes exactly once on main; a rejected one never calls `completion`.
+    func evaluateScript(
+        tab: UInt64,
+        source: String,
+        world: ChromiumScriptWorld,
+        timeoutMS: UInt32,
+        completion: @escaping (ChromiumScriptResult) -> Void
+    ) -> ReArcStatus {
+        guard capabilities.scriptEvaluation else { return ReArcStatus(REARC_UNSUPPORTED) }
+        let box = Unmanaged.passRetained(ScriptEvaluationBox(completion)).toOpaque()
+        let status = source.withCString { sourcePointer in
+            if let boostID = world.boostID {
+                return boostID.withCString {
+                    ReArcTabEvaluateScript(tab, sourcePointer, world.abiWorld, $0, timeoutMS, scriptCallback, box)
+                }
+            }
+            return ReArcTabEvaluateScript(tab, sourcePointer, world.abiWorld, nil, timeoutMS, scriptCallback, box)
+        }
+        if status != .rearcOK {
+            Unmanaged<ScriptEvaluationBox>.fromOpaque(box).release()
         }
         return status
     }

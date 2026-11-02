@@ -50,6 +50,17 @@ final class EngineHost {
         return WKEngine(context: context)
     }
 
+    /// URLs the running engine admits beyond the base set; Chromium WebUI and
+    /// view-source need ABI 1.5 with `navigation_extended`.
+    var navigationSchemes: NavigationURLPolicy.EngineSchemes {
+        #if REARC_CHROMIUM
+        if let runtime = ChromiumRuntime.active {
+            return runtime.capabilities.navigationSchemes
+        }
+        #endif
+        return []
+    }
+
     /// Binds an engine the shell did not create (a Chromium-created tab) to a sidebar tab.
     func adopt(_ engine: any WebEngine, for tab: Tab, profileID: Profile.ID) {
         engines[TabEngineKey(tabID: tab.id, profileID: profileID)] = engine

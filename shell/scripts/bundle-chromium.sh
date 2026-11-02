@@ -10,7 +10,13 @@
 #                                                        @loader_path/../../../../../.. resolves to $DIST
 #
 # Usage: scripts/bundle-chromium.sh [--release] [--copy-dylibs] [--dist DIR] [--skip-build] [--selftest]
+#                                   [--dev-mock-keychain]
 #   REARC_CHROMIUM_OUT  engine output dir (default: engine/chromium/src/out/ReArc-dev-arm64)
+#   --dev-mock-keychain DEVELOPMENT ONLY, off by default, refused with --release. Marks the
+#                       bundle so the shell passes Chromium's --use-mock-keychain: cookies and
+#                       other Safe Storage data are then NOT encrypted with a Keychain key. It
+#                       avoids Keychain authorization stalls caused by this script's ad-hoc
+#                       signature on a replaced executable. Self-test log: selftest-chromium-mockkeychain.log.
 set -euo pipefail
 
 SHELL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,6 +29,7 @@ CONFIG=debug
 DYLIB_MODE=symlink
 BUILD=1
 SELFTEST=0
+DEV_MOCK_KEYCHAIN=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,13 +38,18 @@ while [[ $# -gt 0 ]]; do
     --dist) DIST="$2"; shift ;;
     --skip-build) BUILD=0 ;;
     --selftest) SELFTEST=1 ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    --dev-mock-keychain) DEV_MOCK_KEYCHAIN=1 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 64 ;;
   esac
   shift
 done
 
 die() { echo "bundle-chromium: $*" >&2; exit 1; }
+
+# The mock keychain disables real cookie encryption; it must never reach a release bundle.
+# (Release builds of the shell also ignore the Info.plist marker.)
+[[ $DEV_MOCK_KEYCHAIN == 1 && $CONFIG == release ]] && die "--dev-mock-keychain is development-only and cannot be combined with --release"
 
 [[ -d "$OUT/Chromium.app" ]] || die "no Chromium.app in $OUT (build the engine first; this script never does)"
 [[ -f "$OUT/libchrome_dll.dylib" ]] || die "no libchrome_dll.dylib in $OUT (component build output expected)"
@@ -85,6 +97,12 @@ PLIST="$APP/Contents/Info.plist"
 plutil -replace CFBundleExecutable -string ReArc "$PLIST"
 plutil -replace CFBundleName -string ReArc "$PLIST"
 plutil -replace CFBundleDisplayName -string ReArc "$PLIST"
+if [[ $DEV_MOCK_KEYCHAIN == 1 ]]; then
+  plutil -replace ReArcDevUseMockKeychain -bool YES "$PLIST"
+  echo "==> DEVELOPMENT bundle: --use-mock-keychain enabled (cookies are not Keychain-encrypted)"
+fi
+# Ad-hoc signature: the executable's identity changes on every build, so macOS may ask
+# again for "Chromium Safe Storage" access. Production needs a stable Developer ID.
 codesign --force --sign - "$APP/Contents/MacOS/ReArc" 2>/dev/null
 
 # 4. Dylib closure next to the app (where the framework's rpath points).
@@ -126,7 +144,11 @@ Run the self-test:
 EOF
 
 if [[ $SELFTEST == 1 ]]; then
-  LOG="$SHELL_DIR/selftest-chromium.log"
+  if [[ $DEV_MOCK_KEYCHAIN == 1 ]]; then
+    LOG="$SHELL_DIR/selftest-chromium-mockkeychain.log"
+  else
+    LOG="$SHELL_DIR/selftest-chromium.log"
+  fi
   PROFILE="$(mktemp -d "${TMPDIR:-/tmp}/rearc-selftest-profile.XXXXXX")"
   echo "==> self-test (log: $LOG)"
   set +e

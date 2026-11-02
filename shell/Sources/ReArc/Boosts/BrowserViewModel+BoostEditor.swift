@@ -30,7 +30,7 @@ extension BrowserViewModel {
         guard var draft = boostEditorDraftByTab[tab.id] else { return }
         draft.pickerActive.toggle()
         boostEditorDraftByTab[tab.id] = draft
-        wkEngine(for: tab)?.setBoostPickerMode(draft.pickerActive)
+        boostEditorEngine(for: tab)?.setBoostPickerMode(draft.pickerActive)
     }
 
     func startBoostPicker() {
@@ -38,7 +38,7 @@ extension BrowserViewModel {
         guard var draft = boostEditorDraftByTab[tab.id] else { return }
         draft.pickerActive = true
         boostEditorDraftByTab[tab.id] = draft
-        wkEngine(for: tab)?.setBoostPickerMode(true)
+        boostEditorEngine(for: tab)?.setBoostPickerMode(true)
     }
 
     func handleBoostPick(_ snapshot: PickedElementSnapshot) {
@@ -52,9 +52,9 @@ extension BrowserViewModel {
         boostEditorDraftByTab[tab.id] = draft
         lastPickedSnapshotByTab[tab.id] = snapshot
         boostSelectorFingerprintByTab[tab.id] = BoostSelectorFingerprint.from(snapshot: snapshot)
-        wkEngine(for: tab)?.setBoostPickerMode(false)
+        boostEditorEngine(for: tab)?.setBoostPickerMode(false)
         if let css = draft.selectedSelector {
-            wkEngine(for: tab)?.highlightBoostSelector(css)
+            boostEditorEngine(for: tab)?.highlightBoostSelector(css)
         }
     }
 
@@ -65,7 +65,7 @@ extension BrowserViewModel {
         draft.selectedSelector = draft.candidateChoices[index].candidate.css
         boostEditorDraftByTab[tab.id] = draft
         if let css = draft.selectedSelector {
-            wkEngine(for: tab)?.highlightBoostSelector(css)
+            boostEditorEngine(for: tab)?.highlightBoostSelector(css)
         }
     }
 
@@ -141,7 +141,7 @@ extension BrowserViewModel {
         guard let draft = boostEditorDraftByTab[tab.id],
               draft.selectorDead,
               let fingerprint = boostSelectorFingerprintByTab[tab.id] else { return }
-        wkEngine(for: tab)?.fetchRepairScan { [weak self] scan in
+        boostEditorEngine(for: tab)?.fetchRepairScan { [weak self] scan in
             guard let self else { return }
             let decision = BoostSelectorRepair.considerRepair(fingerprint: fingerprint, scan: scan)
             self.applySessionHeal(for: tab, packageID: draft.packageID, decision: decision)
@@ -188,19 +188,19 @@ extension BrowserViewModel {
     private func closeBoostEditor(revert: Bool) {
         guard let tab = store.selectedTab else { return }
         if revert {
-            wkEngine(for: tab)?.clearEditorLiveCSS()
+            boostEditorEngine(for: tab)?.clearEditorLiveCSS()
         }
-        let wk = wkEngine(for: tab)
-        wk?.setBoostEditorOpen(false)
-        wk?.onBoostEditorPick = nil
-        wk?.onBoostEditorCancel = nil
+        let editor = boostEditorEngine(for: tab)
+        editor?.setBoostEditorOpen(false)
+        editor?.onBoostEditorPick = nil
+        editor?.onBoostEditorCancel = nil
         boostEditorDraftByTab[tab.id] = nil
         boostSessionApplyByTab[tab.id] = nil
         lastPickedSnapshotByTab[tab.id] = nil
         boostSelectorFingerprintByTab[tab.id] = nil
         boostLiveDebounceWorkItem?.cancel()
         if !revert {
-            wkEngine(for: tab)?.clearEditorLiveCSS()
+            boostEditorEngine(for: tab)?.clearEditorLiveCSS()
         }
     }
 
@@ -214,25 +214,28 @@ extension BrowserViewModel {
             draftCSS: draft.draftCSS,
             sessionMap: session
         )
-        wkEngine(for: tab)?.applyEditorLiveCSS(css)
+        boostEditorEngine(for: tab)?.applyEditorLiveCSS(css)
     }
 
     private func wireBoostEditorEngine(for tab: Tab) {
-        guard let wk = wkEngine(for: tab) else { return }
-        wk.setBoostEditorOpen(true)
-        wk.onBoostEditorPick = { [weak self] snap in
+        guard let editor = boostEditorEngine(for: tab) else { return }
+        editor.setBoostEditorOpen(true)
+        editor.onBoostEditorPick = { [weak self] snap in
             self?.handleBoostPick(snap)
         }
-        wk.onBoostEditorCancel = { [weak self, weak wk] in
+        editor.onBoostEditorCancel = { [weak self, weak editor] in
             guard let self, var draft = self.boostEditorDraftByTab[tab.id] else { return }
             draft.pickerActive = false
             self.boostEditorDraftByTab[tab.id] = draft
-            wk?.setBoostPickerMode(false)
+            editor?.setBoostPickerMode(false)
         }
     }
 
-    private func wkEngine(for tab: Tab) -> WKEngine? {
+    /// The selected tab's engine when it can drive the editor (WebKit, or Chromium with script_evaluation).
+    private func boostEditorEngine(for tab: Tab) -> (any BoostEditorEngine)? {
         let pid = profileID(for: tab)
-        return engineHost.engine(for: tab, profileID: pid) as? WKEngine
+        guard let editor = engineHost.engine(for: tab, profileID: pid) as? any BoostEditorEngine,
+              editor.supportsBoostEditor else { return nil }
+        return editor
     }
 }

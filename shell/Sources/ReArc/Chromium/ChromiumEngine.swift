@@ -98,6 +98,23 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     @ObservationIgnored private var linkPeekApplied = false
     @ObservationIgnored private var linkPeekInFlight = false
 
+    /// The shell's navigation identity: bumped on every primary cross-document
+    /// commit and on close. Evaluation results from an older value are stale.
+    @ObservationIgnored private(set) var documentSerial: UInt64 = 0
+    @ObservationIgnored private var commitWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    /// The ABI allows one pending evaluation per tab; later callers queue here.
+    @ObservationIgnored private var evaluationBusy = false
+    @ObservationIgnored private var evaluationWaiters: [CheckedContinuation<Void, Never>] = []
+    @ObservationIgnored private(set) var evaluationInFlight = false
+    /// Evaluations requested and not yet finished, including queued ones.
+    @ObservationIgnored private(set) var evaluationsOutstanding = 0
+
+    @ObservationIgnored var onBoostEditorPick: ((PickedElementSnapshot) -> Void)?
+    @ObservationIgnored var onBoostEditorCancel: (() -> Void)?
+    @ObservationIgnored private(set) var pickerActive = false
+    @ObservationIgnored private var hoverInFlight = false
+    @ObservationIgnored private var pendingHover: CGPoint?
+
     var mediaState: WebMediaState { mediaStateSubject.value }
     var mediaStatePublisher: AnyPublisher<WebMediaState, Never> { mediaStateSubject.eraseToAnyPublisher() }
 
@@ -170,18 +187,28 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
             guard event.isMainFrame else { return }
             if let url = event.url.flatMap(URL.init(string:)) { currentURL = url }
             lastError = nil
-            if !event.isSameDocument { onNavigationCommit?(currentURL, pageTitle) }
+            if !event.isSameDocument {
+                documentSerial += 1
+                resumeCommitWaiters(throwing: nil)
+                onNavigationCommit?(currentURL, pageTitle)
+            }
         case .failed:
-            guard event.isMainFrame, event.errorCode != ChromiumTabEvent.netErrorAborted else { return }
+            guard event.isMainFrame else { return }
+            resumeCommitWaiters(throwing: nil)
+            guard event.errorCode != ChromiumTabEvent.netErrorAborted else { return }
             lastError = "\(event.errorText ?? "net error") (\(event.errorCode))"
         case .closed:
             ChromiumLog.info("tab \(tabID) closed by engine (reason \(event.closedReason))")
             tabID = 0
+            documentSerial += 1
+            resumeCommitWaiters(throwing: ChromiumScriptError.noTab)
             isLoading = false
             installInFlight = false
             linkPeekInFlight = false
             appliedPlan = []
             linkPeekApplied = false
+            // tab.closed is final: no later media event will report the session ended.
+            if mediaState != .silent { mediaStateSubject.send(.silent) }
         }
     }
 
@@ -192,14 +219,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
             faviconRef = event.faviconCleared ? nil : event.iconRef
         case .media:
             isMuted = event.muted
-            var state = mediaState
-            state.isPlaying = event.playback == 0
-            state.isAudible = event.audible
-            state.canPictureInPicture = false
-            if event.hasMetadata {
-                state.title = event.title.flatMap { $0.isEmpty ? nil : $0 }
-                state.artist = event.artist.flatMap { $0.isEmpty ? nil : $0 }
-            }
+            let state = ChromiumMediaMapping.apply(event.mediaSnapshot, to: mediaState)
             if state != mediaState { mediaStateSubject.send(state) }
         case .security:
             securityLevel = event.security
@@ -227,7 +247,9 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
         enqueueNavigation { [weak self] in self?.command("forward") { ReArcTabGoForward($0) } }
     }
 
-    /// Immediate typed navigation (no boost barrier). The ABI admits http(s) and exact about:blank only.
+    /// Immediate typed navigation (no boost barrier). ABI 1.5 admits http(s), data, file,
+    /// chrome://settings, chrome://version, exact about:blank and view-source of http(s)/file;
+    /// older engines admit http(s) and about:blank only. Other URLs return invalid_url.
     @discardableResult
     func navigateNow(_ url: URL) -> ReArcStatus {
         command("navigate \(url.absoluteString)") { tab in
@@ -420,9 +442,11 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     /// One attachment per tab: a new host takes the lease from the previous one.
     func claimLease(for newHost: ChromiumHostView) {
         if let previous = host, previous !== newHost {
+            previous.setPickerOverlay(nil)
             previous.releaseLease(detach: true)
         }
         host = newHost
+        newHost.setPickerOverlay(pickerActive ? self : nil)
     }
 
     func leaseChanged(_ attachmentID: UInt64?, host changedHost: ChromiumHostView) {
@@ -449,6 +473,206 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
                 Unmanaged<SnapshotRequest>.fromOpaque(context).release()
                 continuation.resume(throwing: ChromiumEngineError.rejected("snapshot", status))
             }
+        }
+    }
+
+    // MARK: Script evaluation (ABI 1.5)
+
+    var supportsScriptEvaluation: Bool { runtime.capabilities.scriptEvaluation }
+
+    /// Evaluates a JavaScript expression in the current primary document and
+    /// returns its JSON-decoded value (a JS string decodes to String, undefined
+    /// to NSNull). Wrap statements in an IIFE. One evaluation runs at a time.
+    @MainActor
+    func evaluate(
+        _ source: String,
+        in world: ChromiumScriptWorld,
+        timeoutMS: UInt32 = ChromiumScriptOutcome.defaultTimeoutMS
+    ) async throws -> Any {
+        guard supportsScriptEvaluation else { throw ChromiumScriptError.unsupported }
+        let range = ChromiumScriptOutcome.timeoutRangeMS
+        let timeout = min(max(timeoutMS, range.lowerBound), range.upperBound)
+        evaluationsOutstanding += 1
+        defer { evaluationsOutstanding -= 1 }
+        await acquireEvaluationSlot()
+        defer { releaseEvaluationSlot() }
+        do {
+            return try await evaluateOnce(source, in: world, timeoutMS: timeout)
+        } catch ChromiumScriptError.rejected(let status) where status == ChromiumStatusCode.invalidState {
+            // invalid_state: a primary navigation is pending. Retry once after it commits.
+            try await waitForPrimaryCommit(timeoutMS: timeout)
+            return try await evaluateOnce(source, in: world, timeoutMS: timeout)
+        }
+    }
+
+    @MainActor
+    private func evaluateOnce(_ source: String, in world: ChromiumScriptWorld, timeoutMS: UInt32) async throws -> Any {
+        guard tabID != 0 else { throw ChromiumScriptError.noTab }
+        let tab = tabID
+        let generation = contentGeneration
+        let document = documentSerial
+        evaluationInFlight = true
+        defer { evaluationInFlight = false }
+        let result: ChromiumScriptResult = try await withCheckedThrowingContinuation { continuation in
+            let status = runtime.evaluateScript(tab: tab, source: source, world: world, timeoutMS: timeoutMS) {
+                continuation.resume(returning: $0)
+            }
+            if status != .rearcOK {
+                continuation.resume(throwing: ChromiumScriptError.rejected(status))
+            }
+        }
+        ChromiumLog.trace("tab \(tab) evaluate \(world) -> \(result.status.rearcName) gen \(result.contentGeneration)")
+        if result.status == ReArcStatus(REARC_CANCELLED) { throw ChromiumScriptError.cancelled }
+        guard result.tabID == tab, result.contentGeneration == generation,
+              tabID == tab, contentGeneration == generation, documentSerial == document else {
+            throw ChromiumScriptError.staleDocument
+        }
+        return try ChromiumScriptOutcome.decode(status: result.status, json: result.json, errorJSON: result.errorJSON).get()
+    }
+
+    @MainActor
+    private func acquireEvaluationSlot() async {
+        guard evaluationBusy else {
+            evaluationBusy = true
+            return
+        }
+        await withCheckedContinuation { evaluationWaiters.append($0) }
+    }
+
+    private func releaseEvaluationSlot() {
+        if evaluationWaiters.isEmpty {
+            evaluationBusy = false
+        } else {
+            evaluationWaiters.removeFirst().resume()
+        }
+    }
+
+    @MainActor
+    private func waitForPrimaryCommit(timeoutMS: UInt32) async throws {
+        let key = UUID()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            commitWaiters[key] = continuation
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(Int(timeoutMS))) { [weak self] in
+                self?.commitWaiters.removeValue(forKey: key)?
+                    .resume(throwing: ChromiumScriptError.rejected(ChromiumStatusCode.invalidState))
+            }
+        }
+    }
+
+    private func resumeCommitWaiters(throwing error: Error?) {
+        let waiters = commitWaiters
+        commitWaiters = [:]
+        for waiter in waiters.values {
+            if let error { waiter.resume(throwing: error) } else { waiter.resume() }
+        }
+    }
+
+    // MARK: Boost picker (native overlay input)
+
+    /// Highlights the element under the pointer; at most one hover evaluation is in flight.
+    func pickerHover(at point: CGPoint) {
+        guard pickerActive else { return }
+        if hoverInFlight {
+            pendingHover = point
+            return
+        }
+        hoverInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = try? await self.evaluate(BoostEditorScripts.snapshotAt(x: point.x, y: point.y), in: .editor, timeoutMS: 1000)
+            self.hoverInFlight = false
+            if let next = self.pendingHover {
+                self.pendingHover = nil
+                self.pickerHover(at: next)
+            }
+        }
+    }
+
+    func pickerClick(at point: CGPoint) {
+        guard pickerActive else { return }
+        let tab = tabID
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                if let snapshot = try await self.pickElement(at: point) {
+                    self.onBoostEditorPick?(snapshot)
+                }
+            } catch {
+                ChromiumLog.info("tab \(tab) picker pick failed: \(error)")
+            }
+        }
+    }
+
+    func pickerCancel() {
+        onBoostEditorCancel?()
+    }
+
+    /// Picker descriptor of the element at viewport CSS coordinates (view points at 100% zoom).
+    @MainActor
+    func pickElement(at point: CGPoint) async throws -> PickedElementSnapshot? {
+        let value = try await evaluate(BoostEditorScripts.snapshotAt(x: point.x, y: point.y), in: .editor)
+        guard let object = value as? [String: Any] else { return nil }
+        return BoostEditorMessageHandler.decodePick(object)
+    }
+
+    fileprivate func runEditorScript(_ source: String, _ label: String) {
+        guard supportsScriptEvaluation, tabID != 0 else { return }
+        let tab = tabID
+        Task { @MainActor [weak self] in
+            do {
+                _ = try await self?.evaluate(source, in: .editor)
+            } catch ChromiumScriptError.cancelled, ChromiumScriptError.staleDocument {
+                // The document went away; the editor reapplies on its next change.
+            } catch {
+                ChromiumLog.info("tab \(tab) editor \(label) failed: \(error)")
+            }
+        }
+    }
+
+    fileprivate func setPickerActive(_ active: Bool) {
+        pickerActive = active
+        if !active { pendingHover = nil }
+        host?.setPickerOverlay(active ? self : nil)
+    }
+}
+
+/// The boost editor and picker on Chromium: editor-world evaluation plus a
+/// native overlay for pointer input (WebKit message handlers do not exist here).
+extension ChromiumEngine: BoostEditorEngine {
+    var supportsBoostEditor: Bool { supportsScriptEvaluation }
+
+    func setBoostEditorOpen(_ open: Bool) {
+        if open {
+            runEditorScript(BoostEditorScripts.withPicker("null"), "bootstrap")
+        } else {
+            setBoostPickerMode(false)
+        }
+    }
+
+    func setBoostPickerMode(_ active: Bool) {
+        setPickerActive(active)
+        runEditorScript(BoostEditorScripts.setPickMode(active), "pick mode")
+    }
+
+    func highlightBoostSelector(_ css: String) {
+        runEditorScript(BoostEditorScripts.highlight(selector: css), "highlight")
+    }
+
+    func applyEditorLiveCSS(_ css: String) {
+        guard let source = BoostEditorScripts.liveStylesheet(css) else { return }
+        runEditorScript(source, "live CSS")
+    }
+
+    func clearEditorLiveCSS() {
+        applyEditorLiveCSS("")
+        runEditorScript(BoostEditorScripts.hideOverlay, "hide overlay")
+    }
+
+    func fetchRepairScan(completion: @escaping ([PickedElementSnapshot]) -> Void) {
+        Task { @MainActor [weak self] in
+            let value = try? await self?.evaluate(BoostEditorScripts.scanRepairCandidates, in: .editor)
+            let objects = value as? [[String: Any]] ?? []
+            completion(objects.compactMap(BoostEditorMessageHandler.decodePick))
         }
     }
 }

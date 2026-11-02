@@ -201,6 +201,7 @@ final class WKEngine: NSObject, WebEngine {
     private var boostEditorOpen = false
     var onBoostPageshow: (() -> Void)?
     var onNavigationCommit: ((URL?, String?) -> Void)?
+    let supportsBoostEditor = true
 
     var onBoostEditorPick: ((PickedElementSnapshot) -> Void)? {
         didSet { boostEditorBridge.onPick = onBoostEditorPick }
@@ -453,61 +454,13 @@ final class WKEngine: NSObject, WebEngine {
     }
 
     func applyEditorLiveCSS(_ css: String) {
-        let rules: [BoostCSSRule]
-        if css.isEmpty {
-            rules = []
-        } else {
-            guard let compiled = BoostStyleCompiler.compileStylesheet(css, allowInStyle: true) else { return }
-            rules = compiled
-        }
-        let hostWorld = BoostInjectionScriptBuilder.hostWorld()
-        let rulesJSON: String
-        if rules.isEmpty {
-            rulesJSON = "[]"
-        } else {
-            let parts = rules.map { rule in
-                """
-                {"id":"\(rule.id)","css":"\(escapeJSForEval(rule.css))"}
-                """
-            }
-            rulesJSON = "[\(parts.joined(separator: ","))]"
-        }
+        guard let source = BoostEditorScripts.liveStylesheet(css) else { return }
         webView.evaluateJavaScript(
-            """
-            (function(){
-              var PREFIX = 'rearc-boost-editor-live-';
-              var rules = \(rulesJSON);
-              var active = {};
-              for (var i = 0; i < rules.length; i++) {
-                var rule = rules[i];
-                var styleId = PREFIX + rule.id;
-                active[styleId] = true;
-                var node = document.getElementById(styleId);
-                if (!node) {
-                  node = document.createElement('style');
-                  node.id = styleId;
-                  node.type = 'text/css';
-                  (document.head || document.documentElement).appendChild(node);
-                }
-                node.textContent = rule.css;
-              }
-              var nodes = document.querySelectorAll('style[id^="' + PREFIX + '"]');
-              for (var j = 0; j < nodes.length; j++) {
-                if (!active[nodes[j].id]) nodes[j].remove();
-              }
-            })();
-            """,
+            source,
             in: nil,
-            in: hostWorld,
+            in: BoostInjectionScriptBuilder.hostWorld(),
             completionHandler: nil
         )
-    }
-
-    private func escapeJSForEval(_ s: String) -> String {
-        s.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "")
     }
 
     func clearEditorLiveCSS() {

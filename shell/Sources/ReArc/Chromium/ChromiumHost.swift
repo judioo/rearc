@@ -8,26 +8,42 @@ import SwiftUI
 /// configure before NSApplication exists, block in ReArcEngineRun on main,
 /// build shell windows in `ready`, and exit with Run's result after shutdown.
 enum ChromiumHost {
-    static let userDataDirFlag = "--user-data-dir="
-
     /// Returns only when Chromium is unavailable (caller falls back to WebKit).
     @MainActor
     static func launch(_ options: EngineLaunchOptions) {
         guard let reason = unavailableReason() else {
-            var arguments = CommandLine.arguments
-            if !arguments.contains(where: { $0.hasPrefix(userDataDirFlag) }) {
-                arguments.append(userDataDirFlag + defaultUserDataDir(selfTest: options.selfTest).path)
+            let keychain = ChromiumLaunchArguments.keychainMode(
+                infoDictionary: Bundle.main.infoDictionary,
+                isDebugBuild: ChromiumLaunchArguments.isDebugBuild
+            )
+            switch keychain {
+            case .system:
+                break
+            case .devMock:
+                ChromiumLog.info(
+                    "DEVELOPMENT BUNDLE: \(ChromiumLaunchArguments.mockKeychainSwitch) is on; cookies and Safe Storage "
+                        + "data are NOT protected by the macOS Keychain. Never ship this bundle."
+                )
+            case .devMockRefused:
+                ChromiumLog.info(
+                    "\(ChromiumLaunchArguments.devMockKeychainInfoKey) ignored: release builds always use the macOS Keychain"
+                )
             }
+            let arguments = ChromiumLaunchArguments.browserArguments(
+                CommandLine.arguments,
+                defaultUserDataDir: { defaultUserDataDir(selfTest: options.selfTest).path },
+                keychain: keychain
+            )
             let runtime = ChromiumRuntime.shared
             if options.selfTest {
                 let test = ChromiumSelfTest(runtime: runtime)
                 runtime.onReady = { test.start() }
-                let code = runtime.run(arguments: arguments)
+                let code = runtime.run(arguments: arguments, keychain: keychain)
                 exit(test.exitCode(runResult: code))
             }
             let shell = ChromiumShell(runtime: runtime)
             runtime.onReady = { shell.start() }
-            exit(runtime.run(arguments: arguments))
+            exit(runtime.run(arguments: arguments, keychain: keychain))
         }
         ReArcMain.unavailableChromium(options, reason: reason)
     }
@@ -124,6 +140,15 @@ final class ChromiumShell {
         let target = menuTarget
 
         let app = NSMenu(title: "ReArc")
+        // Chromium owns settings (chrome://settings WebUI); the shell does not duplicate them.
+        if runtime.capabilities.navigationExtended {
+            app.addItem(target.item("Settings…", ",") { model.openBrowserPage(.settings) })
+            app.addItem(target.item("Clear Browsing Data…", "\u{8}", [.command, .shift]) {
+                model.openBrowserPage(.clearBrowsingData)
+            })
+            app.addItem(target.item("About Chromium Engine", "") { model.openBrowserPage(.version) })
+            app.addItem(.separator())
+        }
         app.addItem(withTitle: "Hide ReArc", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         app.addItem(.separator())
         // NSApp.terminate is routed to terminate_requested -> ReArcEngineShutdown.
@@ -147,6 +172,10 @@ final class ChromiumShell {
 
         let view = NSMenu(title: "View")
         view.addItem(target.item("Toggle Sidebar", "s") { model.toggleSidebar() })
+        if runtime.capabilities.navigationExtended {
+            view.addItem(.separator())
+            view.addItem(target.item("View Page Source", "u", [.command, .option]) { model.viewSelectedPageSource() })
+        }
         main.addSubmenu(view, title: "View")
 
         let tabs = NSMenu(title: "Tabs")

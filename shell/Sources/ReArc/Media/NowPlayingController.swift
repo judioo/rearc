@@ -57,6 +57,9 @@ final class NowPlayingController: MediaKeyRouting {
         if let artist = state.artist {
             info[MPMediaItemPropertyArtist] = artist
         }
+        if let album = state.album {
+            info[MPMediaItemPropertyAlbumTitle] = album
+        }
         info[MPNowPlayingInfoPropertyPlaybackRate] = state.isPlaying ? 1.0 : 0.0
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
         MPNowPlayingInfoCenter.default().playbackState = state.isPlaying ? .playing : .paused

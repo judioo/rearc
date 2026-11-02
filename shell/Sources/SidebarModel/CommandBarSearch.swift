@@ -66,7 +66,8 @@ public enum CommandBarSearch {
         peekURL: URL? = nil,
         focusedLittleArcID: LittleArcWindow.ID? = nil,
         mediaByTab: [Tab.ID: WebMediaState] = [:],
-        tabMuteModel: TabMediaMuteModel = TabMediaMuteModel()
+        tabMuteModel: TabMediaMuteModel = TabMediaMuteModel(),
+        navigationSchemes: NavigationURLPolicy.EngineSchemes = []
     ) -> [Result] {
         let (mode, needle) = parseMode(query)
         let context = CommandBarContext(
@@ -76,7 +77,8 @@ public enum CommandBarSearch {
             peekURL: peekURL,
             focusedLittleArcID: focusedLittleArcID,
             mediaByTab: mediaByTab,
-            tabMuteModel: tabMuteModel
+            tabMuteModel: tabMuteModel,
+            navigationSchemes: navigationSchemes
         )
 
         switch mode {
@@ -86,7 +88,7 @@ public enum CommandBarSearch {
             guard !needle.isEmpty else { return [] }
             var output = tabResults(for: needle, in: store)
             output.append(contentsOf: commandResults(matching: needle, context: context, store: store, allowEmpty: false))
-            if let url = URLEntry.resolve(query), looksLikeDirectNavigation(query) {
+            if let url = URLEntry.resolve(query, engine: navigationSchemes), looksLikeDirectNavigation(query) {
                 output.append(Result(
                     id: "url-\(url.absoluteString)",
                     kind: .openURL,
@@ -94,7 +96,7 @@ public enum CommandBarSearch {
                     subtitle: url.absoluteString,
                     destinationURL: url
                 ))
-            } else if let searchURL = URLEntry.resolve(query) {
+            } else if let searchURL = URLEntry.resolve(query, engine: navigationSchemes) {
                 output.append(Result(
                     id: "search-\(searchURL.absoluteString)",
                     kind: .search,

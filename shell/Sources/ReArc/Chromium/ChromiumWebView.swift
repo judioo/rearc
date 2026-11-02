@@ -34,6 +34,7 @@ final class ChromiumHostView: NSView {
 
     private(set) var engine: ChromiumEngine
     private var lease: Lease?
+    private(set) var pickerOverlay: ChromiumPickerOverlayView?
     private var dismantled = false
     private var reportedSize: CGSize = .zero
     private var reportedScale: CGFloat = 0
@@ -76,7 +77,28 @@ final class ChromiumHostView: NSView {
     override func layout() {
         super.layout()
         lease?.view.frame = bounds
+        pickerOverlay?.frame = bounds
         pushSize()
+    }
+
+    /// Covers the page with the picker overlay while `engine` is picking; nil removes it.
+    func setPickerOverlay(_ picking: ChromiumEngine?) {
+        guard let picking else {
+            guard let overlay = pickerOverlay else { return }
+            pickerOverlay = nil
+            if window?.firstResponder === overlay { window?.makeFirstResponder(nil) }
+            overlay.removeFromSuperview()
+            return
+        }
+        let overlay = pickerOverlay ?? ChromiumPickerOverlayView(frame: bounds)
+        overlay.engine = picking
+        overlay.frame = bounds
+        overlay.autoresizingMask = [.width, .height]
+        if subviews.last !== overlay {
+            addSubview(overlay, positioned: .above, relativeTo: nil)
+        }
+        pickerOverlay = overlay
+        window?.makeFirstResponder(overlay)
     }
 
     override func viewDidChangeBackingProperties() {
@@ -115,6 +137,9 @@ final class ChromiumHostView: NSView {
         view.frame = bounds
         view.autoresizingMask = [.width, .height]
         addSubview(view)
+        if let pickerOverlay {
+            addSubview(pickerOverlay, positioned: .above, relativeTo: nil)
+        }
         lease = Lease(
             tabID: tabID,
             attachmentID: attachment.attachment_id,
@@ -175,6 +200,55 @@ final class ChromiumHostView: NSView {
         if status != .rearcOK {
             ChromiumLog.info("tab \(lease.tabID) resize rejected: \(status.rearcName)")
         }
+    }
+}
+
+/// Takes pointer and Escape input over the Chromium view while the boost
+/// picker is active. The ABI has no page-to-host messages, so the element
+/// under the pointer is found by evaluating the picker script at these
+/// top-left view coordinates (CSS pixels at 100% page zoom).
+final class ChromiumPickerOverlayView: NSView {
+    weak var engine: ChromiumEngine?
+    private var trackingArea: NSTrackingArea?
+    private static let escapeKeyCode: UInt16 = 53
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
+            owner: self
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.crosshair.set()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        engine?.pickerHover(at: location(of: event))
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        engine?.pickerClick(at: location(of: event))
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == Self.escapeKeyCode {
+            engine?.pickerCancel()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+
+    private func location(of event: NSEvent) -> CGPoint {
+        convert(event.locationInWindow, from: nil)
     }
 }
 #endif

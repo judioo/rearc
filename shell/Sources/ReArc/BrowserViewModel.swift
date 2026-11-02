@@ -53,7 +53,8 @@ final class BrowserViewModel {
             peekURL: peekSession?.url,
             focusedLittleArcID: focusedLittleArcID,
             mediaByTab: mediaStateByTab,
-            tabMuteModel: tabMuteModel
+            tabMuteModel: tabMuteModel,
+            navigationSchemes: engineHost.navigationSchemes
         )
     }
 
@@ -774,7 +775,7 @@ final class BrowserViewModel {
 
     func submitCommandBar() {
         if let intent = commandBarURLIntent {
-            guard let url = URLEntry.resolve(commandBarText) else {
+            guard let url = URLEntry.resolve(commandBarText, engine: engineHost.navigationSchemes) else {
                 commandBarError = "Enter a valid URL"
                 return
             }
@@ -823,7 +824,7 @@ final class BrowserViewModel {
             }
         }
 
-        guard let url = URLEntry.resolve(commandBarText) else {
+        guard let url = URLEntry.resolve(commandBarText, engine: engineHost.navigationSchemes) else {
             dismissCommandBar()
             return
         }
@@ -832,8 +833,31 @@ final class BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
+    /// Opens a Chromium-owned page (settings, version) instead of a shell
+    /// reimplementation, reusing a tab already showing that WebUI host.
+    func openBrowserPage(_ page: BrowserInternalPage) {
+        guard engineHost.navigationSchemes.contains(.trustedWebUI) else { return }
+        if let existing = store.displayTabs().first(where: { page.isShown(by: $0.url) }) {
+            store.updateTab(existing.id, title: page.title, url: page.url)
+            store.focusTab(existing.id)
+        } else {
+            let tab = store.addTab(kind: .today, title: page.title, url: page.url)
+            store.selectTab(tab.id)
+        }
+        loadSelectedIfNeeded()
+    }
+
+    func viewSelectedPageSource() {
+        guard let current = store.selectedTab,
+              let url = NavigationURLPolicy.viewSourceURL(for: current.url, engine: engineHost.navigationSchemes)
+        else { return }
+        let tab = store.addTab(kind: .today, title: "Source: \(current.title)", url: url)
+        store.selectTab(tab.id)
+        loadSelectedIfNeeded()
+    }
+
     private func navigateCommandBar(to url: URL) {
-        guard NavigationURLPolicy.allows(url) else {
+        guard NavigationURLPolicy.allows(url, engine: engineHost.navigationSchemes) else {
             commandBarError = "That URL scheme is not allowed"
             return
         }
@@ -986,6 +1010,17 @@ final class BrowserViewModel {
             Task { await performCapture(scope: .visible) }
         case .openCapturesGallery:
             isCapturesGalleryPresented = true
+        case .openBrowserPage(let page):
+            guard engineHost.navigationSchemes.contains(.trustedWebUI) else {
+                return "Browser settings need the Chromium engine"
+            }
+            openBrowserPage(page)
+        case .viewPageSource:
+            guard let tab = store.selectedTab,
+                  NavigationURLPolicy.viewSourceURL(for: tab.url, engine: engineHost.navigationSchemes) != nil else {
+                return "Page source is not available for this tab"
+            }
+            viewSelectedPageSource()
         }
         return nil
     }

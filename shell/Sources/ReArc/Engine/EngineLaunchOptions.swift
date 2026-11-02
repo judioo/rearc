@@ -48,3 +48,4 @@ protocol NavigationCommitReporting: AnyObject {
 }
 
 extension WKEngine: NavigationCommitReporting {}
+extension WKEngine: BoostEditorEngine {}

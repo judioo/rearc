@@ -37,6 +37,8 @@ public enum AppCommandAction: Equatable, Hashable {
     case capturePage
     case captureVisibleArea
     case openCapturesGallery
+    case openBrowserPage(BrowserInternalPage)
+    case viewPageSource
 }
 
 /// Read-only command-bar context for enablement and dynamic commands.
@@ -50,6 +52,8 @@ public struct CommandBarContext {
     public var focusedLittleArcID: LittleArcWindow.ID?
     public var mediaByTab: [Tab.ID: WebMediaState]
     public var tabMuteModel: TabMediaMuteModel
+    /// What the running engine admits beyond the base URL set (Chromium WebUI, view-source).
+    public var navigationSchemes: NavigationURLPolicy.EngineSchemes
 
     public init(
         store: SidebarStore,
@@ -58,7 +62,8 @@ public struct CommandBarContext {
         peekURL: URL? = nil,
         focusedLittleArcID: LittleArcWindow.ID? = nil,
         mediaByTab: [Tab.ID: WebMediaState] = [:],
-        tabMuteModel: TabMediaMuteModel = TabMediaMuteModel()
+        tabMuteModel: TabMediaMuteModel = TabMediaMuteModel(),
+        navigationSchemes: NavigationURLPolicy.EngineSchemes = []
     ) {
         self.store = store
         self.isSidebarVisible = isSidebarVisible
@@ -67,6 +72,7 @@ public struct CommandBarContext {
         self.focusedLittleArcID = focusedLittleArcID
         self.mediaByTab = mediaByTab
         self.tabMuteModel = tabMuteModel
+        self.navigationSchemes = navigationSchemes
     }
 }
 
@@ -165,6 +171,11 @@ public struct AppCommand: Equatable, Identifiable {
             return true
         case .capturePage, .captureVisibleArea:
             return store.selectedTab != nil
+        case .openBrowserPage:
+            return context.navigationSchemes.contains(.trustedWebUI)
+        case .viewPageSource:
+            guard let tab = store.selectedTab else { return false }
+            return NavigationURLPolicy.viewSourceURL(for: tab.url, engine: context.navigationSchemes) != nil
         }
     }
 }
@@ -434,6 +445,48 @@ public enum AppCommandRegistry {
                 keywords: ["captures", "screenshots", "gallery", "media", "library"],
                 minQueryLength: 2,
                 action: .openCapturesGallery
+            ),
+            AppCommand(
+                id: "browser-settings",
+                title: "Settings",
+                keywords: ["settings", "preferences", "options", "chrome", "browser"],
+                minQueryLength: 2,
+                action: .openBrowserPage(.settings)
+            ),
+            AppCommand(
+                id: "privacy-settings",
+                title: "Privacy and Security Settings",
+                keywords: ["privacy", "security", "cookies", "settings"],
+                minQueryLength: 2,
+                action: .openBrowserPage(.privacy)
+            ),
+            AppCommand(
+                id: "site-settings",
+                title: "Site Settings",
+                keywords: ["site", "permissions", "camera", "location", "notifications", "settings"],
+                minQueryLength: 2,
+                action: .openBrowserPage(.siteSettings)
+            ),
+            AppCommand(
+                id: "clear-browsing-data",
+                title: "Clear Browsing Data…",
+                keywords: ["clear", "history", "cache", "cookies", "browsing", "data"],
+                minQueryLength: 2,
+                action: .openBrowserPage(.clearBrowsingData)
+            ),
+            AppCommand(
+                id: "engine-version",
+                title: "About Chromium Engine",
+                keywords: ["version", "about", "chromium", "engine"],
+                minQueryLength: 2,
+                action: .openBrowserPage(.version)
+            ),
+            AppCommand(
+                id: "view-page-source",
+                title: "View Page Source",
+                keywords: ["source", "view", "html", "developer"],
+                minQueryLength: 2,
+                action: .viewPageSource
             ),
         ]
     }
