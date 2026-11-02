@@ -17,6 +17,13 @@
 #                       other Safe Storage data are then NOT encrypted with a Keychain key. It
 #                       avoids Keychain authorization stalls caused by this script's ad-hoc
 #                       signature on a replaced executable. Self-test log: selftest-chromium-mockkeychain.log.
+#
+# Signing (optional; ad-hoc when unset). Set in the environment or in the git-ignored
+# shell/signing.local.env (see signing.example.env):
+#   REARC_SIGN_IDENTITY  codesign identity name or SHA-1, e.g. "Apple Development: …" for local
+#                        development (a stable signature keeps the Keychain "Safe Storage" grant
+#                        across rebuilds), or "Developer ID Application: …" for distribution.
+#   REARC_TEAM_ID        Apple Developer Team ID; the identity's certificate must belong to it.
 set -euo pipefail
 
 SHELL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -46,6 +53,21 @@ while [[ $# -gt 0 ]]; do
 done
 
 die() { echo "bundle-chromium: $*" >&2; exit 1; }
+
+# Local, never-committed signing settings. Environment variables take precedence.
+if [[ -f "$SHELL_DIR/signing.local.env" ]]; then
+  _identity="${REARC_SIGN_IDENTITY:-}" _team="${REARC_TEAM_ID:-}"
+  # shellcheck disable=SC1091
+  source "$SHELL_DIR/signing.local.env"
+  REARC_SIGN_IDENTITY="${_identity:-${REARC_SIGN_IDENTITY:-}}"
+  REARC_TEAM_ID="${_team:-${REARC_TEAM_ID:-}}"
+fi
+SIGN_IDENTITY="${REARC_SIGN_IDENTITY:-}"
+TEAM_ID="${REARC_TEAM_ID:-}"
+if [[ -n $SIGN_IDENTITY ]]; then
+  security find-identity -v -p codesigning | grep -qF "$SIGN_IDENTITY" \
+    || die "signing identity not found in the keychain: $SIGN_IDENTITY"
+fi
 
 # The mock keychain disables real cookie encryption; it must never reach a release bundle.
 # (Release builds of the shell also ignore the Info.plist marker.)
@@ -101,9 +123,25 @@ if [[ $DEV_MOCK_KEYCHAIN == 1 ]]; then
   plutil -replace ReArcDevUseMockKeychain -bool YES "$PLIST"
   echo "==> DEVELOPMENT bundle: --use-mock-keychain enabled (cookies are not Keychain-encrypted)"
 fi
-# Ad-hoc signature: the executable's identity changes on every build, so macOS may ask
-# again for "Chromium Safe Storage" access. Production needs a stable Developer ID.
-codesign --force --sign - "$APP/Contents/MacOS/ReArc" 2>/dev/null
+# Only the replaced browser executable is re-signed; it is the process that reads the
+# "Chromium Safe Storage" Keychain item. Nested framework/helper code keeps the engine
+# build's signatures. Ad-hoc: the identity changes on every build, so macOS may ask again
+# for Safe Storage access. With REARC_SIGN_IDENTITY the designated requirement (bundle id
+# + certificate) is stable, so one "Always Allow" survives rebuilds. Distribution still
+# needs a Developer ID identity, hardened runtime, full nested signing and notarization.
+BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw "$PLIST")"
+if [[ -n $SIGN_IDENTITY ]]; then
+  codesign --force --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" --timestamp=none \
+    "$APP/Contents/MacOS/ReArc"
+  if [[ -n $TEAM_ID ]]; then
+    actual_team="$(codesign -dv "$APP/Contents/MacOS/ReArc" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    [[ $actual_team == "$TEAM_ID" ]] || die "signed with team '$actual_team', expected REARC_TEAM_ID=$TEAM_ID"
+  fi
+  echo "==> signed ReArc executable: $SIGN_IDENTITY (team ${TEAM_ID:-unchecked}, id $BUNDLE_ID)"
+else
+  codesign --force --sign - "$APP/Contents/MacOS/ReArc" 2>/dev/null
+  echo "==> ad-hoc signed ReArc executable (set REARC_SIGN_IDENTITY for a stable signature)"
+fi
 
 # 4. Dylib closure next to the app (where the framework's rpath points).
 count=0

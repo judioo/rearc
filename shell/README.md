@@ -175,6 +175,17 @@ scripts/bundle-chromium.sh --dev-mock-keychain --selftest   # log: selftest-chro
 > builds ignore the key (and log that they did). Never ship a bundle built
 > with it.
 
+#### Stable development signing
+
+Set `REARC_SIGN_IDENTITY` (and optionally `REARC_TEAM_ID`, which the script
+verifies) in the environment or in the git-ignored `signing.local.env`. Copy
+`signing.example.env` to create it, and list identities with
+`security find-identity -v -p codesigning`. The script then signs the ReArc
+executable with that identity. The designated requirement becomes the bundle
+id plus the certificate rather than a per-build code hash, so a single Always
+Allow for Safe Storage should survive rebuilds. An Apple Development
+certificate is enough for this. It does not make the bundle distributable.
+
 Production needs:
 
 - a stable signing identity: a Developer ID certificate with a Team ID,
