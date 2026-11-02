@@ -1,0 +1,64 @@
+import SidebarModel
+import SwiftUI
+
+/// WebKit-path SwiftUI app; launched by `ReArcMain`.
+struct ReArcApp: App {
+    @State private var model = BrowserViewModel()
+
+    var body: some Scene {
+        WindowGroup("ReArc") {
+            BrowserView(model: model)
+        }
+        .windowStyle(.hiddenTitleBar)
+
+        WindowGroup("Little Arc", id: "littleArc", for: LittleArcWindow.ID.self) { $windowID in
+            if let windowID {
+                LittleArcWindowView(model: model, windowID: windowID)
+            } else {
+                Text("No Little Arc window")
+            }
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 520, height: 420)
+        .commands {
+            // Cmd+T — new tab, replacing File > New (window).
+            CommandGroup(replacing: .newItem) {
+                Button("New Tab") { model.newTab() }
+                    .keyboardShortcut("t")
+            }
+            // Cmd+S — toggle the sidebar, replacing File > Save.
+            CommandGroup(replacing: .saveItem) {
+                Button(model.isSidebarVisible ? "Hide Sidebar" : "Show Sidebar") {
+                    model.toggleSidebar()
+                }
+                .keyboardShortcut("s")
+            }
+            CommandMenu("Tabs") {
+                Button("Focus Location") { model.focusLocation() }
+                    .keyboardShortcut("l")
+                Divider()
+                // Cmd+W — close the selected tab. There is no replaceable
+                // placement for File > Close Window, so BrowserView strips
+                // its key equivalent on launch, leaving this the sole ⌘W.
+                Button("Close Tab") { model.closeSelectedTab() }
+                    .keyboardShortcut("w")
+                Button("Reopen Closed Tab") { model.reopenClosedTab() }
+                    .keyboardShortcut("t", modifiers: [.command, .shift])
+                Divider()
+                Button("Next Tab") { model.selectNextTab() }
+                    .keyboardShortcut("]", modifiers: [.command, .shift])
+                Button("Previous Tab") { model.selectPreviousTab() }
+                    .keyboardShortcut("[", modifiers: [.command, .shift])
+                Button("Select Next Tab") { model.selectNextTab() }
+                    .keyboardShortcut(.tab, modifiers: .control)
+                Divider()
+                Button("Add Split View") { model.addSplitView(orientation: .horizontal) }
+                Button("Separate from Split View") {
+                    if let tab = model.store.selectedTab {
+                        model.unsplitTabIfInSplit(tab.id)
+                    }
+                }
+            }
+        }
+    }
+}

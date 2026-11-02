@@ -1,0 +1,5 @@
+.build/
+.build-chromium/
+dist/
+.swiftpm/
+*.xcodeproj/
