@@ -81,32 +81,192 @@ enum ChromiumHost {
     }
 }
 
-/// The normal Chromium-path UI: the same `BrowserView` in an AppKit-owned window.
-final class ChromiumShell {
+/// The normal Chromium-path UI. There are no SwiftUI scenes on this path, so
+/// the shell owns its NSWindows: any number of browser windows sharing one
+/// `BrowserViewModel` (as the WebKit path's WindowGroup does), Little Arc
+/// and private windows through `BrowserWindowPresenting` (the same
+/// `LittleArcWindowView` / `PrivateWindowView` the WebKit scenes show).
+/// Closing a window never quits; Quit does.
+///
+/// Window teardown order (C-ABI.md "Core callbacks and ownership"): every
+/// Chromium host in a closing window detaches first, so a tab shown in several
+/// windows hands its one live attachment to a surviving window before the
+/// engine invalidates the closing one.
+final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
+    private enum WindowRole {
+        case browser
+        case littleArc(LittleArcWindow.ID)
+        case privateBrowsing(PrivateWindowModel)
+    }
+
     private let runtime: ChromiumRuntime
     private var model: BrowserViewModel?
-    private var window: NSWindow?
-    private var windowObserver: NSObjectProtocol?
+    private var windows: [ObjectIdentifier: (window: NSWindow, role: WindowRole)] = [:]
+    private var terminating = false
     private let menuTarget = ChromiumMenuTarget()
+    /// The self-test runs this shell on a throwaway sidebar and must not move
+    /// the user's saved window frame.
+    private let autosavesFrames: Bool
 
-    init(runtime: ChromiumRuntime) {
+    init(runtime: ChromiumRuntime, autosavesFrames: Bool = true) {
         self.runtime = runtime
+        self.autosavesFrames = autosavesFrames
     }
 
     @MainActor
-    func start() {
+    func start(model: BrowserViewModel = BrowserViewModel()) {
         NSApp.setActivationPolicy(.regular)
-        let model = BrowserViewModel()
         self.model = model
-        runtime.onAdoptedTab = { [weak model] event in
-            model?.adoptChromiumTab(event) ?? false
+        model.windowPresenter = self
+        model.onProfileDeleted = { [weak self, runtime] id in
+            // EngineHost already dropped the profile's engines. Its private windows
+            // close first (their off-the-record children must go before the parent).
+            self?.closePrivateWindows(parent: id)
+            runtime.closeProfile(.persistent(id), force: true) { status, cancelled in
+                ChromiumLog.info("deleted profile \(id): engine close \(status.rearcName) cancelled=\(cancelled)")
+            }
         }
-        runtime.onTerminateRequested = { [weak model] in
+        model.onPrivateSessionEnded = { [runtime] last in
+            guard let engine = last.engine as? ChromiumEngine else { return }
+            // The session's last window keeps its engine (tab, lease, contexts) alive
+            // until the off-the-record profile close has completed.
+            runtime.closeProfile(engine.profileKey, force: true) { status, cancelled in
+                ChromiumLog.info("private session ended: \(engine.profileKey) closed \(status.rearcName) "
+                    + "cancelled=\(cancelled) (window \(last.id))")
+            }
+        }
+        runtime.onAdoptedTab = { [weak self] event in
+            self?.adopt(event) ?? false
+        }
+        runtime.onTerminateRequested = { [weak self, weak model] in
+            self?.terminating = true
             model?.prepareForQuit()
         }
+        NSApp.mainMenu = makeMainMenu(model: model)
+        openBrowserWindow()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(applicationDidBecomeActive(_:)),
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
+    /// Dock click / app switch with no windows left: reopen a browser window.
+    @MainActor
+    @objc private func applicationDidBecomeActive(_ notification: Notification) {
+        reopenIfNoWindows()
+    }
+
+    @MainActor
+    func reopenIfNoWindows() {
+        guard !terminating, !windows.values.contains(where: { $0.window.isVisible }) else { return }
+        openBrowserWindow()
+    }
+
+    var browserWindows: [NSWindow] {
+        windows.values.compactMap { if case .browser = $0.role { return $0.window } else { return nil } }
+    }
+
+    var browserWindowCount: Int { browserWindows.count }
+
+    var windowCount: Int { windows.count }
+
+    // MARK: Windows
+
+    @MainActor
+    @discardableResult
+    func openBrowserWindow() -> NSWindow? {
+        guard let model, !terminating else { return nil }
+        let first = browserWindowCount == 0
+        let window = makeWindow(
+            size: NSSize(width: 1280, height: 820),
+            title: "ReArc",
+            content: NSHostingView(rootView: BrowserView(model: model))
+        )
+        if first, autosavesFrames {
+            window.setFrameAutosaveName("ReArcChromiumMainWindow")
+            if !window.setFrameUsingName("ReArcChromiumMainWindow") { window.center() }
+        } else {
+            cascade(window, offset: 0)
+        }
+        track(window, .browser)
+        window.makeKeyAndOrderFront(nil)
+        return window
+    }
+
+    /// A private window (`BrowserViewModel.openPrivateWindow`): one page whose
+    /// engine is on the session's off-the-record profile.
+    func presentPrivateWindow(_ privateWindow: PrivateWindowModel) {
+        MainActor.assumeIsolated {
+            guard let model, !terminating else { return }
+            let window = makeWindow(
+                size: NSSize(width: 1100, height: 760),
+                title: "Private Window",
+                content: NSHostingView(rootView: PrivateWindowView(model: model, window: privateWindow))
+            )
+            // PrivateWindowView has its own header below a standard title bar.
+            window.styleMask.remove(.fullSizeContentView)
+            window.titlebarAppearsTransparent = false
+            window.titleVisibility = .visible
+            cascade(window, offset: 30)
+            track(window, .privateBrowsing(privateWindow))
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func closePrivateWindows(parent: Profile.ID) {
+        for entry in windows.values {
+            if case .privateBrowsing(let privateWindow) = entry.role, privateWindow.parentProfileID == parent {
+                closeWindow(entry.window)
+            }
+        }
+    }
+
+    private func cascade(_ window: NSWindow, offset: CGFloat) {
+        if let key = NSApp.keyWindow {
+            window.setFrameTopLeftPoint(key.cascadeTopLeft(from: NSPoint(x: key.frame.minX + offset, y: key.frame.maxY - offset)))
+        } else {
+            window.center()
+        }
+    }
+
+    func presentLittleArcWindow(_ id: LittleArcWindow.ID) {
+        MainActor.assumeIsolated {
+            if let existing = window(forLittleArc: id) {
+                existing.makeKeyAndOrderFront(nil)
+                return
+            }
+            guard let model, !terminating else { return }
+            let window = makeWindow(
+                size: NSSize(width: 520, height: 420),
+                title: "Little Arc",
+                content: NSHostingView(rootView: LittleArcWindowView(model: model, windowID: id))
+            )
+            cascade(window, offset: 40)
+            track(window, .littleArc(id))
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    func dismissLittleArcWindow(_ id: LittleArcWindow.ID) {
+        window(forLittleArc: id).map(closeWindow)
+    }
+
+    func window(forLittleArc id: LittleArcWindow.ID) -> NSWindow? {
+        windows.values.first { if case .littleArc(id) = $0.role { return true } else { return false } }?.window
+    }
+
+    /// Programmatic close: detach first, then close (no shouldClose round trip).
+    func closeWindow(_ window: NSWindow) {
+        ChromiumHostView.dismantleAll(in: window)
+        window.close()
+    }
+
+    private func makeWindow(size: NSSize, title: String, content: NSView) -> NSWindow {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
+            contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -114,24 +274,70 @@ final class ChromiumShell {
         window.isReleasedWhenClosed = false
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.title = "ReArc"
-        window.contentView = NSHostingView(rootView: BrowserView(model: model))
-        window.setFrameAutosaveName("ReArcChromiumMainWindow")
-        if !window.setFrameUsingName("ReArcChromiumMainWindow") { window.center() }
-        // There is one browser window; closing it quits through the engine's orderly shutdown.
-        windowObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: window,
-            queue: .main
-        ) { _ in
-            DispatchQueue.main.async { NSApp.terminate(nil) }
-        }
-        self.window = window
-
-        NSApp.mainMenu = makeMainMenu(model: model)
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        window.title = title
+        window.tabbingMode = .disallowed
+        window.contentView = content
+        window.delegate = self
+        return window
     }
+
+    private func track(_ window: NSWindow, _ role: WindowRole) {
+        windows[ObjectIdentifier(window)] = (window, role)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // Detach before the close begins, ahead of the engine's own will-close observer.
+        ChromiumHostView.dismantleAll(in: sender)
+        return true
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              let entry = windows.removeValue(forKey: ObjectIdentifier(window)) else { return }
+        ChromiumHostView.dismantleAll(in: window)
+        // Quitting keeps Little Arc records for restore, and engine shutdown owns
+        // every profile; a user close archives the record or ends the private session.
+        guard !terminating else { return }
+        if case .privateBrowsing(let privateWindow) = entry.role {
+            model?.privateWindowClosed(privateWindow.id)
+        }
+        DispatchQueue.main.async {
+            // Tears down the SwiftUI hierarchy (onDisappear runs, engines drop).
+            window.contentView = nil
+        }
+    }
+
+    // MARK: Adopted (Chromium-created) tabs
+
+    /// Popups and target=_blank contents stay in the opener's BrowserContext:
+    /// a private opener's popup becomes another private window of the same
+    /// session; anything else becomes a today tab in the active space.
+    @MainActor
+    private func adopt(_ event: ChromiumTabEvent) -> Bool {
+        guard let model, !terminating else { return false }
+        let key = runtime.profileKey(forEngineProfile: event.profileID)
+        if runtime.capabilities.profiles, key == nil, event.profileID != runtime.defaultProfileID {
+            // A profile that is closing (or unknown): relabeling the contents would mix storage.
+            ChromiumLog.info("not adopting tab \(event.tabID): engine profile \(event.profileID) is not open")
+            return false
+        }
+        if let key, case .offTheRecord(let session, let parent) = key {
+            let url = event.url.flatMap(URL.init(string:)) ?? URL(string: "about:blank")!
+            let engine = ChromiumEngine(
+                runtime: runtime,
+                adopting: event,
+                initialURL: url,
+                context: EngineProfileContext(profileID: parent, isEphemeral: true),
+                profileKey: key,
+                shellID: UUID()
+            )
+            model.openPrivateWindow(session: session, parentProfileID: parent, engine: engine)
+            return true
+        }
+        return model.adoptChromiumTab(event, profileKey: key)
+    }
+
+    // MARK: Menus
 
     /// The engine installs an empty placeholder menu; the shell owns menu construction.
     @MainActor
@@ -157,7 +363,17 @@ final class ChromiumShell {
 
         let file = NSMenu(title: "File")
         file.addItem(target.item("New Tab", "t") { model.newTab() })
+        file.addItem(target.item("New Window", "n") { [weak self] in self?.openBrowserWindow() })
+        if runtime.capabilities.profileOffTheRecord {
+            file.addItem(target.item("New Private Window", "n", [.command, .shift]) {
+                model.openPrivateWindow()
+            })
+        }
         file.addItem(target.item("Reopen Closed Tab", "t", [.command, .shift]) { model.reopenClosedTab() })
+        file.addItem(.separator())
+        file.addItem(target.item("Close Window", "w", [.command, .shift]) { [weak self] in
+            if let window = NSApp.keyWindow { self?.closeWindow(window) }
+        })
         main.addSubmenu(file, title: "File")
 
         let edit = NSMenu(title: "Edit")
@@ -172,6 +388,12 @@ final class ChromiumShell {
 
         let view = NSMenu(title: "View")
         view.addItem(target.item("Toggle Sidebar", "s") { model.toggleSidebar() })
+        if runtime.capabilities.pageZoom {
+            view.addItem(.separator())
+            view.addItem(target.item("Zoom In", "=") { model.zoom(.zoomIn) })
+            view.addItem(target.item("Zoom Out", "-") { model.zoom(.zoomOut) })
+            view.addItem(target.item("Actual Size", "0") { model.zoom(.reset) })
+        }
         if runtime.capabilities.navigationExtended {
             view.addItem(.separator())
             view.addItem(target.item("View Page Source", "u", [.command, .option]) { model.viewSelectedPageSource() })
@@ -181,13 +403,22 @@ final class ChromiumShell {
         let tabs = NSMenu(title: "Tabs")
         tabs.addItem(target.item("Focus Location", "l") { model.focusLocation() })
         tabs.addItem(.separator())
-        tabs.addItem(target.item("Close Tab", "w") { model.closeSelectedTab() })
+        tabs.addItem(target.item("Close Tab", "w") { [weak self] in
+            // A private or Little Arc window has one page: Cmd+W closes the window.
+            if let window = NSApp.keyWindow, let entry = self?.windows[ObjectIdentifier(window)] {
+                if case .browser = entry.role {} else { return self?.closeWindow(window) ?? () }
+            }
+            model.closeSelectedTab()
+        })
         tabs.addItem(.separator())
         tabs.addItem(target.item("Next Tab", "]", [.command, .shift]) { model.selectNextTab() })
         tabs.addItem(target.item("Previous Tab", "[", [.command, .shift]) { model.selectPreviousTab() })
         tabs.addItem(target.item("Select Next Tab", "\t", [.control]) { model.selectNextTab() })
         tabs.addItem(.separator())
         tabs.addItem(target.item("Add Split View", "") { model.addSplitView(orientation: .horizontal) })
+        tabs.addItem(target.item("Separate from Split View", "") {
+            if let tab = model.store.selectedTab { model.unsplitTabIfInSplit(tab.id) }
+        })
         main.addSubmenu(tabs, title: "Tabs")
 
         let windowMenu = NSMenu(title: "Window")
@@ -229,18 +460,21 @@ private extension NSMenu {
 }
 
 extension BrowserViewModel {
-    /// Chromium-created contents (popup, target=_blank) become a today tab in the
-    /// active space; v1 opens popups as tabs, never as native windows.
-    func adoptChromiumTab(_ event: ChromiumTabEvent) -> Bool {
+    /// Chromium-created contents (popup, target=_blank) from a persistent
+    /// profile become a today tab in the active space; popups open as tabs,
+    /// never as native windows.
+    func adoptChromiumTab(_ event: ChromiumTabEvent, profileKey: ChromiumProfileKey?) -> Bool {
         let blank = URL(string: "about:blank")!
         let url = event.url.flatMap(URL.init(string:)).flatMap { $0.absoluteString.isEmpty ? nil : $0 } ?? blank
         let tab = store.addTab(kind: .today, title: event.title.flatMap { $0.isEmpty ? nil : $0 } ?? "New Tab", url: url)
         let profileID = profileID(for: tab)
+        // The contents already live in the opener's BrowserContext; keep it.
         let engine = ChromiumEngine(
             runtime: ChromiumRuntime.shared,
             adopting: event,
             initialURL: url,
             context: EngineProfileContext(profileID: profileID),
+            profileKey: profileKey ?? .persistent(profileID),
             shellID: tab.id
         )
         engine.onNavigationCommit = { [weak self] url, title in

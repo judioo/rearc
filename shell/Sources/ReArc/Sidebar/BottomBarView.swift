@@ -109,10 +109,8 @@ struct BottomBarView: View {
     }
 
     private func attemptDelete(_ profile: Profile) {
-        if let error = model.store.deleteProfile(profile.id) {
+        if let error = model.deleteProfile(profile.id) {
             profileActionError = profileErrorMessage(error)
-        } else {
-            model.loadSelectedIfNeeded()
         }
     }
 

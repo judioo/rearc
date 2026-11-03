@@ -11,9 +11,14 @@ enum BoostPickerScript {
       var pickMode = false;
       var ATTR_ALLOW = ['role','aria-label','aria-labelledby','name','type','href','placeholder','alt','title','for','data-testid','data-test','data-cy','data-qa','data-id'];
 
-      function post(obj){ 
-        if(window.webkit && window.webkit.messageHandlers[HANDLER])
+      // WebKit: the editor world's message handler. Chromium: the isolated-world
+      // page-message channel, which takes one JSON string per message.
+      function post(obj){
+        if(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[HANDLER]){
           window.webkit.messageHandlers[HANDLER].postMessage(obj);
+        } else if(typeof rearcPostMessage === 'function'){
+          rearcPostMessage(JSON.stringify(obj));
+        }
       }
 
       function ensureOverlay(){
@@ -175,8 +180,10 @@ enum BoostPickerScript {
         }
       };
 
+      // Page scripts share this DOM and can dispatch synthetic events; only
+      // user input (isTrusted) picks or cancels.
       document.addEventListener('keydown', function(e){
-        if(!pickMode) return;
+        if(!pickMode || !e.isTrusted) return;
         if(e.key === 'Escape'){
           e.preventDefault();
           post({ type: 'cancel' });
@@ -189,7 +196,7 @@ enum BoostPickerScript {
       }, true);
 
       document.addEventListener('click', function(e){
-        if(!pickMode) return;
+        if(!pickMode || !e.isTrusted) return;
         e.preventDefault();
         e.stopImmediatePropagation();
         var payload = snapshotAt(e.clientX, e.clientY);

@@ -124,7 +124,7 @@ if [[ $DEV_MOCK_KEYCHAIN == 1 ]]; then
   echo "==> DEVELOPMENT bundle: --use-mock-keychain enabled (cookies are not Keychain-encrypted)"
 fi
 # Only the replaced browser executable is re-signed; it is the process that reads the
-# "Chromium Safe Storage" Keychain item. Nested framework/helper code keeps the engine
+# "ReArc Safe Storage" Keychain item. Nested framework/helper code keeps the engine
 # build's signatures. Ad-hoc: the identity changes on every build, so macOS may ask again
 # for Safe Storage access. With REARC_SIGN_IDENTITY the designated requirement (bundle id
 # + certificate) is stable, so one "Always Allow" survives rebuilds. Distribution still

@@ -50,19 +50,25 @@ private let snapshotCallback: ReArcSnapshotCallback = { context, status, _, gene
         request.continuation.resume(throwing: ChromiumEngineError.failed("snapshot", ReArcStatus(REARC_INTERNAL)))
     }
 }
-
 /// `WebEngine` backed by one Chromium tab through the engine C ABI
 /// (engine/docs/C-ABI.md). State is published from the ABI's main-thread
-/// callbacks; commands are main-thread ABI calls.
+/// callbacks; commands are main-thread ABI calls. The tab is created once its
+/// engine profile is open (named profiles open asynchronously); commands
+/// issued earlier wait for it.
 @Observable
 final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     let profileContext: EngineProfileContext
     @ObservationIgnored let role: EngineRole
     @ObservationIgnored let shellID: UUID
+    /// Engine profile this tab lives in; fixed for the tab's lifetime (a profile
+    /// change recreates the tab rather than relabeling it).
+    @ObservationIgnored let profileKey: ChromiumProfileKey
     @ObservationIgnored private unowned let runtime: ChromiumRuntime
 
     /// Session-local engine tab ID; 0 until created or after the engine closed the tab.
     private(set) var tabID: UInt64 = 0
+    /// Session-local engine profile ID of `tabID`; 0 without a tab.
+    private(set) var engineProfileID: UInt64 = 0
     private(set) var contentGeneration: UInt64 = 0
     private(set) var currentURL: URL?
     private(set) var pageTitle: String?
@@ -77,6 +83,8 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     private(set) var faviconRef: String?
     private(set) var lastError: String?
     private(set) var attachmentID: UInt64?
+    /// Browser page zoom from Chromium's zoom events (1.0 = 100%).
+    private(set) var zoomFactor: Double = 1.0
     /// Completed boost plan installs; navigation waits for the in-flight one.
     private(set) var boostInstallCount = 0
     private(set) var navigationsDeferredForBoosts = 0
@@ -84,10 +92,19 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     @ObservationIgnored var linkPeekHandler: ((URL) -> Void)? {
         didSet { reconcileLinkPeek() }
     }
+    /// Page messages from installed boost worlds (not the editor): untrusted data.
+    @ObservationIgnored var onBoostPageMessage: ((ChromiumPageMessage) -> Void)?
+    /// Editor-world messages that failed validation (wrong kind, stale document).
+    @ObservationIgnored private(set) var droppedEditorMessages = 0
 
     @ObservationIgnored private let mediaStateSubject = CurrentValueSubject<WebMediaState, Never>(.silent)
+    /// The host holding this tab's single attachment lease.
     @ObservationIgnored private weak var host: ChromiumHostView?
+    /// Every host currently showing this tab (windows, panes); only `host` is attached.
+    @ObservationIgnored private var displayHosts: [WeakHost] = []
 
+    @ObservationIgnored private var tabCreationPending = false
+    @ObservationIgnored private var tabWaiters: [CheckedContinuation<Bool, Never>] = []
     @ObservationIgnored private var desiredPlan: [ChromiumBoostPlan.Entry] = []
     @ObservationIgnored private var appliedPlan: [ChromiumBoostPlan.Entry] = []
     @ObservationIgnored private var installInFlight = false
@@ -97,10 +114,9 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     @ObservationIgnored private var navigationFlushScheduled = false
     @ObservationIgnored private var linkPeekApplied = false
     @ObservationIgnored private var linkPeekInFlight = false
+    /// A zoom request made before the tab had a live render frame (invalid_state).
+    @ObservationIgnored private var pendingZoomFactor: Double?
 
-    /// The shell's navigation identity: bumped on every primary cross-document
-    /// commit and on close. Evaluation results from an older value are stale.
-    @ObservationIgnored private(set) var documentSerial: UInt64 = 0
     @ObservationIgnored private var commitWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     /// The ABI allows one pending evaluation per tab; later callers queue here.
     @ObservationIgnored private var evaluationBusy = false
@@ -108,38 +124,55 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     @ObservationIgnored private(set) var evaluationInFlight = false
     /// Evaluations requested and not yet finished, including queued ones.
     @ObservationIgnored private(set) var evaluationsOutstanding = 0
+    /// Results discarded because the document identity no longer matched.
+    @ObservationIgnored private(set) var staleResultsDiscarded = 0
 
     @ObservationIgnored var onBoostEditorPick: ((PickedElementSnapshot) -> Void)?
     @ObservationIgnored var onBoostEditorCancel: (() -> Void)?
     @ObservationIgnored private(set) var pickerActive = false
+    /// The document the picker was started on; picks from any other are dropped.
+    @ObservationIgnored private var pickerDocument: ChromiumDocumentIdentity?
     @ObservationIgnored private var hoverInFlight = false
     @ObservationIgnored private var pendingHover: CGPoint?
 
     var mediaState: WebMediaState { mediaStateSubject.value }
     var mediaStatePublisher: AnyPublisher<WebMediaState, Never> { mediaStateSubject.eraseToAnyPublisher() }
 
-    init(runtime: ChromiumRuntime, context: EngineProfileContext, role: EngineRole, shellID: UUID) {
+    /// `privateSession` groups the tabs of one private window into one
+    /// off-the-record profile; it applies only to ephemeral contexts.
+    init(
+        runtime: ChromiumRuntime,
+        context: EngineProfileContext,
+        role: EngineRole,
+        shellID: UUID,
+        privateSession: UUID? = nil
+    ) {
         self.runtime = runtime
         self.profileContext = context
         self.role = role
         self.shellID = shellID
+        self.profileKey = ChromiumProfileKey(context: context, privateSession: privateSession ?? shellID)
         ensureTab()
     }
 
-    /// Wraps a tab Chromium created (popup / target=_blank); the engine already owns it.
+    /// Wraps a tab Chromium created (popup / target=_blank); the engine already
+    /// owns it, in the opener's BrowserContext (`profileKey`).
     /// `initialURL` must equal the sidebar tab's URL so selection doesn't navigate over the adopted contents.
     init(
         runtime: ChromiumRuntime,
         adopting event: ChromiumTabEvent,
         initialURL: URL,
         context: EngineProfileContext,
+        profileKey: ChromiumProfileKey,
         shellID: UUID
     ) {
         self.runtime = runtime
         self.profileContext = context
         self.role = .tab
         self.shellID = shellID
+        self.profileKey = profileKey
         tabID = event.tabID
+        engineProfileID = event.profileID
         contentGeneration = event.contentGeneration
         currentURL = initialURL
         runtime.register(self, tabID: event.tabID)
@@ -149,17 +182,52 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
         runtime.releaseTab(tabID, shellID: shellID)
     }
 
+    /// Starts tab creation if needed. True only when the tab already exists;
+    /// otherwise it is created once the profile opens.
     @discardableResult
     func ensureTab() -> Bool {
         if tabID != 0 { return true }
-        guard let id = runtime.createTab(for: self) else { return false }
+        guard !tabCreationPending else { return false }
+        tabCreationPending = true
+        runtime.createTab(for: self) { [weak self] id in
+            guard let self else { return }
+            self.tabCreationPending = false
+            if let id {
+                self.tabCreated(id)
+            } else {
+                self.lastError = "Chromium tab unavailable (\(self.profileKey))"
+                self.resumeTabWaiters(false)
+            }
+        }
+        return tabID != 0
+    }
+
+    private func tabCreated(_ id: UInt64) {
         tabID = id
+        engineProfileID = runtime.engineProfileID(for: profileKey) ?? 0
         appliedPlan = []
         linkPeekApplied = false
         submitPlanIfNeeded()
         reconcileLinkPeek()
-        if let host { DispatchQueue.main.async { host.reconcile() } }
-        return true
+        if !pendingNavigations.isEmpty, !navigationFlushScheduled { flushNavigations() }
+        // Hosts that appeared while the profile was opening could not attach yet.
+        if let next = host ?? preferredDisplayHost() { DispatchQueue.main.async { next.reconcile() } }
+        resumeTabWaiters(true)
+    }
+
+    /// Waits until the tab exists (or creation failed).
+    @MainActor
+    func waitForTab() async -> Bool {
+        if tabID != 0 { return true }
+        ensureTab()
+        guard tabCreationPending else { return tabID != 0 }
+        return await withCheckedContinuation { tabWaiters.append($0) }
+    }
+
+    private func resumeTabWaiters(_ created: Bool) {
+        let waiters = tabWaiters
+        tabWaiters = []
+        waiters.forEach { $0.resume(returning: created) }
     }
 
     // MARK: Events
@@ -167,6 +235,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     func handle(_ event: ChromiumTabEvent) {
         guard event.tabID == tabID else { return }
         if event.contentGeneration != 0 { contentGeneration = event.contentGeneration }
+        if event.profileID != 0 { engineProfileID = event.profileID }
         switch event.kind {
         case .created:
             break
@@ -188,8 +257,8 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
             if let url = event.url.flatMap(URL.init(string:)) { currentURL = url }
             lastError = nil
             if !event.isSameDocument {
-                documentSerial += 1
                 resumeCommitWaiters(throwing: nil)
+                applyPendingZoom()
                 onNavigationCommit?(currentURL, pageTitle)
             }
         case .failed:
@@ -200,13 +269,14 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
         case .closed:
             ChromiumLog.info("tab \(tabID) closed by engine (reason \(event.closedReason))")
             tabID = 0
-            documentSerial += 1
+            engineProfileID = 0
             resumeCommitWaiters(throwing: ChromiumScriptError.noTab)
             isLoading = false
             installInFlight = false
             linkPeekInFlight = false
             appliedPlan = []
             linkPeekApplied = false
+            pickerDocument = nil
             // tab.closed is final: no later media event will report the session ended.
             if mediaState != .silent { mediaStateSubject.send(.silent) }
         }
@@ -250,6 +320,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     /// Immediate typed navigation (no boost barrier). ABI 1.5 admits http(s), data, file,
     /// chrome://settings, chrome://version, exact about:blank and view-source of http(s)/file;
     /// older engines admit http(s) and about:blank only. Other URLs return invalid_url.
+    /// Before the tab exists this is engine_not_ready; `load` waits instead.
     @discardableResult
     func navigateNow(_ url: URL) -> ReArcStatus {
         command("navigate \(url.absoluteString)") { tab in
@@ -260,6 +331,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     /// Navigations wait one main-loop turn so a boost install requested in the
     /// same turn (load then syncBoosts) is submitted first, then wait for its
     /// completion: C-ABI.md requires install acknowledgement before navigating.
+    /// They also wait for the tab itself while its profile opens.
     private func enqueueNavigation(_ operation: @escaping () -> Void) {
         pendingNavigations.append(operation)
         guard !navigationFlushScheduled else { return }
@@ -273,6 +345,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
 
     private func flushNavigations() {
         guard !pendingNavigations.isEmpty else { return }
+        guard ensureTab() else { return }
         if installInFlight {
             navigationsDeferredForBoosts += 1
             return
@@ -325,6 +398,92 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
         let status = requestPictureInPicture()
         if status != .rearcOK {
             lastError = "Picture in Picture: \(status.rearcName)"
+        }
+    }
+
+    // MARK: Zoom (ABI 1.8)
+
+    var supportsZoom: Bool { runtime.capabilities.pageZoom }
+
+    /// Sets browser page zoom. Chromium applies it to every tab of this host in
+    /// the profile and reports each through zoom events; `zoomFactor` follows them.
+    @discardableResult
+    func requestZoomFactor(_ factor: Double) -> ReArcStatus {
+        guard supportsZoom else { return ReArcStatus(REARC_UNSUPPORTED) }
+        guard PageZoom.isValid(factor) else { return ReArcStatus(REARC_INVALID_ARGUMENT) }
+        guard tabID != 0 else {
+            pendingZoomFactor = factor
+            return ReArcStatus(REARC_ENGINE_NOT_READY)
+        }
+        let status = ReArcTabSetZoomFactor(tabID, factor)
+        ChromiumLog.trace("tab \(tabID) set zoom \(factor) -> \(status.rearcName)")
+        if status == ReArcStatus(REARC_INVALID_STATE) {
+            // No live render frame yet: apply after the next commit.
+            pendingZoomFactor = factor
+        } else if status != .rearcOK {
+            ChromiumLog.info("tab \(tabID) zoom \(factor) rejected: \(status.rearcName)")
+        }
+        return status
+    }
+
+    func setZoomFactor(_ factor: Double) {
+        requestZoomFactor(factor)
+    }
+
+    /// Re-reads the factor from Chromium (on tab selection).
+    @discardableResult
+    func refreshZoomFactor() -> Double? {
+        guard supportsZoom, tabID != 0 else { return nil }
+        var factor = 0.0
+        guard ReArcTabGetZoomFactor(tabID, &factor) == .rearcOK, PageZoom.isValid(factor) else { return nil }
+        zoomFactor = factor
+        return factor
+    }
+
+    func handleZoom(document: ChromiumDocumentIdentity, factor: Double) {
+        guard document.tabID == tabID, document.contentGeneration == contentGeneration || contentGeneration == 0,
+              PageZoom.isValid(factor) else { return }
+        zoomFactor = factor
+    }
+
+    private func applyPendingZoom() {
+        guard let factor = pendingZoomFactor else { return }
+        pendingZoomFactor = nil
+        requestZoomFactor(factor)
+    }
+
+    // MARK: Page messages (ABI 1.9)
+
+    var supportsPageMessages: Bool { runtime.capabilities.isolatedPageMessages }
+
+    /// Page messages are untrusted data. Editor-world messages must belong to
+    /// the document currently shown and be a known picker kind.
+    func handlePageMessage(_ message: ChromiumPageMessage) {
+        guard message.document.tabID == tabID, message.document.contentGeneration == contentGeneration else { return }
+        guard message.boostID == ChromiumScriptWorld.editorWorldID else {
+            onBoostPageMessage?(message)
+            return
+        }
+        if let current = runtime.documentIdentity(tab: tabID), !current.isSameDocument(as: message.document) {
+            droppedEditorMessages += 1
+            ChromiumLog.info("tab \(tabID) dropped editor message for an old document (\(message.document) vs \(current))")
+            return
+        }
+        guard let decoded = BoostEditorPageMessage.decode(json: message.json) else {
+            droppedEditorMessages += 1
+            ChromiumLog.info("tab \(tabID) dropped an unrecognized editor message (\(message.json.utf8.count) bytes)")
+            return
+        }
+        switch decoded {
+        case .pick(let snapshot):
+            guard pickerActive, pickerDocument.map({ $0.isSameDocument(as: message.document) }) ?? true else {
+                droppedEditorMessages += 1
+                return
+            }
+            onBoostEditorPick?(snapshot)
+        case .cancel:
+            guard pickerActive else { return }
+            onBoostEditorCancel?()
         }
     }
 
@@ -439,19 +598,49 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
         AnyView(ChromiumWebView(engine: self))
     }
 
-    /// One attachment per tab: a new host takes the lease from the previous one.
+    /// The host currently holding the lease.
+    var leaseHolder: ChromiumHostView? { host }
+
+    /// One live attachment per tab: a new host takes the lease, and the
+    /// previous host detaches before the new one attaches.
     func claimLease(for newHost: ChromiumHostView) {
+        hostAppeared(newHost)
         if let previous = host, previous !== newHost {
             previous.setPickerOverlay(nil)
             previous.releaseLease(detach: true)
         }
         host = newHost
-        newHost.setPickerOverlay(pickerActive ? self : nil)
+        newHost.setPickerOverlay(usesPickerOverlay ? self : nil)
     }
 
     func leaseChanged(_ attachmentID: UInt64?, host changedHost: ChromiumHostView) {
         guard host === changedHost else { return }
         self.attachmentID = attachmentID
+        for display in displayHosts.compactMap(\.value) { display.updatePlaceholder() }
+    }
+
+    func hostAppeared(_ newHost: ChromiumHostView) {
+        displayHosts.removeAll { $0.value == nil }
+        if !displayHosts.contains(where: { $0.value === newHost }) {
+            displayHosts.append(WeakHost(value: newHost))
+        }
+    }
+
+    /// A host left (dismantled or its window closed). If it held the lease,
+    /// another host still showing this tab takes it, preferring the key window.
+    func hostDisappeared(_ oldHost: ChromiumHostView) {
+        displayHosts.removeAll { $0.value == nil || $0.value === oldHost }
+        guard host === oldHost else { return }
+        host = nil
+        attachmentID = nil
+        guard let next = preferredDisplayHost() else { return }
+        DispatchQueue.main.async { next.reconcile() }
+    }
+
+    /// The showing host that should hold the lease: the key window's, else the newest.
+    private func preferredDisplayHost() -> ChromiumHostView? {
+        let candidates = displayHosts.compactMap(\.value).filter { $0.canAttach }
+        return candidates.first(where: { $0.window?.isKeyWindow == true }) ?? candidates.last
     }
 
     // MARK: Capture
@@ -476,41 +665,56 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
         }
     }
 
-    // MARK: Script evaluation (ABI 1.5)
+    // MARK: Script evaluation (ABI 1.5, identity 1.7)
 
     var supportsScriptEvaluation: Bool { runtime.capabilities.scriptEvaluation }
+
+    /// Identity of the document the tab shows now (`ReArcTabGetDocumentIdentity`).
+    var currentDocumentIdentity: ChromiumDocumentIdentity? { runtime.documentIdentity(tab: tabID) }
 
     /// Evaluates a JavaScript expression in the current primary document and
     /// returns its JSON-decoded value (a JS string decodes to String, undefined
     /// to NSNull). Wrap statements in an IIFE. One evaluation runs at a time.
+    ///
+    /// The result is applied only if the document the engine evaluated in is
+    /// still the tab's current document (a fresh identity query), and, when
+    /// `expected` is given, is that document. `sameNavigation` also requires
+    /// the same navigation ID (for results tied to one URL/navigation).
     @MainActor
     func evaluate(
         _ source: String,
         in world: ChromiumScriptWorld,
-        timeoutMS: UInt32 = ChromiumScriptOutcome.defaultTimeoutMS
+        timeoutMS: UInt32 = ChromiumScriptOutcome.defaultTimeoutMS,
+        expecting expected: ChromiumDocumentIdentity? = nil,
+        sameNavigation: Bool = false
     ) async throws -> Any {
         guard supportsScriptEvaluation else { throw ChromiumScriptError.unsupported }
         let range = ChromiumScriptOutcome.timeoutRangeMS
         let timeout = min(max(timeoutMS, range.lowerBound), range.upperBound)
         evaluationsOutstanding += 1
         defer { evaluationsOutstanding -= 1 }
+        guard await waitForTab() else { throw ChromiumScriptError.noTab }
         await acquireEvaluationSlot()
         defer { releaseEvaluationSlot() }
         do {
-            return try await evaluateOnce(source, in: world, timeoutMS: timeout)
+            return try await evaluateOnce(source, in: world, timeoutMS: timeout, expected: expected, sameNavigation: sameNavigation)
         } catch ChromiumScriptError.rejected(let status) where status == ChromiumStatusCode.invalidState {
             // invalid_state: a primary navigation is pending. Retry once after it commits.
             try await waitForPrimaryCommit(timeoutMS: timeout)
-            return try await evaluateOnce(source, in: world, timeoutMS: timeout)
+            return try await evaluateOnce(source, in: world, timeoutMS: timeout, expected: expected, sameNavigation: sameNavigation)
         }
     }
 
     @MainActor
-    private func evaluateOnce(_ source: String, in world: ChromiumScriptWorld, timeoutMS: UInt32) async throws -> Any {
+    private func evaluateOnce(
+        _ source: String,
+        in world: ChromiumScriptWorld,
+        timeoutMS: UInt32,
+        expected: ChromiumDocumentIdentity?,
+        sameNavigation: Bool
+    ) async throws -> Any {
         guard tabID != 0 else { throw ChromiumScriptError.noTab }
         let tab = tabID
-        let generation = contentGeneration
-        let document = documentSerial
         evaluationInFlight = true
         defer { evaluationInFlight = false }
         let result: ChromiumScriptResult = try await withCheckedThrowingContinuation { continuation in
@@ -521,11 +725,25 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
                 continuation.resume(throwing: ChromiumScriptError.rejected(status))
             }
         }
-        ChromiumLog.trace("tab \(tab) evaluate \(world) -> \(result.status.rearcName) gen \(result.contentGeneration)")
+        ChromiumLog.trace("tab \(tab) evaluate \(world) -> \(result.status.rearcName) document \(result.document)")
         if result.status == ReArcStatus(REARC_CANCELLED) { throw ChromiumScriptError.cancelled }
-        guard result.tabID == tab, result.contentGeneration == generation,
-              tabID == tab, contentGeneration == generation, documentSerial == document else {
+        guard result.document.tabID == tab, tabID == tab, result.document.contentGeneration == contentGeneration else {
+            staleResultsDiscarded += 1
             throw ChromiumScriptError.staleDocument
+        }
+        if runtime.capabilities.scriptEvaluationIdentity {
+            guard let current = runtime.documentIdentity(tab: tab),
+                  current.isSameDocument(as: result.document, sameNavigation: sameNavigation) else {
+                staleResultsDiscarded += 1
+                ChromiumLog.info("tab \(tab) discarded an evaluation result: evaluated in [\(result.document)], "
+                    + "tab now shows [\(runtime.documentIdentity(tab: tab).map(String.init(describing:)) ?? "unknown")]")
+                throw ChromiumScriptError.staleDocument
+            }
+            if let expected, !expected.isSameDocument(as: result.document, sameNavigation: sameNavigation) {
+                staleResultsDiscarded += 1
+                ChromiumLog.info("tab \(tab) discarded an evaluation result: required [\(expected)], evaluated in [\(result.document)]")
+                throw ChromiumScriptError.staleDocument
+            }
         }
         return try ChromiumScriptOutcome.decode(status: result.status, json: result.json, errorJSON: result.errorJSON).get()
     }
@@ -567,9 +785,20 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
         }
     }
 
-    // MARK: Boost picker (native overlay input)
+    // MARK: Boost picker
 
-    /// Highlights the element under the pointer; at most one hover evaluation is in flight.
+    /// Picking runs on the page's own input events in the editor world, which
+    /// posts picks through the isolated message channel (http(s) documents
+    /// only). Elsewhere, or on engines without it, a native overlay takes the
+    /// input and evaluates the picker at the pointer.
+    var usesPickerOverlay: Bool {
+        guard pickerActive else { return false }
+        let scheme = currentURL?.scheme?.lowercased()
+        return !(supportsPageMessages && (scheme == "http" || scheme == "https"))
+    }
+
+    /// Overlay hover: highlights the element under the pointer; at most one
+    /// hover evaluation is in flight. `point` is in view points.
     func pickerHover(at point: CGPoint) {
         guard pickerActive else { return }
         if hoverInFlight {
@@ -577,9 +806,10 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
             return
         }
         hoverInFlight = true
+        let css = PageZoom.cssPoint(fromViewPoint: point, zoom: zoomFactor)
         Task { @MainActor [weak self] in
             guard let self else { return }
-            _ = try? await self.evaluate(BoostEditorScripts.snapshotAt(x: point.x, y: point.y), in: .editor, timeoutMS: 1000)
+            _ = try? await self.evaluate(BoostEditorScripts.snapshotAt(x: css.x, y: css.y), in: .editor, timeoutMS: 1000)
             self.hoverInFlight = false
             if let next = self.pendingHover {
                 self.pendingHover = nil
@@ -594,7 +824,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                if let snapshot = try await self.pickElement(at: point) {
+                if let snapshot = try await self.pickElement(atViewPoint: point) {
                     self.onBoostEditorPick?(snapshot)
                 }
             } catch {
@@ -607,10 +837,12 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
         onBoostEditorCancel?()
     }
 
-    /// Picker descriptor of the element at viewport CSS coordinates (view points at 100% zoom).
+    /// Picker descriptor of the element at a view point (top-left origin),
+    /// corrected by the page zoom factor to viewport CSS pixels.
     @MainActor
-    func pickElement(at point: CGPoint) async throws -> PickedElementSnapshot? {
-        let value = try await evaluate(BoostEditorScripts.snapshotAt(x: point.x, y: point.y), in: .editor)
+    func pickElement(atViewPoint point: CGPoint) async throws -> PickedElementSnapshot? {
+        let css = PageZoom.cssPoint(fromViewPoint: point, zoom: zoomFactor)
+        let value = try await evaluate(BoostEditorScripts.snapshotAt(x: css.x, y: css.y), in: .editor, expecting: pickerDocument)
         guard let object = value as? [String: Any] else { return nil }
         return BoostEditorMessageHandler.decodePick(object)
     }
@@ -631,13 +863,21 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
 
     fileprivate func setPickerActive(_ active: Bool) {
         pickerActive = active
+        pickerDocument = active ? currentDocumentIdentity : nil
         if !active { pendingHover = nil }
-        host?.setPickerOverlay(active ? self : nil)
+        host?.setPickerOverlay(usesPickerOverlay ? self : nil)
     }
 }
 
-/// The boost editor and picker on Chromium: editor-world evaluation plus a
-/// native overlay for pointer input (WebKit message handlers do not exist here).
+extension ChromiumEngine: PageZoomRefreshing {}
+
+private struct WeakHost {
+    weak var value: ChromiumHostView?
+}
+
+/// The boost editor and picker on Chromium: editor-world evaluation, page
+/// input picked up in the editor world and posted back through the isolated
+/// page-message channel (WebKit message handlers do not exist here).
 extension ChromiumEngine: BoostEditorEngine {
     var supportsBoostEditor: Bool { supportsScriptEvaluation }
 

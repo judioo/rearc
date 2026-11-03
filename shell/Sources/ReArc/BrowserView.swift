@@ -19,6 +19,7 @@ struct BrowserView: View {
                 contentArea
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .topTrailing) { zoomBadge }
             // Subtle space-theme window tint.
             .background(model.themeColor.opacity(0.10))
 
@@ -106,6 +107,14 @@ struct BrowserView: View {
                 model.clearLittleArcOpenRequests()
             }
         }
+        .onChange(of: model.privateWindowOpenRequests) { _, requests in
+            for id in requests {
+                openWindow(id: "private", value: id)
+            }
+            if !requests.isEmpty {
+                model.clearPrivateWindowOpenRequests()
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             model.prepareForQuit()
         }
@@ -144,6 +153,21 @@ struct BrowserView: View {
                 && item.action == NSSelectorFromString("performClose:") {
                 item.keyEquivalent = ""
             }
+        }
+    }
+
+    /// Shown while the focused tab is not at 100%; clicking resets it (Cmd+0).
+    @ViewBuilder
+    private var zoomBadge: some View {
+        if let engine = model.focusedEngine, !PageZoom.isDefault(engine.zoomFactor) {
+            Button("\(PageZoom.percent(engine.zoomFactor))%") { model.zoom(.reset) }
+                .buttonStyle(.plain)
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.ultraThinMaterial, in: Capsule())
+                .padding(10)
+                .help("Page zoom — click to reset to 100% (⌘0)")
         }
     }
 

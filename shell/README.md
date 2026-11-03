@@ -74,9 +74,11 @@ The shell still calls `ReArcEngineConfigure(1, …)`. After `ready` it probes
 `ReArcEngineABIMinorVersion()`; the framework is weak-linked, so the symbol is
 looked up with `dlsym` first and an engine that predates the export counts as
 minor 0. `ChromiumCapabilities` enables a feature only when the minor version
-is at least 5 **and** `ReArcEngineHasFeature` advertises it, and logs
-`capabilities: ABI minor 5: navigation_extended=1 script_evaluation=1 media_metadata_snapshot=1`.
-On an older engine all three stay off and the shell behaves as in wave 11.
+is at least the one that introduced it (5 for the three below, 6–10 for the
+ABI 1.10 features) **and** `ReArcEngineHasFeature` advertises it, and logs
+`capabilities: ABI minor 10: navigation_extended=1 script_evaluation=1 …`.
+On an older engine the missing features stay off and the shell behaves as it
+did against that engine.
 
 - **`navigation_extended`: URL admission.** `NavigationURLPolicy` always
   admits `http`, `https`, `data`, `file` and `about:blank`. With the Chromium
@@ -101,21 +103,90 @@ On an older engine all three stay off and the shell behaves as in wave 11.
   strings (it never frees them) and balances the retain exactly once, on
   completion or on synchronous rejection. `ChromiumEngine.evaluate` runs one
   evaluation per tab at a time (FIFO). It waits for the commit and retries
-  once on `invalid_state`. Results are dropped as `staleDocument` when the tab,
-  content generation or committed document changed. `cancelled` and `timeout`
+  once on `invalid_state`. Results are dropped as `staleDocument` when the
+  document changed (by document identity on ABI 1.7, see below). `cancelled` and `timeout`
   surface as typed errors (`ChromiumScriptError`), and the default timeout is
   3 s, clamped to 1–30000 ms. Editor scripts run in the `editor` isolated
   world, boost worlds are `rearc.boost.<id>`, and `.page` is the main world.
   The editor and picker (`BoostEditorEngine`, shared with `WKEngine`) use
-  `BoostPickerScript` in the editor world. Picking uses a native overlay
-  (`ChromiumPickerOverlayView`) that turns mouse moves and clicks into
-  `snapshotAt(x, y)` evaluations (view points = CSS px at 100% zoom). Escape
-  cancels.
+  `BoostPickerScript` in the editor world. With isolated page messages the
+  page's own input picks (see ABI 1.10 below). Otherwise a native overlay
+  (`ChromiumPickerOverlayView`) turns mouse moves and clicks into
+  `snapshotAt(x, y)` evaluations, at view points divided by the page zoom.
+  Escape cancels.
 - **`media_metadata_snapshot`.** Each media event replaces playback and
   audible state. `has_metadata=false` means the metadata is unchanged.
   `has_metadata=true` replaces title, artist and album together, and an empty
   or missing string clears that field (`ChromiumMediaMapping`, unit-tested).
   Album reaches Now Playing as `MPMediaItemPropertyAlbumTitle`.
+
+### ABI 1.10 adoption (wave 15)
+
+Follows "Exact Swift adoption" in `engine/docs/WAVE-14-REPORT.md`. Every item
+is gated on its feature flag (`profiles`, `profile_off_the_record`,
+`script_evaluation_identity`, `page_zoom`, `isolated_page_messages`,
+`rearc_safe_storage_branding`).
+
+- **Profiles.** Each shell `Profile` (which owns its Spaces) maps to one named
+  persistent engine profile, opened with `ReArcProfileOpen` under the
+  lowercased profile UUID (`ChromiumProfileKey`). Engine profile IDs are
+  session-local and never persisted. The startup `Default` profile is not
+  used for shell tabs. `ChromiumRuntime` keeps the profile registry. It
+  coalesces opens, queues lifecycle calls (the engine serializes them and
+  answers `busy` otherwise), and creates a tab only once its profile is open.
+  `ChromiumEngine` queues navigations and evaluations until then, and a host
+  that appeared earlier attaches once the tab exists. A Space's tabs keep their
+  BrowserContext when moved: the profile is fixed per engine. Deleting a shell
+  profile closes its private windows, then its engine profile.
+- **Private windows** (File > New Private Window, ⇧⌘N; both engines) are
+  `PrivateWindowModel`s: one page, no sidebar, history or sync. On Chromium a
+  private session is one off-the-record profile created with
+  `ReArcProfileCreateOffTheRecord` under the active profile. Its popups open
+  as further private windows of the same session. When the session's last
+  window closes, its engine stays alive until `ReArcProfileClose` completes,
+  which erases the session. Teardown order is off-the-record children first,
+  one at a time, then the parent (`ChromiumProfileTeardown`). A beforeunload
+  veto keeps the profile and its ID. Engine shutdown owns everything at quit,
+  and the shell waits for profile or tab closes in flight before calling
+  `ReArcEngineShutdown`, which is busy while either is pending. On WebKit the
+  private window's engine uses a non-persistent `WKWebsiteDataStore`.
+- **Evaluation identity.** `ReArcTabEvaluateScript2` replaces the 1.5 call.
+  Before a result is applied, `ReArcTabGetDocumentIdentity` must still match
+  the identity the engine captured at acceptance (profile, tab, content and
+  document generation, plus navigation ID when `sameNavigation` is set), and
+  the identity the caller required (`expecting:`). Otherwise the result is
+  discarded as `staleDocument`. There is no commit counting.
+- **Zoom.** View > Zoom In / Zoom Out / Actual Size (⌘= / ⌘- / ⌘0) step
+  through Chrome's presets on the key private window or the focused tab.
+  `ReArcEngineSetZoomCallback` events update every affected tab, including
+  same-host siblings in the profile. Selecting a tab re-reads
+  `ReArcTabGetZoomFactor`. Chromium persists its own per-host map, and the
+  shell keeps none. A badge shows a non-100% zoom, and clicking it resets.
+  Picker coordinates are view points divided by the zoom factor
+  (`PageZoom.cssPoint`). WebKit uses `WKWebView.pageZoom` per view.
+- **Boost editor page messages.** `ReArcEngineSetPageMessageCallback` is
+  registered at `ready`, before any tab or editor code. In pick mode on
+  http(s), the editor-world picker handles the page's own trusted
+  `mousemove`/`click`/Escape and posts `rearcPostMessage(JSON.stringify(…))`.
+  The callback copies the message, checks it is for the current document and
+  the document picking started on, and accepts only `pick` and `cancel`
+  (`BoostEditorPageMessage`). Hover highlighting stays in the page, so there
+  is no polling or per-move evaluation. The native overlay remains only where
+  the channel cannot work (non-http(s) documents, older engines). Messages
+  from boost worlds go to `onBoostPageMessage` as untrusted data.
+- **Windows.** `ChromiumShell` owns any number of browser windows on one
+  `BrowserViewModel` (File > New Window, ⌘N), Little Arc and private windows
+  (through `BrowserWindowPresenting`), Peek and Split View. A tab has one live
+  attachment. A host that takes the lease detaches the previous holder first,
+  and the other window shows "This tab is open in another window". The key
+  window's host takes it back. Before a window closes, every Chromium host in
+  it detaches, so the lease moves to a surviving window before the engine
+  invalidates the closing one. Closing windows never quits (Quit does).
+  Activating the app with no window open opens a new browser window. ⌘W
+  closes the tab, or the window when it is a private or Little Arc window.
+  ⇧⌘W closes the window.
+- **Safe Storage branding.** The engine reads its key from the Keychain item
+  "ReArc Safe Storage", and the bundle id is `com.rearc.browser`.
 
 ### Self-test
 
@@ -134,14 +205,31 @@ The self-test:
    - an exception and a rejected Promise give `script_error` with details;
    - a 300 ms timeout, after which the next evaluation still succeeds;
    - a cross-document navigation cancels a pending evaluation.
-8. Exercises the boost editor: the overlay picks the `<h1>`, live CSS applies,
+8. Exercises the boost editor: the picker picks the `<h1>`, live CSS applies,
    and the repair scan returns candidates.
-9. Commits `view-source:`, `chrome://version` and `chrome://settings`, and
-   checks that WebUI refuses evaluation (`unsupported`).
-10. Checks that `javascript:`, `chrome://flags` and nested `view-source:` are
-    still `invalid_url`.
-11. Verifies every evaluation context was released (`live contexts: 0`),
-    then shuts down cleanly.
+9. Document identity: a result for the pre-reload document is discarded
+   (`staleDocument`), and the identity changes across navigation.
+10. Zoom: set 1.5 → zoom event and query agree, a non-finite factor is
+    `invalid_argument`, and a pick at a zoomed view point finds the `<h1>`.
+11. Page messages: a boost-world message arrives with its package ID, the main
+    world has no `rearcPostMessage`, a trusted click picks through the editor
+    channel, `cancel` is delivered and an unknown kind is dropped.
+12. Moves a tab to a second window (detach, then attach) and back when that
+    window closes.
+13. Commits `view-source:`, `chrome://version` and `chrome://settings`, and
+    checks that WebUI refuses evaluation (`unsupported`). Checks that
+    `javascript:`, `chrome://flags` and nested `view-source:` are still
+    `invalid_url`.
+14. Profiles: two named profiles keep separate cookies, an off-the-record
+    child sees neither and leaks nothing, closing the parent closes the child
+    first, and reopening gives a new engine ID with the persistent cookie.
+15. Runs the real `ChromiumShell` on a throwaway sidebar: two browser windows
+    sharing a tab, Split View, Peek, Little Arc, the zoom commands (including a
+    same-host sibling and the key private window), a private window whose
+    close ends its off-the-record session, and closing every window without
+    quitting, then reopening.
+16. Verifies every evaluation and profile request context was released
+    (`live script contexts: 0, profile contexts: 0`), then shuts down cleanly.
 
 With the mock keychain the run reaches `RESULT PASS`
 (`selftest-chromium-mockkeychain.log`). The real-Keychain run is covered
@@ -150,10 +238,10 @@ below.
 ### Keychain
 
 Chromium encrypts cookies with a key stored in the login keychain as
-"Chromium Safe Storage". The development bundle is ad-hoc signed, gets a new
-code hash on every build and keeps the bundle id `org.chromium.Chromium`. The
-keychain item's access list therefore does not trust it, so macOS asks for
-authorization. Until the user answers, the async key read
+"ReArc Safe Storage" (engine branding, ABI 1.10; older engines use
+"Chromium Safe Storage"). An ad-hoc signed development bundle gets a new
+code hash on every build, so the keychain item's access list does not trust
+it and macOS asks for authorization. Until the user answers, the async key read
 (`os_crypt_async` `GetKeyTask` → `SecItemCopyMatching` → `securityd`) blocks
 the cookie store, and the first `http(s)` load stays at progress 0.1.
 `data:` still commits because it needs no cookies, and shutdown is clean.
@@ -190,32 +278,33 @@ Production needs:
 
 - a stable signing identity: a Developer ID certificate with a Team ID,
   instead of ad-hoc signing;
-- a unique ReArc bundle id instead of `org.chromium.Chromium`, with the
-  helpers and framework set to match;
+- the release BRANDING input with the real Team ID (the engine already
+  builds bundle id `com.rearc.browser` with matching helper and framework
+  ids, see `engine/docs/PACKAGING-MAC.md`);
 - Safe Storage access granted to that identity: the app creates and owns its
   own Safe Storage item, so the item's access list matches the designated
   requirement across updates and no authorization prompt blocks startup.
 
 ### Chromium limits
 
-- **One profile.** Every shell profile maps to the engine's
-  `default_profile_id`: cookies and storage are shared across profiles, and
-  ephemeral (private) profiles are not honored. `EngineHost.makeEngine` is
-  where per-profile engine ids will be chosen.
 - **Picture in Picture** is reported unsupported (`canPictureInPicture` is false).
 - **No script evaluation on `file:` or WebUI pages** (the engine returns
   `unsupported`), so the boost editor does nothing there.
-- **Picker coordinates assume 100% page zoom**, because the ABI reports no
-  zoom factor.
-- **No SwiftUI scenes.** The Chromium path owns a single `NSWindow` hosting
-  `BrowserView` with its own main menu. Little Arc windows are not opened,
-  and closing the window quits.
-- **Popups and `target=_blank`** become today tabs in the sidebar.
-- **Bundle identity.** The bundle keeps `CFBundleIdentifier`
-  `org.chromium.Chromium` (helpers and framework expect it); only the
-  executable and display name change to ReArc.
+- **No SwiftUI scenes.** The Chromium path owns its NSWindows (`ChromiumShell`)
+  and its own main menu. They show the same SwiftUI views as the WebKit scenes.
+- **Popups and `target=_blank`** from a normal tab become today tabs in the
+  active space, in the opener's engine profile. A private window's popup
+  becomes another private window of the same session. Contents from a profile
+  that is closing are not adopted.
+- **Startup profile data is not migrated.** Shell profiles use named engine
+  profiles, so cookies stored by earlier builds in the engine's `Default`
+  profile directory are not carried over.
+- **Off-the-record zoom** starts from the parent's per-host zoom and is not
+  saved (Chromium's private zoom map).
+- **One live view per tab.** A tab shown in two windows renders in one, and
+  the other shows a placeholder.
 - **Hidden-tab loads can be slow.** A tab that was never attached sometimes
-  takes several seconds to start its first network request.
+  takes several seconds to start its first network request, or to run script.
 
 ## Layout
 
@@ -229,10 +318,14 @@ Production needs:
     Chromium helpers (`ChromiumCapabilities`, `ChromiumScriptEvaluation`,
     `ChromiumMediaMapping`, `ChromiumLaunchArguments`) are compiled in every
     build and unit-tested without Chromium.
-  - `Chromium/` — `ChromiumRuntime` (ABI callbacks, startup/shutdown),
-    `ChromiumEngine`, `ChromiumWebView` (attachment lease host),
-    `ChromiumHost` (window and menu), `ChromiumSelfTest`. Compiled only with
-    `REARC_CHROMIUM`.
+  - `Chromium/` — `ChromiumRuntime` (ABI callbacks, profile registry,
+    startup/shutdown), `ChromiumEngine`, `ChromiumWebView` (attachment lease
+    host), `ChromiumHost` (`ChromiumShell`: windows and menu),
+    `ChromiumSelfTest`. Compiled only with `REARC_CHROMIUM`. The pure helpers
+    `ChromiumProfiles`, `PageZoom` and `BoostEditorPageMessage` are
+    unit-tested without Chromium.
+  - `Private/` — `PrivateWindowModel` and `PrivateWindowView`, shared by
+    both engines.
   - `Sidebar/` — favorites row, pinned/today sections with drag-to-reorder,
     hover-to-close rows, bottom bar (space switcher, new space, avatar).
   - `CommandBar/` — centered floating URL/search panel.
@@ -259,7 +352,9 @@ Production needs:
 |---|---|
 | ⌘T | New today tab + open command bar |
 | ⌘L | Open command bar for current tab |
-| ⌘W | Close selected tab (⌘W is stripped from File > Close Window) |
+| ⌘W | Close selected tab, or a private window (⌘W is stripped from File > Close Window) |
+| ⇧⌘N | New private window |
+| ⌘= / ⌘- / ⌘0 | Zoom in / out / actual size |
 | ⌘S | Toggle sidebar |
 | ⌘⇧] / ⌘⇧[ | Next / previous tab |
 | ⌃⇥ | Next tab |

@@ -3,8 +3,9 @@ import SidebarModel
 
 /// Engine operations behind the boost editor drawer and element picker.
 /// WKEngine uses WKContentWorld scripts and message handlers; ChromiumEngine
-/// uses `ReArcTabEvaluateScript` in the `rearc.boost.editor` isolated world
-/// plus a native picker overlay (the ABI provides no page-to-host messages).
+/// evaluates in the `editor` isolated world and receives picks through the
+/// isolated page-message channel (`rearcPostMessage`, ABI 1.9), falling back
+/// to a native picker overlay where that channel is unavailable.
 protocol BoostEditorEngine: AnyObject {
     /// False on engines that cannot evaluate script (Chromium ABI < 1.5).
     var supportsBoostEditor: Bool { get }

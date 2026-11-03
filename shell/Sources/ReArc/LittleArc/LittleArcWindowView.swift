@@ -42,6 +42,14 @@ struct LittleArcWindowView: View {
         }
     }
 
+    private func dismiss() {
+        if let presenter = model.windowPresenter {
+            presenter.dismissLittleArcWindow(windowID)
+        } else {
+            dismissWindow(id: "littleArc", value: windowID)
+        }
+    }
+
     private func header(for record: LittleArcWindow) -> some View {
         HStack(spacing: 10) {
             Text(record.title)
@@ -54,11 +62,11 @@ struct LittleArcWindowView: View {
             Spacer(minLength: 8)
             Button("Promote") {
                 model.promoteLittleArcWindow(windowID)
-                dismissWindow(id: "littleArc", value: windowID)
+                dismiss()
             }
             Button {
                 model.closeLittleArcWindow(windowID)
-                dismissWindow(id: "littleArc", value: windowID)
+                dismiss()
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)

@@ -68,6 +68,15 @@ final class BrowserViewModel {
     var peekSession: PeekSession?
     var focusedLittleArcID: LittleArcWindow.ID?
     var littleArcOpenRequests: [LittleArcWindow.ID] = []
+    /// Opens Little Arc windows when the app has no SwiftUI scenes (Chromium path).
+    @ObservationIgnored weak var windowPresenter: BrowserWindowPresenting?
+    /// Runs after a shell profile is deleted, to release its engine storage.
+    @ObservationIgnored var onProfileDeleted: ((Profile.ID) -> Void)?
+    /// Open private windows; never persisted.
+    var privateWindows: [UUID: PrivateWindowModel] = [:]
+    var privateWindowOpenRequests: [UUID] = []
+    /// Runs when the last window of a private session closes, with that window.
+    @ObservationIgnored var onPrivateSessionEnded: ((PrivateWindowModel) -> Void)?
     private var didRestoreLittleArcWindows = false
 
     var boostEditorDraftByTab: [Tab.ID: BoostEditorDraft] = [:]
@@ -306,6 +315,17 @@ final class BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
+    /// Deletes a profile (it must own no spaces) and drops engines that used it.
+    @discardableResult
+    func deleteProfile(_ id: Profile.ID) -> ProfileMutationError? {
+        if let error = store.deleteProfile(id) { return error }
+        engineHost.evictEngines(forProfileID: id)
+        reconcileEngineOwnership()
+        loadSelectedIfNeeded()
+        onProfileDeleted?(id)
+        return nil
+    }
+
     func cycleSpace() {
         store.cycleSpace(forward: true)
         loadSelectedIfNeeded()
@@ -358,6 +378,7 @@ final class BrowserViewModel {
         if engine.currentURL != tab.url {
             engine.load(tab.url)
         }
+        (engine as? PageZoomRefreshing)?.refreshZoomFactor()
         wireMediaObserversForKnownTabs()
         syncBoosts(for: tab)
     }
@@ -641,7 +662,26 @@ final class BrowserViewModel {
     }
 
     private func requestLittleArcWindow(_ id: LittleArcWindow.ID) {
-        littleArcOpenRequests.append(id)
+        if let windowPresenter {
+            windowPresenter.presentLittleArcWindow(id)
+        } else {
+            littleArcOpenRequests.append(id)
+        }
+    }
+
+    // MARK: - Page zoom
+
+    /// The engine of the selected tab (the focused pane in a split).
+    var focusedEngine: (any WebEngine)? {
+        guard store.selectedEaselRef == nil, let tab = store.selectedTab else { return nil }
+        return engineHost.engine(forTabID: tab.id, profileID: profileID(for: tab))
+    }
+
+    /// Cmd+= / Cmd+- / Cmd+0 on the key window's page: a private window's,
+    /// else the focused tab's.
+    func zoom(_ step: PageZoom.Step) {
+        guard let engine = keyPrivateWindow?.engine ?? focusedEngine else { return }
+        engine.setZoomFactor(PageZoom.factor(after: step, from: engine.zoomFactor))
     }
 
     // MARK: - Little Arc

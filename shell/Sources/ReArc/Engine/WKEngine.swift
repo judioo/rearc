@@ -294,6 +294,15 @@ final class WKEngine: NSObject, WebEngine {
         evaluateMedia("meetAutoPiP()")
     }
 
+    /// WKWebView page zoom applies per web view (WebKit keeps no per-host map).
+    private(set) var zoomFactor: Double = 1.0
+
+    func setZoomFactor(_ factor: Double) {
+        guard PageZoom.isValid(factor) else { return }
+        webView.pageZoom = factor
+        zoomFactor = factor
+    }
+
     private func evaluateMedia(_ call: String) {
         webView.evaluateJavaScript("window.__rearcMediaControl && window.__rearcMediaControl.\(call)", completionHandler: nil)
     }

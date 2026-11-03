@@ -38,6 +38,8 @@ final class ChromiumHostView: NSView {
     private var dismantled = false
     private var reportedSize: CGSize = .zero
     private var reportedScale: CGFloat = 0
+    private var keyObserver: NSObjectProtocol?
+    private var placeholder: NSTextField?
 
     init(engine: ChromiumEngine) {
         self.engine = engine
@@ -47,20 +49,36 @@ final class ChromiumHostView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    /// The engine attachment ID this host holds, if any.
+    var leaseAttachmentID: UInt64? { lease?.attachmentID }
+
+    /// True when this host could attach: live and in a window that has not closed.
+    var canAttach: Bool {
+        guard !dismantled, let window else { return false }
+        return !ChromiumRuntime.shared.isClosed(window)
+    }
+
     func bind(_ newEngine: ChromiumEngine) {
         guard newEngine !== engine else { return }
         releaseLease(detach: true)
+        engine.hostDisappeared(self)
         engine = newEngine
         reconcile()
     }
 
+    /// Detaches before the host goes away; idempotent (window teardown calls it
+    /// before SwiftUI does).
     func dismantle() {
+        guard !dismantled else { return }
         dismantled = true
+        observeKeyWindow(nil)
         releaseLease(detach: true)
+        engine.hostDisappeared(self)
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        observeKeyWindow(window)
         reconcile()
     }
 
@@ -78,7 +96,23 @@ final class ChromiumHostView: NSView {
         super.layout()
         lease?.view.frame = bounds
         pickerOverlay?.frame = bounds
+        placeholder?.frame = bounds.insetBy(dx: 16, dy: bounds.height / 2 - 12)
         pushSize()
+    }
+
+    /// When a tab is shown in several windows, the key window holds its lease.
+    private func observeKeyWindow(_ window: NSWindow?) {
+        if let keyObserver { NotificationCenter.default.removeObserver(keyObserver) }
+        keyObserver = nil
+        guard let window else { return }
+        keyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.engine.leaseHolder !== self else { return }
+            self.reconcile()
+        }
     }
 
     /// Covers the page with the picker overlay while `engine` is picking; nil removes it.
@@ -108,10 +142,12 @@ final class ChromiumHostView: NSView {
 
     /// Attach to the current window, re-attaching after a window or tab change.
     func reconcile() {
-        guard !dismantled, let window else {
+        guard canAttach, let window else {
             releaseLease(detach: true)
+            updatePlaceholder()
             return
         }
+        engine.hostAppeared(self)
         guard engine.ensureTab() else { return }
         let windowID = ChromiumRuntime.shared.windowID(for: window)
         guard windowID != 0 else { return }
@@ -136,7 +172,7 @@ final class ChromiumHostView: NSView {
         let view = Unmanaged<NSView>.fromOpaque(retained).takeUnretainedValue()
         view.frame = bounds
         view.autoresizingMask = [.width, .height]
-        addSubview(view)
+        addSubview(view, positioned: .below, relativeTo: nil)
         if let pickerOverlay {
             addSubview(pickerOverlay, positioned: .above, relativeTo: nil)
         }
@@ -149,6 +185,7 @@ final class ChromiumHostView: NSView {
         )
         reportedSize = size
         reportedScale = scale
+        ChromiumLog.trace("tab \(tabID) attached lease \(attachment.attachment_id) in window \(windowID)")
         ChromiumRuntime.shared.registerLease(attachment.attachment_id, host: self)
         engine.leaseChanged(attachment.attachment_id, host: self)
         updateVisibility()
@@ -175,9 +212,31 @@ final class ChromiumHostView: NSView {
     func leaseInvalidated(reason: UInt32) {
         ChromiumLog.info("lease \(lease?.attachmentID ?? 0) invalidated (reason \(reason))")
         releaseLease(detach: false)
-        if reason == 2 {
+        switch reason {
+        case 2:
             DispatchQueue.main.async { [weak self] in self?.reconcile() }
+        case 1:
+            engine.hostDisappeared(self)
+        default:
+            break
         }
+    }
+
+    /// Shown while another window holds this tab's lease.
+    func updatePlaceholder() {
+        let elsewhere = lease == nil && canAttach && engine.leaseHolder != nil && engine.leaseHolder !== self
+        if !elsewhere {
+            placeholder?.removeFromSuperview()
+            placeholder = nil
+            return
+        }
+        guard placeholder == nil else { return }
+        let label = NSTextField(labelWithString: "This tab is open in another window")
+        label.alignment = .center
+        label.textColor = .secondaryLabelColor
+        label.frame = bounds.insetBy(dx: 16, dy: max(bounds.height / 2 - 12, 0))
+        addSubview(label)
+        placeholder = label
     }
 
     private func updateVisibility() {
@@ -201,12 +260,27 @@ final class ChromiumHostView: NSView {
             ChromiumLog.info("tab \(lease.tabID) resize rejected: \(status.rearcName)")
         }
     }
+
+    /// Detaches every Chromium host in `window` before it closes, so each tab's
+    /// lease ends in the shell before the engine invalidates the window.
+    static func dismantleAll(in window: NSWindow) {
+        guard let root = window.contentView else { return }
+        var stack: [NSView] = [root]
+        while let view = stack.popLast() {
+            if let host = view as? ChromiumHostView {
+                host.dismantle()
+            } else {
+                stack.append(contentsOf: view.subviews)
+            }
+        }
+    }
 }
 
 /// Takes pointer and Escape input over the Chromium view while the boost
-/// picker is active. The ABI has no page-to-host messages, so the element
-/// under the pointer is found by evaluating the picker script at these
-/// top-left view coordinates (CSS pixels at 100% page zoom).
+/// picker cannot use the page's own events (non-http(s) documents, or an
+/// engine without isolated page messages). The element under the pointer is
+/// found by evaluating the picker script at these top-left view coordinates,
+/// which the engine converts to CSS pixels by the page zoom factor.
 final class ChromiumPickerOverlayView: NSView {
     weak var engine: ChromiumEngine?
     private var trackingArea: NSTrackingArea?

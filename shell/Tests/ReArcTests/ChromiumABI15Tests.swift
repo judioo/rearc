@@ -165,7 +165,9 @@ final class BoostEditorScriptsTests: XCTestCase {
         XCTAssertTrue(source.contains("if (!window.__rearcBoostPicker)"))
         XCTAssertTrue(source.contains("p.snapshotAt(12.0, 34.5)"))
         XCTAssertTrue(BoostEditorScripts.scanRepairCandidates.contains("return p.scanRepairCandidates(24)"))
-        XCTAssertFalse(BoostEditorScripts.scanRepairCandidates.contains("JSON.stringify"))
+        // Results are plain JSON values; only the page-message channel stringifies.
+        XCTAssertFalse(BoostEditorScripts.scanRepairCandidates.contains("JSON.stringify(p."))
+        XCTAssertTrue(BoostPickerScript.bridgeSource.contains("rearcPostMessage(JSON.stringify(obj))"))
     }
 
     func testSelectorIsEmbeddedAsAStringLiteral() throws {

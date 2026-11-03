@@ -36,18 +36,32 @@ final class EngineHost {
 
     /// The single place that picks the concrete engine type.
     ///
-    /// Chromium v1 limitation (engine/docs/C-ABI.md): the ABI admits only the
-    /// startup profile, so every shell profile maps onto `default_profile_id`.
-    /// Under `REARC_ENGINE=chromium` profiles share cookies and storage, and
-    /// `EngineProfileContext.isEphemeral` is not honored (no private profiles).
-    /// WKEngine keeps one `WKWebsiteDataStore` per profile.
-    private func makeEngine(context: EngineProfileContext, role: EngineRole, shellID: UUID) -> any WebEngine {
+    /// Storage follows `EngineProfileContext` on both engines: WKEngine keeps
+    /// one `WKWebsiteDataStore` per profile (non-persistent when ephemeral), and
+    /// ChromiumEngine opens one named engine profile per shell profile, or an
+    /// off-the-record profile for an ephemeral context (`ChromiumProfileKey`).
+    /// `privateSession` groups the engines of one private browsing session
+    /// into one off-the-record context (Chromium; WebKit gives each ephemeral
+    /// engine its own non-persistent store).
+    private func makeEngine(
+        context: EngineProfileContext,
+        role: EngineRole,
+        shellID: UUID,
+        privateSession: UUID? = nil
+    ) -> any WebEngine {
         #if REARC_CHROMIUM
         if let runtime = ChromiumRuntime.active {
-            return ChromiumEngine(runtime: runtime, context: context, role: role, shellID: shellID)
+            return ChromiumEngine(runtime: runtime, context: context, role: role, shellID: shellID, privateSession: privateSession)
         }
         #endif
         return WKEngine(context: context)
+    }
+
+    /// Engine for a private window. Not cached: the window owns it, and its
+    /// storage is off the record under `parentProfileID`.
+    func privateEngine(session: UUID, parentProfileID: Profile.ID, shellID: UUID) -> any WebEngine {
+        let context = EngineProfileContext(profileID: parentProfileID, isEphemeral: true)
+        return makeEngine(context: context, role: .privateWindow, shellID: shellID, privateSession: session)
     }
 
     /// URLs the running engine admits beyond the base set; Chromium WebUI and
@@ -78,6 +92,13 @@ final class EngineHost {
     func evictEngines(forTabIDs ids: [Tab.ID]) {
         let idSet = Set(ids)
         engines = engines.filter { !idSet.contains($0.key.tabID) }
+    }
+
+    /// Drops every engine (tabs, peeks, Little Arc) that used the given profile.
+    func evictEngines(forProfileID id: Profile.ID) {
+        engines = engines.filter { $0.key.profileID != id }
+        ephemeralEngines = ephemeralEngines.filter { $0.key.profileID != id }
+        littleArcEngines = littleArcEngines.filter { $0.key.profileID != id }
     }
 
     /// Removes tab engines whose tab/profile pair is not in the live sidebar ownership set.

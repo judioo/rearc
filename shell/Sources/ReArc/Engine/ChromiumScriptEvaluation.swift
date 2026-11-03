@@ -12,6 +12,29 @@ enum ChromiumStatusCode {
     static let timeout: Int32 = 18
 }
 
+/// Copy of `ReArcDocumentIdentity` (ABI 1.7): which document an evaluation,
+/// zoom event or page message belongs to. `documentGeneration` advances on
+/// every primary cross-document commit (including reload and BFCache
+/// restore); `navigationID` also changes on same-document commits.
+struct ChromiumDocumentIdentity: Equatable, CustomStringConvertible {
+    var profileID: UInt64
+    var tabID: UInt64
+    var contentGeneration: UInt64
+    var documentGeneration: UInt64
+    var navigationID: UInt64
+
+    /// True when both describe the same document. Navigation-specific results
+    /// (for example a per-URL snapshot) also require the same navigation ID.
+    func isSameDocument(as other: ChromiumDocumentIdentity, sameNavigation: Bool = false) -> Bool {
+        profileID == other.profileID && tabID == other.tabID && contentGeneration == other.contentGeneration
+            && documentGeneration == other.documentGeneration && (!sameNavigation || navigationID == other.navigationID)
+    }
+
+    var description: String {
+        "profile \(profileID) tab \(tabID) content \(contentGeneration) document \(documentGeneration) navigation \(navigationID)"
+    }
+}
+
 /// Target world of `ReArcTabEvaluateScript` (C-ABI.md "Script evaluation").
 enum ChromiumScriptWorld: Equatable {
     /// Isolated `rearc.boost.editor`, shared by the boost editor and picker.
@@ -25,6 +48,9 @@ enum ChromiumScriptWorld: Equatable {
     var abiWorld: UInt32 {
         self == .page ? 1 : 0
     }
+
+    /// `boost_id` the engine reports for the default editor world (page messages).
+    static let editorWorldID = "editor"
 
     /// boost_id argument: null selects the editor world (and is required for the main world).
     var boostID: String? {
@@ -53,7 +79,9 @@ enum ChromiumScriptError: Error, Equatable, CustomStringConvertible {
     case timeout
     /// Navigation, close or target loss ended the document (cancelled).
     case cancelled
-    /// Completed for a document the shell no longer shows (generation or navigation changed).
+    /// Completed for a document the tab no longer shows: the identity captured
+    /// at acceptance differs from a fresh `ReArcTabGetDocumentIdentity`, or
+    /// from the identity the caller required.
     case staleDocument
     /// Any other asynchronous status.
     case failed(Int32, ChromiumScriptErrorInfo?)

@@ -36,6 +36,11 @@ protocol WebEngine: AnyObject {
     /// Best-effort PiP; WKWebView may reject without a user gesture (WK-LIMIT).
     func pictureInPicture()
 
+    /// Browser page zoom, 1.0 = 100% (`PageZoom.range`).
+    var zoomFactor: Double { get }
+    /// Requests a zoom factor; `zoomFactor` follows when the engine applies it.
+    func setZoomFactor(_ factor: Double)
+
     /// The SwiftUI view rendering this engine's web content.
     func makeView() -> AnyView
 
@@ -46,4 +51,20 @@ protocol WebEngine: AnyObject {
 
     /// Page screenshot for capture (visible viewport or full scrollable page).
     func captureSnapshot(scope: CaptureScope) async throws -> Data
+}
+
+/// Engines whose zoom can change outside the shell (Chromium shares zoom per
+/// host within a profile) re-read it when their tab is selected.
+protocol PageZoomRefreshing: AnyObject {
+    @discardableResult
+    func refreshZoomFactor() -> Double?
+}
+
+/// Opens and closes Little Arc and private windows on behalf of the view
+/// model when the app runs without SwiftUI scenes (the Chromium path owns its
+/// NSWindows).
+protocol BrowserWindowPresenting: AnyObject {
+    func presentLittleArcWindow(_ id: LittleArcWindow.ID)
+    func dismissLittleArcWindow(_ id: LittleArcWindow.ID)
+    func presentPrivateWindow(_ window: PrivateWindowModel)
 }

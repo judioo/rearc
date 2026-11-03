@@ -40,6 +40,7 @@ enum EngineRole: UInt64 {
     case tab = 1
     case peek = 2
     case littleArc = 3
+    case privateWindow = 4
 }
 
 /// Engines that report main-frame commits/finishes back to the sidebar model.
