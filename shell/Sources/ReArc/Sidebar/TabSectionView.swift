@@ -63,6 +63,8 @@ struct TabSectionView: View {
                 onClose: { model.deleteEaselSidebarItem(ref.id) },
                 onRename: { model.renameEasel(documentID: ref.easelDocumentID, title: $0) }
             )
+        case .folder:
+            EmptyView()
         case .split(let split):
             SplitRowView(
                 split: split,

@@ -116,7 +116,7 @@ final class SplitViewTests: XCTestCase {
         let (store, a, b, _) = makeStoreWithTabs()
         _ = store.createSplit(tabIDs: [a.id, b.id], orientation: .vertical)
         let snapshot = store.makeSnapshot()
-        XCTAssertEqual(snapshot.schemaVersion, 9)
+        XCTAssertEqual(snapshot.schemaVersion, 10)
         XCTAssertEqual(snapshot.splitsByID.count, 1)
         XCTAssertEqual(snapshot.topAppsContainer.kind, .topApps)
 

@@ -195,7 +195,7 @@ final class SnapshotV9MigrationTests: XCTestCase {
             data = try JSONSerialization.data(withJSONObject: object)
         }
         let decoded = try JSONDecoder().decode(SidebarSnapshot.self, from: data)
-        XCTAssertEqual(decoded.schemaVersion, 9)
+        XCTAssertEqual(decoded.schemaVersion, 10)
         XCTAssertFalse(decoded.tabsByID.values.contains { $0.sortRank.isEmpty })
         XCTAssertFalse(decoded.spaces.contains { $0.sortRank.isEmpty })
     }

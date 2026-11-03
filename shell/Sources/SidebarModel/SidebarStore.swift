@@ -7,7 +7,8 @@ import Observation
 @Observable
 public final class SidebarStore {
 
-    /// The per-space tab sections (entries may be plain tabs or split items).
+    /// The per-space tab sections. Entries may be plain tabs, split items,
+    /// easels, or folders; folders live in `pinned` and nest.
     public struct SpaceContent: Equatable, Codable {
         public var pinned: [SidebarEntry]
         public var today: [SidebarEntry]
@@ -16,6 +17,11 @@ public final class SidebarStore {
             self.pinned = pinned
             self.today = today
         }
+
+        /// Non-folder pinned entries in display order (folder contents included).
+        public var pinnedLeaves: [SidebarEntry] { SidebarTree.leaves(pinned) }
+        public var todayLeaves: [SidebarEntry] { SidebarTree.leaves(today) }
+        public var allLeaves: [SidebarEntry] { pinnedLeaves + todayLeaves }
 
         enum CodingKeys: String, CodingKey {
             case pinned, today
@@ -37,9 +43,25 @@ public final class SidebarStore {
 
     enum TabLocation: Equatable {
         case favorite
+        /// In the space's pinned section, at top level or inside a folder.
         case pinned(Space.ID)
         case today(Space.ID)
         case splitPane(spaceID: Space.ID, splitID: SplitViewItem.ID)
+    }
+
+    /// Where `moveItem` places an entry.
+    public enum ItemDestination: Equatable, Hashable {
+        /// A profile's favorites strip; nil means the active profile.
+        case favorites(Profile.ID?)
+        case section(spaceID: Space.ID, section: ItemContainerKind.SpaceSection)
+        case folder(UUID)
+    }
+
+    /// The container directly holding an entry.
+    public enum ItemParent: Equatable, Hashable {
+        case favorites(Profile.ID)
+        case section(spaceID: Space.ID, section: ItemContainerKind.SpaceSection)
+        case folder(UUID)
     }
 
     public private(set) var profiles: [Profile]
@@ -47,8 +69,9 @@ public final class SidebarStore {
     public private(set) var lastActiveSpaceByProfile: [Profile.ID: Space.ID]
     public private(set) var spaces: [Space]
     public private(set) var activeSpaceID: Space.ID
-    public private(set) var favorites: [Tab]
-    public private(set) var topAppsContainerID: UUID
+    /// Favorites strip per profile (Arc `topAppsContainerIDs` keyed by profile).
+    public private(set) var favoritesByProfile: [Profile.ID: [Tab]]
+    public private(set) var topAppsContainerIDByProfile: [Profile.ID: UUID]
     public private(set) var contentBySpace: [Space.ID: SpaceContent]
     public internal(set) var selectedItemID: UUID?
     public private(set) var closedTabStack = ClosedTabStack()
@@ -58,7 +81,15 @@ public final class SidebarStore {
     public private(set) var boostLibrariesByProfileID: [Profile.ID: ProfileBoostLibrary] = [:]
     public internal(set) var easelRefsByID: [UUID: SidebarEaselRef] = [:]
     public internal(set) var capturesByID: [UUID: CaptureRecord] = [:]
+    /// Expanded folders. Arc keeps this per window (`StorableWindows.expandedItems`);
+    /// ReArc windows share one sidebar, so it is per store.
+    public internal(set) var expandedFolderIDs: Set<UUID> = []
+    /// Closed and auto-archived tabs, newest last (Arc archive store).
+    public internal(set) var archivedTabs: [ArchivedTabRecord] = []
+    public internal(set) var autoArchiveThresholdByProfile: [Profile.ID: AutoArchiveThreshold] = [:]
     public var autoPiPPolicy = AutoPiPPolicyState()
+    /// Clock for last-active stamps and archive times (tests inject a fixed date).
+    @ObservationIgnored public var now: () -> Date = { Date() }
     private var selectionBySpace: [Space.ID: UUID]
 
     var onDidMutate: (() -> Void)?
@@ -82,8 +113,8 @@ public final class SidebarStore {
         }
         self.spaces = initial
         self.activeSpaceID = initial[0].id
-        self.favorites = []
-        self.topAppsContainerID = topAppsContainerID
+        self.favoritesByProfile = [defaultProfile.id: []]
+        self.topAppsContainerIDByProfile = [defaultProfile.id: topAppsContainerID]
         self.contentBySpace = [:]
         self.selectedItemID = nil
         self.selectionBySpace = [:]
@@ -118,11 +149,13 @@ public final class SidebarStore {
         let profile = Profile(name: name, avatar: avatar, themeColor: themeColor)
         profiles.append(profile)
         boostLibrariesByProfileID[profile.id] = BoostLibraryOps.empty(for: profile.id)
-        let space = Space(name: "Space 1", theme: themeColor, profileID: profile.id)
+        favoritesByProfile[profile.id] = []
+        topAppsContainerIDByProfile[profile.id] = UUID()
+        let space = Space(name: "Space 1", theme: themeColor, profileID: profile.id, sortRank: rankForNewSpace())
         spaces.append(space)
         contentBySpace[space.id] = SpaceContent()
         lastActiveSpaceByProfile[profile.id] = space.id
-        notifyMutation()
+        notifyMutation(.insertSpace(id: space.id, sortRank: space.sortRank))
         return profile
     }
 
@@ -137,17 +170,37 @@ public final class SidebarStore {
         return nil
     }
 
+    /// Deletes a profile. Without `deletingSpaces` it must own no spaces; with
+    /// it, the profile's spaces (and their tabs) go too (Arc DeleteProfileDialog).
     @discardableResult
-    public func deleteProfile(_ id: Profile.ID) -> ProfileMutationError? {
+    public func deleteProfile(_ id: Profile.ID, deletingSpaces: Bool = false) -> ProfileMutationError? {
         guard profiles.contains(where: { $0.id == id }) else { return .profileNotFound }
-        let owned = spaces(in: id)
-        guard owned.isEmpty else { return .profileOwnsSpaces(count: owned.count) }
         guard profiles.count > 1 else { return .cannotDeleteLastProfile }
+        let owned = spaces(in: id)
+        if !owned.isEmpty, !deletingSpaces { return .profileOwnsSpaces(count: owned.count) }
+        for space in owned {
+            spaces.removeAll { $0.id == space.id }
+            dropSpaceState(space.id)
+            mutationJournal.record(.deleteSpace(id: space.id))
+        }
         profiles.removeAll { $0.id == id }
         lastActiveSpaceByProfile[id] = nil
-        if activeProfileID == id {
-            activeProfileID = profiles[0].id
+        favoritesByProfile[id] = nil
+        topAppsContainerIDByProfile[id] = nil
+        autoArchiveThresholdByProfile[id] = nil
+        if spaces.isEmpty {
+            let fallback = Space(name: "Personal", profileID: profiles[0].id, sortRank: LexoRank.initial)
+            spaces = [fallback]
+            contentBySpace[fallback.id] = SpaceContent()
+        }
+        if activeProfileID == id || !spaces.contains(where: { $0.id == activeSpaceID }) {
+            activeProfileID = spaces.contains(where: { $0.profileID == profiles[0].id })
+                ? profiles[0].id
+                : spaces[0].profileID
+            activeSpaceID = spaces(in: activeProfileID).first?.id ?? spaces[0].id
             activateProfileSpaceMemory(for: activeProfileID)
+            lastActiveSpaceByProfile[activeProfileID] = activeSpaceID
+            selectedItemID = restoredSelection(for: activeSpaceID)
         }
         notifyMutation()
         return nil
@@ -204,6 +257,25 @@ public final class SidebarStore {
         selectedItemID = restoredSelection(for: id)
     }
 
+    // MARK: - Favorites
+
+    public var favorites: [Tab] { favorites(in: activeProfileID) }
+
+    public var topAppsContainerID: UUID { topAppsContainerID(for: activeProfileID) }
+
+    public func favorites(in profileID: Profile.ID) -> [Tab] {
+        RankedSortable.sortedTabs(favoritesByProfile[profileID] ?? [])
+    }
+
+    public func topAppsContainerID(for profileID: Profile.ID) -> UUID {
+        topAppsContainerIDByProfile[profileID] ?? profileID
+    }
+
+    /// The profile whose favorites strip holds `tabID`.
+    public func favoriteOwner(of tabID: Tab.ID) -> Profile.ID? {
+        favoritesByProfile.first(where: { $0.value.contains(where: { $0.id == tabID }) })?.key
+    }
+
     // MARK: - Spaces
 
     public var activeSpace: Space {
@@ -232,19 +304,59 @@ public final class SidebarStore {
         return space
     }
 
-    public func removeSpace(_ id: Space.ID) {
-        guard spaces.count > 1, spaces.contains(where: { $0.id == id }) else { return }
+    /// Deletes a space and its tabs; the last remaining space cannot be deleted.
+    @discardableResult
+    public func removeSpace(_ id: Space.ID) -> Bool {
+        guard spaces.count > 1, spaces.contains(where: { $0.id == id }) else { return false }
+        let wasActive = activeSpaceID == id
+        let owner = space(withID: id)?.profileID
         spaces.removeAll { $0.id == id }
-        contentBySpace[id] = nil
-        selectionBySpace[id] = nil
-        lastActiveSpaceByProfile = lastActiveSpaceByProfile.filter { $0.value != id }
-        if activeSpaceID == id {
-            activeSpaceID = spaces[0].id
-            activeProfileID = spaces[0].profileID
+        dropSpaceState(id)
+        if wasActive {
+            // Stay in the same profile when it still has a space.
+            let next = owner.flatMap { spaces(in: $0).first } ?? spaces[0]
+            activeSpaceID = next.id
+            activeProfileID = next.profileID
             lastActiveSpaceByProfile[activeProfileID] = activeSpaceID
             selectedItemID = restoredSelection(for: activeSpaceID)
         }
         notifyMutation(.deleteSpace(id: id))
+        return true
+    }
+
+    private func dropSpaceState(_ id: Space.ID) {
+        if let content = contentBySpace[id] {
+            for folder in SidebarTree.folders(content.pinned) { expandedFolderIDs.remove(folder.id) }
+        }
+        contentBySpace[id] = nil
+        selectionBySpace[id] = nil
+        lastActiveSpaceByProfile = lastActiveSpaceByProfile.filter { $0.value != id }
+    }
+
+    @discardableResult
+    public func renameSpace(_ id: Space.ID, to name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = spaces.firstIndex(where: { $0.id == id }) else { return false }
+        guard spaces[index].name != trimmed else { return true }
+        spaces[index].name = trimmed
+        notifyMutation(.upsertSpace(id: id))
+        return true
+    }
+
+    public func setSpaceTheme(_ id: Space.ID, theme: SpaceTheme) {
+        guard let index = spaces.firstIndex(where: { $0.id == id }), spaces[index].theme != theme else { return }
+        spaces[index].theme = theme
+        notifyMutation(.upsertSpace(id: id))
+    }
+
+    /// An SF Symbol name or a short text glyph (emoji).
+    public func setSpaceIcon(_ id: Space.ID, iconName: String) {
+        let trimmed = iconName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = spaces.firstIndex(where: { $0.id == id }),
+              spaces[index].iconName != trimmed else { return }
+        spaces[index].iconName = Space.isSymbolName(trimmed) ? trimmed : String(trimmed.prefix(2))
+        notifyMutation(.upsertSpace(id: id))
     }
 
     public func selectSpace(_ id: Space.ID) {
@@ -261,6 +373,15 @@ public final class SidebarStore {
         }
         selectedItemID = restoredSelection(for: id)
         notifyMutation(.focusSpace(spaceID: id))
+    }
+
+    /// Ctrl+1…9: the Nth space (0-based) of the active profile.
+    @discardableResult
+    public func selectSpace(atIndex index: Int) -> Bool {
+        let profileSpaces = spacesInActiveProfile
+        guard profileSpaces.indices.contains(index) else { return false }
+        selectSpace(profileSpaces[index].id)
+        return true
     }
 
     public func cycleSpace(forward: Bool = true) {
@@ -282,17 +403,20 @@ public final class SidebarStore {
 
     public func content(for spaceID: Space.ID) -> SpaceContent {
         var content = contentBySpace[spaceID] ?? SpaceContent()
-        content.pinned = RankedSortable.sortedEntries(content.pinned)
-        content.today = RankedSortable.sortedEntries(content.today)
+        content.pinned = SidebarTree.sortedRecursively(content.pinned)
+        content.today = SidebarTree.sortedRecursively(content.today)
         return content
     }
 
-    /// Sidebar rows in display order: favorites, pinned, today (splits count as one row).
+    /// Selectable sidebar rows in display order: the space's profile
+    /// favorites, then pinned (folder contents inline), then today. Splits
+    /// count as one row; folders themselves are not rows here.
     public func displayEntries(in spaceID: Space.ID? = nil) -> [SidebarEntry] {
         let id = spaceID ?? activeSpaceID
         let content = content(for: id)
-        let favEntries = RankedSortable.sortedTabs(favorites).map { SidebarEntry.tab($0) }
-        return favEntries + content.pinned + content.today
+        let profileID = space(withID: id)?.profileID ?? activeProfileID
+        let favEntries = favorites(in: profileID).map { SidebarEntry.tab($0) }
+        return favEntries + content.pinnedLeaves + content.todayLeaves
     }
 
     public func displayTabs(in spaceID: Space.ID? = nil) -> [Tab] {
@@ -300,7 +424,7 @@ public final class SidebarStore {
             switch entry {
             case .tab(let tab): return [tab]
             case .split(let split): return split.tabs
-            case .easel: return []
+            case .easel, .folder: return []
             }
         }
     }
@@ -318,7 +442,7 @@ public final class SidebarStore {
 
     public func split(withID id: UUID) -> SplitViewItem? {
         for space in spaces {
-            for entry in content(for: space.id).pinned + content(for: space.id).today {
+            for entry in content(for: space.id).allLeaves {
                 if case .split(let split) = entry, split.id == id { return split }
             }
         }
@@ -326,18 +450,13 @@ public final class SidebarStore {
     }
 
     public func tab(withID id: Tab.ID) -> Tab? {
-        if let favorite = favorites.first(where: { $0.id == id }) { return favorite }
+        for favorites in favoritesByProfile.values {
+            if let favorite = favorites.first(where: { $0.id == id }) { return favorite }
+        }
         for space in spaces {
             let content = content(for: space.id)
-            for entry in content.pinned + content.today {
-                switch entry {
-                case .tab(let tab):
-                    if tab.id == id { return tab }
-                case .split(let split):
-                    if let tab = split.tabs.first(where: { $0.id == id }) { return tab }
-                case .easel:
-                    continue
-                }
+            if let tab = SidebarTree.tabs(content.pinned + content.today).first(where: { $0.id == id }) {
+                return tab
             }
         }
         return nil
@@ -353,6 +472,45 @@ public final class SidebarStore {
         }
     }
 
+    /// The entry with `id` anywhere in a space tree or favorites strip.
+    public func entry(withID id: UUID) -> SidebarEntry? {
+        if let favorite = favoritesByProfile.values.lazy.compactMap({ $0.first(where: { $0.id == id }) }).first {
+            return .tab(favorite)
+        }
+        for space in spaces {
+            let content = content(for: space.id)
+            if let found = SidebarTree.find(id, in: content.pinned + content.today) { return found }
+        }
+        return nil
+    }
+
+    /// The container directly holding `id` (folder, section or favorites strip).
+    public func parent(of id: UUID) -> ItemParent? {
+        if let owner = favoriteOwner(of: id) { return .favorites(owner) }
+        for space in spaces {
+            let content = contentBySpace[space.id] ?? SpaceContent()
+            if let parent = SidebarTree.parentFolderID(of: id, in: content.pinned) {
+                return parent.map { .folder($0) } ?? .section(spaceID: space.id, section: .pinned)
+            }
+            if let parent = SidebarTree.parentFolderID(of: id, in: content.today) {
+                return parent.map { .folder($0) } ?? .section(spaceID: space.id, section: .unpinned)
+            }
+        }
+        return nil
+    }
+
+    /// Sorted children of a container.
+    public func entries(in parent: ItemParent) -> [SidebarEntry] {
+        switch parent {
+        case .favorites(let profileID):
+            return favorites(in: profileID).map { .tab($0) }
+        case .section(let spaceID, let section):
+            return sectionEntries(for: section, spaceID: spaceID)
+        case .folder(let folderID):
+            return folder(withID: folderID)?.children ?? []
+        }
+    }
+
     // MARK: - Tab mutation
 
     @discardableResult
@@ -364,9 +522,11 @@ public final class SidebarStore {
     ) -> Tab {
         switch kind {
         case .favorite:
-            var tab = Tab(kind: kind, title: title, url: url)
-            tab.sortRank = rankForNewFavorite(at: favorites.count)
-            favorites.append(tab)
+            let profileID = spaceID.flatMap { space(withID: $0)?.profileID } ?? activeProfileID
+            var tab = Tab(kind: kind, title: title, url: url, lastActiveAt: now())
+            let existing = favorites(in: profileID)
+            tab.sortRank = rankForNewFavorite(at: existing.count, profileID: profileID)
+            favoritesByProfile[profileID, default: []].append(tab)
             notifyMutation(.insertItem(
                 id: tab.id,
                 spaceID: nil,
@@ -378,7 +538,7 @@ public final class SidebarStore {
             let id = spaceID ?? activeSpaceID
             var content = contentBySpace[id] ?? SpaceContent()
             let rank = rankForNewItem(in: content.pinned, atIndex: content.pinned.count)
-            var tab = Tab(kind: kind, title: title, url: url, sortRank: rank)
+            let tab = Tab(kind: kind, title: title, url: url, sortRank: rank, lastActiveAt: now())
             content.pinned.append(.tab(tab))
             contentBySpace[id] = content
             notifyMutation(.insertItem(id: tab.id, spaceID: id, container: .pinned, sortRank: rank))
@@ -387,7 +547,7 @@ public final class SidebarStore {
             let id = spaceID ?? activeSpaceID
             var content = contentBySpace[id] ?? SpaceContent()
             let rank = rankForNewItem(in: content.today, atIndex: 0)
-            var tab = Tab(kind: kind, title: title, url: url, sortRank: rank)
+            let tab = Tab(kind: kind, title: title, url: url, sortRank: rank, lastActiveAt: now())
             content.today.insert(.tab(tab), at: 0)
             contentBySpace[id] = content
             notifyMutation(.insertItem(id: tab.id, spaceID: id, container: .unpinned, sortRank: rank))
@@ -395,6 +555,9 @@ public final class SidebarStore {
         }
     }
 
+    /// Removes a tab. Pinned and Today tabs go to the closed-tab stack and the
+    /// archive (Arc keywords for Archive Tab include "Close"); a favorite is
+    /// deleted outright (`unloadFavorite` is the Cmd+W path for favorites).
     public func closeTab(_ id: Tab.ID) {
         recordClosedTabIfNeeded(tabID: id)
         if let splitLocation = splitContaining(tabID: id) {
@@ -429,12 +592,32 @@ public final class SidebarStore {
             }
             return
         }
-        guard locate(id) != nil else { return }
+        guard let location = locate(id) else { return }
+        if let tab = tab(withID: id), case .pinned(let spaceID) = location {
+            appendArchiveRecord(tab, spaceID: spaceID, reason: .manual)
+        } else if let tab = tab(withID: id), case .today(let spaceID) = location {
+            appendArchiveRecord(tab, spaceID: spaceID, reason: .manual)
+        }
         let ordered = displayEntries()
         let index = ordered.firstIndex(where: { $0.id == id })
         removeFromContainer(id)
         reconcileSelectionAfterRemoval(removedID: id, priorIndex: index)
         notifyMutation(.deleteItem(id: id))
+    }
+
+    /// Cmd+W on a favorite: Arc unloads it and keeps it in the strip. The model
+    /// only moves selection away; the shell drops the tab's engine.
+    @discardableResult
+    public func unloadFavorite(_ id: Tab.ID) -> Bool {
+        guard case .favorite = locate(id) else { return false }
+        if selectedItemID == id {
+            let ordered = displayEntries()
+            let index = ordered.firstIndex(where: { $0.id == id }) ?? 0
+            let others = ordered.filter { $0.id != id }
+            selectedItemID = others.isEmpty ? nil : others[min(index, others.count - 1)].id
+            notifyMutation()
+        }
+        return true
     }
 
     /// Closes the split item and all contained tabs (tabs are not restored).
@@ -452,99 +635,158 @@ public final class SidebarStore {
         notifyMutation(.deleteItem(id: splitID))
     }
 
+    /// Reorders an entry within the container that holds it (favorites strip,
+    /// section, or folder). `destinationIndex` is the index after removal.
     @discardableResult
     public func moveTab(_ id: Tab.ID, to destinationIndex: Int) -> Bool {
-        guard let location = locate(id) else { return false }
-        switch location {
-        case .favorite:
-            guard let from = favorites.firstIndex(where: { $0.id == id }) else { return false }
-            var tab = favorites.remove(at: from)
-            let clamped = max(0, min(destinationIndex, favorites.count))
-            let rank = rankForNewFavorite(at: clamped)
-            tab.sortRank = rank
-            favorites.insert(tab, at: clamped)
+        guard let parent = parent(of: id) else { return false }
+        return moveItem(id, to: destination(for: parent), index: destinationIndex)
+    }
+
+    @discardableResult
+    public func moveEntry(_ id: UUID, to destinationIndex: Int, in spaceID: Space.ID, section: ItemContainerKind.SpaceSection) -> Bool {
+        moveItem(id, to: .section(spaceID: spaceID, section: section), index: destinationIndex)
+    }
+
+    /// Moves an entry to any container: reorder, pin/unpin across sections,
+    /// favorite/unfavorite, into or out of folders, or to another space.
+    /// Rules: favorites hold plain tabs; folders hold tabs and folders and live
+    /// in the pinned section; Today holds no folders; split panes move with
+    /// their split. Tab kinds follow the destination. `index` counts the
+    /// destination's children after the entry is removed.
+    @discardableResult
+    public func moveItem(_ id: UUID, to destination: ItemDestination, index: Int) -> Bool {
+        guard let source = parent(of: id), let entry = entry(withID: id) else { return false }
+        let target = resolvedParent(destination)
+        guard canPlace(entry, in: target) else { return false }
+
+        var removed = entry
+        if case .favorites(let profileID) = source {
+            favoritesByProfile[profileID]?.removeAll { $0.id == id }
+        } else {
+            removeFromContainer(id)
+        }
+
+        let kind: Tab.Kind
+        switch target {
+        case .favorites: kind = .favorite
+        case .section(_, .pinned), .folder: kind = .pinned
+        case .section(_, .unpinned): kind = .today
+        }
+        removed = SidebarTree.settingKind(kind, on: removed)
+
+        let siblings = entries(in: target)
+        let clamped = max(0, min(index, siblings.count))
+        let rank = rankForNewItem(in: siblings, atIndex: clamped)
+        var single = [removed]
+        updateEntryRank(id, in: &single, newRank: rank)
+        removed = single[0]
+
+        switch target {
+        case .favorites(let profileID):
+            guard case .tab(let tab) = removed else { return false }
+            favoritesByProfile[profileID, default: []].append(tab)
             notifyMutation(.moveItem(id: id, spaceID: nil, container: .favorite, sortRank: rank))
-        case .pinned(let spaceID):
-            var entries = sectionEntries(for: .pinned, spaceID: spaceID)
-            guard let from = entries.firstIndex(where: { $0.id == id }) else { return false }
-            let entry = entries.remove(at: from)
-            let clamped = max(0, min(destinationIndex, entries.count))
-            let rank = rankForNewItem(in: entries, atIndex: clamped)
-            entries.insert(entry, at: clamped)
-            updateEntryRank(id, in: &entries, newRank: rank)
-            setSectionEntries(entries, for: .pinned, spaceID: spaceID)
-            notifyMutation(.moveItem(id: id, spaceID: spaceID, container: .pinned, sortRank: rank))
-        case .today(let spaceID):
-            var entries = sectionEntries(for: .unpinned, spaceID: spaceID)
-            guard let from = entries.firstIndex(where: { $0.id == id }) else { return false }
-            let entry = entries.remove(at: from)
-            let clamped = max(0, min(destinationIndex, entries.count))
-            let rank = rankForNewItem(in: entries, atIndex: clamped)
-            entries.insert(entry, at: clamped)
-            updateEntryRank(id, in: &entries, newRank: rank)
-            setSectionEntries(entries, for: .unpinned, spaceID: spaceID)
-            notifyMutation(.moveItem(id: id, spaceID: spaceID, container: .unpinned, sortRank: rank))
-        case .splitPane:
-            return false
+        case .section(let spaceID, let section):
+            var entries = sectionEntries(for: section, spaceID: spaceID)
+            entries.append(removed)
+            setSectionEntries(entries, for: section, spaceID: spaceID)
+            let container: SidebarItemContainer = section == .pinned ? .pinned : .unpinned
+            notifyMutation(.moveItem(id: id, spaceID: spaceID, container: container, sortRank: rank))
+        case .folder(let folderID):
+            insertIntoFolder(removed, folderID: folderID)
+            notifyMutation(.placeItemInFolder(id: id, folderID: folderID, sortRank: rank))
+        }
+
+        if let selected = selectedItemID, !displayEntries().contains(where: { $0.id == selected }) {
+            selectedItemID = restoredSelection(for: activeSpaceID)
         }
         return true
     }
 
     @discardableResult
-    public func moveEntry(_ id: UUID, to destinationIndex: Int, in spaceID: Space.ID, section: ItemContainerKind.SpaceSection) -> Bool {
-        var entries = sectionEntries(for: section, spaceID: spaceID)
-        guard let from = entries.firstIndex(where: { $0.id == id }) else { return false }
-        let entry = entries.remove(at: from)
-        let clamped = max(0, min(destinationIndex, entries.count))
-        let rank = rankForNewItem(in: entries, atIndex: clamped)
-        entries.insert(entry, at: clamped)
-        updateEntryRank(id, in: &entries, newRank: rank)
-        setSectionEntries(entries, for: section, spaceID: spaceID)
-        let container: SidebarItemContainer = section == .pinned ? .pinned : .unpinned
-        notifyMutation(.moveItem(id: id, spaceID: spaceID, container: container, sortRank: rank))
-        return true
-    }
-
-    @discardableResult
     public func pinTab(_ id: Tab.ID) -> Bool {
-        guard case .today(let spaceID) = locate(id) else { return false }
-        var content = content(for: spaceID)
-        guard let index = content.today.firstIndex(where: { $0.id == id }),
-              case .tab(var tab) = content.today[index] else { return false }
-        content.today.remove(at: index)
-        tab.kind = .pinned
-        let rank = rankForNewItem(in: content.pinned, atIndex: content.pinned.count)
-        tab.sortRank = rank
-        content.pinned.append(.tab(tab))
-        contentBySpace[spaceID] = content
-        notifyMutation(.moveItem(id: id, spaceID: spaceID, container: .pinned, sortRank: rank))
-        return true
+        guard case .today(let spaceID) = locate(id), case .tab = entry(withID: id) else { return false }
+        let count = sectionEntries(for: .pinned, spaceID: spaceID).count
+        return moveItem(id, to: .section(spaceID: spaceID, section: .pinned), index: count)
     }
 
+    /// Moves a pinned tab (top level or in a folder) to the top of Today.
     @discardableResult
     public func unpinTab(_ id: Tab.ID) -> Bool {
-        guard case .pinned(let spaceID) = locate(id) else { return false }
-        var content = content(for: spaceID)
-        guard let index = content.pinned.firstIndex(where: { $0.id == id }),
-              case .tab(var tab) = content.pinned[index] else { return false }
-        content.pinned.remove(at: index)
-        tab.kind = .today
-        let rank = rankForNewItem(in: content.today, atIndex: 0)
-        tab.sortRank = rank
-        content.today.insert(.tab(tab), at: 0)
-        contentBySpace[spaceID] = content
-        notifyMutation(.moveItem(id: id, spaceID: spaceID, container: .unpinned, sortRank: rank))
-        return true
+        guard case .pinned(let spaceID) = locate(id), case .tab = entry(withID: id) else { return false }
+        return moveItem(id, to: .section(spaceID: spaceID, section: .unpinned), index: 0)
+    }
+
+    /// Adds a pinned or Today tab to its space's profile favorites (end of strip).
+    @discardableResult
+    public func addToFavorites(_ id: Tab.ID) -> Bool {
+        guard let spaceID = spaceContaining(tabID: id),
+              case .tab = entry(withID: id),
+              let profileID = space(withID: spaceID)?.profileID else { return false }
+        return moveItem(id, to: .favorites(profileID), index: favorites(in: profileID).count)
     }
 
     public func updateTab(_ id: Tab.ID, title: String? = nil, url: URL? = nil) {
-        guard updateTabInStore(id, title: title, url: url) else { return }
+        guard updateTabInStore(id, { tab in
+            if let title { tab.title = title }
+            if let url {
+                tab.url = url
+                tab.faviconToken = Tab.makeFaviconToken(for: url)
+            }
+        }) else { return }
         notifyMutation(.upsertItem(id: id))
     }
 
+    /// Sets (or with nil/blank clears) the user title that overrides the page title.
+    @discardableResult
+    public func renameTab(_ id: Tab.ID, to title: String?) -> Bool {
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let custom = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        guard updateTabInStore(id, { $0.customTitle = custom }) else { return false }
+        notifyMutation(.upsertItem(id: id))
+        return true
+    }
+
     public func setUnread(_ isUnread: Bool, for id: Tab.ID) {
-        guard updateTabInStore(id, unread: isUnread) else { return }
+        guard updateTabInStore(id, { $0.isUnread = isUnread }) else { return }
         notifyMutation()
+    }
+
+    /// Copies a tab right below itself; a favorite's copy opens at the top of Today.
+    @discardableResult
+    public func duplicateTab(_ id: Tab.ID) -> Tab? {
+        guard let original = tab(withID: id), let parent = parent(of: id) else { return nil }
+        if case .favorites = parent {
+            let copy = addTab(kind: .today, title: original.title, url: original.url)
+            renameTab(copy.id, to: original.customTitle)
+            return tab(withID: copy.id)
+        }
+        let siblings = entries(in: parent)
+        guard let sourceIndex = siblings.firstIndex(where: { $0.id == id }) else { return nil }
+        let rank = rankForNewItem(in: siblings, atIndex: sourceIndex + 1)
+        let copy = Tab(
+            kind: original.kind,
+            title: original.title,
+            url: original.url,
+            sortRank: rank,
+            customTitle: original.customTitle,
+            lastActiveAt: now()
+        )
+        switch parent {
+        case .favorites:
+            return nil
+        case .section(let spaceID, let section):
+            var entries = sectionEntries(for: section, spaceID: spaceID)
+            entries.append(.tab(copy))
+            setSectionEntries(entries, for: section, spaceID: spaceID)
+            let container: SidebarItemContainer = section == .pinned ? .pinned : .unpinned
+            notifyMutation(.insertItem(id: copy.id, spaceID: spaceID, container: container, sortRank: rank))
+        case .folder(let folderID):
+            insertIntoFolder(.tab(copy), folderID: folderID)
+            notifyMutation(.placeItemInFolder(id: copy.id, folderID: folderID, sortRank: rank))
+        }
+        return copy
     }
 
     // MARK: - Selection
@@ -557,6 +799,7 @@ public final class SidebarStore {
         }
         guard displayEntries().contains(where: { $0.id == id }) else { return }
         selectedItemID = id
+        markActive(id)
         setUnread(false, for: id)
         notifyMutation()
     }
@@ -569,6 +812,7 @@ public final class SidebarStore {
         }
         selectedItemID = splitID
         if let focus = tab(withID: split.focusTabID) {
+            markActive(focus.id)
             setUnread(false, for: focus.id)
         }
         notifyMutation()
@@ -585,9 +829,11 @@ public final class SidebarStore {
         guard let location = locate(id) else { return false }
         switch location {
         case .favorite:
+            if let owner = favoriteOwner(of: id), owner != activeProfileID { selectProfile(owner) }
             selectTab(id)
         case .pinned(let spaceID), .today(let spaceID):
             if activeSpaceID != spaceID { selectSpace(spaceID) }
+            revealInFolders(id)
             selectTab(id)
         case .splitPane:
             break
@@ -597,6 +843,12 @@ public final class SidebarStore {
 
     public func selectNextTab() { advanceSelection(by: 1) }
     public func selectPreviousTab() { advanceSelection(by: -1) }
+
+    /// Stamps the tab's last-active time (auto-archive clock), without notifying.
+    private func markActive(_ id: Tab.ID) {
+        let stamp = now()
+        updateTabInStore(id) { $0.lastActiveAt = stamp }
+    }
 
     // MARK: - Closed tabs
 
@@ -618,12 +870,15 @@ public final class SidebarStore {
     @discardableResult
     public func reopenMostRecentClosedTab() -> Tab? {
         guard let record = closedTabStack.popMostRecent() else { return nil }
+        archivedTabs.removeAll { $0.id == record.tab.id }
         let restored = Tab(
             kind: record.tab.kind == .pinned ? .pinned : .today,
             title: record.tab.title,
             url: record.tab.url,
             faviconToken: record.tab.faviconToken,
-            isUnread: record.tab.isUnread
+            isUnread: record.tab.isUnread,
+            customTitle: record.tab.customTitle,
+            lastActiveAt: now()
         )
         switch restored.kind {
         case .favorite:
@@ -645,35 +900,22 @@ public final class SidebarStore {
         return restored
     }
 
+    /// Moves a plain tab (from anywhere in a space, folders included) to the
+    /// top of another space's Today section.
     @discardableResult
     public func moveTab(_ id: Tab.ID, toSpace destinationSpaceID: Space.ID) -> Bool {
         guard spaces.contains(where: { $0.id == destinationSpaceID }),
-              let tab = tab(withID: id),
+              tab(withID: id) != nil,
               let location = locate(id) else { return false }
         let wasSelected = selectedTabID == id
         switch location {
         case .favorite, .splitPane:
             return false
-        case .pinned(let sid):
+        case .pinned(let sid), .today(let sid):
             guard sid != destinationSpaceID else { return false }
-            var source = content(for: sid)
-            source.pinned.removeAll { $0.id == id }
-            contentBySpace[sid] = source
-            var dest = content(for: destinationSpaceID)
-            var moved = tab
-            moved.kind = .today
-            dest.today.insert(.tab(moved), at: 0)
-            contentBySpace[destinationSpaceID] = dest
-        case .today(let sid):
-            guard sid != destinationSpaceID else { return false }
-            var source = content(for: sid)
-            source.today.removeAll { $0.id == id }
-            contentBySpace[sid] = source
-            var dest = content(for: destinationSpaceID)
-            var moved = tab
-            moved.kind = .today
-            dest.today.insert(.tab(moved), at: 0)
-            contentBySpace[destinationSpaceID] = dest
+        }
+        guard moveItem(id, to: .section(spaceID: destinationSpaceID, section: .unpinned), index: 0) else {
+            return false
         }
         if wasSelected {
             selectSpace(destinationSpaceID)
@@ -810,9 +1052,19 @@ public final class SidebarStore {
 
     public func makeSnapshot() -> SidebarSnapshot {
         var tabsByID: [UUID: Tab] = [:]
-        for tab in favorites { tabsByID[tab.id] = tab }
+        var topAppsByProfile: [Profile.ID: ItemContainerRecord] = [:]
+        for profile in profiles {
+            let favorites = favorites(in: profile.id)
+            for tab in favorites { tabsByID[tab.id] = tab }
+            topAppsByProfile[profile.id] = ItemContainerRecord(
+                id: topAppsContainerID(for: profile.id),
+                kind: .topApps,
+                childIDs: favorites.map(\.id)
+            )
+        }
         var splitsByID: [UUID: SplitViewItem] = [:]
         var easelRefsByID: [UUID: SidebarEaselRef] = [:]
+        var foldersByID: [UUID: SidebarFolderRecord] = [:]
         var spaceContainers: [Space.ID: SidebarSnapshot.SpaceContainerBundle] = [:]
 
         for space in spaces {
@@ -821,11 +1073,11 @@ public final class SidebarStore {
             var todayIDs: [UUID] = []
             for entry in content.pinned {
                 pinnedIDs.append(entry.id)
-                ingest(entry, tabsByID: &tabsByID, splitsByID: &splitsByID, easelRefsByID: &easelRefsByID)
+                ingest(entry, tabsByID: &tabsByID, splitsByID: &splitsByID, easelRefsByID: &easelRefsByID, foldersByID: &foldersByID)
             }
             for entry in content.today {
                 todayIDs.append(entry.id)
-                ingest(entry, tabsByID: &tabsByID, splitsByID: &splitsByID, easelRefsByID: &easelRefsByID)
+                ingest(entry, tabsByID: &tabsByID, splitsByID: &splitsByID, easelRefsByID: &easelRefsByID, foldersByID: &foldersByID)
             }
             let pinnedRecord = ItemContainerRecord(
                 id: space.pinnedContainerID,
@@ -844,11 +1096,9 @@ public final class SidebarStore {
             )
         }
 
-        let topApps = ItemContainerRecord(
-            id: topAppsContainerID,
-            kind: .topApps,
-            childIDs: favorites.map(\.id)
-        )
+        let defaultProfileID = profiles[0].id
+        let topApps = topAppsByProfile[defaultProfileID]
+            ?? ItemContainerRecord(id: topAppsContainerID(for: defaultProfileID), kind: .topApps)
 
         let journalState = mutationJournal.snapshotTail()
         return SidebarSnapshot(
@@ -872,7 +1122,12 @@ public final class SidebarStore {
             archivedLittleArcWindows: archivedLittleArcWindows,
             boostLibrariesByProfileID: boostLibrariesByProfileID,
             easelRefsByID: easelRefsByID,
-            capturesByID: capturesByID
+            capturesByID: capturesByID,
+            topAppsContainersByProfileID: topAppsByProfile,
+            foldersByID: foldersByID,
+            expandedFolderIDs: expandedFolderIDs.sorted { $0.uuidString < $1.uuidString },
+            archivedTabs: archivedTabs,
+            autoArchiveThresholdByProfile: autoArchiveThresholdByProfile
         )
     }
 
@@ -895,16 +1150,34 @@ public final class SidebarStore {
                 return copy
             }
         }
-        topAppsContainerID = snapshot.topAppsContainer.id
-        favorites = snapshot.topAppsContainer.childIDs.compactMap { snapshot.tabsByID[$0] }
+        // Schema 10 keys favorites by profile; older snapshots carry one global
+        // strip, which belongs to the default (first) profile.
+        var topApps = snapshot.topAppsContainersByProfileID.filter { key, _ in profiles.contains(where: { $0.id == key }) }
+        if topApps.isEmpty {
+            topApps = [defaultProfileID: snapshot.topAppsContainer]
+        }
+        favoritesByProfile = [:]
+        topAppsContainerIDByProfile = [:]
+        for profile in profiles {
+            let record = topApps[profile.id]
+            topAppsContainerIDByProfile[profile.id] = record?.id ?? UUID()
+            favoritesByProfile[profile.id] = (record?.childIDs ?? []).compactMap { id in
+                snapshot.tabsByID[id].map { tab in
+                    var favorite = tab
+                    favorite.kind = .favorite
+                    return favorite
+                }
+            }
+        }
         contentBySpace = [:]
         for space in spaces {
             guard let bundle = snapshot.spaceContainers[space.id] else {
                 contentBySpace[space.id] = SpaceContent()
                 continue
             }
-            let pinned = bundle.pinned.childIDs.compactMap { resolveEntry(id: $0, snapshot: snapshot) }
-            let today = bundle.unpinned.childIDs.compactMap { resolveEntry(id: $0, snapshot: snapshot) }
+            var visited = Set<UUID>()
+            let pinned = bundle.pinned.childIDs.compactMap { resolveEntry(id: $0, snapshot: snapshot, visited: &visited) }
+            let today = bundle.unpinned.childIDs.compactMap { resolveEntry(id: $0, snapshot: snapshot, visited: &visited) }
             contentBySpace[space.id] = SpaceContent(pinned: pinned, today: today)
             if let index = spaces.firstIndex(where: { $0.id == space.id }) {
                 spaces[index].pinnedContainerID = bundle.pinned.id
@@ -931,6 +1204,10 @@ public final class SidebarStore {
         boostLibrariesByProfileID = snapshot.boostLibrariesByProfileID
         easelRefsByID = snapshot.easelRefsByID
         capturesByID = snapshot.capturesByID
+        let liveFolderIDs = Set(spaces.flatMap { SidebarTree.folders(contentBySpace[$0.id]?.pinned ?? []).map(\.id) })
+        expandedFolderIDs = Set(snapshot.expandedFolderIDs).intersection(liveFolderIDs)
+        archivedTabs = TabArchivePolicy.pruned(snapshot.archivedTabs, now: now())
+        autoArchiveThresholdByProfile = snapshot.autoArchiveThresholdByProfile
         for profile in profiles where boostLibrariesByProfileID[profile.id] == nil {
             boostLibrariesByProfileID[profile.id] = BoostLibraryOps.empty(for: profile.id)
         }
@@ -939,15 +1216,19 @@ public final class SidebarStore {
         }
         mutationJournal.restore(from: snapshot)
         assignRanksFromLegacyOrderIfNeeded()
+        stampMissingLastActiveDates()
     }
 
     // MARK: - Internal helpers
 
     func assignRanksFromLegacyOrderIfNeeded() {
-        favorites = RankedSortable.sortedTabs(favorites)
-        let favRanks = LexoRank.initialSequence(count: favorites.count)
-        for index in favorites.indices where favorites[index].sortRank.isEmpty {
-            favorites[index].sortRank = favRanks[index]
+        for (profileID, list) in favoritesByProfile {
+            var favorites = RankedSortable.sortedTabs(list)
+            let favRanks = LexoRank.initialSequence(count: favorites.count)
+            for index in favorites.indices where favorites[index].sortRank.isEmpty {
+                favorites[index].sortRank = favRanks[index]
+            }
+            favoritesByProfile[profileID] = favorites
         }
         spaces = RankedSortable.sortedSpaces(spaces)
         let spaceRanks = LexoRank.initialSequence(count: spaces.count)
@@ -962,7 +1243,44 @@ public final class SidebarStore {
         }
     }
 
-    private func restoredSelection(for spaceID: Space.ID) -> UUID? {
+    /// Tabs saved before schema 10 have no last-active time: their
+    /// auto-archive clock starts now (Arc keeps `autoArchiveStartTime`).
+    private func stampMissingLastActiveDates() {
+        let stamp = now()
+        for (profileID, list) in favoritesByProfile {
+            favoritesByProfile[profileID] = list.map { tab in
+                var copy = tab
+                if copy.lastActiveAt == nil { copy.lastActiveAt = stamp }
+                return copy
+            }
+        }
+        func stamped(_ entries: [SidebarEntry]) -> [SidebarEntry] {
+            entries.map { entry in
+                switch entry {
+                case .tab(var tab):
+                    if tab.lastActiveAt == nil { tab.lastActiveAt = stamp }
+                    return .tab(tab)
+                case .split(var split):
+                    split.tabs = split.tabs.map { tab in
+                        var copy = tab
+                        if copy.lastActiveAt == nil { copy.lastActiveAt = stamp }
+                        return copy
+                    }
+                    return .split(split)
+                case .easel:
+                    return entry
+                case .folder(var folder):
+                    folder.children = stamped(folder.children)
+                    return .folder(folder)
+                }
+            }
+        }
+        for (spaceID, content) in contentBySpace {
+            contentBySpace[spaceID] = SpaceContent(pinned: stamped(content.pinned), today: stamped(content.today))
+        }
+    }
+
+    func restoredSelection(for spaceID: Space.ID) -> UUID? {
         if let remembered = selectionBySpace[spaceID],
            displayEntries(in: spaceID).contains(where: { $0.id == remembered }) {
             return remembered
@@ -975,6 +1293,15 @@ public final class SidebarStore {
         case .pinned(let spaceID), .today(let spaceID): return spaceID
         case .splitPane(let spaceID, _): return spaceID
         case .favorite, nil: return nil
+        }
+    }
+
+    /// The space holding any entry (tab, split, easel or folder) at any depth.
+    public func spaceContaining(entryID: UUID) -> Space.ID? {
+        switch parent(of: entryID) {
+        case .section(let spaceID, _): return spaceID
+        case .folder(let folderID): return spaceContaining(entryID: folderID)
+        case .favorites, nil: return spaceContaining(tabID: entryID)
         }
     }
 
@@ -994,11 +1321,11 @@ public final class SidebarStore {
     }
 
     func locate(_ id: Tab.ID) -> TabLocation? {
-        if favorites.contains(where: { $0.id == id }) { return .favorite }
+        if favoriteOwner(of: id) != nil { return .favorite }
         for space in spaces {
-            let content = content(for: space.id)
-            if content.pinned.contains(where: { $0.id == id }) { return .pinned(space.id) }
-            if content.today.contains(where: { $0.id == id }) { return .today(space.id) }
+            let content = contentBySpace[space.id] ?? SpaceContent()
+            if SidebarTree.contains(id, in: content.pinned) { return .pinned(space.id) }
+            if SidebarTree.contains(id, in: content.today) { return .today(space.id) }
         }
         if let splitLoc = splitContaining(tabID: id) {
             return .splitPane(spaceID: splitLoc.spaceID, splitID: splitLoc.split.id)
@@ -1006,6 +1333,7 @@ public final class SidebarStore {
         return nil
     }
 
+    /// Splits sit at section level (folders hold only tabs and folders).
     public func locateSplit(_ splitID: UUID) -> (spaceID: Space.ID, section: ItemContainerKind.SpaceSection)? {
         for space in spaces {
             let content = content(for: space.id)
@@ -1021,7 +1349,7 @@ public final class SidebarStore {
 
     public func splitContaining(tabID: Tab.ID) -> (spaceID: Space.ID, split: SplitViewItem)? {
         for space in spaces {
-            for entry in content(for: space.id).pinned + content(for: space.id).today {
+            for entry in content(for: space.id).allLeaves {
                 if case .split(let split) = entry,
                    split.tabs.contains(where: { $0.id == tabID }) {
                     return (space.id, split)
@@ -1029,60 +1357,6 @@ public final class SidebarStore {
             }
         }
         return nil
-    }
-
-    private func sectionArray(for location: TabLocation) -> [Tab] {
-        switch location {
-        case .favorite: return favorites
-        case .pinned(let spaceID):
-            return content(for: spaceID).pinned.compactMap { entry in
-                if case .tab(let tab) = entry { return tab }
-                return nil
-            }
-        case .today(let spaceID):
-            return content(for: spaceID).today.compactMap { entry in
-                if case .tab(let tab) = entry { return tab }
-                return nil
-            }
-        case .splitPane: return []
-        }
-    }
-
-    private func setSectionArray(_ array: [Tab], for location: TabLocation) {
-        switch location {
-        case .favorite:
-            favorites = array
-        case .pinned(let spaceID):
-            var content = content(for: spaceID)
-            content.pinned = mergeTabOrder(entries: content.pinned, tabs: array)
-            contentBySpace[spaceID] = content
-        case .today(let spaceID):
-            var content = content(for: spaceID)
-            content.today = mergeTabOrder(entries: content.today, tabs: array)
-            contentBySpace[spaceID] = content
-        case .splitPane:
-            break
-        }
-    }
-
-    private func mergeTabOrder(entries: [SidebarEntry], tabs: [Tab]) -> [SidebarEntry] {
-        var tabMap = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0) })
-        var output: [SidebarEntry] = []
-        for entry in entries {
-            switch entry {
-            case .split, .easel:
-                output.append(entry)
-            case .tab(let tab):
-                if tabMap[tab.id] != nil {
-                    output.append(.tab(tabMap[tab.id]!))
-                    tabMap.removeValue(forKey: tab.id)
-                }
-            }
-        }
-        for tab in tabs where tabMap[tab.id] != nil {
-            output.append(.tab(tab))
-        }
-        return output
     }
 
     func sectionEntries(for section: ItemContainerKind.SpaceSection, spaceID: Space.ID) -> [SidebarEntry] {
@@ -1110,22 +1384,23 @@ public final class SidebarStore {
         setSectionEntries(entries, for: location.section, spaceID: location.spaceID)
     }
 
-    private func removeFromContainer(_ id: Tab.ID) {
-        guard let location = locate(id) else { return }
-        switch location {
-        case .favorite:
-            favorites.removeAll { $0.id == id }
-        case .pinned(let spaceID):
-            var content = content(for: spaceID)
-            content.pinned.removeAll { $0.id == id }
-            contentBySpace[spaceID] = content
-        case .today(let spaceID):
-            var content = content(for: spaceID)
-            content.today.removeAll { $0.id == id }
-            contentBySpace[spaceID] = content
-        case .splitPane:
-            break
+    /// Removes an entry from favorites or from any depth of a space tree.
+    @discardableResult
+    func removeFromContainer(_ id: UUID) -> SidebarEntry? {
+        if let owner = favoriteOwner(of: id),
+           let index = favoritesByProfile[owner]?.firstIndex(where: { $0.id == id }) {
+            guard let removed = favoritesByProfile[owner]?.remove(at: index) else { return nil }
+            return .tab(removed)
         }
+        for space in spaces {
+            var content = contentBySpace[space.id] ?? SpaceContent()
+            if let removed = SidebarTree.remove(id, from: &content.pinned)
+                ?? SidebarTree.remove(id, from: &content.today) {
+                contentBySpace[space.id] = content
+                return removed
+            }
+        }
+        return nil
     }
 
     func reconcileSelectionAfterRemoval(removedID: UUID, priorIndex: Int?) {
@@ -1155,30 +1430,29 @@ public final class SidebarStore {
         self.selectedItemID = next.id
         switch next {
         case .tab(let tab):
+            markActive(tab.id)
             setUnread(false, for: tab.id)
         case .split(let split):
+            markActive(split.focusTabID)
             setUnread(false, for: split.focusTabID)
-        case .easel:
+        case .easel, .folder:
             break
         }
         notifyMutation()
     }
 
+    /// Applies `change` to a tab wherever it lives (favorites, folders, split panes).
     @discardableResult
-    private func updateTabInStore(_ id: Tab.ID, title: String? = nil, url: URL? = nil, unread: Bool? = nil) -> Bool {
-        if var favoriteIndex = favorites.firstIndex(where: { $0.id == id }) {
-            if let title { favorites[favoriteIndex].title = title }
-            if let url {
-                favorites[favoriteIndex].url = url
-                favorites[favoriteIndex].faviconToken = Tab.makeFaviconToken(for: url)
-            }
-            if let unread { favorites[favoriteIndex].isUnread = unread }
+    func updateTabInStore(_ id: Tab.ID, _ change: (inout Tab) -> Void) -> Bool {
+        if let owner = favoriteOwner(of: id),
+           let index = favoritesByProfile[owner]?.firstIndex(where: { $0.id == id }) {
+            change(&favoritesByProfile[owner]![index])
             return true
         }
         for space in spaces {
-            var content = content(for: space.id)
-            if updateTabInEntries(&content.pinned, id: id, title: title, url: url, unread: unread)
-                || updateTabInEntries(&content.today, id: id, title: title, url: url, unread: unread) {
+            var content = contentBySpace[space.id] ?? SpaceContent()
+            if updateTabInEntries(&content.pinned, id: id, change)
+                || updateTabInEntries(&content.today, id: id, change) {
                 contentBySpace[space.id] = content
                 return true
             }
@@ -1186,38 +1460,25 @@ public final class SidebarStore {
         return false
     }
 
-    private func updateTabInEntries(
-        _ entries: inout [SidebarEntry],
-        id: Tab.ID,
-        title: String?,
-        url: URL?,
-        unread: Bool?
-    ) -> Bool {
+    private func updateTabInEntries(_ entries: inout [SidebarEntry], id: Tab.ID, _ change: (inout Tab) -> Void) -> Bool {
         for index in entries.indices {
             switch entries[index] {
             case .tab(var tab) where tab.id == id:
-                if let title { tab.title = title }
-                if let url {
-                    tab.url = url
-                    tab.faviconToken = Tab.makeFaviconToken(for: url)
-                }
-                if let unread { tab.isUnread = unread }
+                change(&tab)
                 entries[index] = .tab(tab)
                 return true
             case .split(var split):
                 if let tabIndex = split.tabs.firstIndex(where: { $0.id == id }) {
-                    if let title { split.tabs[tabIndex].title = title }
-                    if let url {
-                        split.tabs[tabIndex].url = url
-                        split.tabs[tabIndex].faviconToken = Tab.makeFaviconToken(for: url)
-                    }
-                    if let unread { split.tabs[tabIndex].isUnread = unread }
+                    change(&split.tabs[tabIndex])
                     entries[index] = .split(split)
                     return true
                 }
-            case .easel:
-                continue
-            default:
+            case .folder(var folder):
+                if updateTabInEntries(&folder.children, id: id, change) {
+                    entries[index] = .folder(folder)
+                    return true
+                }
+            case .tab, .easel:
                 continue
             }
         }
@@ -1228,7 +1489,8 @@ public final class SidebarStore {
         _ entry: SidebarEntry,
         tabsByID: inout [UUID: Tab],
         splitsByID: inout [UUID: SplitViewItem],
-        easelRefsByID: inout [UUID: SidebarEaselRef]
+        easelRefsByID: inout [UUID: SidebarEaselRef],
+        foldersByID: inout [UUID: SidebarFolderRecord]
     ) {
         switch entry {
         case .tab(let tab):
@@ -1238,10 +1500,21 @@ public final class SidebarStore {
             for tab in split.tabs { tabsByID[tab.id] = tab }
         case .easel(let ref):
             easelRefsByID[ref.id] = ref
+        case .folder(let folder):
+            foldersByID[folder.id] = SidebarFolderRecord(folder)
+            for child in folder.children {
+                ingest(child, tabsByID: &tabsByID, splitsByID: &splitsByID, easelRefsByID: &easelRefsByID, foldersByID: &foldersByID)
+            }
         }
     }
 
-    private func resolveEntry(id: UUID, snapshot: SidebarSnapshot) -> SidebarEntry? {
+    /// `visited` guards against a corrupt snapshot listing an id twice or a folder cycle.
+    private func resolveEntry(id: UUID, snapshot: SidebarSnapshot, visited: inout Set<UUID>) -> SidebarEntry? {
+        guard visited.insert(id).inserted else { return nil }
+        if let record = snapshot.foldersByID[id] {
+            let children = record.childIDs.compactMap { resolveEntry(id: $0, snapshot: snapshot, visited: &visited) }
+            return .folder(SidebarFolder(id: record.id, title: record.title, children: children, sortRank: record.sortRank))
+        }
         if let split = snapshot.splitsByID[id] { return .split(split) }
         if let easel = snapshot.easelRefsByID[id] { return .easel(easel) }
         if let tab = snapshot.tabsByID[id] { return .tab(tab) }
@@ -1253,6 +1526,75 @@ public final class SidebarStore {
         case .favorite(let index), .pinned(_, let index), .today(_, let index):
             return index
         }
+    }
+
+    func resolvedParent(_ destination: ItemDestination) -> ItemParent {
+        switch destination {
+        case .favorites(let profileID): return .favorites(profileID ?? activeProfileID)
+        case .section(let spaceID, let section): return .section(spaceID: spaceID, section: section)
+        case .folder(let folderID): return .folder(folderID)
+        }
+    }
+
+    func destination(for parent: ItemParent) -> ItemDestination {
+        switch parent {
+        case .favorites(let profileID): return .favorites(profileID)
+        case .section(let spaceID, let section): return .section(spaceID: spaceID, section: section)
+        case .folder(let folderID): return .folder(folderID)
+        }
+    }
+
+    /// Placement rules for `moveItem` (see there).
+    func canPlace(_ entry: SidebarEntry, in target: ItemParent) -> Bool {
+        switch target {
+        case .favorites(let profileID):
+            guard profiles.contains(where: { $0.id == profileID }) else { return false }
+            if case .tab = entry { return true }
+            return false
+        case .section(let spaceID, let section):
+            guard spaces.contains(where: { $0.id == spaceID }) else { return false }
+            return section == .pinned || !entry.isFolder
+        case .folder(let folderID):
+            guard folder(withID: folderID) != nil, folderID != entry.id else { return false }
+            switch entry {
+            case .tab:
+                return true
+            case .folder(let moving):
+                // A folder cannot go inside itself or one of its descendants.
+                return !SidebarTree.contains(folderID, in: moving.children)
+            case .split, .easel:
+                return false
+            }
+        }
+    }
+
+    /// Appends `entry` to a folder's children (its rank decides the position).
+    func insertIntoFolder(_ entry: SidebarEntry, folderID: UUID) {
+        for space in spaces {
+            var content = contentBySpace[space.id] ?? SpaceContent()
+            guard var children = SidebarTree.children(of: folderID, in: content.pinned) else { continue }
+            children.append(entry)
+            SidebarTree.setChildren(children, of: folderID, in: &content.pinned)
+            contentBySpace[space.id] = content
+            return
+        }
+    }
+
+    /// Expands every folder on the path to `id` so a focused tab is visible.
+    func revealInFolders(_ id: UUID) {
+        for space in spaces {
+            if let path = SidebarTree.ancestorFolderIDs(of: id, in: contentBySpace[space.id]?.pinned ?? []) {
+                expandedFolderIDs.formUnion(path)
+                return
+            }
+        }
+    }
+
+    func appendArchiveRecord(_ tab: Tab, spaceID: Space.ID?, reason: TabArchiveReason) {
+        guard tab.url.absoluteString != "about:blank" else { return }
+        archivedTabs.removeAll { $0.id == tab.id }
+        archivedTabs.append(ArchivedTabRecord(tab: tab, spaceID: spaceID, archivedAt: now(), reason: reason))
+        archivedTabs = TabArchivePolicy.pruned(archivedTabs, now: now())
     }
 
     // MARK: - Sample content
@@ -1282,4 +1624,3 @@ public final class SidebarStore {
         return store
     }
 }
-

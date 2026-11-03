@@ -23,10 +23,46 @@ public struct SpaceTheme: Hashable, Codable, Sendable {
     ]
 
     public static let `default`: SpaceTheme = presets[0]
+
+    /// Theme editor swatches: three rows of nine, after Arc's style editor
+    /// pads (`ColorPickerPastel1..9`, `ColorPickerGreyscale1..9`,
+    /// `ColorPickerDrab1..9`, SIDEBAR-SPEC §4.6). Values are ReArc's own.
+    public static let editorPalette: [[SpaceTheme]] = [
+        // Vivid
+        [(0.45, 0.35, 0.90), (0.20, 0.60, 0.86), (0.25, 0.72, 0.55), (0.55, 0.78, 0.30), (0.95, 0.78, 0.25),
+         (0.92, 0.55, 0.30), (0.88, 0.32, 0.32), (0.85, 0.35, 0.55), (0.65, 0.40, 0.85)],
+        // Pastel
+        [(0.72, 0.68, 0.95), (0.65, 0.82, 0.95), (0.66, 0.90, 0.80), (0.80, 0.92, 0.66), (0.98, 0.92, 0.66),
+         (0.98, 0.80, 0.66), (0.96, 0.70, 0.70), (0.95, 0.72, 0.84), (0.85, 0.74, 0.95)],
+        // Greyscale and drab
+        [(0.95, 0.95, 0.96), (0.78, 0.78, 0.80), (0.55, 0.55, 0.60), (0.33, 0.33, 0.36), (0.15, 0.15, 0.17),
+         (0.55, 0.50, 0.42), (0.45, 0.52, 0.42), (0.40, 0.47, 0.55), (0.52, 0.42, 0.48)],
+    ].map { row in row.map { SpaceTheme(red: $0.0, green: $0.1, blue: $0.2) } }
+}
+
+public extension Space {
+    /// SF Symbols offered by the space icon picker (emoji can be typed instead).
+    static let iconChoices = [
+        "house.fill", "briefcase.fill", "star.fill", "flame.fill", "leaf.fill", "moon.fill",
+        "globe", "music.note", "book.fill", "graduationcap.fill", "gamecontroller.fill", "cart.fill",
+        "heart.fill", "bolt.fill", "paintbrush.fill", "hammer.fill", "airplane", "camera.fill",
+        "chart.bar.fill", "terminal.fill", "cup.and.saucer.fill", "pawprint.fill", "sun.max.fill", "circle.fill",
+    ]
+
+    /// SF Symbol names are lowercase ASCII words joined by dots; anything else
+    /// (an emoji or a letter) is drawn as text.
+    var iconIsSymbolName: Bool {
+        Space.isSymbolName(iconName)
+    }
+
+    static func isSymbolName(_ name: String) -> Bool {
+        !name.isEmpty && name.allSatisfy { ($0.isASCII && ($0.isLowercase || $0.isNumber)) || $0 == "." }
+    }
 }
 
 /// A Space is a named, themed workspace. Pinned and today tabs belong to a
-/// single space; favorites are global and shown in every space.
+/// single space; favorites belong to the space's profile and show in every
+/// space of that profile.
 public struct Space: Identifiable, Hashable, Codable {
     public let id: UUID
     public var name: String

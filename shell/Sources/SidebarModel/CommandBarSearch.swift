@@ -164,7 +164,7 @@ public enum CommandBarSearch {
             Result(
                 id: "tab-\(item.tab.id.uuidString)",
                 kind: .openTab,
-                title: item.tab.title,
+                title: item.tab.displayTitle,
                 subtitle: item.spaceName,
                 tabID: item.tab.id,
                 spaceID: item.spaceID,
@@ -230,10 +230,12 @@ public enum CommandBarSearch {
         case .tab(let tab): return [tab]
         case .split(let split): return split.tabs
         case .easel: return []
+        case .folder(let folder): return SidebarTree.tabs(folder.children)
         }
     }
 
     private static func matches(tab: Tab, needle: String) -> Bool {
+        if tab.displayTitle.lowercased().contains(needle) { return true }
         if tab.title.lowercased().contains(needle) { return true }
         if tab.url.absoluteString.lowercased().contains(needle) { return true }
         if let host = tab.url.host()?.lowercased(), host.contains(needle) { return true }

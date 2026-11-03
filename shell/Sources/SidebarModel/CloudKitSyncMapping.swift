@@ -63,6 +63,17 @@ public enum CloudKitRecordMapper {
                     encryptedPayload: Data()
                 ),
             ]
+        case .placeItemInFolder(let id, let folderID, let sortRank):
+            return [
+                CloudKitMappedRecord(
+                    recordType: .sidebarItem,
+                    recordName: "item_\(id.uuidString.lowercased())",
+                    sortRank: sortRank,
+                    parentID: "item_\(folderID.uuidString.lowercased())",
+                    clientTimestampMs: timestampMs,
+                    encryptedPayload: Data()
+                ),
+            ]
         case .upsertItem(let id):
             return [
                 CloudKitMappedRecord(

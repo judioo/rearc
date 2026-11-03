@@ -131,7 +131,7 @@ public final class MutationCoalescer: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + window, execute: work)
     }
 
-    /// Squash consecutive moves of the same item; coalesce upserts.
+    /// Squash consecutive moves (section or folder) of the same item; coalesce upserts.
     public static func squash(_ entries: [SidebarJournalEntry]) -> [SidebarJournalEntry] {
         var output: [SidebarJournalEntry] = []
         for entry in entries {
@@ -148,6 +148,19 @@ public final class MutationCoalescer: @unchecked Sendable {
                         )
                         continue
                     }
+                }
+                output.append(entry)
+            case .placeItemInFolder(let id, _, _):
+                if let lastIndex = output.lastIndex(where: { matchesMoveTarget($0, itemID: id) }),
+                   case .placeItemInFolder = output[lastIndex].mutation {
+                    let last = output[lastIndex]
+                    output[lastIndex] = SidebarJournalEntry(
+                        sequence: last.sequence,
+                        timestamp: entry.timestamp,
+                        deviceID: entry.deviceID,
+                        mutation: entry.mutation
+                    )
+                    continue
                 }
                 output.append(entry)
             case .upsertItem(let id):
@@ -168,7 +181,8 @@ public final class MutationCoalescer: @unchecked Sendable {
 
     private static func matchesMoveTarget(_ entry: SidebarJournalEntry, itemID: UUID) -> Bool {
         switch entry.mutation {
-        case .moveItem(let id, _, _, _): return id == itemID
+        // Folder placements are moves too, so a section move never squashes across one.
+        case .moveItem(let id, _, _, _), .placeItemInFolder(let id, _, _): return id == itemID
         default: return false
         }
     }

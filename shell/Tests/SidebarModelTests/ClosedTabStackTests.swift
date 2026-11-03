@@ -41,7 +41,7 @@ final class ClosedTabStackTests: XCTestCase {
         object.removeValue(forKey: "commandBarUsageBumps")
         let v2Data = try JSONSerialization.data(withJSONObject: object)
         let decoded = try JSONDecoder().decode(SidebarSnapshot.self, from: v2Data)
-        XCTAssertEqual(decoded.schemaVersion, 9)
+        XCTAssertEqual(decoded.schemaVersion, 10)
         XCTAssertTrue(decoded.closedTabStack.records.isEmpty)
         XCTAssertTrue(decoded.commandBarUsageBumps.isEmpty)
     }
@@ -53,7 +53,7 @@ final class ClosedTabStackTests: XCTestCase {
         store.bumpCommandUsage("close-tab")
         let data = try JSONEncoder().encode(store.makeSnapshot())
         let decoded = try JSONDecoder().decode(SidebarSnapshot.self, from: data)
-        XCTAssertEqual(decoded.schemaVersion, 9)
+        XCTAssertEqual(decoded.schemaVersion, 10)
         XCTAssertEqual(decoded.closedTabStack.records.count, 1)
         XCTAssertEqual(decoded.commandBarUsageBumps["close-tab"], 1)
     }

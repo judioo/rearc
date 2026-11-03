@@ -1,9 +1,32 @@
 import Foundation
 
+/// A folder node in a snapshot: its children are ids resolved through the
+/// snapshot's tab, folder, split and easel tables.
+public struct SidebarFolderRecord: Equatable, Codable {
+    public var id: UUID
+    public var title: String
+    public var childIDs: [UUID]
+    public var sortRank: String
+
+    public init(id: UUID, title: String, childIDs: [UUID], sortRank: String) {
+        self.id = id
+        self.title = title
+        self.childIDs = childIDs
+        self.sortRank = sortRank
+    }
+
+    public init(_ folder: SidebarFolder) {
+        self.init(id: folder.id, title: folder.title, childIDs: folder.children.map(\.id), sortRank: folder.sortRank)
+    }
+}
+
 /// Codable representation of full sidebar state. Persistence and future sync
 /// backends exchange snapshots; `SidebarStore` command APIs stay unchanged.
+///
+/// Schema 10 adds folders, favorites keyed by profile, folder expansion, the
+/// tab archive and per-profile auto-archive thresholds.
 public struct SidebarSnapshot: Equatable, Codable {
-    public static let schemaVersion = 9
+    public static let schemaVersion = 10
 
     public var schemaVersion: Int
     /// Highest journal sequence durably synced to remote (0 = never flushed).
@@ -37,6 +60,13 @@ public struct SidebarSnapshot: Equatable, Codable {
     public var easelRefsByID: [UUID: SidebarEaselRef]
     /// Capture library index (PNG bytes live under Captures/).
     public var capturesByID: [UUID: CaptureRecord]
+    /// Favorites strip per profile (schema 10). `topAppsContainer` keeps the
+    /// first profile's strip; before 10 it was the only, global one.
+    public var topAppsContainersByProfileID: [Profile.ID: ItemContainerRecord] = [:]
+    public var foldersByID: [UUID: SidebarFolderRecord] = [:]
+    public var expandedFolderIDs: [UUID] = []
+    public var archivedTabs: [ArchivedTabRecord] = []
+    public var autoArchiveThresholdByProfile: [Profile.ID: AutoArchiveThreshold] = [:]
 
     public struct SpaceContainerBundle: Equatable, Codable {
         public var pinned: ItemContainerRecord
@@ -69,7 +99,12 @@ public struct SidebarSnapshot: Equatable, Codable {
         archivedLittleArcWindows: [ArchivedLittleArcWindow] = [],
         boostLibrariesByProfileID: [Profile.ID: ProfileBoostLibrary] = [:],
         easelRefsByID: [UUID: SidebarEaselRef] = [:],
-        capturesByID: [UUID: CaptureRecord] = [:]
+        capturesByID: [UUID: CaptureRecord] = [:],
+        topAppsContainersByProfileID: [Profile.ID: ItemContainerRecord] = [:],
+        foldersByID: [UUID: SidebarFolderRecord] = [:],
+        expandedFolderIDs: [UUID] = [],
+        archivedTabs: [ArchivedTabRecord] = [],
+        autoArchiveThresholdByProfile: [Profile.ID: AutoArchiveThreshold] = [:]
     ) {
         self.schemaVersion = schemaVersion
         self.lastFlushedSequence = lastFlushedSequence
@@ -92,6 +127,11 @@ public struct SidebarSnapshot: Equatable, Codable {
         self.boostLibrariesByProfileID = boostLibrariesByProfileID
         self.easelRefsByID = easelRefsByID
         self.capturesByID = capturesByID
+        self.topAppsContainersByProfileID = topAppsContainersByProfileID
+        self.foldersByID = foldersByID
+        self.expandedFolderIDs = expandedFolderIDs
+        self.archivedTabs = archivedTabs
+        self.autoArchiveThresholdByProfile = autoArchiveThresholdByProfile
     }
 
     public init(from store: SidebarStore) {
@@ -111,6 +151,8 @@ public struct SidebarSnapshot: Equatable, Codable {
         case littleArcWindows, archivedLittleArcWindows
         case boostLibrariesByProfileID
         case easelRefsByID, capturesByID
+        case topAppsContainersByProfileID, foldersByID, expandedFolderIDs
+        case archivedTabs, autoArchiveThresholdByProfile
         case favorites, contentBySpace
     }
 
@@ -132,6 +174,7 @@ public struct SidebarSnapshot: Equatable, Codable {
             self = Self.applyV6ToV7Migration(self)
             self = Self.applyV7ToV8Migration(self)
             self = Self.applyV8ToV9Migration(self)
+            self = Self.applyV9ToV10Migration(self)
             return
         }
 
@@ -341,6 +384,22 @@ public struct SidebarSnapshot: Equatable, Codable {
             self = Self.applyV7ToV8Migration(self)
             self = Self.applyV8ToV9Migration(self)
         }
+        if version >= 10 {
+            topAppsContainersByProfileID = try c.decodeIfPresent(
+                [Profile.ID: ItemContainerRecord].self,
+                forKey: .topAppsContainersByProfileID
+            ) ?? [:]
+            foldersByID = try c.decodeIfPresent([UUID: SidebarFolderRecord].self, forKey: .foldersByID) ?? [:]
+            expandedFolderIDs = try c.decodeIfPresent([UUID].self, forKey: .expandedFolderIDs) ?? []
+            archivedTabs = try c.decodeIfPresent([ArchivedTabRecord].self, forKey: .archivedTabs) ?? []
+            autoArchiveThresholdByProfile = try c.decodeIfPresent(
+                [Profile.ID: AutoArchiveThreshold].self,
+                forKey: .autoArchiveThresholdByProfile
+            ) ?? [:]
+            schemaVersion = SidebarSnapshot.schemaVersion
+        } else {
+            self = Self.applyV9ToV10Migration(self)
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -366,6 +425,23 @@ public struct SidebarSnapshot: Equatable, Codable {
         try c.encode(boostLibrariesByProfileID, forKey: .boostLibrariesByProfileID)
         try c.encode(easelRefsByID, forKey: .easelRefsByID)
         try c.encode(capturesByID, forKey: .capturesByID)
+        try c.encode(topAppsContainersByProfileID, forKey: .topAppsContainersByProfileID)
+        try c.encode(foldersByID, forKey: .foldersByID)
+        try c.encode(expandedFolderIDs, forKey: .expandedFolderIDs)
+        try c.encode(archivedTabs, forKey: .archivedTabs)
+        try c.encode(autoArchiveThresholdByProfile, forKey: .autoArchiveThresholdByProfile)
+    }
+
+    /// Favorites were one global strip before schema 10; Arc keys `topApps`
+    /// by profile (DATA-SCHEMA §1.7), so the strip moves to the default
+    /// (first) profile. Other profiles start with an empty strip.
+    private static func applyV9ToV10Migration(_ snapshot: SidebarSnapshot) -> SidebarSnapshot {
+        var migrated = snapshot
+        migrated.schemaVersion = SidebarSnapshot.schemaVersion
+        if migrated.topAppsContainersByProfileID.isEmpty, let defaultProfile = migrated.profiles.first {
+            migrated.topAppsContainersByProfileID = [defaultProfile.id: migrated.topAppsContainer]
+        }
+        return migrated
     }
 
     private static func applyV6ToV7Migration(_ snapshot: SidebarSnapshot) -> SidebarSnapshot {

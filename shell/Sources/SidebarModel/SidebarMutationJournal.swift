@@ -12,6 +12,8 @@ public enum SidebarJournalMutation: Equatable, Codable, Sendable {
     case insertItem(id: UUID, spaceID: Space.ID?, container: SidebarItemContainer?, sortRank: String)
     case upsertItem(id: UUID)
     case moveItem(id: UUID, spaceID: Space.ID?, container: SidebarItemContainer?, sortRank: String)
+    /// Insert or move an item under a folder (Arc parentID = the folder's item id).
+    case placeItemInFolder(id: UUID, folderID: UUID, sortRank: String)
     case deleteItem(id: UUID)
     case insertSpace(id: UUID, sortRank: String)
     case upsertSpace(id: UUID)

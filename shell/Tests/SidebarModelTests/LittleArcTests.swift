@@ -12,7 +12,7 @@ final class LittleArcTests: XCTestCase {
         XCTAssertEqual(store.littleArcLiveWindows[0].id, created.id)
 
         let snapshot = store.makeSnapshot()
-        XCTAssertEqual(snapshot.schemaVersion, 9)
+        XCTAssertEqual(snapshot.schemaVersion, 10)
         XCTAssertEqual(snapshot.littleArcWindows.count, 1)
 
         let loaded = SidebarStore()
@@ -105,7 +105,7 @@ final class LittleArcTests: XCTestCase {
             SidebarSnapshot.self,
             from: try JSONSerialization.data(withJSONObject: object)
         )
-        XCTAssertEqual(snapshot.schemaVersion, 9)
+        XCTAssertEqual(snapshot.schemaVersion, 10)
         XCTAssertTrue(snapshot.littleArcWindows.isEmpty)
         XCTAssertTrue(snapshot.archivedLittleArcWindows.isEmpty)
     }

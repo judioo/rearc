@@ -96,17 +96,41 @@ public enum TabPlacement: Equatable, Codable {
     case today(spaceID: Space.ID, index: Int)
 }
 
-/// One row in a sidebar section: a plain tab, split item, or easel reference.
+/// A sidebar folder (Arc item type `list`): a titled, nestable container in a
+/// space's pinned section. Children are plain tabs or further folders; split
+/// views and easels stay at section level.
+public struct SidebarFolder: Identifiable, Equatable, Codable {
+    public let id: UUID
+    public var title: String
+    public var children: [SidebarEntry]
+    public var sortRank: String
+
+    public init(id: UUID = UUID(), title: String, children: [SidebarEntry] = [], sortRank: String = "") {
+        self.id = id
+        self.title = title
+        self.children = children
+        self.sortRank = sortRank
+    }
+}
+
+/// One row in a sidebar section: a plain tab, split item, easel reference, or folder.
 public enum SidebarEntry: Identifiable, Equatable, Codable {
     case tab(Tab)
     case split(SplitViewItem)
     case easel(SidebarEaselRef)
+    case folder(SidebarFolder)
 
     public var id: UUID {
         switch self {
         case .tab(let tab): return tab.id
         case .split(let split): return split.id
         case .easel(let ref): return ref.id
+        case .folder(let folder): return folder.id
         }
+    }
+
+    public var isFolder: Bool {
+        if case .folder = self { return true }
+        return false
     }
 }

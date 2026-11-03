@@ -154,7 +154,7 @@ final class BoostTests: XCTestCase {
             SidebarSnapshot.self,
             from: try JSONSerialization.data(withJSONObject: object)
         )
-        XCTAssertEqual(migrated.schemaVersion, 9)
+        XCTAssertEqual(migrated.schemaVersion, 10)
         XCTAssertNotNil(migrated.boostLibrariesByProfileID[store.activeProfileID])
     }
 
@@ -352,7 +352,7 @@ final class BoostTests: XCTestCase {
             css: ".ad { display: none !important; }"
         )
         let snapshot = store.makeSnapshot()
-        XCTAssertEqual(snapshot.schemaVersion, 9)
+        XCTAssertEqual(snapshot.schemaVersion, 10)
         let data = try JSONEncoder().encode(snapshot)
         let decoded = try JSONDecoder().decode(SidebarSnapshot.self, from: data)
         let pkg = decoded.boostLibrariesByProfileID[store.activeProfileID]!.packages.first!

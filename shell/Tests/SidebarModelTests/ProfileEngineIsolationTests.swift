@@ -57,7 +57,7 @@ final class ProfileEngineIsolationTests: XCTestCase {
             SidebarSnapshot.self,
             from: try JSONSerialization.data(withJSONObject: object)
         )
-        XCTAssertEqual(snapshot.schemaVersion, 9)
+        XCTAssertEqual(snapshot.schemaVersion, 10)
         XCTAssertEqual(snapshot.littleArcWindows.count, 1)
         XCTAssertEqual(snapshot.littleArcWindows[0].profileID, work.id)
     }

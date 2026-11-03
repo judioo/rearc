@@ -44,7 +44,7 @@ final class SnapshotMigrationTests: XCTestCase {
         """
         let data = Data(json.utf8)
         let snapshot = try JSONDecoder().decode(SidebarSnapshot.self, from: data)
-        XCTAssertEqual(snapshot.schemaVersion, 9)
+        XCTAssertEqual(snapshot.schemaVersion, 10)
         XCTAssertEqual(snapshot.profiles.count, 1)
         XCTAssertEqual(snapshot.profiles[0].name, "Personal")
         XCTAssertEqual(snapshot.spaces[0].profileID, snapshot.profiles[0].id)
@@ -66,7 +66,7 @@ final class SnapshotMigrationTests: XCTestCase {
         let snapshot = store.makeSnapshot()
         let data = try JSONEncoder().encode(snapshot)
         let decoded = try JSONDecoder().decode(SidebarSnapshot.self, from: data)
-        XCTAssertEqual(decoded.schemaVersion, 9)
+        XCTAssertEqual(decoded.schemaVersion, 10)
         XCTAssertEqual(decoded.profiles.map(\.name), store.profiles.map(\.name))
         XCTAssertEqual(decoded.activeProfileID, store.activeProfileID)
         XCTAssertEqual(decoded.topAppsContainer.childIDs, store.favorites.map(\.id))
@@ -91,7 +91,7 @@ final class SnapshotMigrationTests: XCTestCase {
             SidebarSnapshot.self,
             from: try JSONSerialization.data(withJSONObject: object)
         )
-        XCTAssertEqual(snapshot.schemaVersion, 9)
+        XCTAssertEqual(snapshot.schemaVersion, 10)
         XCTAssertEqual(snapshot.profiles.count, 1)
         XCTAssertEqual(snapshot.profiles[0].name, "Personal")
         XCTAssertEqual(snapshot.spaces[0].profileID, snapshot.profiles[0].id)

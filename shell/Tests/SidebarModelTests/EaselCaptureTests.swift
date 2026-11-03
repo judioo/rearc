@@ -69,7 +69,7 @@ final class EaselCaptureTests: XCTestCase {
         object.removeValue(forKey: "easelRefsByID")
         object.removeValue(forKey: "capturesByID")
         let migrated = try JSONDecoder().decode(SidebarSnapshot.self, from: JSONSerialization.data(withJSONObject: object))
-        XCTAssertEqual(migrated.schemaVersion, 9)
+        XCTAssertEqual(migrated.schemaVersion, 10)
         XCTAssertTrue(migrated.easelRefsByID.isEmpty)
         XCTAssertTrue(migrated.capturesByID.isEmpty)
     }

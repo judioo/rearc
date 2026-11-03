@@ -23,7 +23,7 @@ extension SidebarStore {
     }
 
     func rankForNewItem(in entries: [SidebarEntry], atIndex index: Int) -> String {
-        var peers = entries
+        let peers = entries
         let clamped = max(0, min(index, peers.count))
         let beforeRank = clamped > 0 ? rank(of: peers[clamped - 1]) : nil
         let afterRank = clamped < peers.count ? rank(of: peers[clamped]) : nil
@@ -33,8 +33,8 @@ extension SidebarStore {
         return LexoRank.between(beforeRank, afterRank)
     }
 
-    func rankForNewFavorite(at index: Int) -> String {
-        var peers = RankedSortable.sortedTabs(favorites)
+    func rankForNewFavorite(at index: Int, profileID: Profile.ID? = nil) -> String {
+        let peers = favorites(in: profileID ?? activeProfileID)
         let clamped = max(0, min(index, peers.count))
         let beforeRank = clamped > 0 ? peers[clamped - 1].sortRank : nil
         let afterRank = clamped < peers.count ? peers[clamped].sortRank : nil

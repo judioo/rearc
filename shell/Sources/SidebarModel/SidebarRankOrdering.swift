@@ -24,6 +24,7 @@ public enum RankedSortable {
         case .tab(let tab): return sortRank(tab)
         case .split(let split): return sortRank(split)
         case .easel(let ref): return sortRank(ref)
+        case .folder(let folder): return sortRank(folder)
         }
     }
 }
@@ -36,10 +37,15 @@ extension Tab: SidebarRanked {}
 extension Space: SidebarRanked {}
 extension SplitViewItem: SidebarRanked {}
 extension SidebarEaselRef: SidebarRanked {}
+extension SidebarFolder: SidebarRanked {}
 
 extension SidebarStore {
     func assignRanks(to entries: [SidebarEntry]) -> [SidebarEntry] {
-        var sorted = RankedSortable.sortedEntries(entries)
+        var sorted = RankedSortable.sortedEntries(entries).map { entry -> SidebarEntry in
+            guard case .folder(var folder) = entry else { return entry }
+            folder.children = assignRanks(to: folder.children)
+            return .folder(folder)
+        }
         let needs = sorted.contains { rank(of: $0).isEmpty }
         guard needs else { return sorted }
         let ranks = LexoRank.initialSequence(count: sorted.count)
@@ -54,6 +60,9 @@ extension SidebarStore {
             case .easel(var ref):
                 if ref.sortRank.isEmpty { ref.sortRank = ranks[index] }
                 sorted[index] = .easel(ref)
+            case .folder(var folder):
+                if folder.sortRank.isEmpty { folder.sortRank = ranks[index] }
+                sorted[index] = .folder(folder)
             }
         }
         return sorted
@@ -64,6 +73,7 @@ extension SidebarStore {
         case .tab(let tab): return tab.sortRank
         case .split(let split): return split.sortRank
         case .easel(let ref): return ref.sortRank
+        case .folder(let folder): return folder.sortRank
         }
     }
 
@@ -79,6 +89,9 @@ extension SidebarStore {
         case .easel(var ref):
             ref.sortRank = newRank
             entries[index] = .easel(ref)
+        case .folder(var folder):
+            folder.sortRank = newRank
+            entries[index] = .folder(folder)
         }
     }
 

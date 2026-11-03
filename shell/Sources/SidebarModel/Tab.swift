@@ -2,8 +2,9 @@ import Foundation
 
 /// A single browser tab. Tabs come in three kinds, which determines where in
 /// the sidebar they live and how they behave:
-/// - `favorite`: global icon row at the top of the sidebar, no close button.
-/// - `pinned`: per-space section, text row, persists across sessions.
+/// - `favorite`: per-profile icon row at the top of the sidebar, shared by the
+///   profile's spaces; Cmd+W unloads it instead of deleting it.
+/// - `pinned`: per-space section (folders included), text row, persists across sessions.
 /// - `today`: per-space unpinned section, ephemeral browsing.
 public struct Tab: Identifiable, Hashable, Codable {
     public enum Kind: String, CaseIterable, Codable {
@@ -14,15 +15,29 @@ public struct Tab: Identifiable, Hashable, Codable {
 
     public let id: UUID
     public var kind: Kind
+    /// Page title, updated on every navigation.
     public var title: String
+    /// User rename (Arc "Rename Current Item"); survives page title changes.
+    public var customTitle: String?
     public var url: URL
-    /// Placeholder glyph standing in for a real favicon until the engine
-    /// layer can fetch site icons. Derived from the URL host by default.
+    /// Letter glyph drawn when the shell has no site icon for this tab yet.
+    /// Real icons come from the engine (Chromium `ReArcFaviconGet`, WebKit
+    /// page `<link rel=icon>`) via the shell's favicon cache. Derived from the URL host.
     public var faviconToken: String
-    /// True when the tab has new activity the user hasn't seen yet.
+    /// True when the tab has new activity the user hasn't seen yet. Only ever
+    /// cleared today; nothing sets it (no background-activity source yet).
     public var isUnread: Bool
     /// LexoRank fractional position for sync ordering (empty until migrated).
     public var sortRank: String
+    /// Last time the tab was selected; drives Today-tab auto-archive. Nil on
+    /// tabs saved before schema 10 (the store stamps them at load).
+    public var lastActiveAt: Date?
+
+    /// The title the sidebar shows.
+    public var displayTitle: String {
+        if let customTitle, !customTitle.isEmpty { return customTitle }
+        return title
+    }
 
     public init(
         id: UUID = UUID(),
@@ -31,19 +46,23 @@ public struct Tab: Identifiable, Hashable, Codable {
         url: URL,
         faviconToken: String? = nil,
         isUnread: Bool = false,
-        sortRank: String = ""
+        sortRank: String = "",
+        customTitle: String? = nil,
+        lastActiveAt: Date? = Date()
     ) {
         self.id = id
         self.kind = kind
         self.title = title
+        self.customTitle = customTitle
         self.url = url
         self.faviconToken = faviconToken ?? Tab.makeFaviconToken(for: url)
         self.isUnread = isUnread
         self.sortRank = sortRank
+        self.lastActiveAt = lastActiveAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, title, url, faviconToken, isUnread, sortRank
+        case id, kind, title, customTitle, url, faviconToken, isUnread, sortRank, lastActiveAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -56,6 +75,8 @@ public struct Tab: Identifiable, Hashable, Codable {
             ?? Tab.makeFaviconToken(for: url)
         isUnread = try c.decodeIfPresent(Bool.self, forKey: .isUnread) ?? false
         sortRank = try c.decodeIfPresent(String.self, forKey: .sortRank) ?? ""
+        customTitle = try c.decodeIfPresent(String.self, forKey: .customTitle)
+        lastActiveAt = try c.decodeIfPresent(Date.self, forKey: .lastActiveAt)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -67,6 +88,8 @@ public struct Tab: Identifiable, Hashable, Codable {
         try c.encode(faviconToken, forKey: .faviconToken)
         try c.encode(isUnread, forKey: .isUnread)
         try c.encode(sortRank, forKey: .sortRank)
+        try c.encodeIfPresent(customTitle, forKey: .customTitle)
+        try c.encodeIfPresent(lastActiveAt, forKey: .lastActiveAt)
     }
 
     public static func makeFaviconToken(for url: URL) -> String {
