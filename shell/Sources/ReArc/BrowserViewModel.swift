@@ -328,8 +328,19 @@ final class BrowserViewModel {
             newTab()
         }
         guard let anchorTab = store.selectedTab else { return }
-        if store.splitContaining(tabID: anchorTab.id) != nil { return }
         let sectionKind: Tab.Kind = anchorTab.kind == .pinned ? .pinned : .today
+        if let existing = store.splitContaining(tabID: anchorTab.id)?.split {
+            // Inside a split: add a blank pane, up to four.
+            guard existing.tabs.count < 4 else { return }
+            let pane = store.addTab(kind: sectionKind, title: "New Tab", url: URL(string: "about:blank")!)
+            guard store.splitTab(pane.id, with: anchorTab.id) != nil else {
+                store.closeTab(pane.id)
+                engineHost.remove(pane.id)
+                return
+            }
+            loadSelectedIfNeeded()
+            return
+        }
         let companion = store.addTab(
             kind: sectionKind,
             title: "New Tab",

@@ -192,3 +192,32 @@ extension SidebarStore {
         setSectionEntries(entries, for: section, spaceID: spaceID)
     }
 }
+
+extension SidebarStore {
+    /// Split with a chosen tab (Arc "Split with…"): `tabID` joins `anchorID`.
+    /// It joins the anchor's split when there is room (up to 4 panes), else a
+    /// new two-pane split takes the anchor's place. A tab from the other
+    /// section of the space moves next to the anchor first. Favorites and
+    /// tabs of other spaces are refused.
+    @discardableResult
+    public func splitTab(_ tabID: Tab.ID, with anchorID: Tab.ID, orientation: SplitLayoutOrientation = .horizontal) -> SplitViewItem? {
+        guard tabID != anchorID, splitContaining(tabID: tabID) == nil,
+              case .tab = entry(withID: tabID),
+              let tabSpace = spaceContaining(tabID: tabID),
+              let anchorSpace = spaceContaining(tabID: anchorID), tabSpace == anchorSpace else { return nil }
+        if let existing = splitContaining(tabID: anchorID)?.split {
+            guard existing.tabs.count < 4, let location = locateSplit(existing.id) else { return nil }
+            if parent(of: tabID) != .section(spaceID: anchorSpace, section: location.section) {
+                guard moveItem(tabID, relativeTo: existing.id, after: true) else { return nil }
+            }
+            guard addTabToSplit(splitID: existing.id, tabID: tabID) else { return nil }
+            selectSplit(existing.id, focusTabID: tabID)
+            return split(withID: existing.id)
+        }
+        guard case .section = parent(of: anchorID) else { return nil }
+        if parent(of: tabID) != parent(of: anchorID) {
+            guard moveItem(tabID, relativeTo: anchorID, after: true) else { return nil }
+        }
+        return createSplit(tabIDs: [anchorID, tabID], orientation: orientation, in: anchorSpace)
+    }
+}

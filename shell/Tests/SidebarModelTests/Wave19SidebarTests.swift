@@ -375,3 +375,40 @@ final class SidebarWidthTests: XCTestCase {
         XCTAssertEqual(SidebarWidth.load(from: defaults), SidebarWidth.maximum)
     }
 }
+
+/// Wave 19: split with a chosen tab, up to four panes.
+final class SplitWithTabTests: XCTestCase {
+    private func url(_ s: String) -> URL { URL(string: s)! }
+
+    func testSplitWithATabOfTheOtherSection() throws {
+        let store = SidebarStore()
+        let pinned = store.addTab(kind: .pinned, title: "P", url: url("https://p.test"))
+        let today = store.addTab(kind: .today, title: "T", url: url("https://t.test"))
+        let split = try XCTUnwrap(store.splitTab(today.id, with: pinned.id))
+        XCTAssertEqual(split.tabs.map(\.id), [pinned.id, today.id])
+        XCTAssertEqual(store.parent(of: split.id), .section(spaceID: store.activeSpaceID, section: .pinned), "joins the anchor's section")
+        XCTAssertEqual(store.selectedItemID, split.id)
+    }
+
+    func testAChosenTabJoinsAnExistingSplitUpToFour() throws {
+        let store = SidebarStore()
+        let tabs = (0 ..< 5).map { store.addTab(kind: .today, title: "\($0)", url: url("https://\($0).test")) }
+        let split = try XCTUnwrap(store.createSplit(tabIDs: [tabs[0].id, tabs[1].id], orientation: .horizontal))
+        XCTAssertEqual(store.splitTab(tabs[2].id, with: tabs[0].id)?.tabs.count, 3)
+        XCTAssertEqual(store.selectedTabID, tabs[2].id, "the new pane is focused")
+        XCTAssertEqual(store.splitTab(tabs[3].id, with: tabs[1].id)?.tabs.count, 4)
+        XCTAssertNil(store.splitTab(tabs[4].id, with: tabs[0].id), "four panes at most")
+        XCTAssertEqual(store.split(withID: split.id)?.tabs.count, 4)
+    }
+
+    func testFavoritesAndOtherSpacesAreRefused() {
+        let store = SidebarStore(spaces: [Space(name: "A", sortRank: "a"), Space(name: "B", sortRank: "b")])
+        let a = store.addTab(kind: .today, title: "A", url: url("https://a.test"))
+        let b = store.addTab(kind: .today, title: "B", url: url("https://b.test"), in: store.spaces[1].id)
+        let favorite = store.addTab(kind: .favorite, title: "F", url: url("https://f.test"))
+        XCTAssertNil(store.splitTab(b.id, with: a.id))
+        XCTAssertNil(store.splitTab(favorite.id, with: a.id))
+        XCTAssertNil(store.splitTab(a.id, with: favorite.id))
+        XCTAssertNil(store.splitTab(a.id, with: a.id))
+    }
+}

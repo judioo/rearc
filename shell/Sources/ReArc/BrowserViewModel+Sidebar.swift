@@ -145,6 +145,23 @@ extension BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
+    // MARK: - Split with a chosen tab
+
+    /// Split with Current Tab (row context menu): the row's tab joins the
+    /// selected tab, in its split when it has room.
+    func splitWithSelectedTab(_ tabID: Tab.ID) {
+        guard let anchor = store.selectedTabID, store.splitTab(tabID, with: anchor) != nil else { return }
+        loadSelectedIfNeeded()
+    }
+
+    func canSplitWithSelectedTab(_ tabID: Tab.ID) -> Bool {
+        guard let anchor = store.selectedTabID, anchor != tabID,
+              store.kind(of: anchor) != .favorite, store.kind(of: tabID) != .favorite,
+              store.splitContaining(tabID: tabID) == nil,
+              store.spaceContaining(tabID: tabID) == store.spaceContaining(tabID: anchor) else { return false }
+        return (store.splitContaining(tabID: anchor)?.split.tabs.count ?? 1) < 4
+    }
+
     // MARK: - Pinned tabs (saved URL)
 
     /// Reset Tab to Original URL; a live engine goes back right away.

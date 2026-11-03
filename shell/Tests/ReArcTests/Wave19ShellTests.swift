@@ -173,3 +173,35 @@ final class Wave19ShellTests: XCTestCase {
         XCTAssertFalse(model.store.displayTabs().contains { $0.url.scheme == "chrome" })
     }
 }
+
+/// Wave 19: Add Split View inside a split adds a pane; Split with Current Tab.
+final class Wave19SplitShellTests: XCTestCase {
+    func testAddSplitViewAddsPanesUpToFour() throws {
+        let store = SidebarStore()
+        let tab = store.addTab(kind: .today, title: "A", url: URL(string: "https://a.test")!)
+        store.selectTab(tab.id)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-w19s-\(UUID().uuidString)")
+        let model = BrowserViewModel(
+            store: store,
+            persistence: SidebarFilePersistence(fileURL: directory.appendingPathComponent("sidebar.json")),
+            syncEngine: LocalSyncEngine(),
+            faviconStore: FaviconStore(directory: nil)
+        )
+        for expected in 2 ... 4 {
+            model.addSplitView(orientation: .horizontal)
+            XCTAssertEqual(store.splitContaining(tabID: tab.id)?.split.tabs.count, expected)
+        }
+        let tabCount = store.displayTabs().count
+        model.addSplitView(orientation: .horizontal)
+        XCTAssertEqual(store.splitContaining(tabID: tab.id)?.split.tabs.count, 4, "no fifth pane")
+        XCTAssertEqual(store.displayTabs().count, tabCount, "no stray blank tab")
+
+        let other = store.addTab(kind: .today, title: "B", url: URL(string: "https://b.test")!)
+        XCTAssertFalse(model.canSplitWithSelectedTab(other.id), "the selected split is full")
+        model.selectTab(other.id)
+        let third = store.addTab(kind: .today, title: "C", url: URL(string: "https://c.test")!)
+        XCTAssertTrue(model.canSplitWithSelectedTab(third.id))
+        model.splitWithSelectedTab(third.id)
+        XCTAssertEqual(store.splitContaining(tabID: other.id)?.split.tabs.map(\.id), [other.id, third.id])
+    }
+}

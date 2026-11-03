@@ -60,6 +60,9 @@ struct TabContextMenu: View {
                 }
             }
         }
+        if model.canSplitWithSelectedTab(tab.id) {
+            Button("Split with Current Tab") { model.splitWithSelectedTab(tab.id) }
+        }
         Button("Open in Little Arc") { model.openLittleArc(url: tab.url, title: tab.displayTitle) }
         if BoostScopeMatcher.urlIsEligibleForBoosts(tab.url) {
             Button("Edit Boost for This Site") {
