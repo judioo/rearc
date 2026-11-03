@@ -207,31 +207,16 @@ final class BrowserViewModel {
     }
 
     var syncStatusColor: Color {
-        switch syncStatus {
-        case .local, .unavailable:
-            return Color(nsColor: .systemGray)
-        case .syncing:
-            return .blue
-        case .idleSynced:
-            return .green
-        case .error:
-            return .red
+        switch SyncStatusPresentation(syncStatus).indicator {
+        case .grey: return Color(nsColor: .systemGray)
+        case .blue: return .blue
+        case .green: return .green
+        case .red: return .red
         }
     }
 
     var syncStatusHelp: String {
-        switch syncStatus {
-        case .local:
-            return "Sidebar sync: local only"
-        case .syncing:
-            return "Sidebar sync: syncing…"
-        case .idleSynced:
-            return "Sidebar sync: up to date"
-        case .error(let message):
-            return "Sidebar sync error: \(message)"
-        case .unavailable(let reason):
-            return "Sidebar sync unavailable: \(reason)"
-        }
+        SyncStatusPresentation(syncStatus).help
     }
 
     // MARK: - Selection & navigation

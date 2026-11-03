@@ -229,3 +229,45 @@ final class CloudKitAvailabilityTests: XCTestCase {
         }
     }
 }
+
+/// Wave 19: the sync dot is never green while nothing uploads.
+final class SyncStatusHonestyTests: XCTestCase {
+    func testOnlyAConfirmedUploadIsGreen() {
+        XCTAssertEqual(SyncStatusPresentation(.idleSynced).indicator, .green)
+        for status in [SyncEngineStatus.local, .unavailable(reason: "x"), CloudKitSyncEngine.notImplementedStatus] {
+            XCTAssertEqual(SyncStatusPresentation(status).indicator, .grey, "\(status)")
+            XCTAssertFalse(SyncStatusPresentation(status).help.contains("up to date"), "\(status)")
+        }
+        XCTAssertEqual(SyncStatusPresentation(.error("boom")).indicator, .red)
+    }
+
+    func testTheCloudKitStubSaysNothingUploads() {
+        XCTAssertNotEqual(CloudKitSyncEngine.notImplementedStatus, .idleSynced)
+        XCTAssertTrue(SyncStatusPresentation(CloudKitSyncEngine.notImplementedStatus).help.contains("stay on this Mac"))
+    }
+
+    func testThePipelineNeverReportsStatusForTheEngine() throws {
+        let journal = SidebarMutationJournal()
+        let engine = StatusRecordingEngine()
+        let coalescer = MutationCoalescer(window: 0.01)
+        let pipeline = SyncOutboundPipeline(journal: journal, engine: engine, coalescer: coalescer)
+        journal.record(.upsertItem(id: UUID()))
+        pipeline.handleJournalEntry(try XCTUnwrap(journal.allEntries().last))
+        pipeline.flush()
+        XCTAssertEqual(engine.pushed, 1)
+        XCTAssertTrue(engine.reported.isEmpty, "pipeline reported \(engine.reported)")
+        XCTAssertEqual(engine.status, .local)
+    }
+}
+
+private final class StatusRecordingEngine: SyncEngine, @unchecked Sendable {
+    var status: SyncEngineStatus = .local
+    var reported: [SyncEngineStatus] = []
+    var pushed = 0
+    lazy var onStatusChange: (@Sendable (SyncEngineStatus) -> Void)? = { [unowned self] in self.reported.append($0) }
+
+    func start() {}
+    func stop() {}
+    func push(_ entries: [SidebarJournalEntry]) { pushed += entries.count }
+    func pull(since sequence: UInt64) async throws -> SyncPullResult { SyncPullResult() }
+}

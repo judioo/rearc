@@ -3,9 +3,39 @@ import Foundation
 public enum SyncEngineStatus: Equatable, Sendable {
     case local
     case syncing
+    /// Only for an engine whose last upload a server confirmed.
     case idleSynced
     case error(String)
     case unavailable(reason: String)
+}
+
+/// The bottom-bar sync dot and its tooltip. Green means a server confirmed
+/// the upload (`idleSynced`); local-only and unavailable sync are grey.
+public struct SyncStatusPresentation: Equatable, Sendable {
+    public enum Indicator: Equatable, Sendable { case grey, blue, green, red }
+
+    public var indicator: Indicator
+    public var help: String
+
+    public init(_ status: SyncEngineStatus) {
+        switch status {
+        case .local:
+            self.init(indicator: .grey, help: "Sidebar sync: off, changes stay on this Mac")
+        case .syncing:
+            self.init(indicator: .blue, help: "Sidebar sync: syncing…")
+        case .idleSynced:
+            self.init(indicator: .green, help: "Sidebar sync: up to date")
+        case .error(let message):
+            self.init(indicator: .red, help: "Sidebar sync error: \(message)")
+        case .unavailable(let reason):
+            self.init(indicator: .grey, help: "Sidebar sync: off. \(reason)")
+        }
+    }
+
+    init(indicator: Indicator, help: String) {
+        self.indicator = indicator
+        self.help = help
+    }
 }
 
 public struct SyncPullResult: Equatable, Sendable {
@@ -233,24 +263,14 @@ public final class SyncOutboundPipeline: @unchecked Sendable {
         coalescer.flushNow()
     }
 
+    /// Hands a batch to the engine. Status belongs to the engine alone: the
+    /// pipeline never reports "syncing" or "up to date" on its behalf, since
+    /// only the engine knows whether anything reached a server.
     private func pushBatch(_ entries: [SidebarJournalEntry]) {
         guard let engine, !entries.isEmpty else { return }
-        switch engine.status {
-        case .local, .unavailable:
-            engine.push(entries)
-            if let maxSeq = entries.map(\.sequence).max() {
-                journal.markFlushed(upTo: maxSeq)
-            }
-        case .error, .idleSynced, .syncing:
-            engine.onStatusChange?(.syncing)
-            engine.push(entries)
-            if let maxSeq = entries.map(\.sequence).max() {
-                journal.markFlushed(upTo: maxSeq)
-            }
-            if case .unavailable = engine.status {
-                break
-            }
-            engine.onStatusChange?(.idleSynced)
+        engine.push(entries)
+        if let maxSeq = entries.map(\.sequence).max() {
+            journal.markFlushed(upTo: maxSeq)
         }
     }
 }
