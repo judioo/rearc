@@ -137,7 +137,8 @@ is gated on its feature flag (`profiles`, `profile_off_the_record`,
   `ChromiumEngine` queues navigations and evaluations until then, and a host
   that appeared earlier attaches once the tab exists. A Space's tabs keep their
   BrowserContext when moved: the profile is fixed per engine. Deleting a shell
-  profile closes its private windows, then its engine profile.
+  profile (with its spaces, after confirmation, since wave 17) closes its
+  private windows, then its engine profile.
 - **Private windows** (File > New Private Window, ⇧⌘N; both engines) are
   `PrivateWindowModel`s: one page, no sidebar, history or sync. On Chromium a
   private session is one off-the-record profile created with
@@ -196,6 +197,8 @@ The self-test:
 2. Creates a tab and commits a `data:` document with its expected title, then
    evaluates `document.title` there.
 3. Loads pages from a loopback HTTP fixture and waits for title events.
+   Page A declares `/favicon.png`: the favicon event's `icon_ref` is read
+   with `ReArcFaviconGet` (a PNG), and a stale ref is `not_found`.
 4. Attaches the SwiftUI-hosted view to a window and captures a viewport PNG.
 5. Installs one boost and checks its CSS and isolated-world JS.
 6. Goes back and forward, and checks mute and PiP.
@@ -225,9 +228,12 @@ The self-test:
     first, and reopening gives a new engine ID with the persistent cookie.
 15. Runs the real `ChromiumShell` on a throwaway sidebar: two browser windows
     sharing a tab, Split View, Peek, Little Arc, the zoom commands (including a
-    same-host sibling and the key private window), a private window whose
-    close ends its off-the-record session, and closing every window without
-    quitting, then reopening.
+    same-host sibling and the key private window), the sidebar navigation
+    controls (the tab's favicon reaches the sidebar cache, `security_state`
+    reaches the URL field, and `BrowserViewModel` Back, Forward, Reload,
+    Reload Ignoring Cache and Stop drive the selected tab), a private window
+    whose close ends its off-the-record session, and closing every window
+    without quitting, then reopening.
 16. Verifies every evaluation and profile request context was released
     (`live script contexts: 0, profile contexts: 0`), then shuts down cleanly.
 
@@ -326,18 +332,90 @@ Production needs:
     unit-tested without Chromium.
   - `Private/` — `PrivateWindowModel` and `PrivateWindowView`, shared by
     both engines.
-  - `Sidebar/` — favorites row, pinned/today sections with drag-to-reorder,
-    hover-to-close rows, bottom bar (space switcher, new space, avatar).
+  - `Sidebar/` — navigation row and URL field (`SidebarToolbarView`),
+    favorites row, space header, pinned/today sections with folders and drag
+    and drop (`TabSectionView`), context menus, the Edit Space sheet, the
+    Archive view, and the bottom bar (space switcher, archive, "+" menu,
+    avatar).
+  - `ShellMenus` — menu items and shortcuts shared by the WebKit `Commands`
+    and the Chromium `NSMenu`.
+  - `Engine/FaviconStore` — site icons by host, cached on disk next to
+    `sidebar.json` (`Favicons/`).
   - `CommandBar/` — centered floating URL/search panel.
   - `BrowserViewModel` — glue between store, engines, overlay, and shortcuts.
 
+## Sidebar (wave 17)
+
+- **Navigation without a toolbar.** As in Arc, back, forward and reload/stop
+  sit at the top of the sidebar next to the traffic lights. Below them, a URL
+  field shows the page's domain and lock state (Chromium `security_state`;
+  WebKit derives it from the scheme and `hasOnlySecureContent`) and opens the
+  command bar when clicked. The same actions are in View (⌘[, ⌘], ⌘R, ⇧⌘R,
+  ⌘.) and the command bar.
+- **Folders.** New Folder ("+" menu, space menu, Tabs menu, command bar,
+  "Move to Folder ▸ New Folder with Tab", or drop a tab on a tab) creates an
+  expanded folder in Pinned and prompts for a name. Folders nest. Click a
+  folder to collapse or expand it. A collapsed folder still shows its
+  selected tab. Drop onto the middle of a folder row to move the item in,
+  and near a row's top or bottom edge to place it before or after (an
+  insertion line shows where). A folder's menu renames it, adds a folder
+  inside, expands or collapses all, removes the folder while keeping its
+  tabs, or deletes it with its tabs (they go to the Archive).
+- **Pin, unpin, favorite.** Drag between Favorites, Pinned and Today (the end
+  of each section is a drop zone, and an empty section shows one), use ⌘D
+  (Pin/Unpin Tab), or use the context menu. ⌘W on a favorite unloads it: its
+  engine is dropped and it stays in the strip. Remove from Favorites deletes
+  it.
+- **Context menus** on tabs, favorites, folders, split views, easels and the
+  space header: pin/unpin, add to or remove from favorites, rename,
+  duplicate, copy link, move to folder or space, open in Little Arc, edit
+  boost, archive, close.
+- **Spaces.** ⌃1…9 select the Nth space of the active profile, and ⌥⌘→ / ⌥⌘←
+  go to the next or previous one. The space header and switcher menus rename
+  the space, open Edit Theme and Icon (27 swatches, a custom color, SF Symbols
+  or an emoji) or delete it after confirmation (its tabs go, its engines are
+  dropped). The last space cannot be deleted.
+- **Profiles.** Deleting a profile that owns spaces asks first, then deletes
+  it along with them.
+- **Auto-hide.** With the sidebar hidden (⌘S), moving the pointer to the
+  window's leading edge floats it over the page, and it hides again once the
+  pointer moves away. A local mouse-moved monitor drives this, so it works
+  over WKWebView and the Chromium host view.
+- **Archive.** Closing or archiving a pinned or Today tab keeps a full
+  record (not blank tabs). View Archive (bottom bar, Tabs menu, command bar)
+  groups records by time, searches them, restores one to the top of Today
+  in its space, and clears them. Records older than 60 days are dropped
+  (Arc's data shows about 59 days). Today tabs not selected for the active
+  profile's threshold (12 hours by default, or 24 hours, 7 days, 30 days:
+  profile menu or Archive view) are archived automatically, checked at
+  launch and every five minutes. The selected tab is never archived.
+- **Favicons.** Chromium tabs read icons through `ReArcFaviconGet` when the
+  favicon event arrives. WebKit tabs fetch the page's `<link rel=icon>`
+  (nearest 32 px) or `/favicon.ico` over an ephemeral `URLSession`, and
+  private windows skip the fetch. Icons are cached by host on disk, so
+  unloaded tabs keep theirs. Rows fall back to a letter.
+
+Limits: splits and easels cannot go into folders (folders hold tabs and
+folders), and folders live only in Pinned. Folder expansion is shared by
+all windows, because windows share one sidebar (Arc keeps it per window).
+The Archive and the auto-archive threshold are local and not journaled for
+sync. Pinned tabs still close on ⌘W instead of resetting to a saved URL (P1).
+
 ## Model rules worth knowing
 
-- Favorites are **global** (shown in every space); pinned and today tabs are
-  per-space. New today tabs insert at the **top** of their section.
-- Reordering never crosses sections — `moveTab` interprets the destination
-  index within the tab's own kind. Cross-section moves go through
-  `pinTab`/`unpinTab` (pinned ⇄ today). Favorites can only be reordered.
+- Favorites belong to a **profile** and show in every space of that profile
+  (Arc keys `topApps` by profile). Schema 10 moves the old global strip to
+  the first (default) profile; other profiles start with no favorites.
+  Pinned and today tabs are per space. New today tabs insert at the **top**
+  of their section.
+- Folders (`SidebarEntry.folder`) nest in a space's pinned section. Tabs
+  inside a folder have kind `.pinned`, and lookup, update and removal recurse
+  (`SidebarTree`). `displayEntries` lists folder contents inline, so
+  selection cycling and Ctrl+Tab go through them.
+- `moveItem(_:to:index:)` is the single placement path. Favorites hold plain
+  tabs, Today holds no folders, split panes move only with their split, and
+  a folder never goes inside itself. The tab kind follows the destination.
+  `moveTab(_:to:)` still only reorders inside the item's own container.
 - Closing the selected tab selects whatever now occupies its display position
   (next tab, or previous if it was last), `nil` when nothing remains.
 - Selection is remembered per space when switching spaces.
@@ -355,23 +433,37 @@ Production needs:
 | ⌘W | Close selected tab, or a private window (⌘W is stripped from File > Close Window) |
 | ⇧⌘N | New private window |
 | ⌘= / ⌘- / ⌘0 | Zoom in / out / actual size |
-| ⌘S | Toggle sidebar |
+| ⌘S | Toggle sidebar (when hidden, point at the left edge to float it) |
 | ⌘⇧] / ⌘⇧[ | Next / previous tab |
 | ⌃⇥ | Next tab |
+| ⌘[ / ⌘] | Back / forward |
+| ⌘R / ⇧⌘R / ⌘. | Reload / reload ignoring cache / stop |
+| ⌘D | Pin or unpin the selected tab |
+| ⇧⌘C | Copy the page URL |
+| ⌃1 … ⌃9 | Switch to space 1–9 of the active profile |
+| ⌥⌘→ / ⌥⌘← | Next / previous space |
 
-## Sync (P0 + P1)
+## Sync: not implemented
 
-Sidebar mutations are recorded in a local **mutation journal** (LexoRank ordering,
-device id, monotonic sequence) and optionally pushed through a **SyncEngine**.
+**Nothing syncs.** Sidebar state lives only in the local `sidebar.json`.
+What exists is the local groundwork:
 
-- **Local-only (default in SwiftPM dev builds)**: `LocalSyncEngine` — journal +
-  coalescing run, but nothing leaves the machine. The bottom-bar dot stays grey.
-- **CloudKit backup (signed app)**: enable the iCloud capability and container
-  `iCloud.net.rearc.sidebar` in an Xcode target that embeds `rearc`, with CloudKit
-  services checked for that container. Create the custom zone
-  `com.rearc.sidebar.graph.v1` on first run (the adapter initializes lazily).
-  Without entitlements, `CloudKitSyncAvailability.makeEngine()` returns
-  `unavailable(reason:)` and the app does not crash.
+- A **mutation journal** records sidebar mutations with LexoRank ordering, a
+  device id and a monotonic sequence. Folder placement is its own mutation,
+  `placeItemInFolder`. `SyncOutboundPipeline` coalesces the journal and hands
+  it to a `SyncEngine`, and `CloudKitRecordMapper` maps entries to CloudKit
+  record fields (unit-tested). None of it reaches a server.
+- `LocalSyncEngine` (SwiftPM dev builds) keeps everything on the machine,
+  and the bottom-bar dot stays grey.
+- `CloudKitSyncEngine` is a **stub**. It is used only when the bundle
+  declares the iCloud container `iCloud.net.rearc.sidebar`. `push` maps
+  the records and discards them, and `pull` returns nothing. It never
+  creates the `com.rearc.sidebar.graph.v1` zone or calls a CloudKit
+  operation. In that configuration the dot still turns green ("up to
+  date") although nothing was uploaded. Without the entitlement,
+  `makeEngine()` returns `unavailable(reason:)`.
 
-SwiftPM `swift run rearc` does not inject entitlements; use **Product → Archive**
-or an Xcode scheme with the ReArc entitlements plist linked to test CloudKit sync.
+Real sync (zone setup, record upload and fetch with change tokens, conflict
+merge, then the end-to-end encryption in `docs/SYNC-DESIGN.md`) is future
+work. The Archive, folder expansion and auto-archive thresholds are not in
+the journal.
