@@ -186,8 +186,18 @@ final class WKEngine: NSObject, WebEngine {
     private(set) var currentURL: URL?
     private(set) var pageTitle: String?
     private(set) var isLoading = false
+    private(set) var canGoBack = false
+    private(set) var canGoForward = false
+    private(set) var securityState: WebSecurityState = .unknown
+    private(set) var faviconData: Data?
 
     let webView: WKWebView
+    /// KVO on the web view keeps the observable navigation state current
+    /// (WKWebView's own properties are not @Observable).
+    @ObservationIgnored private var observations: [NSKeyValueObservation] = []
+    @ObservationIgnored private var faviconTask: Task<Void, Never>?
+    /// Page URL the current `faviconData` belongs to.
+    @ObservationIgnored private var faviconPageURL: URL?
     private let linkPeekBridge = LinkPeekMessageHandler()
     private let mediaBridge = MediaStateMessageHandler()
     private let boostPageshowBridge = BoostPageshowHandler()
@@ -240,6 +250,32 @@ final class WKEngine: NSObject, WebEngine {
         boostPageshowBridge.onPageshow = { [weak self] in
             self?.onBoostPageshow?()
         }
+        observeNavigationState()
+    }
+
+    deinit {
+        faviconTask?.cancel()
+    }
+
+    private func observeNavigationState() {
+        let refresh: (WKWebView) -> Void = { [weak self] webView in
+            DispatchQueue.main.async { self?.syncNavigationState(from: webView) }
+        }
+        observations = [
+            webView.observe(\.canGoBack, options: [.initial, .new]) { webView, _ in refresh(webView) },
+            webView.observe(\.canGoForward, options: [.new]) { webView, _ in refresh(webView) },
+            webView.observe(\.isLoading, options: [.new]) { webView, _ in refresh(webView) },
+            webView.observe(\.hasOnlySecureContent, options: [.new]) { webView, _ in refresh(webView) },
+            webView.observe(\.url, options: [.new]) { webView, _ in refresh(webView) },
+        ]
+    }
+
+    private func syncNavigationState(from webView: WKWebView) {
+        if canGoBack != webView.canGoBack { canGoBack = webView.canGoBack }
+        if canGoForward != webView.canGoForward { canGoForward = webView.canGoForward }
+        if isLoading != webView.isLoading { isLoading = webView.isLoading }
+        let security = WebSecurityState.webKit(url: webView.url ?? currentURL, hasOnlySecureContent: webView.hasOnlySecureContent)
+        if securityState != security { securityState = security }
     }
 
     private func reinstallBaseScripts(on controller: WKUserContentController) {
@@ -256,15 +292,20 @@ final class WKEngine: NSObject, WebEngine {
         ))
     }
 
-    var canGoBack: Bool { webView.canGoBack }
-    var canGoForward: Bool { webView.canGoForward }
-
     func load(_ url: URL) {
         currentURL = url
         webView.load(URLRequest(url: url))
     }
 
-    func reload() { webView.reload() }
+    func reload(ignoringCache: Bool) {
+        if ignoringCache {
+            webView.reloadFromOrigin()
+        } else {
+            webView.reload()
+        }
+    }
+
+    func stopLoading() { webView.stopLoading() }
     func goBack() { webView.goBack() }
     func goForward() { webView.goForward() }
 
@@ -566,6 +607,11 @@ extension WKEngine: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         currentURL = webView.url ?? currentURL
+        if faviconPageURL?.host() != currentURL?.host() {
+            faviconTask?.cancel()
+            faviconData = nil
+            faviconPageURL = nil
+        }
         clearBoostSessionOnNavigation()
         refreshBoostsOnPage()
         onNavigationCommit?(currentURL, pageTitle)
@@ -577,10 +623,105 @@ extension WKEngine: WKNavigationDelegate {
         pageTitle = webView.title
         refreshBoostsOnPage()
         onNavigationCommit?(currentURL, pageTitle)
+        syncNavigationState(from: webView)
+        loadFavicon()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         isLoading = false
+        syncNavigationState(from: webView)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        isLoading = false
+        syncNavigationState(from: webView)
+    }
+}
+
+// MARK: - Favicons
+
+extension WKEngine {
+    /// Collects `<link rel~=icon>` candidates in the page's main world.
+    private static let faviconProbeSource = """
+    (function() {
+      var links = Array.prototype.slice.call(document.querySelectorAll('link[rel]'));
+      return links.filter(function(l) {
+        return /(^|\\s)(icon|apple-touch-icon)(\\s|$)/i.test(l.rel) && l.href;
+      }).map(function(l) { return [l.href, l.rel.toLowerCase(), l.sizes ? String(l.sizes) : '']; });
+    })();
+    """
+
+    /// The page's icon: a declared `<link rel=icon>` (a 32px-ish one when sizes
+    /// are given), else /favicon.ico. Ephemeral (private) engines skip it so
+    /// no request leaves their data store's session.
+    fileprivate func loadFavicon() {
+        guard !profileContext.isEphemeral,
+              let pageURL = webView.url,
+              let scheme = pageURL.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return }
+        if faviconPageURL?.host() == pageURL.host(), faviconData != nil { return }
+        webView.evaluateJavaScript(Self.faviconProbeSource) { [weak self] result, _ in
+            guard let self else { return }
+            let declared = (result as? [[String]] ?? []).compactMap { entry -> FaviconCandidate? in
+                guard let href = entry.first, let url = URL(string: href) else { return nil }
+                return FaviconCandidate(url: url, rel: entry.count > 1 ? entry[1] : "icon", sizes: entry.count > 2 ? entry[2] : "")
+            }
+            let urls = FaviconCandidate.ordered(declared, pageURL: pageURL)
+            self.faviconTask?.cancel()
+            self.faviconTask = Task { [weak self] in
+                guard let data = await FaviconCandidate.fetchFirst(urls) else { return }
+                await MainActor.run {
+                    guard let self, self.webView.url?.host() == pageURL.host() else { return }
+                    self.faviconPageURL = pageURL
+                    self.faviconData = data
+                }
+            }
+        }
+    }
+}
+
+/// One `<link rel=icon>` candidate on a WebKit page.
+struct FaviconCandidate: Equatable {
+    var url: URL
+    var rel: String
+    var sizes: String
+
+    /// http(s) candidates, best first (rel=icon nearest 32px, then
+    /// apple-touch-icon), followed by the site's /favicon.ico.
+    static func ordered(_ candidates: [FaviconCandidate], pageURL: URL) -> [URL] {
+        func score(_ candidate: FaviconCandidate) -> Int {
+            let touch = candidate.rel.contains("apple-touch-icon") ? 1000 : 0
+            let size = candidate.sizes.split(separator: "x").first.flatMap { Int($0) } ?? 32
+            return touch + abs(size - 32)
+        }
+        var urls = candidates
+            .filter { ["http", "https"].contains($0.url.scheme?.lowercased() ?? "") }
+            .sorted { score($0) < score($1) }
+            .map(\.url)
+        if var components = URLComponents(url: pageURL, resolvingAgainstBaseURL: false) {
+            components.path = "/favicon.ico"
+            components.query = nil
+            components.fragment = nil
+            if let fallback = components.url, !urls.contains(fallback) { urls.append(fallback) }
+        }
+        return urls
+    }
+
+    /// First candidate that downloads as a decodable image under 256 KiB.
+    /// Uses an ephemeral session: icon fetches share no cookies with pages.
+    static func fetchFirst(_ urls: [URL]) async -> Data? {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.finishTasksAndInvalidate() }
+        for url in urls.prefix(4) {
+            guard !Task.isCancelled else { return nil }
+            var request = URLRequest(url: url, timeoutInterval: 10)
+            request.setValue("image/*", forHTTPHeaderField: "Accept")
+            guard let (data, response) = try? await session.data(for: request),
+                  (response as? HTTPURLResponse)?.statusCode == 200,
+                  !data.isEmpty, data.count <= 256 * 1024,
+                  NSImage(data: data) != nil else { continue }
+            return data
+        }
+        return nil
     }
 }
 

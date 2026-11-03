@@ -566,3 +566,26 @@ final class Wave17SidebarTests: XCTestCase {
         XCTAssertEqual(folderMoves.map(\.mutation), [.placeItemInFolder(id: item, folderID: folder, sortRank: "d")])
     }
 }
+
+extension Wave17SidebarTests {
+    func testDropBeforeAndAfterAcrossContainers() throws {
+        let store = makeStore()
+        let space = store.activeSpaceID
+        let p1 = store.addTab(kind: .pinned, title: "P1", url: url("https://p1.test"))
+        let p2 = store.addTab(kind: .pinned, title: "P2", url: url("https://p2.test"))
+        let t1 = store.addTab(kind: .today, title: "T1", url: url("https://t1.test"))
+        let fav = store.addTab(kind: .favorite, title: "F", url: url("https://f.test"))
+        XCTAssertTrue(store.moveItem(t1.id, relativeTo: p1.id, after: true))
+        XCTAssertEqual(store.content(for: space).pinned.map(\.id), [p1.id, t1.id, p2.id])
+        XCTAssertTrue(store.moveItem(p2.id, relativeTo: fav.id, after: false))
+        XCTAssertEqual(store.favorites.map(\.id), [p2.id, fav.id])
+        XCTAssertEqual(store.kind(of: p2.id), .favorite)
+        let folder = try XCTUnwrap(store.createFolder(containing: [p1.id]))
+        XCTAssertTrue(store.moveItem(t1.id, relativeTo: p1.id, after: false))
+        XCTAssertEqual(store.folder(withID: folder.id)?.children.map(\.id), [t1.id, p1.id])
+        XCTAssertFalse(store.moveItem(t1.id, relativeTo: t1.id, after: true))
+        // Moving down within one container lands right after the target.
+        XCTAssertTrue(store.moveItem(t1.id, relativeTo: p1.id, after: true))
+        XCTAssertEqual(store.folder(withID: folder.id)?.children.map(\.id), [p1.id, t1.id])
+    }
+}

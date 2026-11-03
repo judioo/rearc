@@ -2,13 +2,48 @@ import SwiftUI
 import UniformTypeIdentifiers
 import SidebarModel
 
+/// Where a drag hovering a sidebar row lands: next to it, or into it (a
+/// folder takes the item; a tab makes a new folder with the dragged tab).
+enum SidebarDropPosition: Equatable {
+    case before, after, into
+}
+
+struct SidebarDropState: Equatable {
+    var targetID: UUID
+    var position: SidebarDropPosition
+}
+
+/// One visible row: an entry and its folder depth. A collapsed folder still
+/// shows its selected descendant (Arc's "peeked" expansion state).
+struct SidebarRowItem: Identifiable {
+    let entry: SidebarEntry
+    let depth: Int
+    var id: UUID { entry.id }
+
+    static func rows(_ entries: [SidebarEntry], depth: Int = 0, expanded: Set<UUID>, selected: UUID?) -> [SidebarRowItem] {
+        entries.flatMap { entry -> [SidebarRowItem] in
+            guard case .folder(let folder) = entry else { return [SidebarRowItem(entry: entry, depth: depth)] }
+            let header = SidebarRowItem(entry: entry, depth: depth)
+            if expanded.contains(folder.id) {
+                return [header] + rows(folder.children, depth: depth + 1, expanded: expanded, selected: selected)
+            }
+            if let selected, let leaf = SidebarTree.leaves(folder.children).first(where: { $0.id == selected }) {
+                return [header, SidebarRowItem(entry: leaf, depth: depth + 1)]
+            }
+            return [header]
+        }
+    }
+}
+
 /// One section of the sidebar (pinned or today) for the active space.
 struct TabSectionView: View {
     let title: String?
     let section: ItemContainerKind.SpaceSection
+    let spaceID: Space.ID
     let entries: [SidebarEntry]
     let model: BrowserViewModel
     @Binding var draggedItemID: UUID?
+    @Binding var dropState: SidebarDropState?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -18,23 +53,36 @@ struct TabSectionView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
             }
-            ForEach(entries, id: \.id) { entry in
-                entryRow(entry)
-                    .onDrag {
-                        draggedItemID = entry.id
-                        return NSItemProvider(object: entry.id.uuidString as NSString)
-                    }
-                    .onDrop(
-                        of: [.plainText],
-                        delegate: SectionDropDelegate(
-                            targetEntry: entry,
-                            section: section,
-                            model: model,
-                            draggedItemID: $draggedItemID
-                        )
-                    )
+            let rows = SidebarRowItem.rows(
+                entries,
+                expanded: model.store.expandedFolderIDs,
+                selected: model.store.selectedItemID
+            )
+            ForEach(rows) { row in
+                SidebarDropRow(
+                    entry: row.entry,
+                    model: model,
+                    draggedItemID: $draggedItemID,
+                    dropState: $dropState
+                ) {
+                    entryRow(row.entry)
+                }
+                .padding(.leading, CGFloat(row.depth) * 14)
             }
+            SectionEndDropZone(
+                destination: .section(spaceID: spaceID, section: section),
+                placeholder: entries.isEmpty && draggedItemID != nil
+                    ? (section == .pinned ? "Drop here to pin" : "Drop here to unpin")
+                    : nil,
+                model: model,
+                draggedItemID: $draggedItemID,
+                dropState: $dropState
+            )
         }
+    }
+
+    private func isDropInto(_ id: UUID) -> Bool {
+        dropState == SidebarDropState(targetID: id, position: .into)
     }
 
     @ViewBuilder
@@ -43,17 +91,26 @@ struct TabSectionView: View {
         case .tab(let tab):
             TabRowView(
                 tab: tab,
+                favicon: model.favicon(for: tab),
                 isSelected: model.store.selectedItemID == tab.id,
                 showsAudibleIndicator: model.showsAudibleIndicator(for: tab.id),
+                isDropTarget: isDropInto(tab.id),
                 onSelect: { model.selectTab(tab.id) },
                 onClose: { model.closeTab(tab.id) },
                 onMute: { model.muteTab(tab.id) },
-                onCloseOption: { model.unsplitTabIfInSplit(tab.id) },
-                onEditBoost: {
-                    model.selectTab(tab.id)
-                    model.editBoostFromTabContextMenu()
-                }
-            )
+                onCloseOption: { model.unsplitTabIfInSplit(tab.id) }
+            ) {
+                TabContextMenu(model: model, tab: tab)
+            }
+        case .folder(let folder):
+            FolderRowView(
+                folder: folder,
+                isExpanded: model.store.isFolderExpanded(folder.id),
+                isDropTarget: isDropInto(folder.id),
+                onToggle: { model.store.toggleFolderExpanded(folder.id) }
+            ) {
+                FolderContextMenu(model: model, folder: folder)
+            }
         case .easel(let ref):
             EaselRowView(
                 ref: ref,
@@ -63,14 +120,14 @@ struct TabSectionView: View {
                 onClose: { model.deleteEaselSidebarItem(ref.id) },
                 onRename: { model.renameEasel(documentID: ref.easelDocumentID, title: $0) }
             )
-        case .folder:
-            EmptyView()
+            .contextMenu { SectionItemContextMenu(model: model, entry: entry) }
         case .split(let split):
             SplitRowView(
                 split: split,
                 isSelected: model.store.selectedItemID == split.id,
                 focusedTabID: split.focusTabID,
                 themeColor: model.themeColor,
+                favicon: { model.favicon(for: $0) },
                 showsAudibleIndicator: { model.showsAudibleIndicator(for: $0) },
                 onMutePane: { model.muteTab($0) },
                 onSelectSplit: { model.selectSplit(split.id) },
@@ -84,62 +141,193 @@ struct TabSectionView: View {
                     }
                 }
             )
+            .contextMenu { SectionItemContextMenu(model: model, entry: entry) }
         }
     }
 }
 
-struct SectionDropDelegate: DropDelegate {
-    let targetEntry: SidebarEntry
-    let section: ItemContainerKind.SpaceSection
+/// Makes a row draggable and a drop target with an insertion line (Arc
+/// `SidebarCellDropFeedbackView`). Placement rules live in `SidebarStore.moveItem`.
+struct SidebarDropRow<Content: View>: View {
+    let entry: SidebarEntry
     let model: BrowserViewModel
     @Binding var draggedItemID: UUID?
+    @Binding var dropState: SidebarDropState?
+    @ViewBuilder let content: () -> Content
 
-    func dropEntered(info: DropInfo) {
-        guard let draggedItemID,
-              draggedItemID != targetEntry.id,
-              let destination = sectionEntries().firstIndex(where: { $0.id == targetEntry.id })
-        else { return }
-        withAnimation(.easeInOut(duration: 0.15)) {
-            model.store.moveEntry(
-                draggedItemID,
-                to: destination,
-                in: model.store.activeSpaceID,
-                section: section
+    @State private var height: CGFloat = 28
+
+    var body: some View {
+        content()
+            .background(
+                GeometryReader { geometry in
+                    Color.clear
+                        .onAppear { height = geometry.size.height }
+                        .onChange(of: geometry.size.height) { _, newValue in height = newValue }
+                }
             )
+            .overlay(alignment: .top) { insertionLine(.before) }
+            .overlay(alignment: .bottom) { insertionLine(.after) }
+            .onDrag {
+                draggedItemID = entry.id
+                return NSItemProvider(object: entry.id.uuidString as NSString)
+            }
+            .onDrop(
+                of: [.plainText],
+                delegate: SidebarRowDropDelegate(
+                    target: entry,
+                    rowHeight: height,
+                    model: model,
+                    draggedItemID: $draggedItemID,
+                    dropState: $dropState
+                )
+            )
+    }
+
+    @ViewBuilder
+    private func insertionLine(_ position: SidebarDropPosition) -> some View {
+        if dropState == SidebarDropState(targetID: entry.id, position: position) {
+            Capsule()
+                .fill(Color.accentColor)
+                .frame(height: 2)
+                .padding(.horizontal, 6)
+                .offset(y: position == .before ? -1 : 1)
+                .allowsHitTesting(false)
         }
+    }
+}
+
+struct SidebarRowDropDelegate: DropDelegate {
+    let target: SidebarEntry
+    let rowHeight: CGFloat
+    let model: BrowserViewModel
+    @Binding var draggedItemID: UUID?
+    @Binding var dropState: SidebarDropState?
+
+    private func position(for info: DropInfo) -> SidebarDropPosition? {
+        guard let draggedItemID, draggedItemID != target.id,
+              let dragged = model.store.entry(withID: draggedItemID) else { return nil }
+        let fraction = info.location.y / max(rowHeight, 1)
+        switch target {
+        case .folder(let folder):
+            let canEnter: Bool
+            switch dragged {
+            case .tab: canEnter = true
+            case .folder(let moving): canEnter = !SidebarTree.contains(folder.id, in: moving.children)
+            case .split, .easel: canEnter = false
+            }
+            if canEnter, (0.25 ... 0.75).contains(fraction) { return .into }
+        case .tab:
+            if case .tab = dragged, (0.3 ... 0.7).contains(fraction) { return .into }
+        case .split, .easel:
+            break
+        }
+        return fraction < 0.5 ? .before : .after
+    }
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggedItemID != nil
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        guard let draggedItemID else { return DropProposal(operation: .forbidden) }
-        let compatible = isSameSection(draggedItemID)
-        return DropProposal(operation: compatible ? .move : .forbidden)
+        guard let position = position(for: info) else {
+            if dropState?.targetID == target.id { dropState = nil }
+            return DropProposal(operation: .forbidden)
+        }
+        let state = SidebarDropState(targetID: target.id, position: position)
+        if dropState != state { dropState = state }
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        if dropState?.targetID == target.id { dropState = nil }
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        draggedItemID = nil
+        defer {
+            draggedItemID = nil
+            dropState = nil
+        }
+        guard let draggedItemID, let position = position(for: info) else { return false }
+        withAnimation(.easeInOut(duration: 0.15)) {
+            switch (position, target) {
+            case (.into, .folder(let folder)):
+                model.moveItem(draggedItemID, intoFolder: folder.id)
+            case (.into, _):
+                model.groupIntoNewFolder(target: target.id, dragged: draggedItemID)
+            case (.before, _):
+                model.moveItem(draggedItemID, relativeTo: target.id, after: false)
+            case (.after, _):
+                model.moveItem(draggedItemID, relativeTo: target.id, after: true)
+            }
+        }
         return true
     }
+}
 
-    private func isSameSection(_ id: UUID) -> Bool {
-        if model.store.favorites.contains(where: { $0.id == id }) { return false }
-        if let loc = model.store.locateSplit(id) {
-            return loc.section == section
+/// Drop area after a container's last row: appends there (pins into an
+/// empty Pinned section, unpins into Today, adds to favorites).
+struct SectionEndDropZone: View {
+    let destination: SidebarStore.ItemDestination
+    let placeholder: String?
+    let model: BrowserViewModel
+    @Binding var draggedItemID: UUID?
+    @Binding var dropState: SidebarDropState?
+
+    @State private var isTargeted = false
+
+    var body: some View {
+        ZStack {
+            if let placeholder {
+                Text(placeholder)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                            .foregroundStyle(isTargeted ? Color.accentColor : Color.secondary.opacity(0.5))
+                    )
+            } else {
+                Capsule()
+                    .fill(isTargeted ? Color.accentColor : .clear)
+                    .frame(height: 2)
+                    .padding(.horizontal, 6)
+            }
         }
-        if let loc = model.store.locateEasel(id) {
-            return loc.section == section
-        }
-        guard let kind = model.store.kind(of: id) else { return false }
-        switch (kind, section) {
-        case (.pinned, .pinned), (.today, .unpinned): return true
-        default: return false
-        }
+        .frame(maxWidth: .infinity, minHeight: placeholder == nil ? 10 : nil)
+        .contentShape(Rectangle())
+        .onDrop(of: [.plainText], delegate: EndDropDelegate(zone: self, isTargeted: $isTargeted))
     }
 
-    private func sectionEntries() -> [SidebarEntry] {
-        let content = model.store.content(for: model.store.activeSpaceID)
-        switch section {
-        case .pinned: return content.pinned
-        case .unpinned: return content.today
+    private struct EndDropDelegate: DropDelegate {
+        let zone: SectionEndDropZone
+        @Binding var isTargeted: Bool
+
+        func validateDrop(info: DropInfo) -> Bool { zone.draggedItemID != nil }
+
+        func dropEntered(info: DropInfo) {
+            isTargeted = true
+            zone.dropState = nil
+        }
+
+        func dropUpdated(info: DropInfo) -> DropProposal? {
+            DropProposal(operation: zone.draggedItemID == nil ? .forbidden : .move)
+        }
+
+        func dropExited(info: DropInfo) { isTargeted = false }
+
+        func performDrop(info: DropInfo) -> Bool {
+            isTargeted = false
+            defer { zone.draggedItemID = nil }
+            guard let dragged = zone.draggedItemID else { return false }
+            let store = zone.model.store
+            let count = store.entries(in: store.resolvedParent(zone.destination)).filter { $0.id != dragged }.count
+            withAnimation(.easeInOut(duration: 0.15)) {
+                zone.model.moveItem(dragged, to: zone.destination, index: count)
+            }
+            return true
         }
     }
 }

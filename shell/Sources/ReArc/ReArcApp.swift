@@ -46,6 +46,8 @@ struct ReArcApp: App {
                 .keyboardShortcut("s")
             }
             CommandGroup(after: .toolbar) {
+                ShellMenuButtons(groups: ShellMenus.navigation(model))
+                Divider()
                 Button("Zoom In") { model.zoom(.zoomIn) }
                     .keyboardShortcut("=")
                 Button("Zoom Out") { model.zoom(.zoomOut) }
@@ -78,6 +80,11 @@ struct ReArcApp: App {
                         model.unsplitTabIfInSplit(tab.id)
                     }
                 }
+                Divider()
+                ShellMenuButtons(groups: ShellMenus.sidebarItems(model))
+            }
+            CommandMenu("Spaces") {
+                ShellMenuButtons(groups: ShellMenus.spaces(model))
             }
         }
     }

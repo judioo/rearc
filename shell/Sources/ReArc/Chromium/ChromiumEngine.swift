@@ -80,7 +80,13 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     private(set) var isMuted = false
     /// 0 secure, 1 insecure, 2 dangerous, 3 none, 4 unknown (engine security_state).
     private(set) var securityLevel: UInt32 = 4
+    /// The engine's immutable icon_ref for the current icon (favicon event).
     private(set) var faviconRef: String?
+    /// PNG for `faviconRef`, read with `ReArcFaviconGet` when the event arrives.
+    private(set) var faviconData: Data?
+    /// Favicon reads the engine rejected (stale ref, closed tab).
+    @ObservationIgnored private(set) var faviconFetchFailures = 0
+    var securityState: WebSecurityState { WebSecurityState(chromiumLevel: securityLevel) }
     private(set) var lastError: String?
     private(set) var attachmentID: UInt64?
     /// Browser page zoom from Chromium's zoom events (1.0 = 100%).
@@ -286,7 +292,19 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
         guard event.tabID == tabID else { return }
         switch event.kind {
         case .favicon:
-            faviconRef = event.faviconCleared ? nil : event.iconRef
+            if event.faviconCleared || (event.iconRef ?? "").isEmpty {
+                faviconRef = nil
+                faviconData = nil
+            } else if let ref = event.iconRef, ref != faviconRef {
+                faviconRef = ref
+                let (status, png) = fetchFavicon(ref: ref)
+                if let png {
+                    faviconData = png
+                } else {
+                    faviconFetchFailures += 1
+                    ChromiumLog.info("tab \(tabID) favicon \(ref) unavailable: \(status.rearcName)")
+                }
+            }
         case .media:
             isMuted = event.muted
             let state = ChromiumMediaMapping.apply(event.mediaSnapshot, to: mediaState)
@@ -305,8 +323,15 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
         enqueueNavigation { [weak self] in self?.navigateNow(url) }
     }
 
-    func reload() {
-        enqueueNavigation { [weak self] in self?.command("reload") { ReArcTabReload($0, false) } }
+    func reload(ignoringCache: Bool) {
+        let name = ignoringCache ? "reload ignoring cache" : "reload"
+        enqueueNavigation { [weak self] in self?.command(name) { ReArcTabReload($0, ignoringCache) } }
+    }
+
+    /// Immediate (not queued behind boost installs): stop must not wait.
+    func stopLoading() {
+        guard tabID != 0 else { return }
+        command("stop") { ReArcTabStop($0) }
     }
 
     func goBack() {
@@ -365,6 +390,20 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
             ChromiumLog.info("tab \(tabID) \(name) rejected: \(status.rearcName)")
         }
         return status
+    }
+
+    // MARK: Favicon
+
+    /// Reads a cached favicon PNG (C-ABI.md: +1 malloc buffer, freed here; a
+    /// stale ref is not_found). Main thread, no network.
+    func fetchFavicon(ref: String) -> (ReArcStatus, Data?) {
+        guard tabID != 0 else { return (ReArcStatus(REARC_ENGINE_NOT_READY), nil) }
+        var bytes: UnsafeMutablePointer<UInt8>?
+        var size = 0
+        let status = ref.withCString { ReArcFaviconGet(tabID, $0, &bytes, &size) }
+        defer { if let bytes { ReArcBufferFree(bytes) } }
+        guard status == .rearcOK, let bytes, size > 0 else { return (status, nil) }
+        return (status, Data(bytes: bytes, count: size))
     }
 
     // MARK: Media

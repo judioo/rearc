@@ -187,6 +187,8 @@ final class ChromiumSelfTest {
             log("PASS title event '\(engine.pageTitle ?? "")' url \(engine.currentURL?.absoluteString ?? "nil") (hidden tab)")
         }
 
+        let pngSignature: [UInt8] = [0x89, 0x50, 0x4E, 0x47]
+
         // 3. Attach through the SwiftUI NSViewRepresentable host in a registered window.
         let window = NSWindow(
             contentRect: NSRect(x: 120, y: 120, width: 900, height: 640),
@@ -225,9 +227,19 @@ final class ChromiumSelfTest {
         }
         try await Task.sleep(nanoseconds: 500_000_000)
 
-        // 4. Viewport snapshot.
+        // 3b. Favicon (ABI services kind 0 + ReArcFaviconGet): page A declares /favicon.png.
+        if ReArcEngineHasFeature("favicon") {
+            try await wait("favicon event and ReArcFaviconGet PNG", timeout: 15) { engine.faviconData != nil }
+            let icon = engine.faviconData ?? Data()
+            try check(Array(icon.prefix(4)) == pngSignature, "favicon is not a PNG (\(icon.count) bytes)")
+            let (staleStatus, staleData) = engine.fetchFavicon(ref: "rearc-selftest-stale-ref")
+            try check(staleStatus != .rearcOK && staleData == nil, "stale favicon ref returned \(staleStatus.rearcName)")
+            log("PASS favicon: icon_ref \(engine.faviconRef ?? "-") -> ReArcFaviconGet \(icon.count)-byte PNG; "
+                + "stale ref -> \(staleStatus.rearcName)")
+        } else {
+            log("ABI-GAP favicon not advertised: sidebar rows keep letter tokens on Chromium")
+        }
         let png = try await engine.captureSnapshot(scope: .visible)
-        let pngSignature: [UInt8] = [0x89, 0x50, 0x4E, 0x47]
         try check(png.count > 24 && Array(png.prefix(4)) == pngSignature, "viewport snapshot is not a PNG (\(png.count) bytes)")
         let width = png[16..<20].reduce(0) { $0 << 8 | UInt32($1) }
         let height = png[20..<24].reduce(0) { $0 << 8 | UInt32($1) }
@@ -803,7 +815,8 @@ final class ChromiumSelfTest {
         let model = BrowserViewModel(
             store: store,
             persistence: SidebarFilePersistence(fileURL: sidebarFile),
-            syncEngine: LocalSyncEngine()
+            syncEngine: LocalSyncEngine(),
+            faviconStore: FaviconStore(directory: nil)
         )
         let shell = ChromiumShell(runtime: runtime, autosavesFrames: false)
         shell.start(model: model)
@@ -894,6 +907,10 @@ final class ChromiumSelfTest {
         // reaches a sibling same-host tab of the same profile.
         let tabB = store.addTab(kind: .today, title: "Shell B", url: URL(string: "\(base)/boost")!)
         model.selectTab(tabA.id)
+        // A background tab gets an engine only when something loads it (here, the test).
+        try check(model.engineHost.engine(forTabID: tabB.id, profileID: model.profileID(for: tabB)) == nil,
+                  "an unselected tab got an engine without being loaded")
+        _ = model.engineHost.engine(for: tabB, profileID: model.profileID(for: tabB))
         let engineB = try shellEngine(model, tabB)
         engineB.load(tabB.url)
         try await wait("sibling tab B loaded", timeout: 20) { engineB.currentURL?.path == "/boost" && !engineB.isLoading }
@@ -905,6 +922,8 @@ final class ChromiumSelfTest {
         model.zoom(.reset)
         try await wait("zoom reset on both") { PageZoom.isDefault(engineA.zoomFactor) && PageZoom.isDefault(engineB.zoomFactor) }
         log(String(format: "PASS zoom command: Zoom In -> tab A %.2f and same-host tab B %.2f (zoom events); Actual Size -> 1.00", zoomed, zoomed))
+
+        try await sidebarNavigationChecks(model: model, store: store, tab: tabA, engine: engineA, base: base)
 
         // Private window: PrivateWindowModel on an off-the-record profile under the
         // active profile; its end closes that profile, and a new one starts empty.
@@ -971,6 +990,69 @@ final class ChromiumSelfTest {
         try checkOneLease(engineA, "reopened window")
         log("PASS closing the last window kept the app running (no quit); reopen attached tab A again (lease \(engineA.attachmentID ?? 0))")
         try? FileManager.default.removeItem(at: sidebarFile)
+    }
+
+    // MARK: Sidebar navigation controls (wave 17)
+
+    /// The sidebar's back/forward/reload/stop and lock state act on the
+    /// selected tab's engine through BrowserViewModel (the menu and command-bar
+    /// paths call the same methods), and the engine's favicon reaches the
+    /// sidebar's favicon cache.
+    @MainActor
+    private func sidebarNavigationChecks(
+        model: BrowserViewModel,
+        store: SidebarStore,
+        tab: Tab,
+        engine: ChromiumEngine,
+        base: String
+    ) async throws {
+        model.selectTab(tab.id)
+        try check(model.navigationEngine === engine, "navigation commands do not target the selected tab's engine")
+        if ReArcEngineHasFeature("favicon") {
+            try await wait("tab A favicon in the sidebar cache", timeout: 15) {
+                store.tab(withID: tab.id).map { model.favicon(for: $0) != nil } ?? false
+            }
+            log("PASS sidebar favicon: tab A row icon from ReArcFaviconGet (\(engine.faviconData?.count ?? 0) bytes) via FaviconStore")
+        }
+        if ReArcEngineHasFeature("security_state") {
+            try await wait("security_state event for tab A", timeout: 10) { engine.securityLevel != 4 }
+            log("PASS security_state for \(engine.currentURL?.absoluteString ?? "") -> level \(engine.securityLevel) "
+                + "(\(engine.securityState)) shown by the sidebar URL field")
+        }
+
+        func title() -> String { engine.pageTitle ?? "" }
+        func loadCount() -> Int { Int(title().split(separator: ":").last ?? "") ?? 0 }
+        engine.load(URL(string: "\(base)/nav")!)
+        try await wait("navigation fixture loaded", timeout: 15) { title().hasPrefix("nav:navigate:") && !engine.isLoading }
+        model.goBack()
+        try await wait("sidebar Back -> /a", timeout: 15) { engine.currentURL?.path == "/a" && !engine.isLoading }
+        try await wait("canGoForward after Back") { engine.canGoForward }
+        model.goForward()
+        try await wait("sidebar Forward -> /nav", timeout: 15) {
+            engine.currentURL?.path == "/nav" && !engine.isLoading && title().hasPrefix("nav:")
+        }
+        let before = loadCount()
+        model.reload()
+        try await wait("sidebar Reload", timeout: 15) { title() == "nav:reload:\(before + 1)" && !engine.isLoading }
+        model.reload(ignoringCache: true)
+        try await wait("Reload Ignoring Cache", timeout: 15) { title() == "nav:reload:\(before + 2)" && !engine.isLoading }
+        log("PASS sidebar navigation: Back/Forward between /a and /nav, Reload -> '\(before + 1)', Reload Ignoring Cache -> '\(title())'")
+
+        engine.load(URL(string: "\(base)/slow")!)
+        try await wait("slow load in flight", timeout: 10) { engine.isLoading }
+        let started = Date()
+        model.reloadOrStop()
+        try await wait("Stop ended the load before the fixture answered", timeout: SelfTestFixtureServer.slowResponseDelay - 2) {
+            !engine.isLoading
+        }
+        try check(title() != "slow-loaded", "the stopped page still loaded")
+        log(String(format: "PASS Stop (ReArcTabStop) ended the in-flight load after %.2f s; page stays '%@'",
+                   Date().timeIntervalSince(started), title()))
+        // Back to page A so the checks that follow see the state they expect.
+        engine.load(URL(string: "\(base)/a")!)
+        try await wait("tab A restored after navigation checks", timeout: 15) {
+            engine.currentURL?.path == "/a" && engine.pageTitle == Self.titleA && !engine.isLoading
+        }
     }
 
     // MARK: Trusted navigation
@@ -1056,7 +1138,7 @@ final class SelfTestFixtureServer {
 
     static let pages: [String: String] = [
         "/a": """
-        <!doctype html><html><head><title>\(ChromiumSelfTest.titleA)</title></head>
+        <!doctype html><html><head><title>\(ChromiumSelfTest.titleA)</title><link rel="icon" href="/favicon.png"></head>
         <body style="margin:0;background:#2a6;font:32px -apple-system"><h1>ReArc selftest page A</h1>
         <p><a href="/boost">boost page</a></p></body></html>
         """,
@@ -1073,7 +1155,25 @@ final class SelfTestFixtureServer {
         window.addEventListener('load', function () { check(0); });
         </script></head><body style="font:32px -apple-system"><h1>ReArc selftest boost page</h1></body></html>
         """,
+        // Title = navigation type and a per-tab load count, so reloads are observable.
+        "/nav": """
+        <!doctype html><html><head><title>nav-pending</title><script>
+        var n = Number(sessionStorage.getItem('rearcNav') || '0') + 1;
+        sessionStorage.setItem('rearcNav', String(n));
+        document.title = 'nav:' + performance.getEntriesByType('navigation')[0].type + ':' + n;
+        </script></head><body style="font:32px -apple-system"><h1>ReArc selftest navigation page</h1></body></html>
+        """,
+        // Held back (see `respond`) so a load is still in flight when the test stops it.
+        "/slow": """
+        <!doctype html><html><head><title>slow-loaded</title></head><body>slow</body></html>
+        """,
     ]
+
+    /// 16x16 PNG served at /favicon.png (same bytes as engine/tests/run_c_abi.py's fixture).
+    static let faviconPNG = Data(base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGMQVDImCTGMahjVMHw1AAAaNGYB4V8qqwAAAABJRU5ErkJggg=="
+    )!
+    static let slowResponseDelay: TimeInterval = 6
 
     init() throws {
         let parameters = NWParameters.tcp
@@ -1128,16 +1228,26 @@ final class SelfTestFixtureServer {
     }
 
     private static func respond(_ connection: NWConnection, path: String) {
-        let body = pages[path]
-        print("[fixture] GET \(path) -> \(body == nil ? 404 : 200)")
+        let isIcon = path.hasPrefix("/favicon")
+        let body = isIcon ? nil : pages[path]
+        let found = isIcon || body != nil
+        print("[fixture] GET \(path) -> \(found ? 200 : 404)")
         fflush(stdout)
-        let payload = Data((body ?? "not found").utf8)
-        let head = "HTTP/1.1 \(body == nil ? "404 Not Found" : "200 OK")\r\n"
-            + "Content-Type: text/html; charset=utf-8\r\nContent-Length: \(payload.count)\r\n"
+        let payload = isIcon ? faviconPNG : Data((body ?? "not found").utf8)
+        let type = isIcon ? "image/png" : "text/html; charset=utf-8"
+        let head = "HTTP/1.1 \(found ? "200 OK" : "404 Not Found")\r\n"
+            + "Content-Type: \(type)\r\nContent-Length: \(payload.count)\r\n"
             + "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
-        connection.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in
-            connection.cancel()
-        })
+        let send = {
+            connection.send(content: Data(head.utf8) + payload, completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+        }
+        if path == "/slow" {
+            DispatchQueue.global().asyncAfter(deadline: .now() + slowResponseDelay, execute: send)
+        } else {
+            send()
+        }
     }
 }
 #endif

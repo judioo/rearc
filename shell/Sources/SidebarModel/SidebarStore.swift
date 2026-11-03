@@ -704,6 +704,16 @@ public final class SidebarStore {
         return true
     }
 
+    /// Drop before or after a row: moves `id` into the container holding
+    /// `targetID`, next to it (sidebar drag feedback line).
+    @discardableResult
+    public func moveItem(_ id: UUID, relativeTo targetID: UUID, after: Bool) -> Bool {
+        guard id != targetID, let parent = parent(of: targetID) else { return false }
+        let siblings = entries(in: parent).filter { $0.id != id }
+        guard let targetIndex = siblings.firstIndex(where: { $0.id == targetID }) else { return false }
+        return moveItem(id, to: destination(for: parent), index: after ? targetIndex + 1 : targetIndex)
+    }
+
     @discardableResult
     public func pinTab(_ id: Tab.ID) -> Bool {
         guard case .today(let spaceID) = locate(id), case .tab = entry(withID: id) else { return false }
@@ -1528,7 +1538,7 @@ public final class SidebarStore {
         }
     }
 
-    func resolvedParent(_ destination: ItemDestination) -> ItemParent {
+    public func resolvedParent(_ destination: ItemDestination) -> ItemParent {
         switch destination {
         case .favorites(let profileID): return .favorites(profileID ?? activeProfileID)
         case .section(let spaceID, let section): return .section(spaceID: spaceID, section: section)
@@ -1536,7 +1546,7 @@ public final class SidebarStore {
         }
     }
 
-    func destination(for parent: ItemParent) -> ItemDestination {
+    public func destination(for parent: ItemParent) -> ItemDestination {
         switch parent {
         case .favorites(let profileID): return .favorites(profileID)
         case .section(let spaceID, let section): return .section(spaceID: spaceID, section: section)

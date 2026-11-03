@@ -2,27 +2,28 @@ import AppKit
 import SwiftUI
 import SidebarModel
 
-/// A single text-row tab (pinned or today). Hover reveals the close button.
-struct TabRowView: View {
+/// A single text-row tab (pinned, today or in a folder). Hover reveals the
+/// close button; the context menu comes from the caller (`SidebarItemMenu`).
+struct TabRowView<Menu: View>: View {
     let tab: Tab
+    let favicon: NSImage?
     let isSelected: Bool
     let showsAudibleIndicator: Bool
+    var isDropTarget = false
     let onSelect: () -> Void
     let onClose: () -> Void
     var onMute: (() -> Void)? = nil
     var onCloseOption: (() -> Void)? = nil
-    var onEditBoost: (() -> Void)? = nil
+    @ViewBuilder let menu: () -> Menu
 
     @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(tab.faviconToken)
-                .font(.system(size: 10, weight: .bold))
+            SiteIconView(image: favicon, token: tab.faviconToken, size: 16)
                 .frame(width: 18, height: 18)
-                .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
 
-            Text(tab.title)
+            Text(tab.displayTitle)
                 .font(.callout)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -67,7 +68,9 @@ struct TabRowView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
         .background(
-            isSelected
+            isDropTarget
+                ? Color.accentColor.opacity(0.22)
+                : isSelected
                 ? Color.primary.opacity(0.14)
                 : Color.primary.opacity(isHovering ? 0.07 : 0),
             in: RoundedRectangle(cornerRadius: 8)
@@ -75,14 +78,7 @@ struct TabRowView: View {
         .contentShape(RoundedRectangle(cornerRadius: 8))
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
-        .contextMenu {
-            if let onEditBoost, BoostScopeMatcher.urlIsEligibleForBoosts(tab.url) {
-                Button {
-                    onEditBoost()
-                } label: {
-                    Label("Edit Boost for This Site", systemImage: "paintbrush")
-                }
-            }
-        }
+        .contextMenu { menu() }
+        .help(tab.customTitle == nil ? tab.url.absoluteString : "\(tab.title)\n\(tab.url.absoluteString)")
     }
 }

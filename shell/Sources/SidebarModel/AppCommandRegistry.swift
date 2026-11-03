@@ -39,6 +39,26 @@ public enum AppCommandAction: Equatable, Hashable {
     case openCapturesGallery
     case openBrowserPage(BrowserInternalPage)
     case viewPageSource
+    case goBack
+    case goForward
+    case reloadPage
+    case reloadIgnoringCache
+    case stopLoading
+    case copyURL
+    case nextSpace
+    case previousSpace
+    case renameSpace
+    case editSpaceTheme
+    case deleteSpace
+    case newFolder
+    case expandAllFolders
+    case collapseAllFolders
+    case addToFavorites
+    case removeFromFavorites
+    case renameTab
+    case duplicateTab
+    case archiveTab
+    case viewArchive
 }
 
 /// Read-only command-bar context for enablement and dynamic commands.
@@ -176,6 +196,22 @@ public struct AppCommand: Equatable, Identifiable {
         case .viewPageSource:
             guard let tab = store.selectedTab else { return false }
             return NavigationURLPolicy.viewSourceURL(for: tab.url, engine: context.navigationSchemes) != nil
+        case .goBack, .goForward, .reloadPage, .reloadIgnoringCache, .stopLoading, .copyURL,
+             .renameTab, .duplicateTab:
+            return store.selectedTab != nil
+        case .nextSpace, .previousSpace:
+            return store.spacesInActiveProfile.count > 1
+        case .renameSpace, .editSpaceTheme, .newFolder, .viewArchive:
+            return true
+        case .deleteSpace:
+            return store.spaces.count > 1
+        case .expandAllFolders, .collapseAllFolders:
+            return !store.folderOutline().isEmpty
+        case .addToFavorites, .archiveTab:
+            guard let id = store.selectedTabID, store.splitContaining(tabID: id) == nil else { return false }
+            return store.kind(of: id) == .pinned || store.kind(of: id) == .today
+        case .removeFromFavorites:
+            return store.selectedTabID.flatMap { store.kind(of: $0) } == .favorite
         }
     }
 }
@@ -488,6 +524,84 @@ public enum AppCommandRegistry {
                 minQueryLength: 2,
                 action: .viewPageSource
             ),
-        ]
+        ] + sidebarCommands
     }
+
+    /// Wave 17: navigation, spaces, folders, favorites and archive (SIDEBAR-SPEC §6).
+    private static let sidebarCommands: [AppCommand] = [
+        AppCommand(id: "go-back", title: "Back", keywords: ["back", "previous", "history"], minQueryLength: 2, action: .goBack),
+        AppCommand(id: "go-forward", title: "Forward", keywords: ["forward", "next", "history"], minQueryLength: 2, action: .goForward),
+        AppCommand(id: "reload-page", title: "Reload Page", keywords: ["reload", "refresh"], minQueryLength: 2, action: .reloadPage),
+        AppCommand(
+            id: "reload-ignoring-cache",
+            title: "Reload Ignoring Cache",
+            keywords: ["reload", "hard", "refresh", "cache"],
+            minQueryLength: 2,
+            action: .reloadIgnoringCache
+        ),
+        AppCommand(id: "stop-loading", title: "Stop Loading", keywords: ["stop", "cancel", "loading"], minQueryLength: 2, action: .stopLoading),
+        AppCommand(id: "copy-url", title: "Copy URL", keywords: ["copy", "url", "link", "address"], minQueryLength: 2, action: .copyURL),
+        AppCommand(id: "next-space", title: "Next Space", keywords: ["space", "next", "switch"], minQueryLength: 2, action: .nextSpace),
+        AppCommand(
+            id: "previous-space",
+            title: "Previous Space",
+            keywords: ["space", "previous", "switch"],
+            minQueryLength: 2,
+            action: .previousSpace
+        ),
+        AppCommand(id: "rename-space", title: "Rename Space…", keywords: ["space", "rename", "name"], minQueryLength: 2, action: .renameSpace),
+        AppCommand(
+            id: "edit-space-theme",
+            title: "Edit Space Theme and Icon…",
+            keywords: ["space", "theme", "color", "colour", "icon", "emoji"],
+            minQueryLength: 2,
+            action: .editSpaceTheme
+        ),
+        AppCommand(id: "delete-space", title: "Delete Space…", keywords: ["space", "delete", "remove"], minQueryLength: 3, action: .deleteSpace),
+        AppCommand(id: "new-folder", title: "New Folder", keywords: ["folder", "new", "group"], minQueryLength: 2, action: .newFolder),
+        AppCommand(
+            id: "expand-all-folders",
+            title: "Expand All Folders",
+            keywords: ["folder", "expand", "open"],
+            minQueryLength: 2,
+            action: .expandAllFolders
+        ),
+        AppCommand(
+            id: "collapse-all-folders",
+            title: "Collapse All Folders",
+            keywords: ["folder", "collapse", "close"],
+            minQueryLength: 2,
+            action: .collapseAllFolders
+        ),
+        AppCommand(
+            id: "add-to-favorites",
+            title: "Add to Favorites",
+            keywords: ["favorite", "favourite", "star", "top"],
+            minQueryLength: 2,
+            action: .addToFavorites
+        ),
+        AppCommand(
+            id: "remove-from-favorites",
+            title: "Remove from Favorites",
+            keywords: ["favorite", "favourite", "remove", "unfavorite"],
+            minQueryLength: 2,
+            action: .removeFromFavorites
+        ),
+        AppCommand(id: "rename-tab", title: "Rename Tab…", keywords: ["rename", "tab", "title"], minQueryLength: 2, action: .renameTab),
+        AppCommand(id: "duplicate-tab", title: "Duplicate Tab", keywords: ["duplicate", "copy", "tab"], minQueryLength: 2, action: .duplicateTab),
+        AppCommand(
+            id: "archive-tab",
+            title: "Archive Tab",
+            keywords: ["archive", "exit", "unload", "close"],
+            minQueryLength: 2,
+            action: .archiveTab
+        ),
+        AppCommand(
+            id: "view-archive",
+            title: "View Archive",
+            keywords: ["archive", "history", "closed", "restore"],
+            minQueryLength: 2,
+            action: .viewArchive
+        ),
+    ]
 }

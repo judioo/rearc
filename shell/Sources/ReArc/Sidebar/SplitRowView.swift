@@ -8,6 +8,7 @@ struct SplitRowView: View {
     let isSelected: Bool
     let focusedTabID: Tab.ID
     let themeColor: Color
+    let favicon: (Tab) -> NSImage?
     let showsAudibleIndicator: (Tab.ID) -> Bool
     let onMutePane: (Tab.ID) -> Void
     let onSelectSplit: () -> Void
@@ -55,6 +56,7 @@ struct SplitRowView: View {
             ForEach(split.tabs) { tab in
                 SplitPaneRowView(
                     tab: tab,
+                    favicon: favicon(tab),
                     isFocused: isSelected && tab.id == focusedTabID,
                     accent: themeColor,
                     showsAudibleIndicator: showsAudibleIndicator(tab.id),
@@ -70,6 +72,7 @@ struct SplitRowView: View {
 
 private struct SplitPaneRowView: View {
     let tab: Tab
+    let favicon: NSImage?
     let isFocused: Bool
     let accent: Color
     let showsAudibleIndicator: Bool
@@ -81,11 +84,9 @@ private struct SplitPaneRowView: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Text(tab.faviconToken)
-                .font(.system(size: 9, weight: .bold))
+            SiteIconView(image: favicon, token: tab.faviconToken, size: 14)
                 .frame(width: 16, height: 16)
-                .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
-            Text(tab.title)
+            Text(tab.displayTitle)
                 .font(.caption)
                 .lineLimit(1)
             Spacer(minLength: 0)

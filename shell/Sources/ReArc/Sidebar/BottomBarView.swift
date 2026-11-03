@@ -1,8 +1,9 @@
 import SwiftUI
 import SidebarModel
 
-/// The sidebar's bottom bar: space switcher (click cycles, chevron opens a
-/// popover listing spaces in the active profile), new-space button, and profile avatar.
+/// The sidebar's bottom bar: space switcher (click cycles, right-click edits
+/// the space, chevron opens a popover listing spaces in the active profile),
+/// archive, the "+" menu, and the profile avatar.
 struct BottomBarView: View {
     let model: BrowserViewModel
     @State private var showingSpaceList = false
@@ -13,14 +14,14 @@ struct BottomBarView: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Button(action: model.cycleSpace) {
-                Image(systemName: model.store.activeSpace.iconName)
-                    .font(.system(size: 13))
+            Button { model.cycleSpace() } label: {
+                SpaceIconView(iconName: model.store.activeSpace.iconName)
                     .frame(width: 26, height: 26)
                     .background(model.themeColor.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
             }
             .buttonStyle(.plain)
-            .help("\(model.store.activeSpace.name) — click to switch space")
+            .help("\(model.store.activeSpace.name) — click to switch space (⌃1…9, ⌥⌘← / ⌥⌘→)")
+            .contextMenu { SpaceContextMenu(model: model, space: model.store.activeSpace) }
 
             Button(action: { showingSpaceList.toggle() }) {
                 Image(systemName: "chevron.up")
@@ -40,7 +41,17 @@ struct BottomBarView: View {
                 .frame(width: 8, height: 8)
                 .help(model.syncStatusHelp)
 
+            Button { model.isArchivePresented = true } label: {
+                Image(systemName: "archivebox")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("View Archive")
+
             Menu {
+                Button("New Tab") { model.newTab() }
+                Button("New Folder") { model.newFolder() }
                 Button("New Space") { model.addSpace() }
                 Divider()
                 Button("New Easel") { _ = model.createEasel() }
@@ -58,7 +69,7 @@ struct BottomBarView: View {
                     .foregroundStyle(.secondary)
             }
             .menuStyle(.borderlessButton)
-            .help("New Space / Split View")
+            .help("New Tab, Folder, Space, Easel or Split View")
 
             Button(action: { showingProfileList.toggle() }) {
                 ProfileAvatarView(profile: model.store.activeProfile, diameter: 24)
@@ -108,7 +119,13 @@ struct BottomBarView: View {
         renamingProfileID = nil
     }
 
+    /// A profile with spaces asks first, then goes with its spaces (Arc DeleteProfileDialog).
     private func attemptDelete(_ profile: Profile) {
+        showingProfileList = false
+        if !model.store.spaces(in: profile.id).isEmpty, model.store.profiles.count > 1 {
+            model.pendingDeletion = .profile(profile.id)
+            return
+        }
         if let error = model.deleteProfile(profile.id) {
             profileActionError = profileErrorMessage(error)
         }
@@ -140,7 +157,7 @@ private struct SpaceListView: View {
                     isPresented = false
                 } label: {
                     HStack(spacing: 8) {
-                        Image(systemName: space.iconName)
+                        SpaceIconView(iconName: space.iconName)
                             .frame(width: 18)
                         Text(space.name)
                             .lineLimit(1)
@@ -155,7 +172,19 @@ private struct SpaceListView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .contextMenu { SpaceContextMenu(model: model, space: space) }
             }
+            Divider().padding(.vertical, 4)
+            Button {
+                model.addSpace()
+                isPresented = false
+            } label: {
+                Label("New Space", systemImage: "plus")
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
         }
         .padding(.vertical, 6)
         .frame(minWidth: 200)
@@ -194,7 +223,17 @@ private struct ProfileListView: View {
 
                     Menu {
                         Button("Rename…") { onRename(profile) }
-                        Button("Delete", role: .destructive) { onDelete(profile) }
+                        Menu("Archive Today Tabs After") {
+                            ForEach(AutoArchiveThreshold.allCases, id: \.self) { threshold in
+                                Toggle(threshold.title, isOn: Binding(
+                                    get: { model.store.autoArchiveThreshold(for: profile.id) == threshold },
+                                    set: { if $0 { model.store.setAutoArchiveThreshold(threshold, for: profile.id) } }
+                                ))
+                            }
+                        }
+                        Divider()
+                        Button("Delete…", role: .destructive) { onDelete(profile) }
+                            .disabled(model.store.profiles.count < 2)
                     } label: {
                         Image(systemName: "ellipsis")
                             .font(.system(size: 11, weight: .semibold))

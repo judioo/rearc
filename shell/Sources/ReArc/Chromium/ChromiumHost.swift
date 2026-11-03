@@ -388,6 +388,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
 
         let view = NSMenu(title: "View")
         view.addItem(target.item("Toggle Sidebar", "s") { model.toggleSidebar() })
+        view.addItem(.separator())
+        target.add(ShellMenus.navigation(model), to: view)
         if runtime.capabilities.pageZoom {
             view.addItem(.separator())
             view.addItem(target.item("Zoom In", "=") { model.zoom(.zoomIn) })
@@ -419,7 +421,13 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         tabs.addItem(target.item("Separate from Split View", "") {
             if let tab = model.store.selectedTab { model.unsplitTabIfInSplit(tab.id) }
         })
+        tabs.addItem(.separator())
+        target.add(ShellMenus.sidebarItems(model), to: tabs)
         main.addSubmenu(tabs, title: "Tabs")
+
+        let spaces = NSMenu(title: "Spaces")
+        target.add(ShellMenus.spaces(model), to: spaces)
+        main.addSubmenu(spaces, title: "Spaces")
 
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
@@ -448,6 +456,16 @@ final class ChromiumMenuTarget: NSObject {
 
     @objc private func runAction(_ sender: NSMenuItem) {
         actions[sender.tag]?()
+    }
+
+    /// Appends shared menu groups (`ShellMenus`) with separators between them.
+    func add(_ groups: [[ShellMenuItem]], to menu: NSMenu) {
+        for (index, group) in groups.enumerated() {
+            if index > 0 { menu.addItem(.separator()) }
+            for entry in group {
+                menu.addItem(item(entry.title, entry.menuKeyEquivalent, entry.modifiers, action: entry.action))
+            }
+        }
     }
 }
 
@@ -481,6 +499,7 @@ extension BrowserViewModel {
             self?.handleTabNavigationCommit(tabID: tab.id, url: url, title: title)
         }
         engineHost.adopt(engine, for: tab, profileID: profileID)
+        observeFavicon(of: engine, tabID: tab.id)
         // Background-tab disposition stays unselected; the rest take focus in the sidebar.
         if event.disposition != 2 {
             selectTab(tab.id)

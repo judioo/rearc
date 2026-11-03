@@ -4,7 +4,9 @@ import SidebarModel
 
 /// Root window layout: sidebar on the left, web content filling the rest,
 /// command bar floating centered on top. The active space's theme color is
-/// applied as a subtle window tint.
+/// applied as a subtle window tint. With the sidebar hidden (Cmd+S), pointing
+/// at the window's leading edge floats it over the page until the pointer
+/// leaves (Arc `SidebarHovering`).
 struct BrowserView: View {
     @Bindable var model: BrowserViewModel
     @Environment(\.openWindow) private var openWindow
@@ -22,6 +24,20 @@ struct BrowserView: View {
             .overlay(alignment: .topTrailing) { zoomBadge }
             // Subtle space-theme window tint.
             .background(model.themeColor.opacity(0.10))
+
+            if !model.isSidebarVisible, model.isSidebarPeeking {
+                HStack(spacing: 0) {
+                    SidebarView(model: model)
+                        .background(model.themeColor.opacity(0.10))
+                        .background(.regularMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .shadow(color: .black.opacity(0.25), radius: 12, x: 2)
+                        .padding(.vertical, 6)
+                        .padding(.leading, 6)
+                    Spacer(minLength: 0)
+                }
+                .transition(.move(edge: .leading).combined(with: .opacity))
+            }
 
             if let session = model.peekSession, let web = model.peekEngineView() {
                 PeekOverlayView(
@@ -78,6 +94,14 @@ struct BrowserView: View {
             WindowOcclusionReader { model.handleWindowOcclusion($0) }
                 .frame(width: 0, height: 0)
         )
+        .background(
+            SidebarEdgeHoverMonitor(
+                isEnabled: !model.isSidebarVisible,
+                isPeeking: model.isSidebarPeeking,
+                onChange: { model.setSidebarPeeking($0) }
+            )
+            .frame(width: 0, height: 0)
+        )
         .navigationTitle(contentTitle)
         .sheet(isPresented: $model.isCapturesGalleryPresented) {
             CaptureGalleryView(model: model)
@@ -118,6 +142,38 @@ struct BrowserView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             model.prepareForQuit()
         }
+        .sheet(isPresented: $model.isArchivePresented) {
+            ArchiveView(model: model)
+        }
+        .sheet(isPresented: Binding(
+            get: { model.spaceEditorID != nil },
+            set: { if !$0 { model.spaceEditorID = nil } }
+        )) {
+            if let id = model.spaceEditorID {
+                SpaceEditorView(model: model, spaceID: id)
+            }
+        }
+        .alert(model.pendingRename?.alertTitle ?? "Rename", isPresented: Binding(
+            get: { model.pendingRename != nil },
+            set: { if !$0 { model.pendingRename = nil } }
+        )) {
+            TextField("Name", text: $model.pendingRenameText)
+            Button("Cancel", role: .cancel) { model.pendingRename = nil }
+            Button("Save") { model.commitRename() }
+        } message: {
+            if case .tab = model.pendingRename {
+                Text("Leave empty to use the page title.")
+            }
+        }
+        .alert(model.pendingDeletionMessage.title, isPresented: Binding(
+            get: { model.pendingDeletion != nil },
+            set: { if !$0 { model.pendingDeletion = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { model.pendingDeletion = nil }
+            Button(model.pendingDeletionMessage.action, role: .destructive) { model.confirmPendingDeletion() }
+        } message: {
+            Text(model.pendingDeletionMessage.message)
+        }
         .alert("Rename Profile", isPresented: Binding(
             get: { model.pendingProfileRenameID != nil },
             set: { if !$0 { model.pendingProfileRenameID = nil } }
@@ -137,7 +193,7 @@ struct BrowserView: View {
         if let ref = model.store.selectedEaselRef {
             return model.easelTitle(for: ref)
         }
-        return model.store.selectedTab?.title ?? "ReArc"
+        return model.store.selectedTab?.displayTitle ?? "ReArc"
     }
 
     /// Removes ⌘W from File > Close Window so the Tabs menu's Close Tab
@@ -229,5 +285,61 @@ private struct EmptyStateView: View {
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Watches pointer movement in its window: reports `true` when the pointer
+/// reaches the leading edge while the sidebar is hidden, `false` once it moves
+/// clear of the floating sidebar. A local event monitor sees moves over web
+/// content too (WKWebView or the Chromium host view), which SwiftUI hover
+/// tracking on an overlay would not reliably get.
+struct SidebarEdgeHoverMonitor: NSViewRepresentable {
+    var isEnabled: Bool
+    var isPeeking: Bool
+    var onChange: (Bool) -> Void
+
+    static let revealWidth: CGFloat = 4
+    static let dismissWidth: CGFloat = 244 + 36
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        context.coordinator.view = view
+        context.coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak coordinator = context.coordinator] event in
+            coordinator?.handle(event)
+            return event
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.parent = self
+        nsView.window?.acceptsMouseMovedEvents = true
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        if let monitor = coordinator.monitor { NSEvent.removeMonitor(monitor) }
+        coordinator.monitor = nil
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    final class Coordinator {
+        var parent: SidebarEdgeHoverMonitor
+        weak var view: NSView?
+        var monitor: Any?
+
+        init(parent: SidebarEdgeHoverMonitor) { self.parent = parent }
+
+        func handle(_ event: NSEvent) {
+            guard parent.isEnabled, let window = view?.window, event.window === window else { return }
+            let x = event.locationInWindow.x
+            let y = event.locationInWindow.y
+            let inside = y >= 0 && y <= window.frame.height
+            if !parent.isPeeking, inside, x >= 0, x <= SidebarEdgeHoverMonitor.revealWidth {
+                parent.onChange(true)
+            } else if parent.isPeeking, x > SidebarEdgeHoverMonitor.dismissWidth || !inside {
+                parent.onChange(false)
+            }
+        }
     }
 }

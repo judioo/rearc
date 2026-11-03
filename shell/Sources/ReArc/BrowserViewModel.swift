@@ -24,6 +24,7 @@ final class BrowserViewModel {
     let engineHost = EngineHost()
     let easelStore = EaselDocumentStore()
     let captureFileStore = CaptureFileStore()
+    let faviconStore: FaviconStore
     private let persistence: SidebarFilePersistence
     private let syncPipeline: SyncOutboundPipeline
     let syncEngine: SyncEngine
@@ -37,6 +38,18 @@ final class BrowserViewModel {
     private var autoPiPTriggeredThisOcclusion: Set<Tab.ID> = []
 
     var isSidebarVisible = true
+    /// The hidden sidebar shown floating while the pointer is at the window's
+    /// leading edge (Arc `SidebarHovering` / floating sidebar).
+    var isSidebarPeeking = false
+    var isArchivePresented = false
+    /// Space being edited in the Edit Space sheet (name, theme, icon).
+    var spaceEditorID: Space.ID?
+    var pendingRename: SidebarRenameRequest?
+    var pendingRenameText = ""
+    var pendingDeletion: SidebarDeletionRequest?
+    @ObservationIgnored var autoArchiveTimer: Timer?
+    /// Engine whose favicon is being tracked, per tab.
+    @ObservationIgnored var faviconObservedEngines: [Tab.ID: ObjectIdentifier] = [:]
     var isCommandBarPresented = false
     var commandBarText = "" {
         didSet { commandBarHighlightedIndex = 0 }
@@ -101,10 +114,13 @@ final class BrowserViewModel {
         store: SidebarStore? = nil,
         persistence: SidebarFilePersistence? = nil,
         nowPlaying: MediaKeyRouting? = nil,
-        syncEngine: SyncEngine? = nil
+        syncEngine: SyncEngine? = nil,
+        faviconStore: FaviconStore? = nil
     ) {
         let persistence = persistence ?? SidebarFilePersistence()
         self.persistence = persistence
+        self.faviconStore = faviconStore
+            ?? FaviconStore(directory: persistence.fileURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
         self.store = store ?? SidebarFilePersistence.loadStore(persistence: persistence)
         self.sidebarRecoveredFromCorruption = persistence.loadOutcome == .recoveredFromCorruptFile
         self.nowPlaying = nowPlaying ?? NowPlayingController()
@@ -131,6 +147,8 @@ final class BrowserViewModel {
             }
         }
         wireMediaKeyHandlers()
+        runAutoArchive()
+        startAutoArchiveTimer()
         loadSelectedIfNeeded()
     }
 
@@ -158,11 +176,11 @@ final class BrowserViewModel {
         tabMuteModel.markUserMuted(tabID)
     }
 
-    /// Storage context for a tab's engine. Space tabs use their space's profile;
-    /// favorites use the active profile at load time (global sidebar row).
+    /// Storage context for a tab's engine: the profile owning its space, or
+    /// owning the favorites strip it sits in.
     func profileID(for tab: Tab) -> Profile.ID {
-        if store.kind(of: tab.id) == .favorite {
-            return store.activeProfileID
+        if let owner = store.favoriteOwner(of: tab.id) {
+            return owner
         }
         if let spaceID = store.spaceContaining(tabID: tab.id),
            let space = store.spaces.first(where: { $0.id == spaceID }) {
@@ -243,14 +261,39 @@ final class BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
+    /// Cmd+W / hover close. A favorite is unloaded (engine dropped, kept in
+    /// the strip) as in Arc; anything else is closed and archived.
     func closeTab(_ id: Tab.ID) {
+        if store.kind(of: id) == .favorite {
+            unloadFavorite(id)
+            return
+        }
         store.closeTab(id)
+        releaseEngine(for: id)
+        loadSelectedIfNeeded()
+    }
+
+    func unloadFavorite(_ id: Tab.ID) {
+        store.unloadFavorite(id)
+        releaseEngine(for: id)
+        loadSelectedIfNeeded()
+    }
+
+    /// Remove from Favorites: deletes the favorite.
+    func removeFavorite(_ id: Tab.ID) {
+        guard store.kind(of: id) == .favorite else { return }
+        store.closeTab(id)
+        releaseEngine(for: id)
+        loadSelectedIfNeeded()
+    }
+
+    func releaseEngine(for id: Tab.ID) {
+        faviconObservedEngines[id] = nil
         mediaSubscriptions[id] = nil
         mediaStateByTab[id] = nil
         tabMuteModel.markUserUnmuted(id)
         engineHost.remove(id)
         refreshNowPlaying()
-        loadSelectedIfNeeded()
     }
 
     func closeSplit(_ splitID: SplitViewItem.ID) {
@@ -310,15 +353,15 @@ final class BrowserViewModel {
 
     func selectProfile(_ id: Profile.ID) {
         store.selectProfile(id)
-        engineHost.evictEngines(forTabIDs: store.favorites.map(\.id))
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
     }
 
-    /// Deletes a profile (it must own no spaces) and drops engines that used it.
+    /// Deletes a profile and drops engines that used it. Without
+    /// `deletingSpaces` the profile must own no spaces.
     @discardableResult
-    func deleteProfile(_ id: Profile.ID) -> ProfileMutationError? {
-        if let error = store.deleteProfile(id) { return error }
+    func deleteProfile(_ id: Profile.ID, deletingSpaces: Bool = false) -> ProfileMutationError? {
+        if let error = store.deleteProfile(id, deletingSpaces: deletingSpaces) { return error }
         engineHost.evictEngines(forProfileID: id)
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
@@ -326,8 +369,14 @@ final class BrowserViewModel {
         return nil
     }
 
-    func cycleSpace() {
-        store.cycleSpace(forward: true)
+    func cycleSpace(forward: Bool = true) {
+        store.cycleSpace(forward: forward)
+        loadSelectedIfNeeded()
+    }
+
+    /// Ctrl+1…9.
+    func selectSpace(atIndex index: Int) {
+        guard store.selectSpace(atIndex: index) else { return }
         loadSelectedIfNeeded()
     }
 
@@ -353,6 +402,7 @@ final class BrowserViewModel {
     func toggleSidebar() {
         withAnimation(.easeInOut(duration: 0.18)) {
             isSidebarVisible.toggle()
+            isSidebarPeeking = false
         }
     }
 
@@ -400,6 +450,7 @@ final class BrowserViewModel {
     }
 
     private func wireNavigationCommit(for tab: Tab, profileID: Profile.ID) {
+        observeFavicon(of: engineHost.engine(for: tab, profileID: profileID), tabID: tab.id)
         guard let wk = engineHost.engine(for: tab, profileID: profileID) as? NavigationCommitReporting else { return }
         wk.onNavigationCommit = { [weak self] url, title in
             self?.handleTabNavigationCommit(tabID: tab.id, url: url, title: title)
@@ -455,10 +506,12 @@ final class BrowserViewModel {
         }
     }
 
+    /// Subscribes to tabs that already have an engine. Creating one here would
+    /// reload every sidebar tab's engine (a blank Chromium tab each) and undo
+    /// unloading a favorite.
     private func wireMediaObserver(for tab: Tab) {
-        guard mediaSubscriptions[tab.id] == nil else { return }
-        let pid = profileID(for: tab)
-        let engine = engineHost.engine(for: tab, profileID: pid)
+        guard mediaSubscriptions[tab.id] == nil,
+              let engine = engineHost.engine(forTabID: tab.id, profileID: profileID(for: tab)) else { return }
         mediaSubscriptions[tab.id] = engine.mediaStatePublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
@@ -503,6 +556,7 @@ final class BrowserViewModel {
         }
 
         let liveTabIDs = Set(tabKeys.map(\.tabID))
+        faviconObservedEngines = faviconObservedEngines.filter { liveTabIDs.contains($0.key) }
         for id in mediaSubscriptions.keys where !liveTabIDs.contains(id) {
             mediaSubscriptions[id] = nil
             mediaStateByTab[id] = nil
@@ -765,6 +819,7 @@ final class BrowserViewModel {
     }
 
     func prepareForQuit() {
+        autoArchiveTimer?.invalidate()
         store.autoArchiveIdleLittleArcWindows()
         boostLiveDebounceWorkItem?.cancel()
         for (_, draft) in boostEditorDraftByTab {
@@ -1061,6 +1116,52 @@ final class BrowserViewModel {
                 return "Page source is not available for this tab"
             }
             viewSelectedPageSource()
+        case .goBack:
+            goBack()
+        case .goForward:
+            goForward()
+        case .reloadPage:
+            reload()
+        case .reloadIgnoringCache:
+            reload(ignoringCache: true)
+        case .stopLoading:
+            stopLoading()
+        case .copyURL:
+            copyURL()
+        case .nextSpace:
+            cycleSpace(forward: true)
+        case .previousSpace:
+            cycleSpace(forward: false)
+        case .renameSpace:
+            beginRename(.space(store.activeSpaceID))
+        case .editSpaceTheme:
+            spaceEditorID = store.activeSpaceID
+        case .deleteSpace:
+            guard canDeleteSpaces else { return "The last space cannot be deleted" }
+            pendingDeletion = .space(store.activeSpaceID)
+        case .newFolder:
+            newFolder()
+        case .expandAllFolders:
+            store.setAllFoldersExpanded(true)
+        case .collapseAllFolders:
+            store.setAllFoldersExpanded(false)
+        case .addToFavorites:
+            guard let id = store.selectedTabID, store.kind(of: id) != .favorite else { return "Cannot add this tab to Favorites" }
+            addToFavorites(id)
+        case .removeFromFavorites:
+            guard let id = store.selectedTabID, store.kind(of: id) == .favorite else { return "Not a favorite" }
+            removeFavorite(id)
+        case .renameTab:
+            guard let id = store.selectedTabID else { return "No tab selected" }
+            beginRename(.tab(id))
+        case .duplicateTab:
+            duplicateTab()
+        case .archiveTab:
+            guard let id = store.selectedTabID, store.archiveTab(id) != nil else { return "Cannot archive this tab" }
+            releaseEngine(for: id)
+            loadSelectedIfNeeded()
+        case .viewArchive:
+            isArchivePresented = true
         }
         return nil
     }
