@@ -131,7 +131,8 @@ final class ChromiumSelfTest {
                         "favicon", "security_state", "user_scripts", "script_evaluation", "link_peek",
                         "snapshot_viewport", "snapshot_full_page", "pip_control", "pip_native",
                         "profiles", "profile_off_the_record", "script_evaluation_identity", "page_zoom",
-                        "isolated_page_messages", "rearc_safe_storage_branding"]
+                        "isolated_page_messages", "rearc_safe_storage_branding", "os_permission_shutdown",
+                        "shutdown_pending_closes", "profile_directory", "webui_daily_pages"]
         log("features: " + features.map { "\($0)=\(ReArcEngineHasFeature($0) ? 1 : 0)" }.joined(separator: " "))
         try check(runtime.defaultProfileID != 0, "ready delivered a zero default profile")
 
@@ -329,6 +330,11 @@ final class ChromiumSelfTest {
         // 15. Named profiles are isolated; an off-the-record child sees neither; teardown order.
         if capabilities.profiles {
             try await profileChecks(base: base)
+            if capabilities.profileDirectory {
+                try await profileDirectoryChecks()
+            } else {
+                log("ABI-GAP profile_directory not advertised: the startup Default directory is not adopted")
+            }
         } else {
             log("ABI-GAP profiles not advertised: every shell profile shares the startup profile")
         }
@@ -829,6 +835,18 @@ final class ChromiumSelfTest {
         try checkOneLease(engineA, "shell window")
         log("PASS shell browser window: BrowserView attached tab A (lease \(engineA.attachmentID ?? 0), \(engineA.profileKey) "
             + "-> engine profile \(engineA.engineProfileID))")
+        if runtime.capabilities.profileDirectory, let owner = store.profiles.first?.id {
+            // Wave 16 adoption: the first shell profile opened the startup Default directory in place.
+            let mapURL = runtime.userDataDir?.appendingPathComponent(ChromiumProfileStorageMap.fileName)
+            let saved = mapURL.map(ChromiumProfileStorageMap.load(from:))
+            try check(engineA.engineProfileID == runtime.defaultProfileID,
+                      "first profile's tab is on engine profile \(engineA.engineProfileID), not the startup \(runtime.defaultProfileID)")
+            try check(runtime.storageMap.legacyDefault == .adopted && runtime.storageMap.storage(for: owner) == .directory("Default"),
+                      "storage map after adoption: \(runtime.storageMap)")
+            try check(saved == runtime.storageMap, "persisted storage map \(String(describing: saved)) differs")
+            log("PASS Default adopted in place: \(engineA.profileKey) -> startup engine profile \(runtime.defaultProfileID), "
+                + "mapping persisted in \(mapURL?.lastPathComponent ?? "-")")
+        }
 
         // A second browser window on the same model shows the same selected tab:
         // the lease moves (detach, then attach) and returns when it closes.
@@ -1090,6 +1108,22 @@ final class ChromiumSelfTest {
         }
         log("PASS chrome://settings committed (the shell's Settings entry point), title '\(engine.pageTitle ?? "")'")
 
+        if runtime.capabilities.webUIDailyPages {
+            var committed: [String] = []
+            for page in [BrowserInternalPage.history, .downloads, .passwords, .extensions] {
+                let status = engine.navigateNow(page.url)
+                try check(status == .rearcOK, "\(page.url) rejected: \(status.rearcName)")
+                let host = page.url.host()
+                try await wait("\(page.url) commit", timeout: 25) {
+                    engine.currentURL?.scheme == "chrome" && engine.currentURL?.host() == host && !engine.isLoading
+                }
+                committed.append("\(engine.currentURL?.absoluteString ?? "") '\(engine.pageTitle ?? "")'")
+            }
+            log("PASS daily WebUI committed (webui_daily_pages): \(committed.joined(separator: ", "))")
+        } else {
+            log("ABI-GAP webui_daily_pages not advertised: History, Downloads, Passwords and Extensions stay hidden")
+        }
+
         var rejected: [String] = []
         for bad in ["javascript:void(0)", "chrome://flags", "view-source:view-source:\(base)/a"] {
             let status = engine.navigateNow(URL(string: bad)!)
@@ -1097,6 +1131,27 @@ final class ChromiumSelfTest {
             rejected.append(bad)
         }
         log("PASS still rejected with invalid_url: \(rejected.joined(separator: ", "))")
+    }
+
+    /// ABI 1.13: an existing directory opens in place; the startup one returns
+    /// the startup ID; bad syntax rejects synchronously, a missing one async.
+    @MainActor
+    private func profileDirectoryChecks() async throws {
+        func open(_ token: String) async -> (ReArcStatus, UInt64) {
+            await withCheckedContinuation { continuation in
+                runtime.openDirectory(token) { status, id, _ in continuation.resume(returning: (status, id)) }
+            }
+        }
+        let (defaultStatus, defaultID) = await open("Default")
+        try check(defaultStatus == .rearcOK && defaultID == runtime.defaultProfileID,
+                  "OpenDirectory(Default) -> \(defaultStatus.rearcName) id \(defaultID), startup \(runtime.defaultProfileID)")
+        let (missingStatus, missingID) = await open("rearc-selftest-missing")
+        try check(missingStatus != .rearcOK && missingID == 0, "missing directory -> \(missingStatus.rearcName) id \(missingID)")
+        let (traversalStatus, _) = await open("../Default")
+        try check(traversalStatus == ReArcStatus(REARC_INVALID_ARGUMENT), "../Default -> \(traversalStatus.rearcName)")
+        try check(runtime.liveProfileContexts == 0, "\(runtime.liveProfileContexts) directory request context(s) never released")
+        log("PASS OpenDirectory: Default -> startup profile \(defaultID); missing -> \(missingStatus.rearcName); "
+            + "../Default -> \(traversalStatus.rearcName); contexts released")
     }
 
     @MainActor

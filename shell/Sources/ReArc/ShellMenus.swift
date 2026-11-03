@@ -73,6 +73,18 @@ enum ShellMenus {
         ]]
     }
 
+    /// View menu, Chromium with `webui_daily_pages` only: Chromium's own
+    /// history, downloads, passwords and extensions pages (Arc's View and
+    /// Extensions menus). Shortcuts follow Chrome on macOS.
+    static func browserPages(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("History", "y") { model.openBrowserPage(.history) },
+            ShellMenuItem("Downloads", "l", [.command, .option]) { model.openBrowserPage(.downloads) },
+            ShellMenuItem("Passwords") { model.openBrowserPage(.passwords) },
+            ShellMenuItem("Extensions") { model.openBrowserPage(.extensions) },
+        ]]
+    }
+
     /// Spaces menu: Ctrl+1…9, next/previous, and space management.
     static func spaces(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [

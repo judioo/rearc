@@ -928,10 +928,12 @@ final class BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
-    /// Opens a Chromium-owned page (settings, version) instead of a shell
-    /// reimplementation, reusing a tab already showing that WebUI host.
+    /// Opens a Chromium-owned page (settings, version, history, downloads,
+    /// passwords, extensions) instead of a shell reimplementation, reusing a
+    /// tab already showing that WebUI host. Pages the engine does not admit
+    /// (no `webui_daily_pages` for the daily-use hosts) do nothing.
     func openBrowserPage(_ page: BrowserInternalPage) {
-        guard engineHost.navigationSchemes.contains(.trustedWebUI) else { return }
+        guard page.isAvailable(engine: engineHost.navigationSchemes) else { return }
         if let existing = store.displayTabs().first(where: { page.isShown(by: $0.url) }) {
             store.updateTab(existing.id, title: page.title, url: page.url)
             store.focusTab(existing.id)
@@ -1106,8 +1108,10 @@ final class BrowserViewModel {
         case .openCapturesGallery:
             isCapturesGalleryPresented = true
         case .openBrowserPage(let page):
-            guard engineHost.navigationSchemes.contains(.trustedWebUI) else {
-                return "Browser settings need the Chromium engine"
+            guard page.isAvailable(engine: engineHost.navigationSchemes) else {
+                return engineHost.navigationSchemes.contains(.trustedWebUI)
+                    ? "\(page.title) needs a newer Chromium engine"
+                    : "\(page.title) needs the Chromium engine"
             }
             openBrowserPage(page)
         case .viewPageSource:

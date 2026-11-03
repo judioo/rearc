@@ -118,6 +118,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         self.model = model
         model.windowPresenter = self
+        // The first profile may open the startup Default directory in place
+        // (ABI 1.13), before any of its tabs exist; decided once and persisted.
+        runtime.legacyDefaultOwner = model.store.profiles.first?.id
         model.onProfileDeleted = { [weak self, runtime] id in
             // EngineHost already dropped the profile's engines. Its private windows
             // close first (their off-the-record children must go before the parent).
@@ -399,6 +402,10 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         if runtime.capabilities.navigationExtended {
             view.addItem(.separator())
             view.addItem(target.item("View Page Source", "u", [.command, .option]) { model.viewSelectedPageSource() })
+        }
+        if runtime.capabilities.webUIDailyPages {
+            view.addItem(.separator())
+            target.add(ShellMenus.browserPages(model), to: view)
         }
         main.addSubmenu(view, title: "View")
 

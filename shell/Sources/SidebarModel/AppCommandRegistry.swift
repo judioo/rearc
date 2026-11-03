@@ -191,8 +191,8 @@ public struct AppCommand: Equatable, Identifiable {
             return true
         case .capturePage, .captureVisibleArea:
             return store.selectedTab != nil
-        case .openBrowserPage:
-            return context.navigationSchemes.contains(.trustedWebUI)
+        case .openBrowserPage(let page):
+            return page.isAvailable(engine: context.navigationSchemes)
         case .viewPageSource:
             guard let tab = store.selectedTab else { return false }
             return NavigationURLPolicy.viewSourceURL(for: tab.url, engine: context.navigationSchemes) != nil
@@ -516,6 +516,34 @@ public enum AppCommandRegistry {
                 keywords: ["version", "about", "chromium", "engine"],
                 minQueryLength: 2,
                 action: .openBrowserPage(.version)
+            ),
+            AppCommand(
+                id: "browser-history",
+                title: "History",
+                keywords: ["history", "visited", "chrome", "browsing"],
+                minQueryLength: 2,
+                action: .openBrowserPage(.history)
+            ),
+            AppCommand(
+                id: "browser-downloads",
+                title: "Downloads",
+                keywords: ["downloads", "downloaded", "files"],
+                minQueryLength: 2,
+                action: .openBrowserPage(.downloads)
+            ),
+            AppCommand(
+                id: "browser-passwords",
+                title: "Passwords",
+                keywords: ["passwords", "password", "manager", "logins", "credentials"],
+                minQueryLength: 2,
+                action: .openBrowserPage(.passwords)
+            ),
+            AppCommand(
+                id: "browser-extensions",
+                title: "Extensions",
+                keywords: ["extensions", "extension", "addons", "plugins", "chrome"],
+                minQueryLength: 2,
+                action: .openBrowserPage(.extensions)
             ),
             AppCommand(
                 id: "view-page-source",

@@ -25,6 +25,24 @@ final class NavigationURLPolicyTests: XCTestCase {
         XCTAssertFalse(allows("chrome://history", .chromium))
     }
 
+    func testDailyWebUIHostsNeedTheirFlag() {
+        for host in ["history", "downloads", "password-manager", "extensions"] {
+            XCTAssertFalse(allows("chrome://\(host)/", .chromium), host)
+            XCTAssertFalse(allows("chrome://\(host)/", .dailyWebUI), "\(host) also needs trustedWebUI")
+            XCTAssertTrue(allows("chrome://\(host)/", daily), host)
+        }
+        XCTAssertTrue(allows("chrome://history/syncedTabs", daily))
+        XCTAssertTrue(allows("chrome://password-manager/settings", daily))
+        XCTAssertTrue(allows("chrome://extensions/shortcuts", daily))
+        // Exact hosts only: flags, bookmarks, lookalikes and view-source of WebUI stay rejected.
+        for url in ["chrome://flags", "chrome://bookmarks", "chrome://historyx", "chrome://history.evil",
+                    "chrome://restart", "chrome://quit", "view-source:chrome://history"] {
+            XCTAssertFalse(allows(url, daily), url)
+        }
+        XCTAssertEqual(NavigationURLPolicy.webUIHosts(for: daily).count, 6)
+        XCTAssertEqual(NavigationURLPolicy.webUIHosts(for: .dailyWebUI), [])
+    }
+
     func testViewSourceWrapsOneHTTPOrFileURL() {
         XCTAssertFalse(allows("view-source:https://example.com"))
         XCTAssertTrue(allows("view-source:https://example.com", .chromium))
@@ -48,10 +66,17 @@ final class NavigationURLPolicyTests: XCTestCase {
         XCTAssertNil(URLEntry.resolve("chrome://flags", engine: .chromium))
     }
 
+    private static let dailyPages: Set<BrowserInternalPage> = [.history, .downloads, .passwords, .extensions]
+    private let daily: NavigationURLPolicy.EngineSchemes = NavigationURLPolicy.EngineSchemes.chromium.union(.dailyWebUI)
+
     func testBrowserPagesAreAdmittedWebUI() {
         for page in BrowserInternalPage.allCases {
-            XCTAssertTrue(NavigationURLPolicy.allows(page.url, engine: .chromium), page.rawValue)
+            let needsDaily = Self.dailyPages.contains(page)
+            XCTAssertEqual(NavigationURLPolicy.allows(page.url, engine: .chromium), !needsDaily, page.rawValue)
+            XCTAssertTrue(NavigationURLPolicy.allows(page.url, engine: daily), page.rawValue)
+            XCTAssertTrue(page.isAvailable(engine: daily), page.rawValue)
             XCTAssertFalse(NavigationURLPolicy.allows(page.url), page.rawValue)
+            XCTAssertFalse(page.isAvailable(engine: []), page.rawValue)
         }
         XCTAssertTrue(BrowserInternalPage.settings.isShown(by: URL(string: "chrome://settings/privacy")!))
         XCTAssertFalse(BrowserInternalPage.settings.isShown(by: URL(string: "chrome://version")!))
@@ -72,8 +97,22 @@ final class NavigationURLPolicyTests: XCTestCase {
         XCTAssertFalse(webKitActions.contains(.openBrowserPage(.settings)))
         XCTAssertFalse(webKitActions.contains(.viewPageSource))
         for page in BrowserInternalPage.allCases {
-            XCTAssertTrue(chromiumActions.contains(.openBrowserPage(page)), page.rawValue)
+            XCTAssertEqual(chromiumActions.contains(.openBrowserPage(page)), !Self.dailyPages.contains(page), page.rawValue)
         }
+        let dailyContext = CommandBarContext(
+            store: store,
+            isSidebarVisible: true,
+            closedTabStack: store.closedTabStack,
+            navigationSchemes: daily
+        )
+        let dailyActions = AppCommandRegistry.all(in: dailyContext).map(\.action)
+        for page in BrowserInternalPage.allCases {
+            XCTAssertTrue(dailyActions.contains(.openBrowserPage(page)), page.rawValue)
+        }
+        XCTAssertEqual(
+            CommandBarSearch.results(for: ">downloads", in: store, navigationSchemes: daily).first?.commandAction,
+            .openBrowserPage(.downloads)
+        )
         if let selected = store.selectedTab, NavigationURLPolicy.viewSourceURL(for: selected.url, engine: .chromium) != nil {
             XCTAssertTrue(chromiumActions.contains(.viewPageSource))
         }

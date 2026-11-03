@@ -3,7 +3,8 @@ import Foundation
 /// Which URLs trusted shell UI (command bar, menus) may hand to an engine.
 /// The base set is what every engine loads; Chromium (ABI 1.5,
 /// `navigation_extended`) additionally admits audited WebUI and view-source,
-/// mirroring `ReArcTabNavigate` admission in engine/docs/C-ABI.md.
+/// and ABI 1.14 (`webui_daily_pages`) four daily-use WebUI hosts, mirroring
+/// `ReArcTabNavigate` admission in engine/docs/C-ABI.md.
 public enum NavigationURLPolicy {
     /// Engine-specific additions to the base set.
     public struct EngineSchemes: OptionSet, Hashable, Sendable {
@@ -14,11 +15,24 @@ public enum NavigationURLPolicy {
         public static let trustedWebUI = EngineSchemes(rawValue: 1)
         /// One `view-source:` wrapper around an http(s) or file URL.
         public static let viewSource = EngineSchemes(rawValue: 2)
+        /// `chrome://history`, `downloads`, `password-manager` and `extensions`
+        /// (ABI 1.14); only meaningful together with `trustedWebUI`.
+        public static let dailyWebUI = EngineSchemes(rawValue: 4)
+        /// The ABI 1.5 set; engines with `webui_daily_pages` add `dailyWebUI`.
         public static let chromium: EngineSchemes = [.trustedWebUI, .viewSource]
     }
 
-    /// The only WebUI hosts the engine has audited for browser-less tabs.
+    /// The WebUI hosts the engine audited for browser-less tabs in ABI 1.5.
     public static let trustedWebUIHosts: Set<String> = ["settings", "version"]
+    /// The daily-use hosts added by `webui_daily_pages`. `chrome://flags`,
+    /// bookmarks and every other host stay rejected.
+    public static let dailyWebUIHosts: Set<String> = ["history", "downloads", "password-manager", "extensions"]
+
+    /// Exact WebUI hosts admitted for `engine` (no prefix or wildcard match).
+    public static func webUIHosts(for engine: EngineSchemes) -> Set<String> {
+        guard engine.contains(.trustedWebUI) else { return [] }
+        return engine.contains(.dailyWebUI) ? trustedWebUIHosts.union(dailyWebUIHosts) : trustedWebUIHosts
+    }
 
     private static let baseSchemes: Set<String> = ["http", "https", "data", "file"]
     private static let viewSourceTargets: Set<String> = ["http", "https", "file"]
@@ -31,8 +45,8 @@ public enum NavigationURLPolicy {
         case "about":
             return url.absoluteString.lowercased() == "about:blank"
         case "chrome":
-            guard engine.contains(.trustedWebUI), let host = url.host()?.lowercased() else { return false }
-            return trustedWebUIHosts.contains(host)
+            guard let host = url.host()?.lowercased() else { return false }
+            return webUIHosts(for: engine).contains(host)
         case "view-source":
             guard engine.contains(.viewSource) else { return false }
             let inner = String(url.absoluteString.dropFirst(viewSourcePrefix.count))

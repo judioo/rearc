@@ -16,6 +16,10 @@ struct ChromiumCapabilities: Equatable {
     static let pageZoomFeature = "page_zoom"
     static let isolatedPageMessagesFeature = "isolated_page_messages"
     static let safeStorageBrandingFeature = "rearc_safe_storage_branding"
+    static let osPermissionShutdownFeature = "os_permission_shutdown"
+    static let shutdownPendingClosesFeature = "shutdown_pending_closes"
+    static let profileDirectoryFeature = "profile_directory"
+    static let webUIDailyPagesFeature = "webui_daily_pages"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -28,6 +32,10 @@ struct ChromiumCapabilities: Equatable {
         pageZoomFeature: 8,
         isolatedPageMessagesFeature: 9,
         safeStorageBrandingFeature: 10,
+        osPermissionShutdownFeature: 11,
+        shutdownPendingClosesFeature: 12,
+        profileDirectoryFeature: 13,
+        webUIDailyPagesFeature: 14,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -50,6 +58,14 @@ struct ChromiumCapabilities: Equatable {
     var isolatedPageMessages: Bool
     /// Safe Storage keychain item named "ReArc Safe Storage" (build-time branding).
     var safeStorageBranding: Bool
+    /// Shutdown no longer waits on read-only macOS permission (TCC) queries. No Swift call.
+    var osPermissionShutdown: Bool
+    /// `ReArcEngineShutdown` joins standalone tab closes still in flight.
+    var shutdownPendingCloses: Bool
+    /// `ReArcProfileOpenDirectory`: open an existing profile directory in place; requires `profiles`.
+    var profileDirectory: Bool
+    /// chrome://history, downloads, password-manager and extensions; requires `navigationExtended`.
+    var webUIDailyPages: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -68,10 +84,15 @@ struct ChromiumCapabilities: Equatable {
         pageZoom = adopted(Self.pageZoomFeature)
         isolatedPageMessages = adopted(Self.isolatedPageMessagesFeature)
         safeStorageBranding = adopted(Self.safeStorageBrandingFeature)
+        osPermissionShutdown = adopted(Self.osPermissionShutdownFeature)
+        shutdownPendingCloses = adopted(Self.shutdownPendingClosesFeature)
+        profileDirectory = profiles && adopted(Self.profileDirectoryFeature)
+        webUIDailyPages = navigationExtended && adopted(Self.webUIDailyPagesFeature)
     }
 
     var navigationSchemes: NavigationURLPolicy.EngineSchemes {
-        navigationExtended ? .chromium : []
+        guard navigationExtended else { return [] }
+        return webUIDailyPages ? NavigationURLPolicy.EngineSchemes.chromium.union(.dailyWebUI) : .chromium
     }
 
     /// Keychain item the engine reads its Safe Storage key from.
@@ -91,6 +112,10 @@ struct ChromiumCapabilities: Equatable {
             (Self.pageZoomFeature, pageZoom),
             (Self.isolatedPageMessagesFeature, isolatedPageMessages),
             (Self.safeStorageBrandingFeature, safeStorageBranding),
+            (Self.osPermissionShutdownFeature, osPermissionShutdown),
+            (Self.shutdownPendingClosesFeature, shutdownPendingCloses),
+            (Self.profileDirectoryFeature, profileDirectory),
+            (Self.webUIDailyPagesFeature, webUIDailyPages),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

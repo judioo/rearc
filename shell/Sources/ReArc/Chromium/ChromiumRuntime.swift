@@ -253,6 +253,12 @@ private final class ProfileRequestBox {
     }
 }
 
+/// `ReArcProfileOpenDirectory` (ABI 1.13), resolved with dlsym: the framework is
+/// weak-linked and an older one does not export it (WAVE-16-REPORT.md step 5).
+private typealias ProfileDirectoryOpen = @convention(c) (
+    UnsafePointer<CChar>?, ReArcProfileCallback?, UnsafeMutableRawPointer?
+) -> ReArcStatus
+
 private let profileCallback: ReArcProfileCallback = { context, status, profile, offTheRecord in
     guard let context else { return }
     let box = Unmanaged<ProfileRequestBox>.fromOpaque(context).takeRetainedValue()
@@ -334,6 +340,15 @@ final class ChromiumRuntime {
     var onAdoptedTab: ((ChromiumTabEvent) -> Bool)?
     /// Profile lifecycle transitions, for logs and the self-test.
     var onProfileEvent: ((String) -> Void)?
+    /// The shell profile that may take over the startup `Default` directory
+    /// (the first profile); set before any of its tabs are created.
+    var legacyDefaultOwner: Profile.ID?
+
+    /// `--user-data-dir` and `--profile-directory` the engine runs with.
+    private(set) var userDataDir: URL?
+    private(set) var startupDirectory = ChromiumProfileStorageMap.defaultDirectory
+    /// Directory mappings and the Default decision, persisted in the user-data-dir.
+    private(set) var storageMap = ChromiumProfileStorageMap()
 
     private var engines: [UInt64: WeakRef<ChromiumEngine>] = [:]
     private var leaseHosts: [UInt64: WeakRef<ChromiumHostView>] = [:]
@@ -382,6 +397,9 @@ final class ChromiumRuntime {
     func run(arguments: [String], keychain: ChromiumLaunchArguments.KeychainMode) -> Int32 {
         precondition(Thread.isMainThread && !isConfigured)
         keychainMode = keychain
+        userDataDir = ChromiumLaunchArguments.userDataDir(in: arguments).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        startupDirectory = ChromiumLaunchArguments.startupProfileDirectory(in: arguments)
+        if let url = storageMapURL { storageMap = ChromiumProfileStorageMap.load(from: url) }
         var callbacks = ReArcCallbacks(
             ready: readyCallback,
             tab_event: tabEventCallback,
@@ -537,15 +555,8 @@ final class ChromiumRuntime {
             startDeferredShutdownIfIdle()
         }
         switch key {
-        case .persistent:
-            let name = key.storageKey ?? ""
-            guard ChromiumProfileKey.isValidStorageKey(name) else {
-                return finish(ReArcStatus(REARC_INVALID_ARGUMENT), 0, false)
-            }
-            let status = callProfile(finish) { context, callback in
-                name.withCString { ReArcProfileOpen($0, callback, context) }
-            }
-            if status != .rearcOK { finish(status, 0, false) }
+        case .persistent(let profileID):
+            startPersistentOpen(profileID, finish: finish)
         case .offTheRecord(_, let parent):
             withEngineProfile(.persistent(parent)) { [self] parentID in
                 guard let parentID, isReady, !isStopping else {
@@ -556,6 +567,89 @@ final class ChromiumRuntime {
                 }
                 if status != .rearcOK { finish(status, 0, true) }
             }
+        }
+    }
+
+    /// Opens a persistent profile by its storage plan (WAVE-16-REPORT.md steps
+    /// 4–6): named key, recorded directory, or the one-time Default adoption.
+    private func startPersistentOpen(_ profileID: Profile.ID, finish: @escaping (ReArcStatus, UInt64, Bool) -> Void) {
+        let plan = ChromiumProfileStoragePlan.plan(
+            for: profileID,
+            map: storageMap,
+            legacyOwner: legacyDefaultOwner,
+            engine: .init(canOpenDirectory: capabilities.profileDirectory, startupDirectory: startupDirectory),
+            namedDirectoryExists: { [userDataDir] name in
+                guard let userDataDir else { return false }
+                return FileManager.default.fileExists(atPath: userDataDir.appendingPathComponent(name).path)
+            }
+        )
+        let key = ChromiumProfileKey.persistent(profileID)
+        switch plan {
+        case .named(let name):
+            openNamed(name, finish: finish)
+        case .keepNamed(let name):
+            profileEvent("\(key) keeps its named data; startup Default left in place")
+            storageMap.legacyDefault = .keptNamed
+            saveStorageMap()
+            openNamed(name, finish: finish)
+        case .directory(let token):
+            openDirectory(token, finish: finish)
+        case .startupProfile:
+            profileEvent("\(key) maps to \(startupDirectory); engine lacks profile_directory, using the startup profile")
+            finish(.rearcOK, defaultProfileID, false)
+        case .unsupported(let token):
+            profileEvent("\(key) maps to directory \(token), which this engine cannot open")
+            finish(ReArcStatus(REARC_UNSUPPORTED), 0, false)
+        case .adoptDefault:
+            let token = ChromiumProfileStorageMap.defaultDirectory
+            openDirectory(token) { [self] status, id, offTheRecord in
+                guard status == .rearcOK, id != 0 else {
+                    // Nothing is recorded, so a later launch decides again.
+                    profileEvent("adopting \(token) for \(key) failed: \(status.rearcName); opening named")
+                    return openNamed(ChromiumProfileKey.storageKey(for: profileID), finish: finish)
+                }
+                storageMap.recordDirectory(token, for: profileID)
+                saveStorageMap()
+                profileEvent("adopted \(token) in place for \(key)\(id == defaultProfileID ? " (startup profile)" : "")")
+                finish(status, id, offTheRecord)
+            }
+        }
+    }
+
+    private func openNamed(_ name: String, finish: @escaping (ReArcStatus, UInt64, Bool) -> Void) {
+        guard ChromiumProfileKey.isValidStorageKey(name) else {
+            return finish(ReArcStatus(REARC_INVALID_ARGUMENT), 0, false)
+        }
+        let status = callProfile(finish) { context, callback in
+            name.withCString { ReArcProfileOpen($0, callback, context) }
+        }
+        if status != .rearcOK { finish(status, 0, false) }
+    }
+
+    /// `ReArcProfileOpenDirectory` through the same retained one-shot callback as
+    /// ProfileOpen. Unsupported when the engine or its export is missing.
+    func openDirectory(_ token: String, finish: @escaping (ReArcStatus, UInt64, Bool) -> Void) {
+        guard capabilities.profileDirectory,
+              let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcProfileOpenDirectory") else {
+            return finish(ReArcStatus(REARC_UNSUPPORTED), 0, false)
+        }
+        let open = unsafeBitCast(symbol, to: ProfileDirectoryOpen.self)
+        let status = callProfile(finish) { context, callback in
+            token.withCString { open($0, callback, context) }
+        }
+        if status != .rearcOK { finish(status, 0, false) }
+    }
+
+    private var storageMapURL: URL? {
+        userDataDir?.appendingPathComponent(ChromiumProfileStorageMap.fileName)
+    }
+
+    private func saveStorageMap() {
+        guard let url = storageMapURL else { return }
+        do {
+            try storageMap.save(to: url)
+        } catch {
+            ChromiumLog.info("could not save \(url.lastPathComponent): \(error.localizedDescription)")
         }
     }
 
@@ -608,6 +702,10 @@ final class ChromiumRuntime {
             completion(ReArcStatus(REARC_BUSY), false)
         case .open(let id):
             if !capabilities.profiles || id == defaultProfileID {
+                // The startup profile (adopted Default included) lives until engine
+                // shutdown: its private children closed first, its tabs closed when
+                // the shell dropped their engines. ProfileClose would be invalid_state.
+                profileEvent("\(key) is the startup profile (engine profile \(id)); it stays open until shutdown")
                 return completion(ReArcStatus(REARC_INVALID_STATE), false)
             }
             closeInFlight = true
@@ -693,8 +791,8 @@ final class ChromiumRuntime {
         forceCloseTab(tabID)
     }
 
-    /// Force-closes a tab the shell no longer shows. Shutdown is busy while any
-    /// tab close is pending, so it waits for these completions.
+    /// Force-closes a tab the shell no longer shows. Each completion arrives
+    /// once; engines before ABI 1.12 make shutdown wait for them (`mustDeferShutdown`).
     private func forceCloseTab(_ tabID: UInt64) {
         let status = callAsync({ [self] _, _ in
             tabClosesInFlight -= 1
@@ -870,19 +968,24 @@ final class ChromiumRuntime {
 
     /// Orderly engine shutdown; `ReArcEngineRun` returns after the final
     /// completion. The engine closes every profile's tabs and destroys private
-    /// profiles before their parents. A profile or tab close in flight makes
-    /// shutdown busy, so shutdown then waits for it; a rejection after waiting
-    /// is reported through `completion`.
+    /// profiles before their parents. A profile close in flight makes shutdown
+    /// busy, so shutdown waits for it. With `shutdown_pending_closes` (ABI 1.12)
+    /// the engine joins tab closes still in flight, whose callbacks still
+    /// arrive once before shutdown completes; older engines are busy then too.
+    /// A rejection after waiting is reported through `completion`.
     @discardableResult
     func requestShutdown(force: Bool, completion: @escaping (ReArcStatus, Bool) -> Void) -> ReArcStatus {
         guard isReady, !isStopping else { return ReArcStatus(REARC_BUSY) }
         isStopping = true
         cancelQueuedLifecycle()
         // Pending opens are the engine's to cancel; closes in flight make shutdown busy.
-        if closeInFlight || tabClosesInFlight > 0 {
+        if mustDeferShutdown {
             ChromiumLog.info("shutdown waits for closes in flight (profile \(closeInFlight), tabs \(tabClosesInFlight))")
             deferredShutdown = (force, completion)
             return .rearcOK
+        }
+        if tabClosesInFlight > 0 {
+            ChromiumLog.info("shutdown joins \(tabClosesInFlight) tab close(s) in flight (shutdown_pending_closes)")
         }
         return startShutdown(force: force, completion: completion)
     }
@@ -904,12 +1007,20 @@ final class ChromiumRuntime {
     }
 
     private func startDeferredShutdownIfIdle() {
-        guard let deferred = deferredShutdown, !closeInFlight, tabClosesInFlight == 0 else { return }
+        guard let deferred = deferredShutdown, !mustDeferShutdown else { return }
         deferredShutdown = nil
         let status = startShutdown(force: deferred.force, completion: deferred.completion)
         if status != .rearcOK {
             deferred.completion(status, false)
         }
+    }
+
+    private var mustDeferShutdown: Bool {
+        ChromiumShutdownGate.mustDefer(
+            profileCloseInFlight: closeInFlight,
+            tabClosesInFlight: tabClosesInFlight,
+            engineJoinsTabCloses: capabilities.shutdownPendingCloses
+        )
     }
 
     private func startShutdown(force: Bool, completion: @escaping (ReArcStatus, Bool) -> Void) -> ReArcStatus {

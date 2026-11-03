@@ -12,6 +12,7 @@ import Foundation
 /// in release builds of the shell even if the key is present.
 enum ChromiumLaunchArguments {
     static let userDataDirFlag = "--user-data-dir="
+    static let profileDirectoryFlag = "--profile-directory="
     static let mockKeychainSwitch = "--use-mock-keychain"
     static let devMockKeychainInfoKey = "ReArcDevUseMockKeychain"
 
@@ -50,5 +51,17 @@ enum ChromiumLaunchArguments {
             result.append(mockKeychainSwitch)
         }
         return result
+    }
+
+    /// The `--user-data-dir` the engine runs with (last occurrence wins, as in Chromium).
+    static func userDataDir(in arguments: [String]) -> String? {
+        arguments.last { $0.hasPrefix(userDataDirFlag) }.map { String($0.dropFirst(userDataDirFlag.count)) }
+    }
+
+    /// The startup profile directory: `ReArcEngineRun` adds
+    /// `--profile-directory=Default` unless one was supplied.
+    static func startupProfileDirectory(in arguments: [String]) -> String {
+        arguments.last { $0.hasPrefix(profileDirectoryFlag) }
+            .map { String($0.dropFirst(profileDirectoryFlag.count)) } ?? ChromiumProfileStorageMap.defaultDirectory
     }
 }
