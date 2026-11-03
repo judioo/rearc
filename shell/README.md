@@ -75,16 +75,19 @@ The shell still calls `ReArcEngineConfigure(1, …)`. After `ready` it probes
 looked up with `dlsym` first and an engine that predates the export counts as
 minor 0. `ChromiumCapabilities` enables a feature only when the minor version
 is at least the one that introduced it (5 for the three below, 6–10 for the
-ABI 1.10 features) **and** `ReArcEngineHasFeature` advertises it, and logs
-`capabilities: ABI minor 10: navigation_extended=1 script_evaluation=1 …`.
+ABI 1.10 features, 11–14 for the ABI 1.14 ones) **and** `ReArcEngineHasFeature`
+advertises it, and logs
+`capabilities: ABI minor 14: navigation_extended=1 script_evaluation=1 …`.
 On an older engine the missing features stay off and the shell behaves as it
 did against that engine.
 
 - **`navigation_extended`: URL admission.** `NavigationURLPolicy` always
   admits `http`, `https`, `data`, `file` and `about:blank`. With the Chromium
   engine it also admits `chrome://settings…`, `chrome://version` and
-  `view-source:` around one `http`/`https`/`file` URL. It rejects every other
-  `chrome://` host, `javascript:`, `blob:` and nested `view-source:` before
+  `view-source:` around one `http`/`https`/`file` URL, and with
+  `webui_daily_pages` (ABI 1.14) exactly `chrome://history`, `downloads`,
+  `password-manager` and `extensions`. It rejects every other
+  `chrome://` host (`flags` included), `javascript:`, `blob:` and nested `view-source:` before
   the URL reaches the engine. The command bar, `URLEntry.resolve` and
   navigation requests all use the same policy, with the schemes taken from
   `EngineHost.navigationSchemes`. On WebKit, `chrome://` and `view-source:`
@@ -96,7 +99,10 @@ did against that engine.
   Privacy and Security Settings, Site Settings, Clear Browsing Data… and
   About Chromium Engine. View > View Page Source (⌥⌘U) and the matching
   command open `view-source:` for the selected tab. All of these are hidden
-  or disabled when `navigation_extended` is off.
+  or disabled when `navigation_extended` is off. View > History (⌘Y),
+  Downloads (⌥⌘L), Passwords and Extensions, and the matching command-bar
+  commands, open Chromium's own pages the same way; they exist only with
+  `webui_daily_pages`.
 - **`script_evaluation`: boost editor and element picker.**
   `ChromiumRuntime.evaluateScript` passes a retained `ScriptEvaluationBox` as
   the context with a static C callback. The callback copies the borrowed
@@ -130,8 +136,9 @@ is gated on its feature flag (`profiles`, `profile_off_the_record`,
 - **Profiles.** Each shell `Profile` (which owns its Spaces) maps to one named
   persistent engine profile, opened with `ReArcProfileOpen` under the
   lowercased profile UUID (`ChromiumProfileKey`). Engine profile IDs are
-  session-local and never persisted. The startup `Default` profile is not
-  used for shell tabs. `ChromiumRuntime` keeps the profile registry. It
+  session-local and never persisted. Since ABI 1.13 the first profile
+  opens the startup `Default` directory instead (see ABI 1.14 adoption
+  below). `ChromiumRuntime` keeps the profile registry. It
   coalesces opens, queues lifecycle calls (the engine serializes them and
   answers `busy` otherwise), and creates a tab only once its profile is open.
   `ChromiumEngine` queues navigations and evaluations until then, and a host
@@ -148,8 +155,9 @@ is gated on its feature flag (`profiles`, `profile_off_the_record`,
   which erases the session. Teardown order is off-the-record children first,
   one at a time, then the parent (`ChromiumProfileTeardown`). A beforeunload
   veto keeps the profile and its ID. Engine shutdown owns everything at quit,
-  and the shell waits for profile or tab closes in flight before calling
-  `ReArcEngineShutdown`, which is busy while either is pending. On WebKit the
+  and the shell waits for a profile close in flight before calling
+  `ReArcEngineShutdown` (and for tab closes too on engines before ABI 1.12,
+  which are busy while either is pending). On WebKit the
   private window's engine uses a non-persistent `WKWebsiteDataStore`.
 - **Evaluation identity.** `ReArcTabEvaluateScript2` replaces the 1.5 call.
   Before a result is applied, `ReArcTabGetDocumentIdentity` must still match
@@ -189,6 +197,45 @@ is gated on its feature flag (`profiles`, `profile_off_the_record`,
 - **Safe Storage branding.** The engine reads its key from the Keychain item
   "ReArc Safe Storage", and the bundle id is `com.rearc.browser`.
 
+### ABI 1.14 adoption (wave 19)
+
+Follows "Exact Swift adoption" in `engine/docs/WAVE-16-REPORT.md` and
+`WAVE-18-REPORT.md` (concern 1). Each item is gated on its minor and flag
+(`os_permission_shutdown`, `shutdown_pending_closes`, `profile_directory`,
+`webui_daily_pages`); Configure still takes 1.
+
+- **Startup data opened in place.** Builds before named profiles kept
+  their cookies and storage in the engine's startup `Default` directory. The
+  first shell profile now opens that directory with
+  `ReArcProfileOpenDirectory("Default")` (looked up with `dlsym`, through the
+  same retained one-shot callback as `ReArcProfileOpen`) instead of a fresh
+  `ReArcProfile-<hex>` directory. `ChromiumShell.makeModel` names that owner
+  from the loaded sidebar before any tab exists. The decision is made once
+  and persisted in `ReArcProfileStorage.json` in the user-data-dir:
+  `directories` maps the profile UUID to `Default` and `legacyDefault` is
+  `adopted`. Every later launch reopens the recorded mapping. If the first
+  profile already has a named directory (data from a wave 15–18 build), it
+  keeps it, `legacyDefault` becomes `keptNamed` and Default is left
+  untouched: nothing is moved, copied, merged or deleted. A failed adoption
+  records nothing and opens named. Engines before 1.13 use the startup
+  profile for a recorded `Default` mapping and report `unsupported` for any
+  other directory, never a fresh named profile (`ChromiumProfileStoragePlan`,
+  unit-tested). The adopted profile is the startup profile: deleting its
+  shell profile closes its private children and tabs, and the engine keeps
+  the BrowserContext until shutdown (ProfileClose would be `invalid_state`).
+  Its private windows are ordinary off-the-record children. As the engine
+  report says, pre-wave-14 "Chromium Safe Storage" ciphertext is not
+  converted to the ReArc key.
+- **Pending closes.** With `shutdown_pending_closes` the shell no longer
+  holds `ReArcEngineShutdown` back while standalone tab closes are in
+  flight (the engine joins them, and each callback still arrives once). A
+  ProfileClose in flight still defers shutdown (`ChromiumShutdownGate`).
+- **Daily WebUI.** History, Downloads, Passwords and Extensions (see
+  Settings routing above). Admission does not mean history is recorded, a
+  download tray, page password filling or extension installs: those need
+  engine work (WAVE-18-REPORT concerns 2–9).
+- `os_permission_shutdown` needs no Swift call; it is logged.
+
 ### Self-test
 
 The self-test:
@@ -220,13 +267,20 @@ The self-test:
 12. Moves a tab to a second window (detach, then attach) and back when that
     window closes.
 13. Commits `view-source:`, `chrome://version` and `chrome://settings`, and
-    checks that WebUI refuses evaluation (`unsupported`). Checks that
+    checks that WebUI refuses evaluation (`unsupported`). With
+    `webui_daily_pages` it commits `chrome://history`, `downloads`,
+    `password-manager` and `extensions`. Checks that
     `javascript:`, `chrome://flags` and nested `view-source:` are still
     `invalid_url`.
 14. Profiles: two named profiles keep separate cookies, an off-the-record
     child sees neither and leaks nothing, closing the parent closes the child
     first, and reopening gives a new engine ID with the persistent cookie.
-15. Runs the real `ChromiumShell` on a throwaway sidebar: two browser windows
+    With `profile_directory`: `OpenDirectory("Default")` returns the startup
+    ID, a missing directory is `not_found`, `../Default` is
+    `invalid_argument`, and every request context is released.
+15. Runs the real `ChromiumShell` on a throwaway sidebar. Its first profile
+    adopts Default (tab A is on the startup engine profile and the mapping
+    is persisted). Then: two browser windows
     sharing a tab, Split View, Peek, Little Arc, the zoom commands (including a
     same-host sibling and the key private window), the sidebar navigation
     controls (the tab's favicon reaches the sidebar cache, `security_state`
@@ -302,9 +356,9 @@ Production needs:
   active space, in the opener's engine profile. A private window's popup
   becomes another private window of the same session. Contents from a profile
   that is closing are not adopted.
-- **Startup profile data is not migrated.** Shell profiles use named engine
-  profiles, so cookies stored by earlier builds in the engine's `Default`
-  profile directory are not carried over.
+- **Startup data goes to the first profile only.** The first shell profile
+  opens `Default` in place (ABI 1.13). Other profiles, and a first profile
+  that already had named data, do not see it, and the two are never merged.
 - **Off-the-record zoom** starts from the parent's per-host zoom and is not
   saved (Chromium's private zoom map).
 - **One live view per tab.** A tab shown in two windows renders in one, and
@@ -395,11 +449,41 @@ Production needs:
   private windows skip the fetch. Icons are cached by host on disk, so
   unloaded tabs keep theirs. Rows fall back to a letter.
 
+## Sidebar (wave 19)
+
+- **Pinned tabs keep their URL.** A tab saves its URL and title when it is
+  pinned (`Tab.savedURL`). ⌘W, or the row's close button, unloads a pinned
+  tab: its engine is dropped, it goes back to the saved URL and stays in
+  Pinned. Delete Tab (context menu) removes it to the Archive. When a pinned
+  tab has navigated away, its row shows "Back to the pinned URL" on hover,
+  and the context menu has Reset to Pinned URL and Make This the Pinned URL.
+  Tabs menu and command bar: Reset Tab to Original URL, Reset All Tabs in
+  This Space.
+- **⌘1…⌘8** select that row of the sidebar (favorites, pinned, Today; a
+  split is one row) and **⌘9** the last one (Tabs > Tab 1…Last Tab).
+- **Space bar.** The bottom bar shows every space of the window's profile.
+  Click one to switch, drag it to reorder (also Spaces > Move Space
+  Left/Right), or drop a tab, folder, split or easel on it to move it there.
+  The item keeps its section (end of Pinned, top of Today). Hold a drag on a
+  space for 0.7 s to switch to it and place the item precisely.
+- **New Space dialog** (name, profile, theme, icon) from the "+" menu, the
+  space list, the Spaces menu, the space menu and the command bar. Nothing
+  is created until Create.
+- **One space per window.** Each browser window shows its own space and
+  that space's selection: sidebar, content, theme, URL field and favorites.
+  The key window's space is the active one, so menus, shortcuts and the
+  command bar act on it, and a window that becomes key brings its space
+  back. Window spaces are not restored after relaunch.
+- **Today** has a divider with Clear (archive every Today tab in the space,
+  then Undo Clear) and ends with a "+ New Tab" row.
+- The row speaker **toggles mute**; a muted tab shows a muted speaker.
+- The sidebar **resizes** from its trailing edge (200–420 pt, remembered).
+
 Limits: splits and easels cannot go into folders (folders hold tabs and
 folders), and folders live only in Pinned. Folder expansion is shared by
-all windows, because windows share one sidebar (Arc keeps it per window).
-The Archive and the auto-archive threshold are local and not journaled for
-sync. Pinned tabs still close on ⌘W instead of resetting to a saved URL (P1).
+all windows (Arc keeps it per window). The Archive and the auto-archive
+threshold are local and not journaled for sync. An existing space cannot
+change profile yet (the dialog picks it at creation).
 
 ## Model rules worth knowing
 
@@ -439,6 +523,8 @@ sync. Pinned tabs still close on ⌘W instead of resetting to a saved URL (P1).
 | ⌘[ / ⌘] | Back / forward |
 | ⌘R / ⇧⌘R / ⌘. | Reload / reload ignoring cache / stop |
 | ⌘D | Pin or unpin the selected tab |
+| ⌘1 … ⌘8 / ⌘9 | Select that sidebar row / the last one |
+| ⌘Y / ⌥⌘L | History / Downloads (Chromium with `webui_daily_pages`) |
 | ⇧⌘C | Copy the page URL |
 | ⌃1 … ⌃9 | Switch to space 1–9 of the active profile |
 | ⌥⌘→ / ⌥⌘← | Next / previous space |
@@ -459,9 +545,12 @@ What exists is the local groundwork:
   declares the iCloud container `iCloud.net.rearc.sidebar`. `push` maps
   the records and discards them, and `pull` returns nothing. It never
   creates the `com.rearc.sidebar.graph.v1` zone or calls a CloudKit
-  operation. In that configuration the dot still turns green ("up to
-  date") although nothing was uploaded. Without the entitlement,
-  `makeEngine()` returns `unavailable(reason:)`.
+  operation. Since wave 19 it always reports
+  `unavailable("CloudKit upload is not implemented; sidebar changes stay on
+  this Mac")`, so the dot stays grey. `SyncOutboundPipeline` no longer sets
+  a status itself, and `SyncStatusPresentation` shows green only for
+  `idleSynced`, which only an engine with a confirmed upload may report.
+  Without the entitlement, `makeEngine()` returns `unavailable(reason:)`.
 
 Real sync (zone setup, record upload and fetch with change tokens, conflict
 merge, then the end-to-end encryption in `docs/SYNC-DESIGN.md`) is future
