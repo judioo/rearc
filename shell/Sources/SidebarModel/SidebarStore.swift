@@ -67,8 +67,10 @@ public final class SidebarStore {
     public private(set) var profiles: [Profile]
     public private(set) var activeProfileID: Profile.ID
     public private(set) var lastActiveSpaceByProfile: [Profile.ID: Space.ID]
-    public private(set) var spaces: [Space]
-    public private(set) var activeSpaceID: Space.ID
+    public internal(set) var spaces: [Space]
+    public private(set) var activeSpaceID: Space.ID {
+        didSet { followActiveSpaceInKeyWindow() }
+    }
     /// Favorites strip per profile (Arc `topAppsContainerIDs` keyed by profile).
     public private(set) var favoritesByProfile: [Profile.ID: [Tab]]
     public private(set) var topAppsContainerIDByProfile: [Profile.ID: UUID]
@@ -87,6 +89,11 @@ public final class SidebarStore {
     /// Closed and auto-archived tabs, newest last (Arc archive store).
     public internal(set) var archivedTabs: [ArchivedTabRecord] = []
     public internal(set) var autoArchiveThresholdByProfile: [Profile.ID: AutoArchiveThreshold] = [:]
+    /// Each browser window's focused space (Arc `focusedSpaceID` per window).
+    /// The key window's entry always equals `activeSpaceID`; not persisted.
+    public internal(set) var focusedSpaceByWindow: [SidebarWindowID: Space.ID] = [:]
+    /// The window whose space and selection `activeSpaceID` / `selectedItemID` are.
+    public internal(set) var keyWindowID: SidebarWindowID?
     public var autoPiPPolicy = AutoPiPPolicyState()
     /// Clock for last-active stamps and archive times (tests inject a fixed date).
     @ObservationIgnored public var now: () -> Date = { Date() }
@@ -290,13 +297,14 @@ public final class SidebarStore {
     public func addSpace(
         name: String,
         theme: SpaceTheme = .default,
-        iconName: String = "circle.fill"
+        iconName: String = "circle.fill",
+        profileID: Profile.ID? = nil
     ) -> Space {
         let space = Space(
             name: name,
             theme: theme,
             iconName: iconName,
-            profileID: activeProfileID,
+            profileID: profileID.flatMap { profile(withID: $0)?.id } ?? activeProfileID,
             sortRank: rankForNewSpace()
         )
         spaces.append(space)
@@ -781,7 +789,9 @@ public final class SidebarStore {
             url: original.url,
             sortRank: rank,
             customTitle: original.customTitle,
-            lastActiveAt: now()
+            lastActiveAt: now(),
+            savedURL: original.savedURL,
+            savedTitle: original.savedTitle
         )
         switch parent {
         case .favorites:
@@ -888,7 +898,9 @@ public final class SidebarStore {
             faviconToken: record.tab.faviconToken,
             isUnread: record.tab.isUnread,
             customTitle: record.tab.customTitle,
-            lastActiveAt: now()
+            lastActiveAt: now(),
+            savedURL: record.tab.savedURL,
+            savedTitle: record.tab.savedTitle
         )
         switch restored.kind {
         case .favorite:
@@ -1174,7 +1186,7 @@ public final class SidebarStore {
             favoritesByProfile[profile.id] = (record?.childIDs ?? []).compactMap { id in
                 snapshot.tabsByID[id].map { tab in
                     var favorite = tab
-                    favorite.kind = .favorite
+                    favorite.setKind(.favorite)
                     return favorite
                 }
             }

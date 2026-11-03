@@ -4,7 +4,9 @@ import Foundation
 /// the sidebar they live and how they behave:
 /// - `favorite`: per-profile icon row at the top of the sidebar, shared by the
 ///   profile's spaces; Cmd+W unloads it instead of deleting it.
-/// - `pinned`: per-space section (folders included), text row, persists across sessions.
+/// - `pinned`: per-space section (folders included), text row, persists across
+///   sessions. It keeps the URL it was pinned at (`savedURL`); Cmd+W unloads it
+///   back to that URL instead of deleting it.
 /// - `today`: per-space unpinned section, ephemeral browsing.
 public struct Tab: Identifiable, Hashable, Codable {
     public enum Kind: String, CaseIterable, Codable {
@@ -32,6 +34,31 @@ public struct Tab: Identifiable, Hashable, Codable {
     /// Last time the tab was selected; drives Today-tab auto-archive. Nil on
     /// tabs saved before schema 10 (the store stamps them at load).
     public var lastActiveAt: Date?
+    /// A pinned tab's original URL and title (Arc "Reset Tab to Original URL").
+    /// Set when the tab becomes pinned, cleared when it leaves Pinned.
+    public var savedURL: URL?
+    public var savedTitle: String?
+
+    /// A pinned tab that navigated away from the URL it was pinned at.
+    public var isAwayFromSavedURL: Bool {
+        guard kind == .pinned, let savedURL else { return false }
+        return savedURL.absoluteString != url.absoluteString
+    }
+
+    /// Changes the kind, keeping `savedURL` in step: becoming pinned saves the
+    /// current URL (unless one is saved), anything else forgets it.
+    public mutating func setKind(_ newKind: Kind) {
+        kind = newKind
+        if newKind == .pinned {
+            if savedURL == nil {
+                savedURL = url
+                savedTitle = title
+            }
+        } else {
+            savedURL = nil
+            savedTitle = nil
+        }
+    }
 
     /// The title the sidebar shows.
     public var displayTitle: String {
@@ -48,7 +75,9 @@ public struct Tab: Identifiable, Hashable, Codable {
         isUnread: Bool = false,
         sortRank: String = "",
         customTitle: String? = nil,
-        lastActiveAt: Date? = Date()
+        lastActiveAt: Date? = Date(),
+        savedURL: URL? = nil,
+        savedTitle: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -59,10 +88,14 @@ public struct Tab: Identifiable, Hashable, Codable {
         self.isUnread = isUnread
         self.sortRank = sortRank
         self.lastActiveAt = lastActiveAt
+        if kind == .pinned {
+            self.savedURL = savedURL ?? url
+            self.savedTitle = savedTitle ?? title
+        }
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, title, customTitle, url, faviconToken, isUnread, sortRank, lastActiveAt
+        case id, kind, title, customTitle, url, faviconToken, isUnread, sortRank, lastActiveAt, savedURL, savedTitle
     }
 
     public init(from decoder: Decoder) throws {
@@ -77,6 +110,11 @@ public struct Tab: Identifiable, Hashable, Codable {
         sortRank = try c.decodeIfPresent(String.self, forKey: .sortRank) ?? ""
         customTitle = try c.decodeIfPresent(String.self, forKey: .customTitle)
         lastActiveAt = try c.decodeIfPresent(Date.self, forKey: .lastActiveAt)
+        if kind == .pinned {
+            // Pinned tabs saved before wave 19 keep the URL they had.
+            savedURL = try c.decodeIfPresent(URL.self, forKey: .savedURL) ?? url
+            savedTitle = try c.decodeIfPresent(String.self, forKey: .savedTitle) ?? title
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -90,6 +128,8 @@ public struct Tab: Identifiable, Hashable, Codable {
         try c.encode(sortRank, forKey: .sortRank)
         try c.encodeIfPresent(customTitle, forKey: .customTitle)
         try c.encodeIfPresent(lastActiveAt, forKey: .lastActiveAt)
+        try c.encodeIfPresent(savedURL, forKey: .savedURL)
+        try c.encodeIfPresent(savedTitle, forKey: .savedTitle)
     }
 
     public static func makeFaviconToken(for url: URL) -> String {

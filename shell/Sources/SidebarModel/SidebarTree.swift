@@ -137,10 +137,10 @@ public enum SidebarTree {
     public static func settingKind(_ kind: Tab.Kind, on entry: SidebarEntry) -> SidebarEntry {
         switch entry {
         case .tab(var tab):
-            tab.kind = kind
+            tab.setKind(kind)
             return .tab(tab)
         case .split(var split):
-            split.tabs = split.tabs.map { var tab = $0; tab.kind = kind; return tab }
+            split.tabs = split.tabs.map { var tab = $0; tab.setKind(kind); return tab }
             return .split(split)
         case .easel:
             return entry

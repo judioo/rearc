@@ -20,8 +20,14 @@ public struct TabMediaMuteModel: Equatable, Sendable {
         userMutedTabIDs.removeAll()
     }
 
+    /// The row's speaker: shown while the tab plays sound, and while the user
+    /// has it muted (a muted speaker that unmutes on click).
     public func showsAudibleIndicator(for tabID: Tab.ID, media: WebMediaState) -> Bool {
-        media.isAudible
+        media.isAudible || userMutedTabIDs.contains(tabID)
+    }
+
+    public func isUserMuted(_ tabID: Tab.ID) -> Bool {
+        userMutedTabIDs.contains(tabID)
     }
 
     public static func shouldEnableMuteTab(selectedTabID: Tab.ID?, media: WebMediaState?) -> Bool {

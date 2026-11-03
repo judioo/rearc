@@ -63,7 +63,7 @@ extension SidebarStore {
         let record = archivedTabs.remove(at: index)
         let spaceID = record.spaceID.flatMap { space(withID: $0)?.id } ?? activeSpaceID
         var tab = record.tab
-        tab.kind = .today
+        tab.setKind(.today)
         tab.lastActiveAt = now()
         if self.tab(withID: tab.id) != nil {
             // Already back in the sidebar (reopened): keep one copy.
