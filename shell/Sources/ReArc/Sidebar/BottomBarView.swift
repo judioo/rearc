@@ -1,11 +1,17 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import SidebarModel
 
-/// The sidebar's bottom bar: space switcher (click cycles, right-click edits
-/// the space, chevron opens a popover listing spaces in the active profile),
-/// archive, the "+" menu, and the profile avatar.
+/// The sidebar's bottom bar: one icon per space of this window's profile
+/// (click to switch, right-click for the space menu, drag to reorder, drop a
+/// sidebar item on one to move it there; hovering a drag over an icon
+/// switches to that space), a chevron listing the spaces by name, archive,
+/// the "+" menu, and the profile avatar (SIDEBAR-SPEC §4.3, §4.7).
 struct BottomBarView: View {
     let model: BrowserViewModel
+    @Binding var draggedItemID: UUID?
+    @Environment(\.sidebarWindow) private var window
+    @State private var draggedSpaceID: Space.ID?
     @State private var showingSpaceList = false
     @State private var showingProfileList = false
     @State private var renamingProfileID: Profile.ID?
@@ -13,15 +19,26 @@ struct BottomBarView: View {
     @State private var profileActionError: String?
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button { model.cycleSpace() } label: {
-                SpaceIconView(iconName: model.store.activeSpace.iconName)
-                    .frame(width: 26, height: 26)
-                    .background(model.themeColor.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
+        let current = model.space(in: window)
+        let profile = model.profile(in: window)
+        HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    let spaces = model.store.spaces(in: current.profileID)
+                    ForEach(Array(spaces.enumerated()), id: \.element.id) { index, space in
+                        SpaceIconButton(
+                            model: model,
+                            space: space,
+                            index: index,
+                            isCurrent: space.id == current.id,
+                            draggedItemID: $draggedItemID,
+                            draggedSpaceID: $draggedSpaceID
+                        )
+                    }
+                }
             }
-            .buttonStyle(.plain)
-            .help("\(model.store.activeSpace.name) — click to switch space (⌃1…9, ⌥⌘← / ⌥⌘→)")
-            .contextMenu { SpaceContextMenu(model: model, space: model.store.activeSpace) }
+            .frame(maxWidth: 150)
+            .fixedSize(horizontal: true, vertical: false)
 
             Button(action: { showingSpaceList.toggle() }) {
                 Image(systemName: "chevron.up")
@@ -29,12 +46,12 @@ struct BottomBarView: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
-            .help("Spaces in \(model.store.activeProfile.name)")
+            .help("Spaces in \(profile.name)")
             .popover(isPresented: $showingSpaceList, arrowEdge: .top) {
                 SpaceListView(model: model, isPresented: $showingSpaceList)
             }
 
-            Spacer()
+            Spacer(minLength: 0)
 
             Circle()
                 .fill(model.syncStatusColor)
@@ -52,7 +69,7 @@ struct BottomBarView: View {
             Menu {
                 Button("New Tab") { model.newTab() }
                 Button("New Folder") { model.newFolder() }
-                Button("New Space") { model.addSpace() }
+                Button("New Space…") { model.beginSpaceCreation(profileID: current.profileID) }
                 Divider()
                 Button("New Easel") { _ = model.createEasel() }
                 Button("New Note") { _ = model.createEasel(title: "Note", note: true) }
@@ -72,10 +89,10 @@ struct BottomBarView: View {
             .help("New Tab, Folder, Space, Easel or Split View")
 
             Button(action: { showingProfileList.toggle() }) {
-                ProfileAvatarView(profile: model.store.activeProfile, diameter: 24)
+                ProfileAvatarView(profile: profile, diameter: 24)
             }
             .buttonStyle(.plain)
-            .help(model.store.activeProfile.name)
+            .help(profile.name)
             .popover(isPresented: $showingProfileList, arrowEdge: .top) {
                 ProfileListView(
                     model: model,
@@ -145,13 +162,95 @@ struct BottomBarView: View {
     }
 }
 
+/// One space in the bottom bar. A sidebar item dropped on it moves to that
+/// space (keeping its section); held over it for a moment, the drag switches
+/// to the space so it can be placed precisely. A space dropped on it takes
+/// its position.
+private struct SpaceIconButton: View {
+    let model: BrowserViewModel
+    let space: Space
+    let index: Int
+    let isCurrent: Bool
+    @Binding var draggedItemID: UUID?
+    @Binding var draggedSpaceID: Space.ID?
+    @State private var isTargeted = false
+
+    var body: some View {
+        let theme = Color(red: space.theme.red, green: space.theme.green, blue: space.theme.blue)
+        Button { model.selectSpace(space.id) } label: {
+            SpaceIconView(iconName: space.iconName, size: 12)
+                .frame(width: 24, height: 24)
+                .foregroundStyle(isCurrent ? theme : .secondary)
+                .background(
+                    isTargeted ? Color.accentColor.opacity(0.35) : theme.opacity(isCurrent ? 0.25 : 0),
+                    in: RoundedRectangle(cornerRadius: 7)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .help("\(space.name) (⌃\(index + 1)) — drop a tab here to move it to this space")
+        .contextMenu { SpaceContextMenu(model: model, space: space) }
+        .onDrag {
+            draggedSpaceID = space.id
+            return NSItemProvider(object: space.id.uuidString as NSString)
+        }
+        .onDrop(of: [.plainText], delegate: SpaceIconDropDelegate(icon: self, isTargeted: $isTargeted))
+    }
+}
+
+private struct SpaceIconDropDelegate: DropDelegate {
+    let icon: SpaceIconButton
+    @Binding var isTargeted: Bool
+    /// Spring-loading: a held drag switches to the space after this delay.
+    static let springDelay: TimeInterval = 0.7
+
+    func validateDrop(info: DropInfo) -> Bool {
+        icon.draggedItemID != nil || icon.draggedSpaceID != nil
+    }
+
+    func dropEntered(info: DropInfo) {
+        isTargeted = true
+        guard let dragged = icon.draggedItemID else { return }
+        let spaceID = icon.space.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.springDelay) { [model = icon.model] in
+            // Still hovering the same drag over this icon: open the space.
+            guard isTargeted, icon.draggedItemID == dragged, model.store.activeSpaceID != spaceID else { return }
+            model.selectSpace(spaceID)
+        }
+    }
+
+    func dropExited(info: DropInfo) { isTargeted = false }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: validateDrop(info: info) ? .move : .forbidden)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        isTargeted = false
+        defer {
+            icon.draggedItemID = nil
+            icon.draggedSpaceID = nil
+        }
+        if let space = icon.draggedSpaceID {
+            guard space != icon.space.id else { return false }
+            withAnimation(.easeInOut(duration: 0.15)) { icon.model.moveSpace(space, toIndex: icon.index) }
+            return true
+        }
+        guard let item = icon.draggedItemID else { return false }
+        withAnimation(.easeInOut(duration: 0.15)) { icon.model.moveEntry(item, toSpace: icon.space.id) }
+        return true
+    }
+}
+
 private struct SpaceListView: View {
     let model: BrowserViewModel
     @Binding var isPresented: Bool
+    @Environment(\.sidebarWindow) private var window
 
     var body: some View {
+        let current = model.space(in: window)
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(model.store.spacesInActiveProfile) { space in
+            ForEach(model.store.spaces(in: current.profileID)) { space in
                 Button {
                     model.selectSpace(space.id)
                     isPresented = false
@@ -162,7 +261,7 @@ private struct SpaceListView: View {
                         Text(space.name)
                             .lineLimit(1)
                         Spacer()
-                        if space.id == model.store.activeSpaceID {
+                        if space.id == current.id {
                             Image(systemName: "checkmark")
                                 .font(.system(size: 10, weight: .bold))
                         }
@@ -176,10 +275,10 @@ private struct SpaceListView: View {
             }
             Divider().padding(.vertical, 4)
             Button {
-                model.addSpace()
                 isPresented = false
+                model.beginSpaceCreation(profileID: current.profileID)
             } label: {
-                Label("New Space", systemImage: "plus")
+                Label("New Space…", systemImage: "plus")
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                     .frame(maxWidth: .infinity, alignment: .leading)

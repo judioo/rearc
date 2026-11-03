@@ -429,6 +429,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             if let tab = model.store.selectedTab { model.unsplitTabIfInSplit(tab.id) }
         })
         tabs.addItem(.separator())
+        target.add(ShellMenus.tabPositions(model), to: tabs)
+        tabs.addItem(.separator())
         target.add(ShellMenus.sidebarItems(model), to: tabs)
         main.addSubmenu(tabs, title: "Tabs")
 

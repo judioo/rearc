@@ -132,11 +132,86 @@ extension BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
+    /// Move to Space (menu, command bar, or a drop on a space icon): the item
+    /// keeps its section, landing at the end of Pinned or the top of Today.
     func moveTab(_ id: Tab.ID, toSpace spaceID: Space.ID) {
-        guard store.moveTab(id, toSpace: spaceID) else { return }
+        moveEntry(id, toSpace: spaceID)
+    }
+
+    func moveEntry(_ id: UUID, toSpace spaceID: Space.ID) {
+        guard store.moveEntry(id, toSpace: spaceID) else { return }
         // A space in another profile means another engine profile: drop the old engine.
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
+    }
+
+    // MARK: - Pinned tabs (saved URL)
+
+    /// Reset Tab to Original URL; a live engine goes back right away.
+    func resetTabToSavedURL(_ tabID: Tab.ID? = nil) {
+        guard let id = tabID ?? store.selectedTabID, store.resetTabToSavedURL(id) else { return }
+        reloadReset([id])
+    }
+
+    /// Reset all tabs in this Space.
+    func resetPinnedTabs() {
+        reloadReset(store.resetPinnedTabs())
+    }
+
+    func updateSavedURLToCurrent(_ tabID: Tab.ID? = nil) {
+        guard let id = tabID ?? store.selectedTabID else { return }
+        store.updateSavedURLToCurrent(id)
+    }
+
+    private func reloadReset(_ ids: [Tab.ID]) {
+        for id in ids {
+            guard let tab = store.tab(withID: id),
+                  let engine = engineHost.engine(forTabID: id, profileID: profileID(for: tab)) else { continue }
+            engine.load(tab.url)
+        }
+        loadSelectedIfNeeded()
+    }
+
+    // MARK: - Cmd+1…9
+
+    func selectItem(atPosition number: Int) {
+        guard store.selectItem(atPosition: number) != nil else { return }
+        loadSelectedIfNeeded()
+    }
+
+    // MARK: - Clear Today
+
+    /// Clear Unpinned Tabs: archives the active space's Today tabs; Undo puts them back.
+    func clearTodayTabs() {
+        let cleared = store.clearTodayTabs()
+        guard !cleared.isEmpty else { return }
+        cleared.forEach(releaseEngine(for:))
+        lastClearedTabIDs = cleared
+        loadSelectedIfNeeded()
+    }
+
+    func undoClearTodayTabs() {
+        let ids = lastClearedTabIDs
+        lastClearedTabIDs = []
+        guard !store.restoreClearedTabs(ids).isEmpty else { return }
+        loadSelectedIfNeeded()
+    }
+
+    // MARK: - Mute
+
+    /// The speaker on a row: mutes an audible tab, unmutes a muted one.
+    func toggleMute(_ tabID: Tab.ID) {
+        guard let tab = store.tab(withID: tabID) else { return }
+        if tabMuteModel.isUserMuted(tabID) {
+            engineHost.setMuted(false, forTabID: tabID, profileID: profileID(for: tab))
+            tabMuteModel.markUserUnmuted(tabID)
+        } else {
+            muteTab(tabID)
+        }
+    }
+
+    func isUserMuted(_ tabID: Tab.ID) -> Bool {
+        tabMuteModel.isUserMuted(tabID)
     }
 
     // MARK: - Drag and drop
@@ -260,6 +335,18 @@ extension BrowserViewModel {
     }
 
     // MARK: - Spaces
+
+    /// Moves a space within its profile (switcher drag, Spaces menu).
+    func moveSpace(_ id: Space.ID, toIndex index: Int) {
+        store.moveSpace(id, toIndex: index)
+    }
+
+    /// Move Space Left / Right in the Spaces menu.
+    func moveActiveSpace(by offset: Int) {
+        let peers = store.spacesInActiveProfile
+        guard let index = peers.firstIndex(where: { $0.id == store.activeSpaceID }) else { return }
+        store.moveSpace(store.activeSpaceID, toIndex: index + offset)
+    }
 
     /// Deletes a space and its tabs, then drops their engines.
     func deleteSpace(_ id: Space.ID) {

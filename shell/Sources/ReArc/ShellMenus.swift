@@ -85,6 +85,16 @@ enum ShellMenus {
         ]]
     }
 
+    /// Tabs menu: Cmd+1…8 select that sidebar row (favorites, pinned, Today),
+    /// Cmd+9 the last one (Arc / Chrome "Switch to Nth Tab").
+    static func tabPositions(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [(1 ... 9).map { number in
+            ShellMenuItem(number == 9 ? "Last Tab" : "Tab \(number)", Character("\(number)")) {
+                model.selectItem(atPosition: number)
+            }
+        }]
+    }
+
     /// Spaces menu: Ctrl+1…9, next/previous, and space management.
     static func spaces(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [
@@ -96,9 +106,11 @@ enum ShellMenus {
                 ShellMenuItem("Space \(number)", Character("\(number)"), .control) { model.selectSpace(atIndex: number - 1) }
             },
             [
-                ShellMenuItem("New Space") { model.addSpace() },
+                ShellMenuItem("New Space…") { model.beginSpaceCreation() },
                 ShellMenuItem("Rename Space…") { model.beginRename(.space(model.store.activeSpaceID)) },
                 ShellMenuItem("Edit Theme and Icon…") { model.spaceEditorID = model.store.activeSpaceID },
+                ShellMenuItem("Move Space Left") { model.moveActiveSpace(by: -1) },
+                ShellMenuItem("Move Space Right") { model.moveActiveSpace(by: 1) },
                 ShellMenuItem("Delete Space…") {
                     guard model.canDeleteSpaces else { return }
                     model.pendingDeletion = .space(model.store.activeSpaceID)
@@ -119,6 +131,11 @@ enum ShellMenus {
                 ShellMenuItem("Duplicate Tab") { model.duplicateTab() },
                 ShellMenuItem("Copy URL", "c", [.command, .shift]) { model.copyURL() },
                 ShellMenuItem("Archive Tab") { model.archiveTab() },
+            ],
+            [
+                ShellMenuItem("Reset Tab to Original URL") { model.resetTabToSavedURL() },
+                ShellMenuItem("Reset All Tabs in This Space") { model.resetPinnedTabs() },
+                ShellMenuItem("Clear Unpinned Tabs") { model.clearTodayTabs() },
             ],
             [
                 ShellMenuItem("New Folder") { model.newFolder() },

@@ -7,9 +7,11 @@ import SidebarModel
 /// (COMMAND-BAR §2 placeholder). State follows the selected tab's engine.
 struct SidebarToolbarView: View {
     let model: BrowserViewModel
+    @Environment(\.sidebarWindow) private var window
 
     var body: some View {
-        let engine = model.focusedEngine
+        let engine = model.focusedEngine(in: window)
+        let profile = model.profile(in: window)
         VStack(spacing: 8) {
             HStack(spacing: 2) {
                 Spacer(minLength: 72) // traffic lights
@@ -26,14 +28,14 @@ struct SidebarToolbarView: View {
                         model.reload(ignoringCache: NSEvent.modifierFlags.contains(.shift))
                     }
                 }
-                ProfileAvatarView(profile: model.store.activeProfile, diameter: 18)
+                ProfileAvatarView(profile: profile, diameter: 18)
                     .opacity(0.85)
                     .padding(.leading, 4)
-                    .help(model.store.activeProfile.name)
+                    .help(profile.name)
             }
             .frame(height: 22)
 
-            SidebarURLField(model: model, engine: engine)
+            SidebarURLField(model: model, engine: engine, tab: model.selectedTab(in: window))
         }
         .padding(.horizontal, 10)
         .padding(.top, 7)
@@ -57,10 +59,11 @@ struct SidebarToolbarView: View {
 struct SidebarURLField: View {
     let model: BrowserViewModel
     let engine: (any WebEngine)?
+    let tab: Tab?
     @State private var isHovering = false
 
     var body: some View {
-        let url = engine?.currentURL ?? model.store.selectedTab?.url
+        let url = engine?.currentURL ?? tab?.url
         let host = url.flatMap(Self.displayHost)
         HStack(spacing: 6) {
             securityIcon(engine?.securityState ?? .unknown, hasHost: host != nil)
@@ -79,7 +82,7 @@ struct SidebarURLField: View {
         .onHover { isHovering = $0 }
         .contextMenu {
             Button("Copy URL") { model.copyURL() }
-                .disabled(model.store.selectedTabID == nil)
+                .disabled(tab == nil)
         }
         .help(url?.absoluteString ?? "Open the command bar (⌘L)")
     }

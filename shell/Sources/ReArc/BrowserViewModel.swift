@@ -38,12 +38,18 @@ final class BrowserViewModel {
     private var autoPiPTriggeredThisOcclusion: Set<Tab.ID> = []
 
     var isSidebarVisible = true
+    /// Points; dragged from the sidebar's trailing edge, saved when the drag ends.
+    var sidebarWidth: CGFloat = SidebarWidth.load()
     /// The hidden sidebar shown floating while the pointer is at the window's
     /// leading edge (Arc `SidebarHovering` / floating sidebar).
     var isSidebarPeeking = false
     var isArchivePresented = false
     /// Space being edited in the Edit Space sheet (name, theme, icon).
     var spaceEditorID: Space.ID?
+    /// The New Space dialog's fields while it is open.
+    var spaceCreationDraft: SpaceDraft?
+    /// Today tabs archived by the last Clear, for Undo.
+    var lastClearedTabIDs: [Tab.ID] = []
     var pendingRename: SidebarRenameRequest?
     var pendingRenameText = ""
     var pendingDeletion: SidebarDeletionRequest?
@@ -104,11 +110,6 @@ final class BrowserViewModel {
     var isCapturePreviewPresented = false
     var lastCapturePreview: CaptureRecord?
     var captureErrorMessage: String?
-
-    private static let spaceIconCycle = [
-        "house.fill", "briefcase.fill", "star.fill", "flame.fill",
-        "leaf.fill", "moon.fill", "globe", "music.note",
-    ]
 
     init(
         store: SidebarStore? = nil,
@@ -247,13 +248,29 @@ final class BrowserViewModel {
     }
 
     /// Cmd+W / hover close. A favorite is unloaded (engine dropped, kept in
-    /// the strip) as in Arc; anything else is closed and archived.
+    /// the strip) and a pinned tab is unloaded back to its saved URL, as in
+    /// Arc; anything else is closed and archived.
     func closeTab(_ id: Tab.ID) {
         if store.kind(of: id) == .favorite {
             unloadFavorite(id)
             return
         }
+        if store.kind(of: id) == .pinned, store.splitContaining(tabID: id) == nil {
+            unloadPinnedTab(id)
+            return
+        }
+        deleteTab(id)
+    }
+
+    /// Removes a tab from the sidebar (to the archive), pinned tabs included.
+    func deleteTab(_ id: Tab.ID) {
         store.closeTab(id)
+        releaseEngine(for: id)
+        loadSelectedIfNeeded()
+    }
+
+    func unloadPinnedTab(_ id: Tab.ID) {
+        guard store.unloadPinnedTab(id) else { return }
         releaseEngine(for: id)
         loadSelectedIfNeeded()
     }
@@ -374,13 +391,25 @@ final class BrowserViewModel {
         return profile
     }
 
+    /// Creates the suggested next space directly (no dialog).
     @discardableResult
     func addSpace() -> Space {
-        let index = store.spacesInActiveProfile.count
-        let theme = SpaceTheme.presets[index % SpaceTheme.presets.count]
-        let icon = BrowserViewModel.spaceIconCycle[index % BrowserViewModel.spaceIconCycle.count]
-        let space = store.addSpace(name: "Space \(index + 1)", theme: theme, iconName: icon)
-        store.selectSpace(space.id)
+        let space = store.createSpace(from: SpaceDraft.suggested(in: store)) ?? store.activeSpace
+        loadSelectedIfNeeded()
+        return space
+    }
+
+    /// New Space: opens the creation dialog (name, icon, theme, profile).
+    func beginSpaceCreation(profileID: Profile.ID? = nil) {
+        spaceCreationDraft = SpaceDraft.suggested(in: store, profileID: profileID)
+    }
+
+    @discardableResult
+    func createSpace(from draft: SpaceDraft) -> Space? {
+        guard let space = store.createSpace(from: draft) else { return nil }
+        spaceCreationDraft = nil
+        reconcileEngineOwnership()
+        loadSelectedIfNeeded()
         return space
     }
 
@@ -1010,7 +1039,7 @@ final class BrowserViewModel {
             pendingProfileRenameID = store.activeProfileID
             pendingProfileRenameName = store.activeProfile.name
         case .createSpace:
-            _ = addSpace()
+            beginSpaceCreation()
         case .toggleSidebar:
             toggleSidebar()
         case .addSplitRight:
@@ -1151,6 +1180,14 @@ final class BrowserViewModel {
             loadSelectedIfNeeded()
         case .viewArchive:
             isArchivePresented = true
+        case .resetTabToOriginalURL:
+            resetTabToSavedURL()
+        case .resetPinnedTabsInSpace:
+            resetPinnedTabs()
+        case .updatePinnedURL:
+            updateSavedURLToCurrent()
+        case .clearUnpinnedTabs:
+            clearTodayTabs()
         }
         return nil
     }

@@ -81,6 +81,8 @@ struct ReArcApp: App {
                     }
                 }
                 Divider()
+                ShellMenuButtons(groups: ShellMenus.tabPositions(model))
+                Divider()
                 ShellMenuButtons(groups: ShellMenus.sidebarItems(model))
             }
             CommandMenu("Spaces") {

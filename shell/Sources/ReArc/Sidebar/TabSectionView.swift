@@ -44,6 +44,10 @@ struct TabSectionView: View {
     let model: BrowserViewModel
     @Binding var draggedItemID: UUID?
     @Binding var dropState: SidebarDropState?
+    @Environment(\.sidebarWindow) private var window
+
+    /// This window's selection in this space.
+    private var selectedID: UUID? { model.store.selectedItemID(inSpace: spaceID) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -56,7 +60,7 @@ struct TabSectionView: View {
             let rows = SidebarRowItem.rows(
                 entries,
                 expanded: model.store.expandedFolderIDs,
-                selected: model.store.selectedItemID
+                selected: selectedID
             )
             ForEach(rows) { row in
                 SidebarDropRow(
@@ -92,13 +96,15 @@ struct TabSectionView: View {
             TabRowView(
                 tab: tab,
                 favicon: model.favicon(for: tab),
-                isSelected: model.store.selectedItemID == tab.id,
+                isSelected: selectedID == tab.id,
                 showsAudibleIndicator: model.showsAudibleIndicator(for: tab.id),
+                isMuted: model.isUserMuted(tab.id),
                 isDropTarget: isDropInto(tab.id),
                 onSelect: { model.selectTab(tab.id) },
                 onClose: { model.closeTab(tab.id) },
-                onMute: { model.muteTab(tab.id) },
-                onCloseOption: { model.unsplitTabIfInSplit(tab.id) }
+                onMute: { model.toggleMute(tab.id) },
+                onCloseOption: { model.unsplitTabIfInSplit(tab.id) },
+                onReset: tab.isAwayFromSavedURL ? { model.resetTabToSavedURL(tab.id) } : nil
             ) {
                 TabContextMenu(model: model, tab: tab)
             }
@@ -115,7 +121,7 @@ struct TabSectionView: View {
             EaselRowView(
                 ref: ref,
                 title: model.easelTitle(for: ref),
-                isSelected: model.store.selectedItemID == ref.id,
+                isSelected: selectedID == ref.id,
                 onSelect: { model.selectEasel(ref.id) },
                 onClose: { model.deleteEaselSidebarItem(ref.id) },
                 onRename: { model.renameEasel(documentID: ref.easelDocumentID, title: $0) }
@@ -124,12 +130,12 @@ struct TabSectionView: View {
         case .split(let split):
             SplitRowView(
                 split: split,
-                isSelected: model.store.selectedItemID == split.id,
+                isSelected: selectedID == split.id,
                 focusedTabID: split.focusTabID,
-                themeColor: model.themeColor,
+                themeColor: model.themeColor(in: window),
                 favicon: { model.favicon(for: $0) },
                 showsAudibleIndicator: { model.showsAudibleIndicator(for: $0) },
-                onMutePane: { model.muteTab($0) },
+                onMutePane: { model.toggleMute($0) },
                 onSelectSplit: { model.selectSplit(split.id) },
                 onSelectPane: { model.selectSplit(split.id, focusTabID: $0) },
                 onCloseSplit: { model.closeSplit(split.id) },

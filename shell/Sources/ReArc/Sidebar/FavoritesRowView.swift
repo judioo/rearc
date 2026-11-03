@@ -10,16 +10,20 @@ struct FavoritesRowView: View {
     let model: BrowserViewModel
     @Binding var draggedTabID: UUID?
     @Binding var dropState: SidebarDropState?
+    @Environment(\.sidebarWindow) private var window
 
     var body: some View {
-        let favorites = model.store.favorites
+        // The favorites of this window's space's profile.
+        let profileID = model.space(in: window).profileID
+        let favorites = model.store.favorites(in: profileID)
+        let selectedID = model.selectedItemID(in: window)
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(favorites) { tab in
                     FavoriteIconView(
                         tab: tab,
                         favicon: model.favicon(for: tab),
-                        isSelected: tab.id == model.store.selectedItemID,
+                        isSelected: tab.id == selectedID,
                         insertion: insertion(for: tab.id)
                     )
                     .onTapGesture { model.selectTab(tab.id) }
@@ -50,7 +54,7 @@ struct FavoritesRowView: View {
                         )
                 }
                 SectionEndDropZone(
-                    destination: .favorites(nil),
+                    destination: .favorites(profileID),
                     placeholder: nil,
                     model: model,
                     draggedItemID: $draggedTabID,

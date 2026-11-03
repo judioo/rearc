@@ -10,6 +10,8 @@ import SidebarModel
 struct BrowserView: View {
     @Bindable var model: BrowserViewModel
     @Environment(\.openWindow) private var openWindow
+    /// This window's identity for its own focused space (Arc `focusedSpaceID`).
+    @State private var windowID = SidebarWindowID()
 
     var body: some View {
         ZStack {
@@ -22,13 +24,13 @@ struct BrowserView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .topTrailing) { zoomBadge }
-            // Subtle space-theme window tint.
-            .background(model.themeColor.opacity(0.10))
+            // Subtle space-theme window tint (this window's space).
+            .background(model.themeColor(in: windowID).opacity(0.10))
 
             if !model.isSidebarVisible, model.isSidebarPeeking {
                 HStack(spacing: 0) {
                     SidebarView(model: model)
-                        .background(model.themeColor.opacity(0.10))
+                        .background(model.themeColor(in: windowID).opacity(0.10))
                         .background(.regularMaterial)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                         .shadow(color: .black.opacity(0.25), radius: 12, x: 2)
@@ -87,7 +89,8 @@ struct BrowserView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.97)))
             }
         }
-        .tint(model.themeColor)
+        .tint(model.themeColor(in: windowID))
+        .environment(\.sidebarWindow, windowID)
         .animation(.easeInOut(duration: 0.15), value: model.isCommandBarPresented)
         .frame(minWidth: 760, minHeight: 520)
         .background(
@@ -95,9 +98,17 @@ struct BrowserView: View {
                 .frame(width: 0, height: 0)
         )
         .background(
+            WindowKeyObserver(
+                onBecameKey: { model.windowBecameKey(windowID) },
+                onClose: { model.store.unregisterWindow(windowID) }
+            )
+            .frame(width: 0, height: 0)
+        )
+        .background(
             SidebarEdgeHoverMonitor(
                 isEnabled: !model.isSidebarVisible,
                 isPeeking: model.isSidebarPeeking,
+                dismissWidth: model.sidebarWidth + 36,
                 onChange: { model.setSidebarPeeking($0) }
             )
             .frame(width: 0, height: 0)
@@ -120,6 +131,7 @@ struct BrowserView: View {
             Text(model.captureErrorMessage ?? "")
         }
         .onAppear {
+            model.store.registerWindow(windowID)
             stripCloseWindowShortcut()
             model.restoreLittleArcWindowsIfNeeded()
         }
@@ -151,6 +163,14 @@ struct BrowserView: View {
         )) {
             if let id = model.spaceEditorID {
                 SpaceEditorView(model: model, spaceID: id)
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { model.spaceCreationDraft != nil && isKeyWindowSheetOwner },
+            set: { if !$0 { model.spaceCreationDraft = nil } }
+        )) {
+            if let draft = model.spaceCreationDraft {
+                SpaceCreationView(model: model, draft: draft)
             }
         }
         .alert(model.pendingRename?.alertTitle ?? "Rename", isPresented: Binding(
@@ -189,11 +209,16 @@ struct BrowserView: View {
         }
     }
 
+    /// Only the key window presents the shared New Space sheet.
+    private var isKeyWindowSheetOwner: Bool {
+        model.store.keyWindowID == nil || model.store.keyWindowID == windowID
+    }
+
     private var contentTitle: String {
-        if let ref = model.store.selectedEaselRef {
+        if let ref = model.selectedEaselRef(in: windowID) {
             return model.easelTitle(for: ref)
         }
-        return model.store.selectedTab?.displayTitle ?? "ReArc"
+        return model.selectedTab(in: windowID)?.displayTitle ?? "ReArc"
     }
 
     /// Removes ⌘W from File > Close Window so the Tabs menu's Close Tab
@@ -215,7 +240,7 @@ struct BrowserView: View {
     /// Shown while the focused tab is not at 100%; clicking resets it (Cmd+0).
     @ViewBuilder
     private var zoomBadge: some View {
-        if let engine = model.focusedEngine, !PageZoom.isDefault(engine.zoomFactor) {
+        if let engine = model.focusedEngine(in: windowID), !PageZoom.isDefault(engine.zoomFactor) {
             Button("\(PageZoom.percent(engine.zoomFactor))%") { model.zoom(.reset) }
                 .buttonStyle(.plain)
                 .font(.caption.monospacedDigit().weight(.semibold))
@@ -250,21 +275,21 @@ struct BrowserView: View {
 
     @ViewBuilder
     private var contentArea: some View {
-        if let ref = model.store.selectedEaselRef,
+        if let ref = model.selectedEaselRef(in: windowID),
            let document = model.easelDocument(forSidebarItem: ref.id) {
             EaselEditorView(model: model, sidebarItemID: ref.id, document: document)
                 .id(document.id)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let split = model.activeSplit {
-            SplitContentView(split: split, model: model, accent: model.themeColor)
+        } else if let split = model.activeSplit(in: windowID) {
+            SplitContentView(split: split, model: model, accent: model.themeColor(in: windowID))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let tab = model.store.selectedTab {
+        } else if let tab = model.selectedTab(in: windowID) {
             model.engineHost.engine(for: tab, profileID: model.profileID(for: tab))
                 .makeView()
                 .id(tab.id)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            EmptyStateView(theme: model.themeColor)
+            EmptyStateView(theme: model.themeColor(in: windowID))
         }
     }
 }
@@ -296,10 +321,11 @@ private struct EmptyStateView: View {
 struct SidebarEdgeHoverMonitor: NSViewRepresentable {
     var isEnabled: Bool
     var isPeeking: Bool
+    /// Past this x the floating sidebar hides again (its width plus a margin).
+    var dismissWidth: CGFloat
     var onChange: (Bool) -> Void
 
     static let revealWidth: CGFloat = 4
-    static let dismissWidth: CGFloat = 244 + 36
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
@@ -337,7 +363,7 @@ struct SidebarEdgeHoverMonitor: NSViewRepresentable {
             let inside = y >= 0 && y <= window.frame.height
             if !parent.isPeeking, inside, x >= 0, x <= SidebarEdgeHoverMonitor.revealWidth {
                 parent.onChange(true)
-            } else if parent.isPeeking, x > SidebarEdgeHoverMonitor.dismissWidth || !inside {
+            } else if parent.isPeeking, x > parent.dismissWidth || !inside {
                 parent.onChange(false)
             }
         }

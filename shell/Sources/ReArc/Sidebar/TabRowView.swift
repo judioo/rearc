@@ -9,11 +9,14 @@ struct TabRowView<Menu: View>: View {
     let favicon: NSImage?
     let isSelected: Bool
     let showsAudibleIndicator: Bool
+    var isMuted = false
     var isDropTarget = false
     let onSelect: () -> Void
     let onClose: () -> Void
     var onMute: (() -> Void)? = nil
     var onCloseOption: (() -> Void)? = nil
+    /// Set for a pinned tab away from its saved URL: shows "Back to pinned URL".
+    var onReset: (() -> Void)? = nil
     @ViewBuilder let menu: () -> Menu
 
     @State private var isHovering = false
@@ -40,12 +43,23 @@ struct TabRowView<Menu: View>: View {
                 Button {
                     onMute?()
                 } label: {
-                    Image(systemName: "speaker.wave.2.fill")
+                    Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help("Mute tab")
+                .help(isMuted ? "Unmute tab" : "Mute tab")
+            }
+
+            if isHovering, let onReset {
+                Button(action: onReset) {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 16, height: 16)
+                }
+                .buttonStyle(.plain)
+                .help("Back to the pinned URL (\(tab.savedURL?.host() ?? "saved page"))")
             }
 
             if isHovering {
@@ -62,7 +76,9 @@ struct TabRowView<Menu: View>: View {
                         .frame(width: 16, height: 16)
                 }
                 .buttonStyle(.plain)
-                .help("Close Tab (⌥-click to unsplit when in a split)")
+                .help(tab.kind == .pinned
+                    ? "Unload Tab: it stays pinned and goes back to its pinned URL (⌘W)"
+                    : "Close Tab (⌥-click to unsplit when in a split)")
             }
         }
         .padding(.horizontal, 8)

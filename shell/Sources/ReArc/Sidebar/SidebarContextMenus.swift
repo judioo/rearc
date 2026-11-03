@@ -21,6 +21,13 @@ struct TabContextMenu: View {
             Button(kind == .pinned ? "Unpin Tab" : "Pin Tab") { model.togglePin(tab.id) }
             Button("Add to Favorites") { model.addToFavorites(tab.id) }
         }
+        if kind == .pinned, !inSplit {
+            Divider()
+            Button("Reset to Pinned URL") { model.resetTabToSavedURL(tab.id) }
+                .disabled(!tab.isAwayFromSavedURL)
+            Button("Make This the Pinned URL") { model.updateSavedURLToCurrent(tab.id) }
+                .disabled(!tab.isAwayFromSavedURL)
+        }
         Divider()
         Button("Rename…") { model.beginRename(.tab(tab.id)) }
         Button("Duplicate") { model.duplicateTab(tab.id) }
@@ -43,7 +50,8 @@ struct TabContextMenu: View {
                     }
                 }
             }
-            let otherSpaces = store.spacesInActiveProfile.filter { $0.id != store.spaceContaining(tabID: tab.id) }
+            let owner = store.spaceContaining(tabID: tab.id).flatMap { store.space(withID: $0)?.profileID }
+            let otherSpaces = store.spaces(in: owner ?? store.activeProfileID).filter { $0.id != store.spaceContaining(tabID: tab.id) }
             if !otherSpaces.isEmpty {
                 Menu("Move to Space") {
                     ForEach(otherSpaces) { space in
@@ -63,7 +71,12 @@ struct TabContextMenu: View {
         if isSpaceTab {
             Button("Archive Tab") { model.archiveTab(tab.id) }
         }
-        Button(kind == .favorite ? "Unload Tab" : "Close Tab") { model.closeTab(tab.id) }
+        if kind == .pinned, !inSplit {
+            Button("Unload Tab") { model.closeTab(tab.id) }
+            Button("Delete Tab") { model.deleteTab(tab.id) }
+        } else {
+            Button(kind == .favorite ? "Unload Tab" : "Close Tab") { model.closeTab(tab.id) }
+        }
     }
 }
 
@@ -130,6 +143,16 @@ struct SpaceContextMenu: View {
     var body: some View {
         Button("Rename Space…") { model.beginRename(.space(space.id)) }
         Button("Edit Theme and Icon…") { model.spaceEditorID = space.id }
+        Divider()
+        Button("New Space…") { model.beginSpaceCreation(profileID: space.profileID) }
+        Button("Reset All Tabs in This Space") {
+            if model.store.activeSpaceID != space.id { model.selectSpace(space.id) }
+            model.resetPinnedTabs()
+        }
+        Button("Clear Unpinned Tabs") {
+            if model.store.activeSpaceID != space.id { model.selectSpace(space.id) }
+            model.clearTodayTabs()
+        }
         Divider()
         Button("New Folder") {
             if model.store.activeSpaceID != space.id { model.selectSpace(space.id) }

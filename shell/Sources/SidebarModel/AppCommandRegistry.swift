@@ -59,6 +59,10 @@ public enum AppCommandAction: Equatable, Hashable {
     case duplicateTab
     case archiveTab
     case viewArchive
+    case resetTabToOriginalURL
+    case resetPinnedTabsInSpace
+    case updatePinnedURL
+    case clearUnpinnedTabs
 }
 
 /// Read-only command-bar context for enablement and dynamic commands.
@@ -212,6 +216,15 @@ public struct AppCommand: Equatable, Identifiable {
             return store.kind(of: id) == .pinned || store.kind(of: id) == .today
         case .removeFromFavorites:
             return store.selectedTabID.flatMap { store.kind(of: $0) } == .favorite
+        case .resetTabToOriginalURL, .updatePinnedURL:
+            return store.selectedTab?.isAwayFromSavedURL == true
+        case .resetPinnedTabsInSpace:
+            return SidebarTree.tabs(store.content(for: store.activeSpaceID).pinned).contains(where: \.isAwayFromSavedURL)
+        case .clearUnpinnedTabs:
+            return store.content(for: store.activeSpaceID).todayLeaves.contains {
+                if case .tab = $0 { return true }
+                return false
+            }
         }
     }
 }
@@ -623,6 +636,34 @@ public enum AppCommandRegistry {
             keywords: ["archive", "exit", "unload", "close"],
             minQueryLength: 2,
             action: .archiveTab
+        ),
+        AppCommand(
+            id: "reset-tab",
+            title: "Reset Tab to Original URL",
+            keywords: ["reset", "pinned", "original", "url", "back"],
+            minQueryLength: 2,
+            action: .resetTabToOriginalURL
+        ),
+        AppCommand(
+            id: "reset-pinned-tabs",
+            title: "Reset All Tabs in This Space",
+            keywords: ["reset", "pinned", "all", "space", "original"],
+            minQueryLength: 3,
+            action: .resetPinnedTabsInSpace
+        ),
+        AppCommand(
+            id: "update-pinned-url",
+            title: "Make This the Pinned URL",
+            keywords: ["pinned", "url", "save", "update", "change"],
+            minQueryLength: 3,
+            action: .updatePinnedURL
+        ),
+        AppCommand(
+            id: "clear-unpinned-tabs",
+            title: "Clear Unpinned Tabs",
+            keywords: ["clear", "tidy", "today", "unpinned", "archive", "clean"],
+            minQueryLength: 2,
+            action: .clearUnpinnedTabs
         ),
         AppCommand(
             id: "view-archive",

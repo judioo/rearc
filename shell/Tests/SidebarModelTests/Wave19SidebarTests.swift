@@ -357,3 +357,21 @@ final class TabMuteToggleTests: XCTestCase {
         XCTAssertFalse(model.showsAudibleIndicator(for: id, media: .silent))
     }
 }
+
+/// Wave 19: the resizable sidebar width.
+final class SidebarWidthTests: XCTestCase {
+    func testWidthIsClampedAndRemembered() throws {
+        XCTAssertEqual(SidebarWidth.clamped(100), SidebarWidth.minimum)
+        XCTAssertEqual(SidebarWidth.clamped(9000), SidebarWidth.maximum)
+        XCTAssertEqual(SidebarWidth.clamped(.nan), SidebarWidth.standard)
+        XCTAssertEqual(SidebarWidth.clamped(300), 300)
+        let suite = "rearc-width-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(SidebarWidth.load(from: defaults), SidebarWidth.standard)
+        SidebarWidth.save(310, to: defaults)
+        XCTAssertEqual(SidebarWidth.load(from: defaults), 310)
+        SidebarWidth.save(5000, to: defaults)
+        XCTAssertEqual(SidebarWidth.load(from: defaults), SidebarWidth.maximum)
+    }
+}
