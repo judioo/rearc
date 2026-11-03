@@ -818,6 +818,8 @@ final class ChromiumSelfTest {
         let store = SidebarStore()
         let tabA = store.addTab(kind: .today, title: "Shell A", url: URL(string: "\(base)/a")!)
         store.selectTab(tabA.id)
+        // As ChromiumShell.makeModel does: the owner is named before the model loads tab A.
+        runtime.legacyDefaultOwner = store.profiles.first?.id
         let model = BrowserViewModel(
             store: store,
             persistence: SidebarFilePersistence(fileURL: sidebarFile),

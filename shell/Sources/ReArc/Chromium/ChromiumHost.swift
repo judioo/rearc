@@ -42,7 +42,7 @@ enum ChromiumHost {
                 exit(test.exitCode(runResult: code))
             }
             let shell = ChromiumShell(runtime: runtime)
-            runtime.onReady = { shell.start() }
+            runtime.onReady = { shell.start(model: ChromiumShell.makeModel(runtime: runtime)) }
             exit(runtime.run(arguments: arguments, keychain: keychain))
         }
         ReArcMain.unavailableChromium(options, reason: reason)
@@ -113,14 +113,24 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         self.autosavesFrames = autosavesFrames
     }
 
+    /// Loads the sidebar and names its first profile the owner of the startup
+    /// Default directory (ABI 1.13; decided once, then persisted) before any
+    /// tab exists: creating the model loads the selected tab, which opens its
+    /// engine profile.
     @MainActor
-    func start(model: BrowserViewModel = BrowserViewModel()) {
+    static func makeModel(runtime: ChromiumRuntime) -> BrowserViewModel {
+        let persistence = SidebarFilePersistence()
+        let store = SidebarFilePersistence.loadStore(persistence: persistence)
+        runtime.legacyDefaultOwner = store.profiles.first?.id
+        return BrowserViewModel(store: store, persistence: persistence)
+    }
+
+    /// `model` must come from `makeModel` (or name the Default owner itself first).
+    @MainActor
+    func start(model: BrowserViewModel) {
         NSApp.setActivationPolicy(.regular)
         self.model = model
         model.windowPresenter = self
-        // The first profile may open the startup Default directory in place
-        // (ABI 1.13), before any of its tabs exist; decided once and persisted.
-        runtime.legacyDefaultOwner = model.store.profiles.first?.id
         model.onProfileDeleted = { [weak self, runtime] id in
             // EngineHost already dropped the profile's engines. Its private windows
             // close first (their off-the-record children must go before the parent).
