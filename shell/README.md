@@ -478,6 +478,9 @@ Production needs:
   then Undo Clear) and ends with a "+ New Tab" row.
 - The row speaker **toggles mute**; a muted tab shows a muted speaker.
 - The sidebar **resizes** from its trailing edge (200–420 pt, remembered).
+- **Splits.** Split with Current Tab (row context menu) joins that tab to
+  the selected one, in its split when there is room. Add Split View inside
+  a split adds a blank pane, up to four.
 
 Limits: splits and easels cannot go into folders (folders hold tabs and
 folders), and folders live only in Pinned. Folder expansion is shared by
