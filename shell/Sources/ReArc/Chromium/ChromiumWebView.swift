@@ -183,7 +183,9 @@ final class ChromiumHostView: NSView {
         let tabID = engine.tabID
         var attachment = ReArcAttachment()
         let size = bounds.size
-        let status = ReArcViewAttach(tabID, windowID, Double(size.width), Double(size.height), Double(scale), &attachment)
+        let status = PerfSignposts.engineCall("ViewAttach") {
+            ReArcViewAttach(tabID, windowID, Double(size.width), Double(size.height), Double(scale), &attachment)
+        }
         guard status == .rearcOK, let retained = attachment.native_view else {
             ChromiumLog.info("tab \(tabID) attach rejected: \(status.rearcName)")
             return
@@ -217,7 +219,7 @@ final class ChromiumHostView: NSView {
         self.lease = nil
         ChromiumRuntime.shared.unregisterLease(lease.attachmentID)
         if detach {
-            let status = ReArcViewDetach(lease.tabID, lease.attachmentID)
+            let status = PerfSignposts.engineCall("ViewDetach") { ReArcViewDetach(lease.tabID, lease.attachmentID) }
             if status != .rearcOK, status != ReArcStatus(REARC_STALE_ATTACHMENT) {
                 ChromiumLog.info("tab \(lease.tabID) detach rejected: \(status.rearcName)")
             }
@@ -261,7 +263,7 @@ final class ChromiumHostView: NSView {
     private func updateVisibility() {
         guard let lease else { return }
         let visible = window != nil && !isHiddenOrHasHiddenAncestor
-        let status = ReArcViewSetVisible(lease.tabID, lease.attachmentID, visible)
+        let status = PerfSignposts.engineCall("ViewSetVisible") { ReArcViewSetVisible(lease.tabID, lease.attachmentID, visible) }
         if status != .rearcOK {
             ChromiumLog.info("tab \(lease.tabID) visibility rejected: \(status.rearcName)")
         }
@@ -274,7 +276,9 @@ final class ChromiumHostView: NSView {
         guard size != reportedSize || scale != reportedScale else { return }
         reportedSize = size
         reportedScale = scale
-        let status = ReArcViewResize(lease.tabID, lease.attachmentID, Double(size.width), Double(size.height), Double(scale))
+        let status = PerfSignposts.engineCall("ViewResize") {
+            ReArcViewResize(lease.tabID, lease.attachmentID, Double(size.width), Double(size.height), Double(scale))
+        }
         if status != .rearcOK {
             ChromiumLog.info("tab \(lease.tabID) resize rejected: \(status.rearcName)")
         }

@@ -455,7 +455,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     @discardableResult
     func navigateNow(_ url: URL) -> ReArcStatus {
         command("navigate \(url.absoluteString)") { tab in
-            url.absoluteString.withCString { ReArcTabNavigate(tab, $0, 0) }
+            PerfSignposts.engineCall("TabLoad") { url.absoluteString.withCString { ReArcTabNavigate(tab, $0, 0) } }
         }
     }
 

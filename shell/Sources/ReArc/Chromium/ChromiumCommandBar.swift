@@ -122,7 +122,8 @@ extension ChromiumRuntime {
     func queryHistory(profile: UInt64, text: String, limit: UInt32,
                       completion: @escaping (ReArcStatus, [ChromiumHistoryRow]) -> Void) -> ReArcStatus {
         guard capabilities.historyQuery, serviceReady else { return ReArcStatus(REARC_UNSUPPORTED) }
-        return start("history query", completion) { context in
+        let interval = PerfSignposts.beginEngineCall("HistoryQuery")
+        return start("history query", { status, rows in interval.end(); completion(status, rows) }) { context in
             text.withCString { ReArcHistoryQuery(profile, $0, limit, historyCallback, context) }
         }
     }
@@ -177,7 +178,11 @@ extension ChromiumRuntime {
     @discardableResult
     func startAutocomplete(profile: UInt64, text: String, update: @escaping (ChromiumAutocompleteUpdate) -> Void) -> UInt64? {
         guard capabilities.searchAutocomplete, serviceReady else { return nil }
-        let context = Unmanaged.passRetained(AutocompleteBox(update)).toOpaque()
+        let interval = PerfSignposts.beginEngineCall("AutocompleteStart")
+        let context = Unmanaged.passRetained(AutocompleteBox({ result in
+            if result.done { interval.end() }
+            update(result)
+        })).toOpaque()
         var queryID: UInt64 = 0
         let status = text.withCString { ReArcAutocompleteStart(profile, $0, 1, autocompleteCallback, context, &queryID) }
         guard status == .rearcOK else {

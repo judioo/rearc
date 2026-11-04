@@ -664,6 +664,7 @@ final class ChromiumRuntime {
         defer { owned.forEach { free($0) } }
         var argv: [UnsafePointer<CChar>?] = owned.map { UnsafePointer($0) }
         argv.append(nil)
+        PerfSignposts.launchEvent("EngineRunCalled")
         let code = argv.withUnsafeBufferPointer { ReArcEngineRun(Int32(arguments.count), $0.baseAddress) }
         isReady = false
         ChromiumLog.info("ReArcEngineRun returned \(code)")
@@ -674,6 +675,7 @@ final class ChromiumRuntime {
         defaultProfileID = profile
         capabilities = Self.probeCapabilities()
         isReady = true
+        PerfSignposts.launchEvent("EngineReady")
         ChromiumLog.info(
             "ready: ABI \(ReArcEngineABIVersion()), bridge \(String(cString: ReArcEngineBridgeVersion())), "
                 + "Chromium \(String(cString: ReArcEngineVersion())), default profile \(profile)"
@@ -910,7 +912,8 @@ final class ChromiumRuntime {
         guard ChromiumProfileKey.isValidStorageKey(name) else {
             return finish(ReArcStatus(REARC_INVALID_ARGUMENT), 0, false)
         }
-        let status = callProfile(finish) { context, callback in
+        let interval = PerfSignposts.beginEngineCall("ProfileOpen")
+        let status = callProfile({ status, id, otr in interval.end(); finish(status, id, otr) }) { context, callback in
             name.withCString { ReArcProfileOpen($0, callback, context) }
         }
         if status != .rearcOK { finish(status, 0, false) }
@@ -924,7 +927,8 @@ final class ChromiumRuntime {
             return finish(ReArcStatus(REARC_UNSUPPORTED), 0, false)
         }
         let open = unsafeBitCast(symbol, to: ProfileDirectoryOpen.self)
-        let status = callProfile(finish) { context, callback in
+        let interval = PerfSignposts.beginEngineCall("ProfileOpen")
+        let status = callProfile({ status, id, otr in interval.end(); finish(status, id, otr) }) { context, callback in
             token.withCString { open($0, callback, context) }
         }
         if status != .rearcOK { finish(status, 0, false) }
@@ -1061,7 +1065,7 @@ final class ChromiumRuntime {
         withEngineProfile(engine.profileKey) { [weak self, weak engine] profileID in
             guard let self, let engine, let profileID, self.isReady, !self.isStopping else { return completion(nil) }
             var tabID: UInt64 = 0
-            let status = ReArcTabCreate(profileID, engine.role.rawValue, nil, &tabID)
+            let status = PerfSignposts.engineCall("TabCreate") { ReArcTabCreate(profileID, engine.role.rawValue, nil, &tabID) }
             guard status == .rearcOK, tabID != 0 else {
                 ChromiumLog.info("ReArcTabCreate(profile \(profileID)) failed: \(status.rearcName)")
                 return completion(nil)

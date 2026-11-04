@@ -50,6 +50,7 @@ struct ChromiumCapabilities: Equatable {
     static let clientCertificatesFeature = "client_certificates"
     static let keyEquivalentEventsFeature = "key_equivalent_events"
     static let pipEmbeddedFeature = "pip_embedded"
+    static let perfMetricsFeature = "perf_metrics"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -96,6 +97,7 @@ struct ChromiumCapabilities: Equatable {
         clientCertificatesFeature: 41,
         keyEquivalentEventsFeature: 42,
         pipEmbeddedFeature: 43,
+        perfMetricsFeature: 44,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -189,6 +191,10 @@ struct ChromiumCapabilities: Equatable {
     /// Video PiP renders into a shell view (`ReArcEngineSetVideoOverlayCallback`) and
     /// media events come with `ReArcTabGetMediaActions`; requires `pictureInPicture`.
     var pipEmbedded: Bool
+    /// Measurement channels for the bench (`ReArcEngineSetPageTimingCallback`,
+    /// `ReArcEngineSetViewPresentationCallback`, `ReArcMetricsGetHistogram`,
+    /// `ReArcEngineGetProcesses`). Only `--rearc-bench` registers the callbacks.
+    var perfMetrics: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -241,6 +247,7 @@ struct ChromiumCapabilities: Equatable {
         clientCertificates = adopted(Self.clientCertificatesFeature)
         keyEquivalentEvents = adopted(Self.keyEquivalentEventsFeature)
         pipEmbedded = pictureInPicture && adopted(Self.pipEmbeddedFeature)
+        perfMetrics = adopted(Self.perfMetricsFeature)
     }
 
     /// Inspect in the page menu: the shell opens a hosted frontend itself
@@ -312,6 +319,7 @@ struct ChromiumCapabilities: Equatable {
             (Self.clientCertificatesFeature, clientCertificates),
             (Self.keyEquivalentEventsFeature, keyEquivalentEvents),
             (Self.pipEmbeddedFeature, pipEmbedded),
+            (Self.perfMetricsFeature, perfMetrics),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }
