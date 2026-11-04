@@ -410,10 +410,9 @@ The sidebar, other tabs and other windows keep working.
   returns. Engine items run as `ReArcContextMenuCommand`, and Arc items
   run in the shell and dismiss the request. Every menu ends with a
   command, closing without a choice included. A refused command (disabled,
-  or Inspect) is followed by a dismiss. Inspect is listed disabled: the
-  engine answers `unsupported` (wave 18d has no DevTools frontend yet).
-  It is enabled only for an engine that advertises the provisional
-  `devtools` feature, and none does through ABI 1.27.
+  or Inspect) is followed by a dismiss. The engine answers Inspect with
+  `unsupported`; since ABI 1.40 (wave 28) the shell's Inspect opens its own
+  DevTools instead, and before it Inspect is listed disabled.
 - **Password offers.** A card at the page's top trailing corner: "Save
   password for <host>?" (or Update) with the username, Never (not for
   updates), Not Now and Save. The answer goes back as
@@ -502,10 +501,10 @@ context at once (the self-test checks that none is left).
   wants and toggles once AppKit has finished a transition, since a toggle
   during one is ignored. WebKit enables `isElementFullscreenEnabled`, and
   WKWebView shows its own fullscreen window.
-- **Inspect.** The wave 22 placeholder `devtools` gate is gone: the header
-  advertises no DevTools feature, and wave 18d decided not to ship one, so
-  `ChromiumCapabilities.canInspect` is always false and Inspect stays
-  listed disabled (the engine answers `unsupported`).
+- **Inspect.** The wave 22 placeholder `devtools` gate is gone: through
+  ABI 1.39 no engine advertises DevTools, so Inspect stays listed disabled.
+  Engine wave 18h added the real `devtools` feature at ABI 1.40, which the
+  shell adopts in wave 28 (`canInspect` follows it).
 
 ### ABI 1.28–1.30 adoption (wave 24)
 
@@ -646,7 +645,7 @@ extensions or autofill, so those stay hidden there.
   username and password. Cancel shows the server's 401 page. The
   credentials go back once (`ReArcHttpAuthRespond`) and the fields are
   cleared; Chromium keeps its auth cache. WebKit's `didReceive challenge`
-  uses the same sheet. Client certificates are not in the ABI.
+  uses the same sheet. Client certificates came at ABI 1.41 (wave 28).
 - **Check Passwords for Leaks.** ReArc > Check Passwords for Leaks shows the
   default profile's `profile.password_manager_leak_detection` (on by
   default, as in Chrome) and sets it on every open persistent profile; an
@@ -674,8 +673,39 @@ extensions or autofill, so those stay hidden there.
   still arrive through tab adoption.
 
 Security interstitials need no shell work: Chromium renders them inside
-the tab, with their own proceed and back controls. DevTools (engine wave
-18h) and client certificates are not adopted.
+the tab, with their own proceed and back controls. DevTools and client
+certificates came with engine wave 18h (ABI 1.40–1.41, below).
+
+### ABI 1.40–1.41 adoption (wave 28)
+
+Follows "Shell adoption" in `engine/docs/WAVE-18H-REPORT.md`. Each is gated
+on its minor and flag (`devtools`, `client_certificates`).
+
+- **DevTools.** View > Developer > Developer Tools (⌥⌘I) toggles the
+  selected tab's DevTools, and the page menu's Inspect opens them (the
+  engine command Inspect stays `unsupported`, so the shell dismisses the
+  request and calls `ReArcTabOpenDevTools` itself). The call returns a new
+  registry tab with Chromium's bundled frontend. Its `tab.created` (opener =
+  the page) is caught before tab adoption, so it never becomes a sidebar
+  tab, and it is attached like any other tab. It shows docked as a pane on
+  the right of the page, Arc's default, with a draggable divider, Open
+  Developer Tools in a Window and Close. The window has Dock to Page, and
+  closing it closes the frontend. The shell keeps one frontend per tab
+  (`DevToolsSessions`); dropping its engine closes the frontend tab. The
+  engine closes the frontend when its page goes, whatever closed it, and
+  the shell then removes the pane or window. The docked pane shows for a
+  tab on its own, not inside a split. WebKit has no DevTools: Inspect stays
+  disabled there.
+- **Client certificates.** The callback is registered at `ready`, before
+  any HTTPS page loads. A request opens a sheet over that tab only: the
+  server (`https://host:port` of the challenger), then each identity's
+  subject, issuer and expiry (valid ones first; the SHA-256 fingerprint is
+  in the row's help). OK (or a double-click) sends the fingerprint with
+  `ReArcClientCertificateRespond`, Cancel sends none: the page shows
+  Chromium's error, nothing is cached and the page is not asked again until
+  it is loaded again. Chromium caches a choice per host and port. A
+  withdrawal (navigation, close, the 30-second deadline) closes the sheet
+  without a reply. WebKit keeps WKWebView's default handling.
 
 ### Self-test
 
@@ -857,12 +887,48 @@ The self-test:
     no-outside-network switches (no background networking or component
     updates, every non-loopback name unresolvable), secure DNS off in the
     fresh profile, and the autofill focus test switch.
-22. Verifies every evaluation, profile request and command-bar call
+22. Wave 28, in the real shell on tab A: View > View Media opens the
+    Library over the key window's page and selecting the tab closes it; a
+    gradient theme with Dark appearance turns the window `darkAqua`, its
+    style is in its own sync record, and back to Automatic the window
+    follows the Mac; a visual boost (dark mode, a zap of `<p>`, 125% text)
+    compiled into its stylesheet applies on Chromium and goes with the
+    boost; Capture starts over tab A, and a region and the clicked `<h1>`
+    (measured in the editor world) crop the viewport snapshot, and portrait
+    frames it (nothing is saved to the captures folder). In the trusted
+    navigation step, `chrome://settings/importData` commits and its dialog
+    is seen by its scrim darkening the Settings page (script cannot run on
+    WebUI). No import runs, since that would read this Mac's real browser
+    data. With `devtools`: View > Developer > Developer Tools is ⌥⌘I; ⌥⌘I
+    attaches the bundled frontend docked beside tab A in its window (same
+    engine profile, no sidebar tab), it moves to its own window and back,
+    and ⌥⌘I closes it while the page stays; the page menu's Inspect path
+    opens one for a second tab, and closing that page closes its frontend in
+    the engine and the shell. With `client_certificates`, in the mock
+    keychain run only: the bundle script points
+    `REARC_SELFTEST_CLIENT_CERT_DIR` at the engine's `net/data` certificates,
+    the self-test starts a loopback mutual-TLS server (Python, a per-run
+    server key accepted by its SPKI exception) and launches Chromium with
+    `--rearc-test-client-cert-dir`, so the debug engine's test-only store
+    offers net/data's client_1 and client_2 and the real Keychain is never
+    listed. The sheet lists Client Cert A and D for the server's origin;
+    Cancel loads nothing and does not ask again; after a reload, D reaches
+    the server, and the next page on that host and port reuses it without
+    asking.
+23. Verifies every evaluation, profile request and command-bar call
     context was released (`live script contexts: 0, profile contexts: 0`),
     then shuts down cleanly.
 
-With the mock keychain the run reaches `RESULT PASS`
-(`selftest-chromium-mockkeychain.log`). The real-Keychain run is covered
+Through wave 27 the mock-keychain run reached `RESULT PASS`. The wave 28
+logs (`selftest-chromium-mockkeychain.log`, `selftest-chromium.log`) end in
+`FAIL timeout` instead. Both ran next to a release engine build that kept the
+load average near 900 on 10 cores. Both stopped in step 15 (profiles), where
+a hidden tab's `document.cookie` evaluation missed its 30 s deadline; the
+step took about 12 s in wave 27. Everything before it passed, including the
+wave 28 import check. The wave 28 shell, DevTools and client-certificate steps
+come after it and have not run yet: rerun the self-test on an idle machine.
+For the same reason, the first `data:` commit now allows 45 s (a cold
+renderer) and hidden-tab cookie reads 30 s. The real-Keychain run is covered
 below. In both wave 24 runs the app was active for the input-driven steps.
 For the first time, HTML fullscreen was exercised end to end: enter,
 the page's exit, Escape, and leaving native fullscreen as the green
@@ -967,9 +1033,10 @@ Production needs:
   saved (Chromium's private zoom map).
 - **One live view per tab.** A tab shown in two windows renders in one, and
   the other shows a placeholder.
-- **No Inspect.** The page menu lists Inspect disabled: the engine has no
-  browser-less DevTools frontend and advertises none (WAVE-18D-REPORT
-  "DevTools audit and disposition").
+- **DevTools.** No nested DevTools, remote targets, workspaces, saving to
+  disk or DevTools extensions (WAVE-18H-REPORT); the frontend cannot open
+  new tabs or windows. Client certificates: no "continue without a
+  certificate" and no certificate viewer.
 - **Discard refusals.** Chromium will not discard a page that is shown,
   loading, playing, captured, in PiP or fullscreen, or has unload
   handlers. The automatic unload leaves those loaded.
@@ -1251,6 +1318,83 @@ space can change profile.
   opens `chrome://settings/content/siteDetails`, which lists and clears
   them. Also the Site Controls command.
 
+## Wave 28: Library, gradient themes, Boosts v2, capture, notes, import
+
+Both engines unless noted.
+
+- **Library.** The sidebar's Home button (bottom bar, `archivebox`), View >
+  View Library and the View Spaces / Downloads / Media / Easels & Notes /
+  Archive / Boosts items (and the View Library, View Media, View Easels &
+  Notes commands) open Arc's Library over the window's page: a page list on
+  the left, the page on the right. Spaces groups the spaces by profile as
+  theme cards (click to switch, the space menu, New Space…). Downloads is
+  the tray's list, plus Chromium's page on Chromium. Media lists every
+  capture newest first with the easels it is on (filter, search, Copy, Add
+  to Easel, Open Page, Delete). Easels & Notes lists both kinds with a
+  filter, search, New Note, New Easel, Rename and Delete. Archive and Boosts
+  are the former sheets. The Library is per window (`LibraryPresentation`).
+  Esc, the close button or showing any sidebar item in that window closes
+  it, and the Home button reopens the last page.
+- **Gradient themes.** Edit Space and New Space share Arc's style editor
+  (`SpaceStyleEditor`): up to three colour stops (one colour is a plain
+  theme, more are a gradient running corner to corner), the swatch pads
+  and six gradient presets, a grain slider, and Automatic / Light / Dark.
+  The grain is a procedural tile blended over the background (Arc's
+  textures are Metal bitmaps, not copied). Appearance sets the window's
+  `NSAppearance`, so pages (WebKit follows the view; Chromium pages follow
+  macOS), easels and notes follow it. Spaces > Appearance: … and the
+  Appearance commands set it for the active space. A plain theme encodes as
+  before. The gradient, grain and appearance sync in their own
+  `SidebarSpaceStyleRecord` (`docs/SYNC-RECORDS.md`), because Macs on a
+  wave 25–27 build rewrite every field of a space record they know.
+- **Boosts v2.** The boost drawer has Colour (Arc's eight colours, a hue
+  slider, intensity, Single / Analogous / Complementary), Dark Mode, Font
+  (four presets or an installed family) and Text Size, and Zaps (Zap an
+  Element picks and hides it at once, Zap / Zap Similar for the selected
+  element; each zap is listed and removable). Custom CSS holds the
+  hand-written rest. The settings compile into a marked block at the top
+  of the boost's stylesheet, headed by a one-line settings comment
+  (`BoostVisualStyle`), so they sync and export as CSS and every older
+  ReArc keeps them. New Legacy Boost (Advanced) (Tabs menu, command, the
+  Boosts page) makes a CSS and JavaScript boost for the page's site and
+  opens its code editor. Its script runs only after "Allow this boost's
+  script to run". Boosts export as `.rearcboost` files (JSON, the
+  interchange format) and import from them (Import Boosts…). An imported
+  script boost arrives off, with its script not allowed, whatever the file
+  says. Arc shares boosts as links to its server; ReArc has no server.
+- **Capture.** File > Capture (⇧⌘2) or the Capture command dims the page:
+  drag a region, or click an element (widened to the nearest picture,
+  block or 48×24-point ancestor), Esc cancels. Both crop the engine's
+  viewport snapshot (`snapshot_viewport` on Chromium); the element is
+  measured in an isolated world (Chromium's editor world, WebKit's
+  `.defaultClient`). Capture in Portrait Mode frames the visible page on
+  the space's theme with rounded corners, a shadow and a "ReArc"
+  watermark (Portrait Capture Watermark On/Off). Every capture goes to the
+  Library's Media page and shows its card: Copy, Add to Easel (any easel or
+  a new one), Delete. The capture's kind is a new optional `detail` field,
+  so older builds still read the index.
+- **Notes.** A note opens as a document, not a canvas (`NoteEditorView`):
+  a title, then text with Body / Heading 1–3, bold (⌘B), italic (⌘I),
+  underline (⌘U), strikethrough (⇧⌘X), code, links (⌘K; http, https and
+  mailto, opened in a new tab), bulleted (⇧⌘8), numbered (⇧⌘7) and
+  checklist (⇧⌘L) items and quotes. Return continues a list and ends it on
+  an empty item, Delete at the start of a line clears its style, "# ",
+  "## ", "- ", "1. ", "[] " and "> " format the line, and a click on a box
+  checks it. Paste keeps the note's styles. Copy as Markdown is in the ⋯
+  menu. The note is `EaselDocument.note`, and its plain text is also kept
+  in the old text block so a build before wave 28 still shows it. Notes,
+  like easels, are per Mac: the sync design keeps easels local.
+- **Import.** File > Import Bookmarks from HTML File… reads the file any
+  browser exports (Safari, Chrome, Firefox, Edge, Arc) into a new space:
+  folders become pinned folders (closed), links pinned tabs, in file
+  order; only http and https links, at most 2000, folders at most 6 deep.
+  On Chromium, File > Import from Another Browser… (and the command) opens
+  Chromium's own importer, `chrome://settings/importData`, in the settings
+  tab. It imports into the engine profile: passwords and history appear in
+  Chromium's pages and the command bar's history, and imported bookmarks
+  go into Chromium's bookmark model, which ReArc does not show, so use the
+  HTML file for bookmarks.
+
 ## Model rules worth knowing
 
 - Favorites belong to a **profile** and show in every space of that profile
@@ -1299,13 +1443,17 @@ space can change profile.
 | → in the command bar | Take the grey domain completion |
 | ⌘↩ / ⌥↩ / ⇧↩ in the command bar | Open the result in a new tab / a split / Little Arc |
 | ⌘P | Print the page (native print panel as a sheet; File > Export as PDF… saves it) |
+| ⇧⌘2 | Capture: drag a region or click an element (Esc cancels) |
+| ⌥⌘I | Developer Tools for the selected tab, docked beside it (Chromium with `devtools`) |
+| ⌘B / ⌘I / ⌘U / ⇧⌘X / ⌘K in a note | Bold / italic / underline / strikethrough / link |
+| ⇧⌘8 / ⇧⌘7 / ⇧⌘L in a note | Bulleted list / numbered list / checklist |
 | ⌃1 … ⌃9 | Switch to space 1–9 of the active profile |
 | ⌥⌘→ / ⌥⌘← | Next / previous space |
 | Two-finger swipe on the sidebar | Previous / next space |
 | Tab / ⌫ in the command bar | Search the typed site / remove the site pill |
 | ⇧⌫ in the command bar | Remove the highlighted history row |
 
-## Sync: iCloud (wave 25, not yet run on real iCloud)
+## Sync: iCloud (wave 25; verified on one Mac against real iCloud in wave 28)
 
 The sidebar syncs through CloudKit, but only in a build signed with an
 iCloud container. Every other build (`swift run`, `swift test`, ad-hoc
@@ -1347,4 +1495,6 @@ SYNC-DESIGN are in `docs/SYNC-RECORDS.md`.
 The mutation journal and `SyncOutboundPipeline` remain. They now only tell
 the scheduler that something changed. Not done yet: ReArc's own end-to-end
 encryption, recovery phrase and device pairing (SYNC-DESIGN P2), push
-notifications, and a first run against a real iCloud container.
+notifications, and a run on a second Mac against real iCloud. One Mac has
+synced with real iCloud (Development environment, 2026-11-04: 11 records
+uploaded, none pending; `docs/ICLOUD-SETUP.md`).
