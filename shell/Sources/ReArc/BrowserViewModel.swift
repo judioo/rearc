@@ -29,6 +29,9 @@ final class BrowserViewModel {
     private let syncPipeline: SyncOutboundPipeline
     let syncEngine: SyncEngine
     private(set) var syncStatus: SyncEngineStatus = .local
+    /// Settings > iCloud Sync; nil when this build has no iCloud entitlement.
+    var syncDetails: SyncStatusDetails?
+    @ObservationIgnored var syncActivationObserver: NSObjectProtocol?
     private let nowPlaying: MediaKeyRouting
     private var mediaSubscriptions: [Tab.ID: AnyCancellable] = [:]
 
@@ -210,13 +213,16 @@ final class BrowserViewModel {
         self.sitePermissions = SitePermissionsController(fileURL: Self.siblingFile(SitePermissionStore.fileName, of: persistence.fileURL))
         engineHost.sitePermissions = sitePermissions
         self.nowPlaying = nowPlaying ?? NowPlayingController()
-        let engine = syncEngine ?? CloudKitSyncAvailability.makeEngine()
+        let engine = syncEngine ?? MainActor.assumeIsolated {
+            CloudKitSyncAvailability.makeEngine(stateFileURL: Self.siblingFile(SidebarSyncStateFile.fileName, of: persistence.fileURL))
+        }
         self.syncEngine = engine
         self.syncPipeline = SyncOutboundPipeline(journal: self.store.mutationJournal, engine: engine)
         self.syncStatus = engine.status
         engine.onStatusChange = { [weak self] status in
             self?.syncStatus = status
         }
+        attachSync()
         self.store.mutationJournal.onAppend = { [weak self] entry in
             self?.syncPipeline.handleJournalEntry(entry)
         }

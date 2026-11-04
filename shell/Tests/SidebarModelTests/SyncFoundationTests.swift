@@ -218,6 +218,7 @@ final class RankIntegrationTests: XCTestCase {
     }
 }
 
+@MainActor
 final class CloudKitAvailabilityTests: XCTestCase {
     func testDevBuildDetectsMissingEntitlement() {
         XCTAssertFalse(CloudKitSyncAvailability.hasCloudKitEntitlement)
@@ -234,16 +235,17 @@ final class CloudKitAvailabilityTests: XCTestCase {
 final class SyncStatusHonestyTests: XCTestCase {
     func testOnlyAConfirmedUploadIsGreen() {
         XCTAssertEqual(SyncStatusPresentation(.idleSynced).indicator, .green)
-        for status in [SyncEngineStatus.local, .unavailable(reason: "x"), CloudKitSyncEngine.notImplementedStatus] {
+        for status in [SyncEngineStatus.local, .unavailable(reason: "x"), .unavailable(reason: CloudKitSyncAvailability.unavailableMessage)] {
             XCTAssertEqual(SyncStatusPresentation(status).indicator, .grey, "\(status)")
             XCTAssertFalse(SyncStatusPresentation(status).help.contains("up to date"), "\(status)")
         }
         XCTAssertEqual(SyncStatusPresentation(.error("boom")).indicator, .red)
     }
 
-    func testTheCloudKitStubSaysNothingUploads() {
-        XCTAssertNotEqual(CloudKitSyncEngine.notImplementedStatus, .idleSynced)
-        XCTAssertTrue(SyncStatusPresentation(CloudKitSyncEngine.notImplementedStatus).help.contains("stay on this Mac"))
+    func testAnUnentitledBuildSaysNothingUploads() {
+        let status = UnavailableSyncEngine(reason: CloudKitSyncAvailability.unavailableMessage).status
+        XCTAssertNotEqual(status, .idleSynced)
+        XCTAssertTrue(SyncStatusPresentation(status).help.contains(CloudKitSyncAvailability.unavailableMessage))
     }
 
     func testThePipelineNeverReportsStatusForTheEngine() throws {

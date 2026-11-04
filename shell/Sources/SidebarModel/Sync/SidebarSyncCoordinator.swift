@@ -1,0 +1,437 @@
+import Foundation
+
+/// What sync reads from and writes to: the sidebar store on the main thread.
+@MainActor
+public protocol SidebarSyncHost: AnyObject {
+    func syncSnapshot() -> SidebarSnapshot
+    /// Replaces the sidebar with `snapshot` without journaling it as local edits.
+    func applySyncedSnapshot(_ snapshot: SidebarSnapshot)
+}
+
+extension SidebarStore: SidebarSyncHost {
+    public func syncSnapshot() -> SidebarSnapshot {
+        makeSnapshot()
+    }
+
+    public func applySyncedSnapshot(_ snapshot: SidebarSnapshot) {
+        applySnapshot(snapshot)
+        onDidMutate?()
+    }
+}
+
+/// Settings and the bottom-bar dot read this.
+public struct SyncStatusDetails: Equatable, Sendable {
+    public enum Phase: Equatable, Sendable {
+        case off
+        case unavailable(String)
+        case signedOut(String)
+        case syncing
+        case upToDate
+        /// Changes are queued; sync retries on its own.
+        case waiting(String)
+        case failed(String)
+    }
+
+    public var phase: Phase
+    public var lastSyncedAt: Date?
+    public var pendingCount: Int
+    public var account: SyncAccountStatus?
+
+    public init(phase: Phase, lastSyncedAt: Date? = nil, pendingCount: Int = 0, account: SyncAccountStatus? = nil) {
+        self.phase = phase
+        self.lastSyncedAt = lastSyncedAt
+        self.pendingCount = pendingCount
+        self.account = account
+    }
+
+    public var engineStatus: SyncEngineStatus {
+        switch phase {
+        case .off: return .local
+        case .unavailable(let reason), .signedOut(let reason): return .unavailable(reason: reason)
+        case .syncing: return .syncing
+        case .upToDate: return .idleSynced
+        case .waiting(let message), .failed(let message): return .error(message)
+        }
+    }
+
+    public var accountDescription: String {
+        switch account {
+        case .available?: return "Signed in to iCloud"
+        case .noAccount?: return "No iCloud account on this Mac"
+        case .restricted?: return "iCloud is restricted on this Mac"
+        case .temporarilyUnavailable?: return "iCloud is temporarily unavailable"
+        case .couldNotDetermine?: return "iCloud account status unknown"
+        case nil: return "Not checked yet"
+        }
+    }
+}
+
+/// One sync cycle's result (tests assert on it).
+public struct SyncCycleOutcome: Equatable, Sendable {
+    public var pushed = 0
+    public var pulled = 0
+    public var appliedRemote = false
+    public var error: SyncTransportError?
+    public var skipped = false
+}
+
+/// The sidebar sync pipeline (SYNC-DESIGN §6.1), transport-agnostic.
+///
+/// A cycle: check the account, make sure the zone exists, stamp local edits
+/// (diffing the sidebar against the last merged records), fetch and merge
+/// remote changes, rebuild the sidebar from the merged records, then upload
+/// what the server lacks, merging and retrying on conflicts. Records with
+/// unconfirmed writes stay `pending` in the persisted state, which is the
+/// offline queue: nothing is lost across a quit, and a restart resumes.
+@MainActor
+public final class SidebarSyncCoordinator {
+    public static let batchSize = 200
+    /// Tombstones live this long before they are deleted from the server (§5.4).
+    public static let tombstoneLifetime: TimeInterval = 30 * 24 * 3600
+
+    public let transport: SidebarSyncTransport
+    public weak var host: SidebarSyncHost?
+    public private(set) var state: SidebarSyncState
+    public private(set) var details: SyncStatusDetails
+    public var onDetailsChange: ((SyncStatusDetails) -> Void)?
+    public var now: () -> Date
+
+    private let stateStore: SidebarSyncStateStoring
+    private var clock: HybridLogicalClock
+
+    public init(
+        transport: SidebarSyncTransport,
+        stateStore: SidebarSyncStateStoring,
+        deviceID: String,
+        now: @escaping () -> Date = { Date() }
+    ) {
+        self.transport = transport
+        self.stateStore = stateStore
+        self.now = now
+        let state = stateStore.load()
+        self.state = state
+        self.clock = HybridLogicalClock(device: deviceID, last: state.clock)
+        self.details = SyncStatusDetails(
+            phase: state.enabled ? .waiting("Waiting to sync") : .off,
+            lastSyncedAt: state.lastSyncedAt,
+            pendingCount: state.pendingCount
+        )
+    }
+
+    public var isEnabled: Bool { state.enabled }
+
+    public func setEnabled(_ enabled: Bool) {
+        guard state.enabled != enabled else { return }
+        state.enabled = enabled
+        persist()
+        update(enabled ? .waiting("Waiting to sync") : .off)
+    }
+
+    // MARK: - Cycle
+
+    @discardableResult
+    public func sync() async -> SyncCycleOutcome {
+        var outcome = SyncCycleOutcome()
+        guard state.enabled, host != nil else {
+            outcome.skipped = true
+            return outcome
+        }
+        update(.syncing)
+        let account = await transport.accountStatus()
+        details.account = account
+        guard case .available(let userID) = account else {
+            update(.signedOut(SyncStatusDetails(phase: .off, account: account).accountDescription))
+            outcome.error = .notAuthenticated
+            return outcome
+        }
+        if let known = state.accountID, known != userID {
+            // Another Apple Account: its zone is a different sidebar. Keep this
+            // Mac's sidebar and join the new account as a fresh device.
+            state.resetServerState()
+            transport.reset()
+        }
+        state.accountID = userID
+
+        do {
+            try await runCycle(&outcome)
+        } catch let error as SyncTransportError {
+            if error == .zoneNotFound {
+                resetZone()
+                do {
+                    try await runCycle(&outcome)
+                } catch let retry as SyncTransportError {
+                    fail(retry, &outcome)
+                } catch {
+                    fail(.other(error.localizedDescription), &outcome)
+                }
+            } else {
+                fail(error, &outcome)
+            }
+        } catch {
+            fail(.other(error.localizedDescription), &outcome)
+        }
+        return outcome
+    }
+
+    private func runCycle(_ outcome: inout SyncCycleOutcome) async throws {
+        guard let host else { return }
+        if !state.zoneReady {
+            try await transport.prepareZone()
+            state.zoneReady = true
+            persist()
+        }
+        var remoteChanged: Bool
+        if !state.joined {
+            // First sync: look at the server before stamping local rows, so a
+            // fresh install adopts the iCloud sidebar instead of duplicating it.
+            remoteChanged = try await pullAll(&outcome)
+            let hasRemoteSidebar = state.records.values.contains { $0.payload.kind == .space && $0.payload.isAlive }
+            let adopt = hasRemoteSidebar && SidebarSyncProjection.isPristine(host.syncSnapshot())
+            // Rows only the server has are new to this Mac, not deleted here.
+            if !adopt { capture(host.syncSnapshot(), tombstoningMissing: false) }
+            if adopt { remoteChanged = true }
+            state.joined = true
+        } else {
+            capture(host.syncSnapshot())
+            remoteChanged = try await pullAll(&outcome)
+        }
+        if remoteChanged { applyToHost(&outcome) }
+
+        for _ in 0 ..< 3 {
+            let mergedConflicts = try await pushPending(&outcome)
+            guard mergedConflicts else { break }
+            applyToHost(&outcome)
+        }
+        state.lastSyncedAt = now()
+        state.lastError = nil
+        persist()
+        update(state.pendingCount == 0 ? .upToDate : .waiting("\(state.pendingCount) changes waiting to upload"))
+    }
+
+    /// Rebuilds the sidebar from the merged records, then stamps whatever the
+    /// rebuild repaired (rescued orphans, re-ranked ties) as local writes.
+    private func applyToHost(_ outcome: inout SyncCycleOutcome) {
+        guard let host else { return }
+        let merged = SidebarSyncProjection.apply(state.records.mapValues(\.payload), onto: host.syncSnapshot())
+        host.applySyncedSnapshot(merged)
+        outcome.appliedRemote = true
+        capture(host.syncSnapshot())
+    }
+
+    // MARK: - Local edits
+
+    /// Stamps local edits now, without the network, so a write's stamp is the
+    /// time it was made even when it uploads hours later (offline). The
+    /// scheduler calls this for every coalesced batch of sidebar edits.
+    public func captureLocalChanges() {
+        guard state.enabled, state.joined, let host else { return }
+        capture(host.syncSnapshot())
+        details.pendingCount = state.pendingCount
+    }
+
+    /// Stamps every field that differs from the last merged record; rows gone
+    /// from the sidebar get a tombstone.
+    func capture(_ snapshot: SidebarSnapshot, tombstoningMissing: Bool = true) {
+        let bodies = SidebarSyncProjection.extract(snapshot)
+        let at = now()
+        for (name, body) in bodies {
+            let known = state.records[name]
+            var record = known ?? SyncShadowRecord(payload: SyncRecordPayload(kind: body.kind))
+            let alive = known != nil && record.payload.isAlive
+            var changed = false
+            for (key, value) in body.values where !alive || record.payload.fields[key]?.value != value {
+                record.payload.fields[key] = SyncField(value: value, stamp: clock.tick(now: at))
+                changed = true
+            }
+            if alive {
+                for (key, field) in record.payload.fields where body.values[key] == nil && field.value != .null {
+                    record.payload.fields[key] = SyncField(value: .null, stamp: clock.tick(now: at))
+                    changed = true
+                }
+            }
+            if changed {
+                record.pending = true
+                state.records[name] = record
+            }
+        }
+        for (name, record) in state.records where tombstoningMissing && record.payload.isAlive && bodies[name] == nil
+            && SidebarSyncProjection.canMaterialize(name, record.payload) {
+            var deleted = record
+            deleted.payload.tombstone = clock.tick(now: at)
+            deleted.pending = true
+            state.records[name] = deleted
+        }
+        state.clock = clock.last
+        persist()
+    }
+
+    // MARK: - Fetch
+
+    private func pullAll(_ outcome: inout SyncCycleOutcome) async throws -> Bool {
+        var changed = false
+        var restarts = 0
+        while true {
+            let result: SyncFetchResult
+            do {
+                result = try await transport.fetchChanges(since: state.transportToken)
+            } catch SyncTransportError.changeTokenExpired where restarts < 2 {
+                // Merging is idempotent, so fetching everything again is safe.
+                restarts += 1
+                state.transportToken = nil
+                persist()
+                continue
+            }
+            for wire in result.changed where merge(wire) {
+                changed = true
+                outcome.pulled += 1
+            }
+            for name in result.deleted {
+                guard var record = state.records[name] else { continue }
+                if record.pending {
+                    record.serverTag = nil
+                    state.records[name] = record
+                } else {
+                    state.records[name] = nil
+                    changed = true
+                }
+            }
+            state.transportToken = result.token
+            state.clock = clock.last
+            persist()
+            if !result.moreComing { break }
+        }
+        return changed
+    }
+
+    /// Merges a server copy into the local one. True when the local copy changed.
+    @discardableResult
+    private func merge(_ wire: SyncWireRecord) -> Bool {
+        if let latest = wire.payload.latestStamp { clock.observe(latest) }
+        guard var record = state.records[wire.recordName] else {
+            state.records[wire.recordName] = SyncShadowRecord(payload: wire.payload, serverTag: wire.serverTag)
+            return true
+        }
+        let merged = SyncRecordPayload.merge(record.payload, wire.payload)
+        let changed = merged != record.payload
+        record.payload = merged
+        record.serverTag = wire.serverTag
+        record.pending = merged != wire.payload
+        state.records[wire.recordName] = record
+        return changed
+    }
+
+    // MARK: - Upload
+
+    /// Uploads pending records. True when a conflict merged remote writes in.
+    private func pushPending(_ outcome: inout SyncCycleOutcome) async throws -> Bool {
+        var mergedRemote = false
+        var skipped = Set<String>()
+        for _ in 0 ..< 4 {
+            let pending = state.records.filter { $0.value.pending && !skipped.contains($0.key) }
+                .sorted { $0.key < $1.key }
+            let expired = expiredTombstones()
+            guard !pending.isEmpty || !expired.isEmpty else { break }
+            var conflicts = false
+            var batches = stride(from: 0, to: pending.count, by: Self.batchSize).map {
+                Array(pending[$0 ..< min($0 + Self.batchSize, pending.count)])
+            }
+            if batches.isEmpty { batches = [[]] }
+            for (index, batch) in batches.enumerated() {
+                let wires = batch.map { SyncWireRecord(recordName: $0.key, payload: $0.value.payload, serverTag: $0.value.serverTag) }
+                let deletes = index == 0 ? expired : []
+                let result = try await transport.modify(saving: wires, deleting: deletes)
+                let sent = Dictionary(uniqueKeysWithValues: wires.map { ($0.recordName, $0.payload) })
+                for saved in result.saved {
+                    guard var record = state.records[saved.recordName] else { continue }
+                    record.serverTag = saved.serverTag
+                    if record.payload == sent[saved.recordName] { record.pending = false }
+                    state.records[saved.recordName] = record
+                    outcome.pushed += 1
+                }
+                for name in result.deleted { state.records[name] = nil }
+                for (name, error) in result.failures.sorted(by: { $0.key < $1.key }) {
+                    switch error {
+                    case .serverRecordChanged(let server):
+                        if merge(server) { mergedRemote = true }
+                        conflicts = true
+                    case .unknownItem:
+                        if deletes.contains(name) {
+                            state.records[name] = nil
+                        } else if var record = state.records[name] {
+                            record.serverTag = nil
+                            state.records[name] = record
+                            conflicts = true
+                        }
+                    case .zoneNotFound, .userDeletedZone, .notAuthenticated, .quotaExceeded:
+                        persist()
+                        throw error
+                    default:
+                        if error.isTransient {
+                            persist()
+                            throw error
+                        }
+                        skipped.insert(name)
+                        state.lastError = error.userMessage
+                    }
+                }
+                state.clock = clock.last
+                persist()
+            }
+            if !conflicts { break }
+        }
+        return mergedRemote
+    }
+
+    private func expiredTombstones() -> [String] {
+        let cutoff = Int64((now().timeIntervalSince1970 - Self.tombstoneLifetime) * 1000)
+        return state.records.filter { _, record in
+            guard !record.pending, !record.payload.isAlive, let tombstone = record.payload.tombstone else { return false }
+            return tombstone.millis < cutoff
+        }.map(\.key).sorted()
+    }
+
+    // MARK: - Errors
+
+    /// The zone vanished (reset by another Mac, or a new environment): create
+    /// it again and upload every record, tombstones included.
+    private func resetZone() {
+        state.zoneReady = false
+        state.transportToken = nil
+        for name in state.records.keys {
+            state.records[name]?.serverTag = nil
+            state.records[name]?.pending = true
+        }
+        transport.reset()
+        persist()
+    }
+
+    private func fail(_ error: SyncTransportError, _ outcome: inout SyncCycleOutcome) {
+        outcome.error = error
+        state.lastError = error.userMessage
+        switch error {
+        case .userDeletedZone:
+            // The user removed the data on purpose: never re-upload on our own.
+            state.resetServerState()
+            state.enabled = false
+            persist()
+            update(.failed(error.userMessage))
+        case .notAuthenticated:
+            persist()
+            update(.signedOut(error.userMessage))
+        default:
+            persist()
+            update(error.isTransient || error == .quotaExceeded ? .waiting(error.userMessage) : .failed(error.userMessage))
+        }
+    }
+
+    private func update(_ phase: SyncStatusDetails.Phase) {
+        details.phase = phase
+        details.lastSyncedAt = state.lastSyncedAt
+        details.pendingCount = state.pendingCount
+        onDetailsChange?(details)
+    }
+
+    private func persist() {
+        stateStore.save(state)
+    }
+}
