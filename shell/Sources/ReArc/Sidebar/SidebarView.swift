@@ -51,20 +51,8 @@ struct SidebarView: View {
                 )
             )
 
-            if let miniID = model.miniPlayerTabID, let tab = model.store.tab(withID: miniID) {
-                let media = model.mediaState(for: miniID)
-                MiniPlayerView(
-                    title: media.title ?? tab.displayTitle,
-                    favicon: model.favicon(for: tab),
-                    faviconToken: tab.faviconToken,
-                    isPlaying: media.isPlaying,
-                    isMuted: model.isUserMuted(miniID),
-                    onTogglePlayPause: { model.miniPlayerTogglePlayPause() },
-                    onNext: { model.miniPlayerNextTrack() },
-                    onToggleMute: { model.toggleMute(miniID) },
-                    onGoToTab: { model.goToMiniPlayerTab() }
-                )
-            }
+            // Arc's media strips (and ReArc's live video) sit above the bottom bar.
+            MediaControlsStackView(model: model)
 
             BottomBarView(model: model, draggedItemID: $draggedItemID)
         }

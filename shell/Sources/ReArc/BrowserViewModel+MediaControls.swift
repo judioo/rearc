@@ -1,0 +1,147 @@
+import AppKit
+import SidebarModel
+
+/// Arc's sidebar media strips and ReArc's live video (wave 32,
+/// MINI-PLAYER.md §3 and §5): which strips a window shows, where a tab's
+/// live PiP video goes (sidebar card, floating panel or minimized into its
+/// strip), and the strip and player buttons.
+extension BrowserViewModel {
+    static let embedsVideoInSidebarKey = "ReArcEmbeddedSidebarVideo"
+
+    // MARK: - What shows
+
+    /// The tabs a window has on screen: its focused space's selected tab, or every pane of its split.
+    func visibleTabIDs(in window: SidebarWindowID?) -> Set<Tab.ID> {
+        guard let id = selectedItemID(in: window) else { return [] }
+        if let split = store.split(withID: id) { return Set(split.tabs.map(\.id)) }
+        return [id]
+    }
+
+    /// The strips for a window, front first. A source whose video shows in
+    /// the floating panel has none until the panel is minimized.
+    func mediaStrips(in window: SidebarWindowID?) -> [Tab.ID] {
+        let suppressed = Set(livePlacements.keys.filter { effectiveLivePlacement(for: $0)?.suppressesStrip == true })
+        return mediaControls.strips(visibleTabIDs: visibleTabIDs(in: window), suppressed: suppressed)
+    }
+
+    /// The tab whose live video plays in the sidebar, if any.
+    func sidebarLiveVideoTabID(in window: SidebarWindowID?) -> Tab.ID? {
+        livePlacements.keys.sorted { $0.uuidString < $1.uuidString }.first {
+            effectiveLivePlacement(for: $0) == .sidebar && liveVideo(for: $0) != nil
+        }
+    }
+
+    func liveVideo(for tabID: Tab.ID) -> (any LiveVideoHandle)? {
+        guard let tab = store.tab(withID: tabID),
+              let engine = engineHost.engine(forTabID: tabID, profileID: profileID(for: tab)) as? LiveVideoProviding
+        else { return nil }
+        return engine.liveVideo
+    }
+
+    /// Where the tab's live video is now: a sidebar placement falls back to the panel while the sidebar is hidden.
+    func effectiveLivePlacement(for tabID: Tab.ID) -> LiveVideoPlacement? {
+        livePlacements[tabID]?.effective(sidebarVisible: isSidebarVisible)
+    }
+
+    func mediaStripInfo(for tabID: Tab.ID) -> MediaStripInfo? {
+        guard let tab = store.tab(withID: tabID) else { return nil }
+        let media = mediaState(for: tabID)
+        let video = liveVideo(for: tabID)
+        let placement = livePlacements[tabID]
+        return MediaStripInfo(
+            id: tabID,
+            title: media.title ?? tab.displayTitle,
+            site: tab.url.host() ?? tab.displayTitle,
+            favicon: favicon(for: tab),
+            faviconToken: tab.faviconToken,
+            isPlaying: video?.isPlaying ?? media.isPlaying,
+            isMuted: isUserMuted(tabID),
+            canPreviousTrack: media.canPreviousTrack || video?.canSkipTracks.previous == true,
+            canNextTrack: media.canNextTrack || video?.canSkipTracks.next == true,
+            offersPictureInPicture: placement?.offersBackToPiP == true
+                || (placement == nil && media.canPictureInPicture && !media.isPictureInPicture)
+        )
+    }
+
+    /// New live videos start in the sidebar (Video in Sidebar) or the panel;
+    /// a tab without one has no placement.
+    func reconcileLivePlacements() {
+        for (id, media) in mediaStateByTab where media.hasLiveVideo && livePlacements[id] == nil {
+            let requested = livePanelRequests.remove(id) != nil
+            livePlacements[id] = .initial(embedsInSidebar: embedsVideoInSidebar, requestedPanel: requested)
+        }
+        for id in livePlacements.keys where mediaStateByTab[id]?.hasLiveVideo != true {
+            livePlacements[id] = nil
+        }
+    }
+
+    // MARK: - Strip buttons
+
+    /// The favicon, title row or a click on the video: show the tab. A live
+    /// video ends its session first (Chromium focuses the tab as PiP's back to tab).
+    func goToMediaTab(_ tabID: Tab.ID) {
+        liveVideo(for: tabID)?.perform(.backToTab)
+        if let spaceID = store.spaceContaining(tabID: tabID), spaceID != store.activeSpaceID {
+            store.selectSpace(spaceID)
+        }
+        if let location = store.splitContaining(tabID: tabID) {
+            store.selectSplit(location.split.id, focusTabID: tabID)
+        } else {
+            store.selectTab(tabID)
+        }
+        loadSelectedIfNeeded()
+    }
+
+    func mediaTogglePlayPause(_ tabID: Tab.ID) {
+        if let video = liveVideo(for: tabID) {
+            video.perform(.togglePlayPause)
+        } else {
+            mediaEngine(for: tabID)?.togglePlayPause()
+        }
+    }
+
+    func mediaNextTrack(_ tabID: Tab.ID) {
+        mediaEngine(for: tabID)?.skipToNextTrack()
+    }
+
+    func mediaPreviousTrack(_ tabID: Tab.ID) {
+        mediaEngine(for: tabID)?.skipToPreviousTrack()
+    }
+
+    /// "Close Mini Player": hidden until the tab plays again.
+    func closeMediaStrip(_ tabID: Tab.ID) {
+        if liveVideo(for: tabID) != nil { closeLiveVideo(tabID) }
+        mediaControls.dismiss(tabID)
+    }
+
+    /// "Open Picture in Picture": a minimized panel comes back; otherwise the
+    /// video enters PiP in the floating panel.
+    func openPictureInPicture(_ tabID: Tab.ID) {
+        if liveVideo(for: tabID) != nil {
+            livePlacements[tabID] = .panel
+        } else if engineHost.supportsLiveVideo {
+            livePanelRequests.insert(tabID)
+            setPictureInPicture(true, tabID: tabID)
+        } else {
+            setPictureInPicture(true, tabID: tabID)
+        }
+    }
+
+    // MARK: - Live video buttons
+
+    func popOutLiveVideo(_ tabID: Tab.ID) { livePlacements[tabID] = .panel }
+    func dockLiveVideo(_ tabID: Tab.ID) { livePlacements[tabID] = .sidebar }
+    /// Arc's minimize: the panel collapses into the strip, which offers "Open Picture in Picture".
+    func minimizeLiveVideo(_ tabID: Tab.ID) { livePlacements[tabID] = .minimized }
+
+    /// Close (×): the session ends and the video pauses; the paused strip stays.
+    func closeLiveVideo(_ tabID: Tab.ID) {
+        autoPiPEnteredTabIDs.remove(tabID)
+        liveVideo(for: tabID)?.perform(.closeAndPause)
+    }
+
+    private func mediaEngine(for tabID: Tab.ID) -> (any WebEngine)? {
+        guard let pid = profileID(forTabID: tabID) else { return nil }
+        return engineHost.engine(forTabID: tabID, profileID: pid)
+    }
+}

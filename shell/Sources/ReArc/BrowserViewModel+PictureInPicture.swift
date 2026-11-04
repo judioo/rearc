@@ -54,7 +54,8 @@ extension BrowserViewModel {
             media: mediaStateByTab,
             hosts: hosts,
             autoEntered: autoPiPEnteredTabIDs,
-            isEnabled: automaticPictureInPicture,
+            // Video in Sidebar implies entering on a switch away: that is how the video gets there.
+            isEnabled: automaticPictureInPicture || (embedsVideoInSidebar && engineHost.supportsLiveVideo),
             settings: store.autoPiPPolicy,
             now: now
         )

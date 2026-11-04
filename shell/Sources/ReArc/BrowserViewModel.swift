@@ -35,7 +35,30 @@ final class BrowserViewModel {
     private let nowPlaying: MediaKeyRouting
     private var mediaSubscriptions: [Tab.ID: AnyCancellable] = [:]
 
-    var mediaStateByTab: [Tab.ID: WebMediaState] = [:]
+    var mediaStateByTab: [Tab.ID: WebMediaState] = [:] {
+        didSet {
+            mediaControls.update(media: mediaStateByTab)
+            reconcileLivePlacements()
+        }
+    }
+    /// Arc's sidebar media strips (wave 32), following `mediaStateByTab`.
+    var mediaControls = MediaControlsModel()
+    /// The floating PiP panel for a live video (Arc mode, or popped out).
+    @ObservationIgnored lazy var livePanel = MainActor.assumeIsolated { LiveVideoPanelController(model: self) }
+    /// Where each tab's live video shows (Chromium `pip_embedded`).
+    var livePlacements: [Tab.ID: LiveVideoPlacement] = [:]
+    /// Tabs whose next PiP session was asked for in the floating panel ("Open Picture in Picture").
+    @ObservationIgnored var livePanelRequests: Set<Tab.ID> = []
+    /// ReArc > Video in Sidebar: a live video plays in the sidebar above its
+    /// strip instead of a floating panel (a ReArc addition; on by default).
+    var embedsVideoInSidebar = UserDefaults.standard.object(forKey: BrowserViewModel.embedsVideoInSidebarKey) as? Bool ?? true {
+        didSet {
+            externalLinkDefaults.set(embedsVideoInSidebar, forKey: Self.embedsVideoInSidebarKey)
+            for (id, placement) in livePlacements where placement != .minimized {
+                livePlacements[id] = embedsVideoInSidebar ? .sidebar : .panel
+            }
+        }
+    }
     var tabMuteModel = TabMediaMuteModel()
     private(set) var windowOcclusionState: WindowOcclusionState = .visible
     private var autoPiPTriggeredThisOcclusion: Set<Tab.ID> = []
@@ -308,15 +331,7 @@ final class BrowserViewModel {
         runAutoArchive()
         startAutoArchiveTimer()
         loadSelectedIfNeeded()
-    }
-
-    var miniPlayerTabID: Tab.ID? {
-        MiniPlayerVisibility.activeMiniPlayerTab(
-            mediaByTab: mediaStateByTab,
-            selectedTabID: store.selectedTabID,
-            activeSpaceID: store.activeSpaceID,
-            spaceForTab: { store.spaceContaining(tabID: $0) }
-        )
+        MainActor.assumeIsolated { livePanel.track() }
     }
 
     func mediaState(for tabID: Tab.ID) -> WebMediaState {
@@ -700,33 +715,6 @@ final class BrowserViewModel {
         store.updateLittleArcWindow(id: windowID, title: resolvedTitle, url: url)
     }
 
-    func goToMiniPlayerTab() {
-        guard let id = miniPlayerTabID else { return }
-        if let spaceID = store.spaceContaining(tabID: id), spaceID != store.activeSpaceID {
-            store.selectSpace(spaceID)
-        }
-        if let location = store.splitContaining(tabID: id) {
-            store.selectSplit(location.split.id, focusTabID: id)
-        } else {
-            store.selectTab(id)
-        }
-        loadSelectedIfNeeded()
-    }
-
-    func miniPlayerTogglePlayPause() {
-        guard let id = miniPlayerTabID,
-              let pid = profileID(forTabID: id),
-              let engine = engineHost.engine(forTabID: id, profileID: pid) else { return }
-        engine.togglePlayPause()
-    }
-
-    func miniPlayerNextTrack() {
-        guard let id = miniPlayerTabID,
-              let pid = profileID(forTabID: id),
-              let engine = engineHost.engine(forTabID: id, profileID: pid) else { return }
-        engine.skipToNextTrack()
-    }
-
     private func wireMediaObserversForKnownTabs() {
         for space in store.spaces {
             for tab in store.displayTabs(in: space.id) {
@@ -818,6 +806,8 @@ final class BrowserViewModel {
             )
             guard case .trigger = decision else { continue }
             guard autoPiPTriggeredThisOcclusion.insert(candidate.id).inserted else { continue }
+            // The window is covered, so its sidebar cannot show the video: use the floating panel.
+            if engineHost.supportsLiveVideo { livePanelRequests.insert(candidate.id) }
             engineHost.engine(for: candidate, profileID: profileID(for: candidate)).pictureInPicture()
         }
     }
