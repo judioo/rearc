@@ -103,6 +103,13 @@ enum ChromiumLaunchArguments {
         return arguments + extra.filter { !arguments.contains($0) }
     }
 
+    /// `--rearc-bench`: only the no-outside-network switches. Never the
+    /// foreground switches (a user's pages background and throttle), never
+    /// the self-test's danger, autoplay or focus switches.
+    static func benchArguments(_ arguments: [String]) -> [String] {
+        arguments + selfTestNoOutsideNetworkSwitches.filter { !arguments.contains($0) }
+    }
+
     /// Secure DNS off in a fresh self-test profile: automatic DoH dials its
     /// resolver's IP literal, which resolver rules cannot map (wave 18f).
     static func prepareSelfTestUserDataDir(_ directory: URL) {

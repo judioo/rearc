@@ -11,6 +11,7 @@ enum ChromiumHost {
     /// Returns only when Chromium is unavailable (caller falls back to WebKit).
     @MainActor
     static func launch(_ options: EngineLaunchOptions) {
+        LaunchTimeline.main = ProcessInfo.processInfo.systemUptime
         guard let reason = unavailableReason() else {
             let keychain = ChromiumLaunchArguments.keychainMode(
                 infoDictionary: Bundle.main.infoDictionary,
@@ -31,7 +32,9 @@ enum ChromiumHost {
             }
             let arguments = ChromiumLaunchArguments.browserArguments(
                 CommandLine.arguments,
-                defaultUserDataDir: { defaultUserDataDir(selfTest: options.selfTest || options.launchProbePath != nil).path },
+                defaultUserDataDir: {
+                    defaultUserDataDir(selfTest: options.selfTest || options.launchProbePath != nil || options.bench != nil).path
+                },
                 keychain: keychain
             )
             let runtime = ChromiumRuntime.shared
@@ -55,6 +58,18 @@ enum ChromiumHost {
                                            + mutualTLS,
                                        keychain: keychain)
                 exit(test.exitCode(runResult: code))
+            }
+            if let bench = options.bench {
+                // No self-test foreground switches: pages throttle as they do for users.
+                // Only loopback names resolve, as in the self-test (the fixture server is 127.0.0.1).
+                ChromiumBench.prepareLaunch()
+                let runner = ChromiumBench(runtime: runtime, options: bench)
+                runtime.onReady = { runner.start() }
+                if let dir = ChromiumLaunchArguments.userDataDir(in: arguments) {
+                    ChromiumLaunchArguments.prepareSelfTestUserDataDir(URL(fileURLWithPath: dir, isDirectory: true))
+                }
+                let code = runtime.run(arguments: ChromiumLaunchArguments.benchArguments(arguments), keychain: keychain)
+                exit(runner.exitCode(runResult: code))
             }
             if let path = options.launchProbePath {
                 let probe = ChromiumLaunchProbe(runtime: runtime, options: options, resultPath: path)
@@ -161,6 +176,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let model = BrowserViewModel(store: store, persistence: persistence)
         // Profile opens complete asynchronously; each gets this policy before its first tab.
         runtime.downloadDirectory = model.downloads.directory
+        PerfSignposts.launchEvent("ModelLoaded")
         return model
     }
 
@@ -296,6 +312,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         }
         track(window, .browser)
         window.makeKeyAndOrderFront(nil)
+        if first { PerfSignposts.launchEvent("WindowOrderedFront") }
         return window
     }
 

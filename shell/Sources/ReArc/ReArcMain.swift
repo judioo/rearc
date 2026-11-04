@@ -7,6 +7,7 @@ import Foundation
 enum ReArcMain {
     @MainActor
     static func main() {
+        PerfSignposts.launchEvent("Main")
         let info = Bundle.main.infoDictionary
         let chromiumOwnsApplication = EngineLaunchOptions.applicationClassRequiresChromium(infoDictionary: info) {
             NSClassFromString($0) != nil
@@ -22,7 +23,7 @@ enum ReArcMain {
                 + "using the Chromium engine (the WebKit path cannot start here).\n").utf8))
         }
         // Links from other apps (ReArc as the default browser), both engines.
-        if !options.selfTest { ExternalLinkRouter.shared.install() }
+        if !options.selfTest && options.bench == nil { ExternalLinkRouter.shared.install() }
         if options.engine == .chromium {
             #if REARC_CHROMIUM
             ChromiumHost.launch(options)

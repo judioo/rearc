@@ -21,6 +21,7 @@ struct EngineLaunchOptions: Equatable {
         case environment
         case argument
         case selfTest
+        case bench
         /// The bundle's principal class is Chromium's, which aborts on the WebKit path.
         case applicationClass
     }
@@ -30,6 +31,9 @@ struct EngineLaunchOptions: Equatable {
     /// `--rearc-launch-probe=PATH`: start like a normal launch, write what
     /// happened to PATH at `ready`, then quit. Not an engine choice.
     static let launchProbeFlagPrefix = "--rearc-launch-probe="
+    /// `--rearc-bench[=ui,page,memory,launch-child]`: the perf-0 benchmark
+    /// (ChromiumBench). Implies the Chromium engine; never with `--rearc-selftest`.
+    static let benchFlag = "--rearc-bench"
     static let environmentKey = "REARC_ENGINE"
     static let infoPlistKey = "ReArcDefaultEngine"
     static let principalClassKey = "NSPrincipalClass"
@@ -41,6 +45,69 @@ struct EngineLaunchOptions: Equatable {
     var selfTest: Bool
     var source: Source = .builtInDefault
     var launchProbePath: String?
+    var bench: BenchOptions?
+
+    /// `--rearc-bench` and its `--rearc-bench-*` options (docs/PERFORMANCE-PLAN.md §2.2).
+    struct BenchOptions: Equatable {
+        enum Suite: String, CaseIterable { case ui, page, memory, launchChild = "launch-child" }
+        var suites: [Suite] = [.ui, .page, .memory]
+        var outputPath: String?
+        var iterations = 40
+        var warmups = 3
+        /// Metric ID prefixes to run (empty: all).
+        var only: [String] = []
+        var fixture = "items500"
+        var seed: UInt64 = 1
+        /// Run with the screen locked (results are marked; the gate never compares them with unlocked runs).
+        var allowLocked = false
+        /// Launch child: the process start time the parent measured, for `launch.*` (mach seconds).
+        var launchStart: Double?
+        /// Writes the loopback page set here (the Chrome reference serves the same bytes).
+        var dumpPagesPath: String?
+        /// An iteration whose other processes used more of the machine's CPU than this is contaminated.
+        var maxOtherCPU = 0.15
+
+        static func parse(_ arguments: [String]) -> BenchOptions? {
+            var options: BenchOptions?
+            for argument in arguments {
+                if argument == EngineLaunchOptions.benchFlag {
+                    options = options ?? BenchOptions()
+                } else if argument.hasPrefix(EngineLaunchOptions.benchFlag + "=") {
+                    var parsed = options ?? BenchOptions()
+                    let names = argument.dropFirst(EngineLaunchOptions.benchFlag.count + 1).split(separator: ",")
+                    parsed.suites = names.compactMap { Suite(rawValue: String($0)) }
+                    options = parsed
+                }
+            }
+            guard var result = options else { return nil }
+            for argument in arguments {
+                func value(_ name: String) -> String? {
+                    let prefix = "\(EngineLaunchOptions.benchFlag)-\(name)="
+                    return argument.hasPrefix(prefix) ? String(argument.dropFirst(prefix.count)) : nil
+                }
+                if let path = value("out"), !path.isEmpty { result.outputPath = path }
+                if let n = value("iterations").flatMap(Int.init), n > 0 { result.iterations = n }
+                if let n = value("warmups").flatMap(Int.init), n >= 0 { result.warmups = n }
+                if let ids = value("only") { result.only = ids.split(separator: ",").map(String.init) }
+                if let name = value("fixture"), !name.isEmpty { result.fixture = name }
+                if let seed = value("seed").flatMap(UInt64.init) { result.seed = seed }
+                if let start = value("launch-start").flatMap(Double.init) { result.launchStart = start }
+                if let path = value("dump-pages"), !path.isEmpty { result.dumpPagesPath = path }
+                if let share = value("max-other-cpu").flatMap(Double.init), share > 0 { result.maxOtherCPU = share }
+                if argument == EngineLaunchOptions.benchFlag + "-allow-locked" { result.allowLocked = true }
+            }
+            return result
+        }
+
+        func runs(_ metric: String) -> Bool {
+            only.isEmpty || only.contains { metric.hasPrefix($0) }
+        }
+
+        /// A scenario runs when a selected prefix names it or one of its metrics.
+        func runsScenario(_ name: String) -> Bool {
+            only.isEmpty || only.contains { name.hasPrefix($0) || $0.hasPrefix(name) }
+        }
+    }
 
     /// The command-line flag wins over `REARC_ENGINE`, which wins over the
     /// bundle default; unknown values mean WebKit.
@@ -72,11 +139,16 @@ struct EngineLaunchOptions: Equatable {
                 probe = String(argument.dropFirst(launchProbeFlagPrefix.count))
             }
         }
+        let bench = selfTest ? nil : BenchOptions.parse(Array(arguments.dropFirst()))
         if selfTest {
             engine = .chromium
             source = .selfTest
+        } else if bench != nil {
+            engine = .chromium
+            source = .bench
         }
-        return EngineLaunchOptions(engine: engine, selfTest: selfTest, source: source, launchProbePath: probe.flatMap { $0.isEmpty ? nil : $0 })
+        return EngineLaunchOptions(engine: engine, selfTest: selfTest, source: source,
+                                   launchProbePath: probe.flatMap { $0.isEmpty ? nil : $0 }, bench: bench)
     }
 
     /// True when NSApplicationMain would instantiate Chromium's application
