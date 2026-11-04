@@ -48,6 +48,10 @@ public enum AppCommandAction: Equatable, Hashable {
     case newNote
     case capturePage
     case captureVisibleArea
+    /// Arc's Capture (`capturePage`): drag a region or click an element.
+    case captureAreaOrElement
+    /// Arc `capturePrettyScreenshot`.
+    case capturePortrait
     case openCapturesGallery
     /// Arc `openLibrary` (nil: the last page) and its View menu pages.
     case openLibrary(LibrarySection?)
@@ -239,7 +243,7 @@ public struct AppCommand: Equatable, Identifiable {
             return store.selectedTab != nil
         case .newEasel, .newNote, .openCapturesGallery, .openLibrary:
             return true
-        case .capturePage, .captureVisibleArea:
+        case .capturePage, .captureVisibleArea, .captureAreaOrElement, .capturePortrait:
             return store.selectedTab != nil
         case .openBrowserPage(let page):
             return page.isAvailable(engine: context.navigationSchemes)
@@ -582,6 +586,20 @@ public enum AppCommandRegistry {
                 keywords: ["capture", "screenshot", "snapshot", "full", "page"],
                 minQueryLength: 2,
                 action: .capturePage
+            ),
+            AppCommand(
+                id: "capture-area",
+                title: "Capture",
+                keywords: ["capture", "screenshot", "snapshot", "cut", "out", "region", "area", "element", "drag", "click"],
+                minQueryLength: 2,
+                action: .captureAreaOrElement
+            ),
+            AppCommand(
+                id: "capture-portrait",
+                title: "Capture in Portrait Mode",
+                keywords: ["capture", "screenshot", "portrait", "pretty", "mode", "frame"],
+                minQueryLength: 3,
+                action: .capturePortrait
             ),
             AppCommand(
                 id: "capture-visible",

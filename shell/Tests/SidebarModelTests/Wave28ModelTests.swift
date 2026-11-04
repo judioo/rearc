@@ -333,4 +333,56 @@ final class Wave28ModelTests: XCTestCase {
         XCTAssertEqual(BoostInterchange.describe(.unsupportedVersion), "This boost was made by a newer ReArc.")
         guard case .failure(.decodeFailed) = BoostInterchange.importJSON(Data("nope".utf8)) else { return XCTFail() }
     }
+
+    // MARK: Capture
+
+    func testCaptureDetailIsOptionalSoOlderIndexesStillRead() throws {
+        let record = CaptureRecord(sourceURL: nil, sourceTitle: "T", scope: .visible, detail: .region)
+        XCTAssertEqual(try JSONDecoder().decode(CaptureRecord.self, from: JSONEncoder().encode(record)), record)
+        let plain = CaptureRecord(sourceURL: nil, sourceTitle: "T", scope: .fullPage)
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(plain)) as! [String: Any]
+        XCTAssertNil(json["detail"], "a plain capture writes what wave 27 wrote")
+        var future = try JSONSerialization.jsonObject(with: JSONEncoder().encode(record)) as! [String: Any]
+        future["detail"] = "hologram"
+        let decoded = try JSONDecoder().decode(CaptureRecord.self, from: JSONSerialization.data(withJSONObject: future))
+        XCTAssertNil(decoded.detail, "an unknown detail is dropped, not the record")
+    }
+
+    func testDragAndElementRectsBecomeFractionsAndPixels() throws {
+        XCTAssertNil(CaptureCropping.dragFraction(from: (10, 10), to: (14, 40), viewWidth: 200, viewHeight: 100), "a click, not a drag")
+        let drag = try XCTUnwrap(CaptureCropping.dragFraction(from: (150, 80), to: (50, -20), viewWidth: 200, viewHeight: 100))
+        XCTAssertEqual(drag, CaptureRect(x: 0.25, y: 0, width: 0.5, height: 0.8), "any direction, clipped to the view")
+
+        let element = try XCTUnwrap(CaptureCropping.elementFraction(ElementBounds(x: -20, y: 50, width: 120, height: 100),
+                                                                     viewportWidth: 400, viewportHeight: 100))
+        XCTAssertEqual(element, CaptureRect(x: 0, y: 0.5, width: 0.25, height: 0.5), "only the part on screen")
+        XCTAssertNil(CaptureCropping.elementFraction(ElementBounds(x: 0, y: 200, width: 10, height: 10), viewportWidth: 100, viewportHeight: 100))
+
+        XCTAssertEqual(CaptureCropping.pixelRect(CaptureRect(x: 0.25, y: 0.5, width: 0.5, height: 0.5), imageWidth: 801, imageHeight: 400),
+                       CaptureRect(x: 200, y: 200, width: 401, height: 200), "rounded outward to whole pixels")
+        XCTAssertEqual(CaptureCropping.pixelRect(CaptureRect(x: 1, y: 1, width: 0, height: 0), imageWidth: 10, imageHeight: 10),
+                       CaptureRect(x: 9, y: 9, width: 1, height: 1), "never empty, never outside")
+    }
+
+    func testPortraitLayoutFramesTheCaptureWithAMarginAndWatermark() throws {
+        let layout = PortraitCaptureLayout(imageWidth: 1000, imageHeight: 600, watermark: true)
+        XCTAssertEqual(layout.image, CaptureRect(x: 48, y: 48, width: 1000, height: 600))
+        XCTAssertEqual(layout.canvasWidth, 1096)
+        XCTAssertEqual(layout.canvasHeight, 696)
+        XCTAssertEqual(layout.cornerRadius, 15)
+        let mark = try XCTUnwrap(layout.watermark)
+        XCTAssertEqual(mark.x, 1048, "right-aligned inside the margin")
+        XCTAssertGreaterThan(mark.y, 648, "in the bottom margin")
+        XCTAssertNil(PortraitCaptureLayout(imageWidth: 1000, imageHeight: 600, watermark: false).watermark)
+    }
+
+    func testCaptureCommands() {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        let tab = store.addTab(kind: .today, title: "T", url: URL(string: "https://t.test")!)
+        store.selectTab(tab.id)
+        let context = CommandBarContext(store: store, isSidebarVisible: true, closedTabStack: ClosedTabStack())
+        let titles = AppCommandRegistry.all(in: context).map(\.title)
+        XCTAssertTrue(titles.contains("Capture"))
+        XCTAssertTrue(titles.contains("Capture in Portrait Mode"))
+    }
 }
