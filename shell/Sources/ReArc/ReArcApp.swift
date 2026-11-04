@@ -123,5 +123,9 @@ struct ReArcApp: App {
                 ShellMenuButtons(groups: ShellMenus.spaces(model))
             }
         }
+
+        Settings {
+            SyncSettingsView(model: model)
+        }
     }
 }

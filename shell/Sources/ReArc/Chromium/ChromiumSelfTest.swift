@@ -365,6 +365,9 @@ final class ChromiumSelfTest {
         engine.load(URL(string: "\(base)/a")!)
         try await wait("page A after the wave 24 page checks") { engine.pageTitle == Self.titleA && !engine.isLoading }
 
+        // 12f. Wave 25: this bundle's iCloud sync gate (never creates a CKContainer unentitled).
+        try syncGateChecks()
+
         // 13. Two windows: the tab's one lease moves to a second window and back.
         try await twoWindowChecks(engine: engine, first: window)
 
@@ -2290,6 +2293,29 @@ extension ChromiumSelfTest {
         try check(late == ReArcStatus(REARC_NOT_FOUND), "a second reply to the offer returned \(late.rearcName)")
         log("PASS password offer (ABI 1.22): '\(offer.title)' for \(offer.username) -> Not Now (dismiss; nothing stored), "
             + "second reply -> \(late.rearcName); unknown offer -> \(unknown.rearcName)")
+    }
+}
+
+// MARK: - Wave 25: iCloud sync gate
+
+extension ChromiumSelfTest {
+    /// The running bundle's signature decides sync. Unentitled (ad-hoc or
+    /// Apple Development without REARC_ICLOUD_CONTAINER) it must be the inert
+    /// engine and say so; entitled, the container must be the one configured.
+    @MainActor
+    fileprivate func syncGateChecks() throws {
+        switch CloudKitSyncAvailability.current {
+        case .unavailable(let reason):
+            let engine = CloudKitSyncAvailability.makeEngine(stateFileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("rearc-selftest-sync-\(UUID().uuidString).json"))
+            try check(engine is UnavailableSyncEngine, "an unentitled bundle built a live sync engine")
+            try check(reason.hasPrefix(CloudKitSyncAvailability.unavailableMessage), "unexpected sync gate reason: \(reason)")
+            log("PASS iCloud sync gated off in this bundle: \(reason)")
+        case .available(let container):
+            let configured = Bundle.main.object(forInfoDictionaryKey: CloudKitSyncAvailability.infoPlistKey) as? String
+            try check(configured == container, "entitled container \(container) is not the configured \(configured ?? "none")")
+            log("PASS iCloud sync available for \(container) (not exercised against iCloud by the self-test)")
+        }
     }
 }
 

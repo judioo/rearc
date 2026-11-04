@@ -102,6 +102,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private let runtime: ChromiumRuntime
     private var model: BrowserViewModel?
     private var windows: [ObjectIdentifier: (window: NSWindow, role: WindowRole)] = [:]
+    /// ReArc > iCloud Sync… (Settings… is Chromium's own WebUI on this path).
+    private var syncSettingsWindow: NSWindow?
     private var terminating = false
     private let menuTarget = ChromiumMenuTarget()
     /// The tray's Chromium side; the controller only holds it weakly.
@@ -300,6 +302,27 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             track(window, .littleArc(id))
             window.makeKeyAndOrderFront(nil)
         }
+    }
+
+    @MainActor
+    func presentSyncSettings() {
+        guard let model, !terminating else { return }
+        if let window = syncSettingsWindow {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 320),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.title = "iCloud Sync"
+        window.contentView = NSHostingView(rootView: SyncSettingsView(model: model))
+        window.center()
+        syncSettingsWindow = window
+        window.makeKeyAndOrderFront(nil)
     }
 
     func dismissLittleArcWindow(_ id: LittleArcWindow.ID) {
@@ -524,6 +547,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             app.addItem(.separator())
         }
         app.addItem(target.item("Set ReArc as Default Browser…", "") { model.setAsDefaultBrowser() })
+        app.addItem(target.item("iCloud Sync…", "") { [weak self] in self?.presentSyncSettings() })
         if runtime.capabilities.pictureInPicture {
             app.addItem(target.checkItem("Automatic Picture in Picture", isOn: { model.automaticPictureInPicture }) {
                 model.automaticPictureInPicture.toggle()
