@@ -103,6 +103,43 @@ final class Wave31LookSnapshotTests: XCTestCase {
     }
 }
 
+extension Wave31LookSnapshotTests {
+    /// The theme editor on a stored three-colour Arc theme (cyan, violet, mint).
+    func testEditorSnapshot() throws {
+        guard let output = ProcessInfo.processInfo.environment["REARC_LOOK_EDITOR"] else {
+            throw XCTSkip("set REARC_LOOK_EDITOR to write the editor snapshot")
+        }
+        let colors = ["#6CBAD9", "#7F7EDC", "#5CD8B8"].map { SpaceColor(hex: $0)! }
+        var theme = SpaceTheme(red: colors[0].red, green: colors[0].green, blue: colors[0].blue,
+                               gradientColors: Array(colors.dropFirst()), noise: 0.65)
+        theme.texture = .grain
+        let host = NSHostingView(rootView: EditorHost(theme: theme).padding(20).background(Color(nsColor: .windowBackgroundColor)))
+        let window = UnconstrainedWindow(contentRect: NSRect(x: 40, y: 40, width: 340, height: 560),
+                                         styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = host
+        window.orderFrontRegardless()
+        let deadline = Date().addingTimeInterval(1)
+        while Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let size = host.fittingSize
+        window.setContentSize(size)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                   colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        rep.size = size
+        host.cacheDisplay(in: host.bounds, to: rep)
+        try XCTUnwrap(rep.representation(using: .png, properties: [:])).write(to: URL(fileURLWithPath: output))
+        window.close()
+    }
+
+    private struct EditorHost: View {
+        @State var theme: SpaceTheme
+        var body: some View { SpaceStyleEditor(theme: $theme) }
+    }
+}
+
 /// Keeps the snapshot window at Arc's capture size on a smaller screen.
 private final class UnconstrainedWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }

@@ -1,13 +1,24 @@
 import SwiftUI
 import SidebarModel
 
-/// Settings > iCloud Sync: the on/off toggle, account and status, "Sync Now".
-/// A build without the iCloud entitlement only says so (docs/ICLOUD-SETUP.md).
+/// Settings: Arc's "URL in toolbar" choice, then iCloud Sync (the on/off
+/// toggle, account and status, "Sync Now"). A build without the iCloud
+/// entitlement only says so (docs/ICLOUD-SETUP.md). Both engine paths show
+/// this view as their Settings window.
 struct SyncSettingsView: View {
     let model: BrowserViewModel
+    @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
 
     var body: some View {
         Form {
+            Section("Appearance") {
+                Toggle("Show URL in toolbar", isOn: $urlInToolbar)
+                Text(urlInToolbar
+                    ? "Back, forward, reload and the address sit in a strip at the top of the page."
+                    : "Back, forward, reload and the address sit at the top of the sidebar.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             if let reason = model.syncUnavailableReason {
                 unavailable(reason)
             } else {
