@@ -84,7 +84,7 @@ Flags and environment:
 | | |
 |---|---|
 | `--rearc-engine=chromium\|webkit`, `REARC_ENGINE` | engine selection |
-| `--rearc-selftest` | Chromium runtime proof; exits 0 on success, nonzero on failure, 124 on the 120 s watchdog |
+| `--rearc-selftest` | Chromium runtime proof; exits 0 on success, nonzero on failure, 124 on the 300 s watchdog |
 | `--rearc-launch-probe=PATH` | reach `ready` on a temp profile, write `ready=1 engine=… source=… links=…` to PATH, quit (`scripts/check-launch.sh`) |
 | `--user-data-dir=PATH` | Chromium profile dir (default `~/Library/Application Support/ReArc/Chromium`; temp dir for the self-test) |
 | `REARC_CHROMIUM_TRACE=1` | log every tab/service event and engine call (including script evaluations) to stderr |
@@ -691,7 +691,8 @@ on its minor and flag (`devtools`, `client_certificates`).
   the right of the page, Arc's default, with a draggable divider, Open
   Developer Tools in a Window and Close. The window has Dock to Page, and
   closing it closes the frontend. The shell keeps one frontend per tab
-  (`DevToolsSessions`); dropping its engine closes the frontend tab. The
+  (`DevToolsSessions`); closing them explicitly closes the frontend registry
+  tab, even while a view or caller retains its engine. The
   engine closes the frontend when its page goes, whatever closed it, and
   the shell then removes the pane or window. The docked pane shows for a
   tab on its own, not inside a split. WebKit has no DevTools: Inspect stays
@@ -896,9 +897,9 @@ The self-test:
     boost; Capture starts over tab A, and a region and the clicked `<h1>`
     (measured in the editor world) crop the viewport snapshot, and portrait
     frames it (nothing is saved to the captures folder). In the trusted
-    navigation step, `chrome://settings/importData` commits and its dialog
-    is seen by its scrim darkening the Settings page (script cannot run on
-    WebUI). No import runs, since that would read this Mac's real browser
+    navigation step, `chrome://settings/importData` commits and keeps its
+    route (WebUI refuses script and snapshots, so the dialog itself is not
+    observable). No import runs, since that would read this Mac's real browser
     data. With `devtools`: View > Developer > Developer Tools is ⌥⌘I; ⌥⌘I
     attaches the bundled frontend docked beside tab A in its window (same
     engine profile, no sidebar tab), it moves to its own window and back,
@@ -919,15 +920,40 @@ The self-test:
     context was released (`live script contexts: 0, profile contexts: 0`),
     then shuts down cleanly.
 
-Through wave 27 the mock-keychain run reached `RESULT PASS`. The wave 28
-logs (`selftest-chromium-mockkeychain.log`, `selftest-chromium.log`) end in
-`FAIL timeout` instead. Both ran next to a release engine build that kept the
-load average near 900 on 10 cores. Both stopped in step 15 (profiles), where
-a hidden tab's `document.cookie` evaluation missed its 30 s deadline; the
-step took about 12 s in wave 27. Everything before it passed, including the
-wave 28 import check. The wave 28 shell, DevTools and client-certificate steps
-come after it and have not run yet: rerun the self-test on an idle machine.
-For the same reason, the first `data:` commit now allows 45 s (a cold
+Wave 29 (2026-11-04): both development logs
+(`selftest-chromium-mockkeychain.log`, `selftest-chromium.log`) reach
+`RESULT PASS` against ABI 1.41, in 175.10 s and 171.43 s respectively. The
+real-Keychain run completed without a prompt or stall. The wave 28 profile
+timeouts did not recur on the idle machine. Library, gradient appearance,
+Boosts v2, capture, DevTools open/pop-out/dock/close and Inspect all pass;
+the mock run also verifies client certificates against the loopback mTLS
+fixture. DevTools close now explicitly closes the registry tab even while
+its engine is retained. Autocomplete publishes suggestions only after the
+current query completes, since partial updates can contain the preceding
+query's cached rows. After closing the certificate tab, the test selects
+tab A before the private-window and final reopen checks.
+
+The screen was locked for the passing dev runs. NOTE-only input checks:
+the trusted editor pick (editor-world fallback passed), file input,
+password save offer, beforeunload activation, HTML fullscreen, ⌥⌘-click,
+autofill dropdown/Manage and address save offer, modified link clicks, and
+key-private-window zoom routing. Client certificates are intentionally
+skipped with the real Keychain; only the mock/debug fixture enumerates test
+identities. A passing result does not verify those skipped input paths.
+
+The signed release from `bc480620` also reaches `RESULT PASS` in 59.98 s
+with the real Keychain and no prompt or stall (`selftest-release.log`,
+mirrored from `dist/release/selftest-release.log`). Its input steps pass,
+except that the ordinary-link ⇧⌘-click and ⌥⌘-click variants remain NOTE-only;
+⌘-click passes. Client identities are intentionally skipped. Both
+LaunchServices launch probes pass. `scripts/release.sh --dmg` rebuilt the
+signed `dist/release/ReArc-0.1.0.dmg`; its embedded app signature and source
+revision, Applications link, background, Finder layout and volume icon
+were checked from a read-only mount. Unit tests remain green: 638 cases.
+
+Wave 28's earlier runs timed out at the profile step under the concurrent
+release engine build's heavy load. For that reason, the first `data:` commit
+allows 45 s (a cold
 renderer) and hidden-tab cookie reads 30 s. The real-Keychain run is covered
 below. In both wave 24 runs the app was active for the input-driven steps.
 For the first time, HTML fullscreen was exercised end to end: enter,
