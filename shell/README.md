@@ -98,7 +98,7 @@ minor 0. `ChromiumCapabilities` enables a feature only when the minor version
 is at least the one that introduced it (5 for the three below, 6–10 for the
 ABI 1.10 features, 11–14 for the ABI 1.14 ones, 15–17 for the wave 20 ones,
 18–22 for the wave 22 prompt channels, 23–27 for wave 23, 28–30 for
-wave 24)
+wave 24, 42 for wave 30's key verdicts)
 **and** `ReArcEngineHasFeature`
 advertises it, and logs
 `capabilities: ABI minor 14: navigation_extended=1 script_evaluation=1 …`.
@@ -707,6 +707,18 @@ on its minor and flag (`devtools`, `client_certificates`).
   it is loaded again. Chromium caches a choice per host and port. A
   withdrawal (navigation, close, the 30-second deadline) closes the sheet
   without a reply. WebKit keeps WKWebView's default handling.
+
+### ABI 1.42 adoption (wave 30)
+
+- **`key_equivalent_events`: page verdicts on shortcuts.** Engine patch
+  `tab/061-host-key-equivalent-events` observes every widget of a tab and
+  posts each Command or Control key-down the page acknowledges to
+  `ReArcEngineSetKeyEquivalentCallback`, with `consumed` set when the page
+  took it. `ChromiumShell` hands verdicts to `ShortcutRouter.pageVerdict`.
+  An unconsumed key runs its menu item; a consumed website-first key shows
+  Arc's "again" prompt (docs/SHORTCUTS.md "Routing"). Below ABI 1.42 only
+  Arc-wins keys work while a page has focus, as the monitor runs them before
+  the page.
 
 ### Self-test
 
@@ -1446,35 +1458,66 @@ Both engines unless noted.
 
 ## Shortcuts
 
+Arc's own keys (wave 30). `docs/SHORTCUTS.md` has all 101 of Arc 1.171.0's
+bindings with ReArc's status; `ArcShortcuts` (SidebarModel) holds the table.
+
+While a page has keyboard focus, each key follows Arc's priority for it
+(`ShortcutRouter`, run from the app-wide key monitor):
+
+- **Arc wins** (⌘L, ⌘T, ⌘W, ⇧⌘C, ⌘[ / ⌘], ⌃⇥, ⌘1…9, ⌃1…9…): the menu runs
+  it, and the page never sees the key.
+- **Website first** (⌘S, ⌘D, ⌘P, ⌥⌘I…): the page sees it first. If the page
+  takes it, a "Press ⌘S again to Show/Hide Sidebar" toast shows, and the
+  second press within 2.5 s is ReArc's.
+- **Website wins** (⌘R, ⌘F, the editing keys…): the page sees it first, and
+  the menu runs it only if the page does not take it.
+
+On Chromium the page's verdict comes from the engine (ABI 1.42
+`key_equivalent_events`, `ReArcEngineSetKeyEquivalentCallback`). Before it,
+`RenderWidgetHostViewCocoa` took every Command key from the menu and the
+bridge dropped the ones the page did not handle. The Chromium menu bar
+stores shifted shortcuts as their shifted character ("C" + ⌘ for ⇧⌘C),
+which is the only form AppKit matches.
+
 | Keys | Action |
 |---|---|
-| ⌘T | New today tab + open command bar |
-| ⌘L | Open command bar for current tab |
-| ⌘W | Close selected tab, or a private window (⌘W is stripped from File > Close Window) |
-| ⇧⌘N | New private window |
-| ⌘= / ⌘- / ⌘0 | Zoom in / out / actual size |
-| ⌘S | Toggle sidebar (when hidden, point at the left edge to float it) |
-| ⌘⇧] / ⌘⇧[ | Next / previous tab |
+| ⌘T | Command bar for a new tab; Esc leaves no tab |
+| ⌘L | Command bar on the page's URL, selected; again closes it; the page gets focus back |
+| ⌘W / ⇧⌘W | Close the selected tab (or a private / Little Arc window) / the window |
+| ⇧⌘T | Reopen closed tab |
+| ⌘N / ⌃⌘N / ⇧⌘N / ⌥⌘N | New window / blank window / private window / Little Arc window |
+| ⌘S | Hide or show the sidebar (spring; when hidden, point at the left edge to float it); the page keeps focus |
+| ⌥⌘↓ / ⌥⌘↑ | Next / previous tab in sidebar order |
+| ⌃⌘← / ⌃⌘→ | Cycle back / forward through the tabs visited |
 | ⌃⇥ / ⌃⇧⇥ | Recent-tab switcher forward / backward; release ⌃ to switch, Esc cancels |
-| ⌘[ / ⌘] | Back / forward |
-| ⌘R / ⇧⌘R / ⌘. | Reload / reload ignoring cache / stop |
-| ⌘D | Pin or unpin the selected tab |
 | ⌘1 … ⌘8 / ⌘9 | Select that sidebar row / the last one |
+| ⌃1 … ⌃9 | Switch to space 1–9 of the active profile |
+| ⌥⌘→ / ⌥⌘← | Next / previous space |
+| ⌘[ / ⌘] (⌘← / ⌘→) | Back / forward |
+| ⌘R / ⇧⌘R / ⌘. | Reload / reload ignoring cache / stop |
+| ⌘= (⌘+) / ⌘- / ⌘0 | Zoom in / out / actual size |
+| ⇧⌘C / ⌥⇧⌘C / ⌃⇧⌘C | Copy the page URL, without trackers / as Markdown / as Quote ("Copied Current URL", or "Copied a clean link without trackers") |
+| ⌘D | Pin or unpin the selected tab ("Pinned Tab to “Space”") |
+| ⇧⌘K | Clear unpinned tabs |
+| ⌃⇧= / ⌃⇧- | Add split view / close the focused split pane |
+| ⌃⇧N / ⌃⇧E | New note / new easel |
+| ⌘O | Move the key Little Arc into the active space |
+| ⇧⌘L / ⇧⌘J | Library / downloads tray |
+| ⌘F / ⌘G / ⇧⌘G / ⌘J | Find / next / previous / jump to selection |
+| ⇧⌘V | Paste and match style |
 | ⌘Y / ⌥⌘L | History / Downloads (Chromium with `webui_daily_pages`) |
-| ⇧⌘C / ⌥⇧⌘C | Copy the page URL / as Markdown (Copy as Quote in the Tabs menu) |
-| ⌥⌘N | New Little Arc window (also system-wide once turned on in the ReArc menu) |
+| ⌥⌘I (F12) / ⌥⌘C / ⌥⌘J | Developer Tools, docked beside the tab (Chromium with `devtools`) |
+| ⌥⌘U | View page source (Chromium) |
+| ⌃⌘F | Enter / exit full screen |
+| ⌘P | Print the page (native print panel as a sheet; File > Export as PDF… saves it) |
+| ⇧⌘2 | Capture: drag a region or click an element (Esc cancels) |
 | ⌥⌘-click a link | Open it in Little Arc |
 | ⌘-click or middle-click a link / ⇧⌘-click | Open it in a background tab / a new selected tab (Chromium needs ABI 1.39) |
 | ⇧-click a link | Peek in sidebar tabs; elsewhere on Chromium (ABI 1.39) Little Arc |
 | → in the command bar | Take the grey domain completion |
 | ⌘↩ / ⌥↩ / ⇧↩ in the command bar | Open the result in a new tab / a split / Little Arc |
-| ⌘P | Print the page (native print panel as a sheet; File > Export as PDF… saves it) |
-| ⇧⌘2 | Capture: drag a region or click an element (Esc cancels) |
-| ⌥⌘I | Developer Tools for the selected tab, docked beside it (Chromium with `devtools`) |
 | ⌘B / ⌘I / ⌘U / ⇧⌘X / ⌘K in a note | Bold / italic / underline / strikethrough / link |
 | ⇧⌘8 / ⇧⌘7 / ⇧⌘L in a note | Bulleted list / numbered list / checklist |
-| ⌃1 … ⌃9 | Switch to space 1–9 of the active profile |
-| ⌥⌘→ / ⌥⌘← | Next / previous space |
 | Two-finger swipe on the sidebar | Previous / next space |
 | Tab / ⌫ in the command bar | Search the typed site / remove the site pill |
 | ⇧⌫ in the command bar | Remove the highlighted history row |
