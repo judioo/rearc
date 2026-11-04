@@ -1789,6 +1789,17 @@ final class ChromiumSelfTest {
         try await wait("Air Traffic Control Little Arc closed") { store.littleArcWindow(withID: routed.id) == nil }
         log("PASS Air Traffic Control: a 'URL contains' rule sent a GetURL link to a Little Arc (tab \(routedEngine.tabID)) "
             + "instead of the default (current space)")
+
+        // Site Control Center on tab A: the panel's zoom acts on this page; site data lives in Chromium's Site Settings.
+        guard let site = SiteControlCenter.site(for: engine.currentURL) else { throw Failure(description: "tab A has no site") }
+        model.zoom(.zoomIn, engine: engine)
+        try await wait("Site Control Center zoom in") { !PageZoom.isDefault(engine.zoomFactor) }
+        model.zoom(.reset, engine: engine)
+        try await wait("Site Control Center zoom reset") { PageZoom.isDefault(engine.zoomFactor) }
+        try check((engine as AnyObject) is SiteDataManaging == false && model.sitePermissionsLiveInEngine,
+                  "Chromium site data should open Site Settings")
+        log("PASS Site Control Center for \(site.host): panel zoom in and reset on tab A (zoom events); cookies and site data "
+            + "-> chrome://settings/content/siteDetails")
     }
 
     /// ⌥⌘-click on a link in tab A: Chromium makes a background tab, which the

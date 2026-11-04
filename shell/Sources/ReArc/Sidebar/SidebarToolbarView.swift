@@ -60,22 +60,53 @@ struct SidebarURLField: View {
     let model: BrowserViewModel
     let engine: (any WebEngine)?
     let tab: Tab?
+    @Environment(\.sidebarWindow) private var window
     @State private var isHovering = false
+    @State private var showsSiteControls = false
 
     var body: some View {
         let url = engine?.currentURL ?? tab?.url
         let host = url.flatMap(Self.displayHost)
+        let site = SiteControlCenter.site(for: url)
         HStack(spacing: 6) {
-            securityIcon(engine?.securityState ?? .unknown, hasHost: host != nil)
+            if let engine, let site {
+                // Arc's Site Control Center opens from the site's icon.
+                Button { showsSiteControls.toggle() } label: {
+                    securityIcon(engine.securityState, hasHost: true)
+                        .frame(width: 16, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Site controls for \(site.host)")
+                .accessibilityLabel("Site controls")
+                .popover(isPresented: $showsSiteControls, arrowEdge: .bottom) {
+                    SiteControlCenterView(model: model, engine: engine, site: site) { showsSiteControls = false }
+                }
+            } else {
+                securityIcon(engine?.securityState ?? .unknown, hasHost: host != nil)
+            }
             Text(host ?? "Search or Enter URL…")
                 .font(.callout)
                 .foregroundStyle(host == nil ? .secondary : .primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 0)
-            if let summary = model.sitePermissionSummary(for: engine) {
-                SitePermissionsButton(model: model, summary: summary)
+            if let summary = model.sitePermissionSummary(for: engine), site != nil {
+                // The wave 22 indicator: answers recorded for this site.
+                Button { showsSiteControls.toggle() } label: {
+                    Image(systemName: summary.symbol)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(summary.anyBlocked ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Site permissions for \(summary.host)")
+                .accessibilityLabel("Site permissions")
             }
+        }
+        .onChange(of: model.siteControlCenterRequest) { _, _ in
+            if site != nil, model.isKeyBrowserWindow(window) { showsSiteControls = true }
         }
         .padding(.horizontal, 9)
         .frame(height: 28)
@@ -120,87 +151,5 @@ struct SidebarURLField: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.tertiary)
         }
-    }
-}
-
-/// The URL field's per-site permissions indicator: shown once the page's
-/// site has an answer recorded here. The popover lists them; WebKit answers
-/// reset in place, Chromium's remembered ones live in its Site Settings.
-private struct SitePermissionsButton: View {
-    let model: BrowserViewModel
-    let summary: SitePermissionSummary
-    @State private var isPresented = false
-
-    var body: some View {
-        Button { isPresented.toggle() } label: {
-            Image(systemName: summary.symbol)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(summary.anyBlocked ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
-                .frame(width: 18, height: 18)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Site permissions for \(summary.host)")
-        .accessibilityLabel("Site permissions")
-        .popover(isPresented: $isPresented, arrowEdge: .bottom) {
-            SitePermissionsPopover(model: model, summary: summary) { isPresented = false }
-        }
-    }
-}
-
-private struct SitePermissionsPopover: View {
-    let model: BrowserViewModel
-    let summary: SitePermissionSummary
-    let dismiss: () -> Void
-
-    private var engineOwnsSettings: Bool { model.sitePermissionsLiveInEngine }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(summary.host).font(.headline)
-            ForEach(summary.rows, id: \.type.key) { row in
-                HStack(spacing: 8) {
-                    Image(systemName: row.type.symbol)
-                        .frame(width: 18)
-                        .foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(row.type.name).font(.system(size: 13))
-                        Text(statusText(row.entry))
-                            .font(.caption)
-                            .foregroundStyle(row.entry.decision == .deny ? Color.orange : Color.secondary)
-                    }
-                    Spacer(minLength: 16)
-                    if !engineOwnsSettings {
-                        Button("Reset") {
-                            model.sitePermissions.reset(origin: summary.origin, scope: summary.scope, type: row.type)
-                        }
-                        .controlSize(.small)
-                    }
-                }
-            }
-            Divider()
-            if engineOwnsSettings {
-                Text("Remembered permissions are kept by the engine. Change or reset them in Site Settings.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button("Site Settings…") {
-                    dismiss()
-                    model.openSiteSettings(origin: summary.origin)
-                }
-            } else {
-                Button("Reset All Permissions") {
-                    model.sitePermissions.reset(origin: summary.origin, scope: summary.scope)
-                    dismiss()
-                }
-            }
-        }
-        .padding(14)
-        .frame(width: 280)
-    }
-
-    private func statusText(_ entry: SitePermissionStore.Entry) -> String {
-        let decision = entry.decision == .allow ? "Allowed" : "Blocked"
-        return entry.remembered ? decision : "\(decision) this time"
     }
 }

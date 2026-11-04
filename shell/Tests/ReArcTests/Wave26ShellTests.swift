@@ -363,4 +363,36 @@ final class Wave26ShellTests: XCTestCase {
         _ = model.executeCommand(.showAirTrafficControl, commandID: nil)
         XCTAssertEqual(presented, 1)
     }
+
+    // MARK: Site Control Center
+
+    func testSiteControlCenterBoostsZoomAndSiteData() async throws {
+        let model = makeModel()
+        let url = URL(string: "https://docs.test/page")!
+        let tab = model.store.addTab(kind: .today, title: "Docs", url: url)
+        model.store.selectTab(tab.id)
+        let engine = try XCTUnwrap(model.engineHost.engine(for: tab, profileID: model.profileID(for: tab)) as? WKEngine)
+
+        XCTAssertTrue(model.siteControlBoostRows(for: url).isEmpty)
+        model.newBoost()
+        let row = try XCTUnwrap(model.siteControlBoostRows(for: url).first)
+        model.setBoostEnabled(row.id, enabled: !row.isEnabled)
+        XCTAssertEqual(model.siteControlBoostRows(for: url).first?.isEnabled, !row.isEnabled, "the panel's switch")
+        XCTAssertTrue(model.siteControlBoostRows(for: URL(string: "about:blank")!).isEmpty)
+
+        model.zoom(.zoomIn, engine: engine)
+        XCTAssertEqual(engine.zoomFactor, PageZoom.factor(after: .zoomIn, from: 1), accuracy: PageZoom.tolerance)
+        model.zoom(.reset, engine: engine)
+        XCTAssertTrue(PageZoom.isDefault(engine.zoomFactor))
+
+        let kinds = await engine.siteDataKindCount(host: "docs.test")
+        XCTAssertEqual(kinds, 0, "nothing stored for a page that never loaded")
+        await engine.clearSiteData(host: "docs.test")
+
+        let before = model.siteControlCenterRequest
+        _ = model.executeCommand(.showSiteControlCenter, commandID: nil)
+        XCTAssertEqual(model.siteControlCenterRequest, before + 1)
+        let context = CommandBarContext(store: model.store, isSidebarVisible: true, closedTabStack: ClosedTabStack())
+        XCTAssertTrue(AppCommandRegistry.all(in: context).first { $0.action == .showSiteControlCenter }!.isEnabled(in: context))
+    }
 }

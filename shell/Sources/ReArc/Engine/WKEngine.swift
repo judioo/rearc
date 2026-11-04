@@ -859,6 +859,26 @@ private struct WebViewRepresentable: NSViewRepresentable {
 
 extension WKEngine: LittleArcLinkOpening {}
 
+/// Site Control Center: the site's records in this view's data store.
+@MainActor
+extension WKEngine: SiteDataManaging {
+    private func records(for host: String) async -> [WKWebsiteDataRecord] {
+        let store = webView.configuration.websiteDataStore
+        let all = await store.dataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes())
+        return all.filter { SiteControlCenter.siteDataRecord($0.displayName, belongsTo: host) }
+    }
+
+    func siteDataKindCount(host: String) async -> Int {
+        await records(for: host).reduce(into: Set<String>()) { $0.formUnion($1.dataTypes) }.count
+    }
+
+    func clearSiteData(host: String) async {
+        let matching = await records(for: host)
+        guard !matching.isEmpty else { return }
+        await webView.configuration.websiteDataStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), for: matching)
+    }
+}
+
 extension WKEngine: PageSelectionReading {
     func selectedText() async -> String? {
         try? await webView.evaluateJavaScript("String(window.getSelection ? window.getSelection() : '')") as? String

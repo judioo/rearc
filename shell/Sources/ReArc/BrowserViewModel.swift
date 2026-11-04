@@ -69,6 +69,8 @@ final class BrowserViewModel {
     var isAirTrafficControlPresented = false
     /// Set by the Chromium shell, which owns its windows.
     @ObservationIgnored var presentAirTrafficControl: (() -> Void)?
+    /// Bumped by the Site Controls command; the key window's URL field opens its panel.
+    var siteControlCenterRequest = 0
     @ObservationIgnored var defaultBrowser: any DefaultBrowserSetting = SystemDefaultBrowser()
     /// Bumped when the default-browser state may have changed (menus re-read it).
     var defaultBrowserRevision = 0
@@ -1442,6 +1444,9 @@ final class BrowserViewModel {
             setAsDefaultBrowser()
         case .setExternalLinkDestination(let destination):
             externalLinkDestination = destination
+        case .showSiteControlCenter:
+            dismissCommandBar()
+            showSiteControlCenter()
         case .showAirTrafficControl:
             dismissCommandBar()
             showAirTrafficControl()
