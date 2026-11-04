@@ -365,6 +365,12 @@ struct BrowserView: View {
         return contentArea
             .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil)
             .overlay {
+                if let session = model.pageCaptureSession,
+                   session.window == nil ? isKeyWindowSheetOwner : session.window == windowID {
+                    PageCaptureOverlay(model: model)
+                }
+            }
+            .overlay {
                 if let dragged = draggedItemID, model.canDropToSplit(dragged, in: windowID) {
                     ContentSplitDropZone(draggedItemID: dragged, accent: model.themeColor(in: windowID)) { id, edge in
                         draggedItemID = nil

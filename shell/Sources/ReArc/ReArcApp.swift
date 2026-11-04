@@ -73,6 +73,8 @@ struct ReArcApp: App {
                 .keyboardShortcut("s")
             }
             CommandGroup(replacing: .printItem) {
+                ShellMenuButtons(groups: ShellMenus.capture(model))
+                Divider()
                 ShellMenuButtons(groups: ShellMenus.printing(model))
             }
             // Edit > Find: the page's find bar replaces the text-field finder.

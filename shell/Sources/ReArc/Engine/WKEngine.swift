@@ -907,6 +907,15 @@ extension WKEngine: SiteDataManaging {
     }
 }
 
+extension WKEngine: PageElementLocating {
+    /// Measured in ReArc's own content world, out of reach of page script.
+    @MainActor
+    func captureElementBounds(atFractionX x: Double, y: Double) async -> PageElementRect? {
+        let value = try? await webView.evaluateJavaScript(PageCaptureScripts.elementRect(fractionX: x, y: y), in: nil, contentWorld: .defaultClient)
+        return PageElementRect(value)
+    }
+}
+
 extension WKEngine: PageSelectionReading {
     func selectedText() async -> String? {
         try? await webView.evaluateJavaScript("String(window.getSelection ? window.getSelection() : '')") as? String

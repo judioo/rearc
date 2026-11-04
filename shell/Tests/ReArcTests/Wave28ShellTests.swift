@@ -153,4 +153,46 @@ final class Wave28ShellTests: XCTestCase {
         model.editBoost(imported.manifest.id)
         XCTAssertEqual(model.legacyBoostEditorID, imported.manifest.id, "Edit opens the code editor for a script boost")
     }
+
+    // MARK: Capture
+
+    private func testPNG(width: Int, height: Int) throws -> Data {
+        let rep = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8,
+                                                 samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                                 bytesPerRow: 0, bitsPerPixel: 0))
+        for x in 0 ..< width { for y in 0 ..< height { rep.setColor(x < width / 2 ? NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1) : NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1), atX: x, y: y) } }
+        return try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+    }
+
+    func testCropAndPortraitProduceImagesOfTheLaidOutSize() throws {
+        let png = try testPNG(width: 40, height: 20)
+        let cropped = try XCTUnwrap(CaptureImaging.crop(png, to: CaptureRect(x: 0.5, y: 0, width: 0.5, height: 0.5)))
+        let image = try XCTUnwrap(CaptureImaging.cgImage(cropped))
+        XCTAssertEqual(image.width, 20)
+        XCTAssertEqual(image.height, 10)
+        let rep = NSBitmapImageRep(cgImage: image)
+        XCTAssertGreaterThan(rep.colorAt(x: 5, y: 5)?.blueComponent ?? 0, 0.9, "the right half is blue")
+
+        let palette = SpaceThemePalette(theme: SpaceTheme.gradientPresets[0], darkAppearance: false)
+        let framed = try XCTUnwrap(CaptureImaging.portrait(png, palette: palette, watermark: true))
+        let framedImage = try XCTUnwrap(CaptureImaging.cgImage(framed))
+        let layout = PortraitCaptureLayout(imageWidth: 40, imageHeight: 20, watermark: true)
+        XCTAssertEqual(framedImage.width, Int(layout.canvasWidth))
+        XCTAssertEqual(framedImage.height, Int(layout.canvasHeight))
+    }
+
+    func testCaptureOverlayNeedsAPageAndCancels() {
+        let model = makeModel()
+        XCTAssertEqual(model.beginPageCapture(), "No page to capture")
+        let tab = model.store.addTab(kind: .today, title: "Site", url: URL(string: "https://capture.test/")!)
+        model.store.selectTab(tab.id)
+        XCTAssertNil(model.executeCommand(.captureAreaOrElement, commandID: nil))
+        XCTAssertEqual(model.pageCaptureSession?.tabID, tab.id)
+        model.cancelPageCapture()
+        XCTAssertNil(model.pageCaptureSession)
+        XCTAssertEqual(PageElementRect(["x": 1, "y": 2, "width": 3, "height": 4, "vw": 100, "vh": 50])?.fraction,
+                       CaptureRect(x: 0.01, y: 0.04, width: 0.03, height: 0.08))
+        XCTAssertNil(PageElementRect(["x": "nope"]))
+        XCTAssertTrue(titles(ShellMenus.capture(model)).contains("Capture in Portrait Mode"))
+    }
 }

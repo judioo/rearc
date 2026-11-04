@@ -1352,4 +1352,13 @@ extension ChromiumEngine: PageSelectionReading {
     }
 }
 
+extension ChromiumEngine: PageElementLocating {
+    /// The DOM is shared by every world, so the editor world measures it.
+    func captureElementBounds(atFractionX x: Double, y: Double) async -> PageElementRect? {
+        guard supportsScriptEvaluation else { return nil }
+        let value = try? await evaluate(PageCaptureScripts.elementRect(fractionX: x, y: y), in: .editor, timeoutMS: 1000)
+        return PageElementRect(value)
+    }
+}
+
 #endif

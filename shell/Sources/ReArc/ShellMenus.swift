@@ -90,6 +90,18 @@ enum ShellMenus {
         ]]
     }
 
+    /// File menu: Arc's capture commands (EASEL-CAPTURE §5). ⇧⌘2 sits beside
+    /// macOS's own ⇧⌘3–5 screenshots.
+    static func capture(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("Capture", "2", [.command, .shift]) { model.beginPageCapture() },
+            ShellMenuItem("Capture Full Page") { Task { await model.performCapture(scope: .fullPage) } },
+            ShellMenuItem("Capture Visible Area") { Task { await model.performCapture(scope: .visible) } },
+            ShellMenuItem("Capture in Portrait Mode") { Task { await model.capturePortrait() } },
+            ShellMenuItem("Portrait Capture Watermark On/Off") { model.portraitCaptureWatermark.toggle() },
+        ]]
+    }
+
     /// View menu: the selected tab's video in or out of Picture in Picture.
     static func pictureInPicture(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [[

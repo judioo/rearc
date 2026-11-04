@@ -23,19 +23,20 @@ struct CapturePreviewSheet: View {
 
             HStack {
                 Button("Copy") { model.copyCaptureToClipboard(record) }
-                Menu("Add to easel…") {
+                Menu("Add to Easel") {
                     ForEach(easelTargets, id: \.id) { ref in
                         Button(model.easelTitle(for: ref)) {
                             model.insertCapture(record, intoEasel: ref.easelDocumentID)
-                        }
-                    }
-                    if easelTargets.isEmpty {
-                        Button("New Easel…") {
-                            model.insertCaptureIntoNewEasel(record)
                             dismiss()
                         }
                     }
+                    if !easelTargets.isEmpty { Divider() }
+                    Button("New Easel") {
+                        model.insertCaptureIntoNewEasel(record)
+                        dismiss()
+                    }
                 }
+                .fixedSize()
                 Button("Delete", role: .destructive) {
                     model.deleteCapture(record)
                     dismiss()

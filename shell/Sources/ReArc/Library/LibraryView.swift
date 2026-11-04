@@ -271,20 +271,11 @@ struct LibraryMediaPage: View {
     }
 
     private func subtitle(_ item: LibraryMediaItem) -> String {
-        var parts = [item.record.scope.title, item.record.createdAt.formatted(date: .abbreviated, time: .shortened)]
+        var parts = [item.record.kindTitle, item.record.createdAt.formatted(date: .abbreviated, time: .shortened)]
         if let easel = item.easelTitles.first {
             parts.append(item.easelTitles.count > 1 ? "\(easel) +\(item.easelTitles.count - 1)" : easel)
         }
         return parts.joined(separator: " · ")
-    }
-}
-
-extension CaptureScope {
-    var title: String {
-        switch self {
-        case .visible: return "Visible"
-        case .fullPage: return "Full page"
-        }
     }
 }
 

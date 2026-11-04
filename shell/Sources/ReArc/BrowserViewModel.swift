@@ -211,6 +211,8 @@ final class BrowserViewModel {
     var sidebarRecoveredFromCorruption = false
     var isCapturePreviewPresented = false
     var lastCapturePreview: CaptureRecord?
+    /// Capture's drag-or-click overlay, while it is up.
+    var pageCaptureSession: PageCaptureSession?
     var captureErrorMessage: String?
 
     /// Cmd+F bar; targets one page at a time.
@@ -1476,6 +1478,10 @@ final class BrowserViewModel {
             Task { await performCapture(scope: .fullPage) }
         case .captureVisibleArea:
             Task { await performCapture(scope: .visible) }
+        case .captureAreaOrElement:
+            return beginPageCapture()
+        case .capturePortrait:
+            Task { await capturePortrait() }
         case .openCapturesGallery:
             openLibrary(.media)
         case .openLibrary(let section):

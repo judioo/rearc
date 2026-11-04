@@ -248,7 +248,11 @@ enum GrainTexture {
 enum SystemAppearance {
     static func isDark(_ colorScheme: ColorScheme) -> Bool {
         _ = colorScheme
-        return NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return isSystemDark
+    }
+
+    static var isSystemDark: Bool {
+        NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 }
 
