@@ -81,7 +81,7 @@ final class Wave22ShellTests: XCTestCase {
         XCTAssertFalse(at22.canInspect)
         XCTAssertTrue(at22.summary.contains("javascript_dialogs=1"))
         XCTAssertTrue(at22.summary.contains("password_prompts=1"))
-        XCTAssertFalse(at22.summary.contains("devtools"))
+        XCTAssertTrue(at22.summary.contains("devtools=0"))
 
         for (minor, adopted) in [(18, "javascript_dialogs"), (19, "file_chooser"), (20, "permission_prompts"), (21, "context_menu"), (22, "password_prompts")] {
             let before = ChromiumCapabilities(abiMinorVersion: UInt32(minor - 1), hasFeature: all)
@@ -96,8 +96,9 @@ final class Wave22ShellTests: XCTestCase {
         XCTAssertFalse(noFlag.passwordPrompts, "save offers need the 1.15 password client too")
         XCTAssertTrue(noFlag.javascriptDialogs)
 
-        // Wave 18d ships no DevTools frontend and the header advertises no such feature.
-        XCTAssertFalse(ChromiumCapabilities(abiMinorVersion: 999) { _ in true }.canInspect)
+        // Wave 18h (ABI 1.40) hosts the DevTools frontend; before it Inspect stays disabled.
+        XCTAssertTrue(ChromiumCapabilities(abiMinorVersion: 999) { _ in true }.canInspect)
+        XCTAssertFalse(ChromiumCapabilities(abiMinorVersion: 39) { _ in true }.canInspect)
     }
 
     func testContextMenuItemsMapToEngineCommands() {

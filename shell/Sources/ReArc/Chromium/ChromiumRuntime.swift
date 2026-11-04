@@ -528,6 +528,18 @@ final class ChromiumRuntime {
     /// ReArc > Check Passwords for Leaks; applied to each persistent profile as it opens.
     var leakDetectionPreference = PasswordLeakDetectionPreference()
     var expectedExtensionPopups: Set<UInt64> = []
+    /// DevTools frontends (ABI 1.40): announced by `openDevTools`, then open until closed.
+    var expectedDevToolsFrontends: Set<UInt64> = []
+    var devToolsFrontends: Set<UInt64> = []
+    /// The target of an `openDevTools` call in progress (its frontend's created event may come inside it).
+    var devToolsOpeningTarget: UInt64 = 0
+    /// A frontend's created event; false closes it.
+    var onDevToolsFrontendCreated: ((ChromiumTabEvent) -> Bool)?
+    var onDevToolsFrontendClosed: ((UInt64) -> Void)?
+    /// The page menu's Inspect on this page.
+    var onInspectRequested: ((ChromiumEngine) -> Void)?
+    /// Client-certificate requests seen and replies sent, for logs and the self-test.
+    var clientCertificateEvents: [ChromiumClientCertificateEvent] = []
     /// Recorded for the self-test.
     var extensionPromptEvents: [ChromiumExtensionPromptEvent] = []
     var extensionActionEvents: [ChromiumExtensionActionEvent] = []
@@ -642,6 +654,7 @@ final class ChromiumRuntime {
         // Wave 27 (ABI 1.32–1.38), before any tab.
         registerExtensionChannels(context: context)
         registerAutofillChannels(context: context)
+        registerClientCertificateChannel(context: context)
         if capabilities.htmlFullscreen {
             ReArcEngineSetFullscreenCallback(fullscreenCallback, context)
         }
@@ -1030,7 +1043,7 @@ final class ChromiumRuntime {
 
     /// Force-closes a tab the shell no longer shows. Each completion arrives
     /// once; engines before ABI 1.12 make shutdown wait for them (`mustDeferShutdown`).
-    private func forceCloseTab(_ tabID: UInt64) {
+    func forceCloseTab(_ tabID: UInt64) {
         let status = callAsync({ [self] _, _ in
             tabClosesInFlight -= 1
             startDeferredShutdownIfIdle()
@@ -1119,6 +1132,19 @@ final class ChromiumRuntime {
                 forceCloseTab(event.tabID)
             }
             return
+        }
+        if event.kind == .created, engines[event.tabID] == nil, takeExpectedDevToolsFrontend(event) {
+            // A DevTools frontend (opener = the inspected tab): docked or in its own window, never a sidebar tab.
+            devToolsFrontends.insert(event.tabID)
+            if onDevToolsFrontendCreated?(event) != true {
+                ChromiumLog.info("closing DevTools frontend \(event.tabID): no host")
+                devToolsFrontends.remove(event.tabID)
+                forceCloseTab(event.tabID)
+            }
+            return
+        }
+        if event.kind == .closed, devToolsFrontends.remove(event.tabID) != nil {
+            onDevToolsFrontendClosed?(event.tabID)
         }
         if event.kind == .created, engines[event.tabID] == nil {
             let adopted = onAdoptedTab?(event) ?? false

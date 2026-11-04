@@ -27,6 +27,8 @@ final class ChromiumSelfTest {
 
     private let runtime: ChromiumRuntime
     private var failures: [String] = []
+    /// Why the client-certificate fixture is or is not running (set before the engine starts).
+    var mutualTLSNote = ""
     private var server: SelfTestFixtureServer?
     /// The loopback fixture's origin ("http://127.0.0.1:<port>").
     private var serverBase = ""
@@ -1219,6 +1221,8 @@ final class ChromiumSelfTest {
         }
         try await wave27ShellChecks(model: model, store: store, shell: shell, tab: tabA, engine: engineA, base: base, window: first)
         try await wave28ShellChecks(model: model, store: store, tab: tabA, engine: engineA, base: base, window: first)
+        try await devToolsChecks(model: model, store: store, shell: shell, tab: tabA, engine: engineA, base: base, window: first)
+        try await clientCertificateChecks(model: model, store: store)
 
         // Private window: PrivateWindowModel on an off-the-record profile under the
         // active profile; its end closes that profile, and a new one starts empty.
@@ -2471,7 +2475,8 @@ extension ChromiumSelfTest {
         try check(linkPlan.items.prefix(2) == [.openLinkInNewTab, .openLinkInLittleArc] && linkPlan.items.contains(.copyLink)
                   && linkPlan.items.contains(.openLinkInNewSplit) == (prompts.ownerTabID != nil),
                   "link menu \(linkPlan.items.map(\.title))")
-        try check(linkPlan.entry(.inspect)?.isEnabled == false, "Inspect enabled without an inspection engine")
+        try check(linkPlan.entry(.inspect)?.isEnabled == runtime.capabilities.canInspect,
+                  "Inspect enabled=\(String(describing: linkPlan.entry(.inspect)?.isEnabled)) with devtools=\(runtime.capabilities.devTools)")
         try await wait("dismissed link menu") { engine.contextMenuRequestID == nil && (runtime.promptReplies["context"] ?? 0) > repliesBefore }
         // A retried click can land late as a second menu; let it finish first.
         try await Task.sleep(nanoseconds: 400_000_000)
@@ -2491,7 +2496,8 @@ extension ChromiumSelfTest {
             return marker == "undefined"
         }
 
-        // Inspect is refused (unsupported) and the request is dismissed instead.
+        // The engine command Inspect stays refused (unsupported) and the request is dismissed instead;
+        // with `devtools` the menu's Inspect is the shell's own (wave 28 DevTools step).
         try await Task.sleep(nanoseconds: 400_000_000)
         menus.hold = true
         let heldBase = menus.plans.count
@@ -3162,6 +3168,105 @@ extension ChromiumSelfTest {
         try check(portrait.width > full.width && portrait.height > full.height, "portrait \(portrait.width)x\(portrait.height)")
         log("PASS capture: region \(region.width)x\(region.height) of the \(full.width)x\(full.height) viewport snapshot, "
             + "clicked element <h1> \(element.width)x\(element.height) measured in the editor world, portrait \(portrait.width)x\(portrait.height)")
+    }
+
+    // MARK: DevTools (ABI 1.40) and client certificates (ABI 1.41)
+
+    @MainActor
+    private func devToolsChecks(model: BrowserViewModel, store: SidebarStore, shell: ChromiumShell, tab: Tab,
+                                engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        guard runtime.capabilities.devTools else {
+            log("ABI-GAP devtools not advertised (ABI minor \(minorText) < 40): Inspect and ⌥⌘I stay off")
+            return
+        }
+        let viewMenu = NSApp.mainMenu?.items.first { $0.title == "View" }?.submenu
+        let developer = viewMenu?.items.first { $0.title == "Developer" }?.submenu?.items.first { $0.title == "Developer Tools" }
+        try check(developer?.keyEquivalent == "i" && developer?.keyEquivalentModifierMask == [.command, .option],
+                  "View > Developer > Developer Tools (⌥⌘I) missing")
+        model.selectTab(tab.id)
+        try check(model.toggleDevTools() == nil, "⌥⌘I refused on tab A")
+        try await wait("the docked DevTools frontend attached", timeout: 20) {
+            (model.dockedDevTools(for: tab.id) as? ChromiumEngine)?.attachmentID != nil
+        }
+        let frontend = try XCTUnwrapValue(model.devToolsEngine(for: tab.id) as? ChromiumEngine, "the frontend engine")
+        try await wait("the bundled frontend loaded", timeout: 20) {
+            frontend.currentURL?.scheme == "devtools" && !frontend.isLoading
+        }
+        try check(frontend.engineProfileID == engine.engineProfileID && frontend.leaseHolder?.window === window,
+                  "frontend profile \(frontend.engineProfileID) window \(String(describing: frontend.leaseHolder?.window))")
+        try check(!store.displayTabs().contains { $0.url.scheme == "devtools" }, "the frontend became a sidebar tab")
+        model.setDevToolsPlacement(.window)
+        try await wait("DevTools in their own window", timeout: 10) {
+            guard let own = shell.window(forDevTools: tab.id) else { return false }
+            return frontend.leaseHolder?.window === own
+        }
+        model.setDevToolsPlacement(.docked)
+        try await wait("DevTools docked again", timeout: 10) {
+            shell.window(forDevTools: tab.id) == nil && frontend.leaseHolder?.window === window
+        }
+        let frontendTab = frontend.tabID
+        model.toggleDevTools()
+        try await wait("⌥⌘I closed the frontend tab", timeout: 10) { !runtime.devToolsFrontends.contains(frontendTab) }
+        try check(model.devTools.session(for: tab.id) == nil && engine.tabID != 0, "the page went with its DevTools")
+        log("PASS DevTools (ABI 1.40): ⌥⌘I opens the bundled frontend docked beside tab A (same engine profile, not a sidebar tab), "
+            + "it moves to its own window and back, and ⌥⌘I closes it while the page stays")
+
+        // Inspect from the page menu on another tab; closing that page closes its frontend.
+        let target = model.openInNewTab(URL(string: "\(base)/a")!)
+        let targetEngine = try XCTUnwrapValue(model.engineHost.engine(forTabID: target.id, profileID: model.profileID(for: target)) as? ChromiumEngine,
+                                              "the second tab's engine")
+        try await wait("the second tab loaded", timeout: 15) { targetEngine.pageTitle == Self.titleA && !targetEngine.isLoading }
+        runtime.onInspectRequested?(targetEngine)
+        try await wait("Inspect's frontend", timeout: 20) { model.devToolsEngine(for: target.id) != nil }
+        let inspected = (model.devToolsEngine(for: target.id) as? ChromiumEngine)?.tabID ?? 0
+        runtime.forceCloseTab(targetEngine.tabID)
+        try await wait("the engine closed the frontend with its page", timeout: 15) {
+            !runtime.devToolsFrontends.contains(inspected) && model.devTools.session(for: target.id) == nil
+        }
+        model.closeTab(target.id)
+        model.selectTab(tab.id)
+        log("PASS DevTools: the page menu's Inspect opened a frontend for another tab (frontend \(inspected)); "
+            + "closing that page closed its frontend in the engine and in the shell")
+    }
+
+    @MainActor
+    private func clientCertificateChecks(model: BrowserViewModel, store: SidebarStore) async throws {
+        guard runtime.capabilities.clientCertificates else {
+            log("ABI-GAP client_certificates not advertised (ABI minor \(minorText) < 41): sites asking for one fail")
+            return
+        }
+        guard let mtls = SelfTestMutualTLS.shared else {
+            log("NOTE client certificates: step skipped (\(mutualTLSNote))")
+            return
+        }
+        let tab = model.openInNewTab(mtls.url("/select"))
+        let engine = try XCTUnwrapValue(model.engineHost.engine(forTabID: tab.id, profileID: model.profileID(for: tab)) as? ChromiumEngine,
+                                        "the mTLS tab's engine")
+        let prompts = engine.pagePrompts
+        try await wait("the certificate sheet", timeout: 20) { prompts.clientCertificate != nil }
+        let request = try XCTUnwrapValue(prompts.clientCertificate?.request, "the request")
+        let subjects = request.identities.map(\.subject)
+        try check(request.identities.count == 2 && subjects.contains { $0.contains("Client Cert A") }
+                  && subjects.contains { $0.contains("Client Cert D") }
+                  && request.identities.allSatisfy { ClientCertificateIdentity.isValidFingerprint($0.fingerprint) }
+                  && request.origin == "https://127.0.0.1:\(mtls.port)",
+                  "request \(request.origin) \(subjects)")
+        prompts.answerClientCertificate(nil)
+        try await wait("Cancel leaves the page without a certificate", timeout: 15) { !engine.isLoading && prompts.clientCertificate == nil }
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        try check(prompts.clientCertificate == nil && engine.pageTitle?.hasPrefix("mtls:") != true, "Cancel was asked again or loaded")
+        engine.reload(ignoringCache: false)
+        try await wait("the sheet again after a reload", timeout: 20) { prompts.clientCertificate != nil }
+        let chosen = try XCTUnwrapValue(prompts.clientCertificate?.request.identities.first { $0.subject.contains("Client Cert D") }, "Client Cert D")
+        prompts.selectedCertificate = chosen.fingerprint
+        prompts.answerClientCertificate(prompts.selectedCertificate)
+        try await wait("the server saw Client Cert D", timeout: 20) { engine.pageTitle == "mtls:Client Cert D:/select" }
+        loadShellTab(model, tab, engine, mtls.url("/cached"))
+        try await wait("Chromium reused the choice", timeout: 20) { engine.pageTitle == "mtls:Client Cert D:/cached" }
+        try check(prompts.clientCertificate == nil, "asked again for the same host and port")
+        model.closeTab(tab.id)
+        log("PASS client certificates (ABI 1.41): the per-tab sheet listed Client Cert A and D (subject, issuer, expiry) for "
+            + "\(request.origin); Cancel loaded nothing and did not ask again; selecting D reached the server and was reused")
     }
 
     private func XCTUnwrapImage(_ png: Data?, _ label: String) throws -> CGImage {

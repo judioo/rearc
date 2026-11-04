@@ -10,11 +10,15 @@
 #                                                        @loader_path/../../../../../.. resolves to $DIST
 #
 # Usage: scripts/bundle-chromium.sh [--release] [--copy-dylibs] [--dist DIR] [--skip-build] [--selftest]
-#                                   [--dev-mock-keychain] [--launch-check]
+#                                   [--dev-mock-keychain] [--launch-check] [--engine-out DIR]
 #   --launch-check      after assembling, launch the bundle through LaunchServices (`open`, no
 #                       engine argument, with and without a link) and check it reaches ready on
 #                       the Chromium path (scripts/check-launch.sh; throwaway profile).
-#   REARC_CHROMIUM_OUT  engine output dir (default: engine/chromium/src/out/ReArc-dev-arm64)
+#   REARC_CHROMIUM_OUT  engine output dir (default: engine/chromium/src/out/ReArc-dev-arm64);
+#   --engine-out DIR    the same, as an option. A monolithic (non-component) engine build such
+#                       as out/ReArc-release-arm64 (scripts/build-engine-release.sh) has no
+#                       dylib closure: the framework is self-contained. Release-sign that bundle
+#                       with scripts/sign-release.sh, or run scripts/release.sh for everything.
 #   --dev-mock-keychain DEVELOPMENT ONLY, off by default, refused with --release. Marks the
 #                       bundle so the shell passes Chromium's --use-mock-keychain: cookies and
 #                       other Safe Storage data are then NOT encrypted with a Keychain key. It
@@ -54,11 +58,12 @@ while [[ $# -gt 0 ]]; do
     --release) CONFIG=release ;;
     --copy-dylibs) DYLIB_MODE=copy ;;
     --dist) DIST="$2"; shift ;;
+    --engine-out) OUT="$(cd "$2" && pwd)"; shift ;;
     --skip-build) BUILD=0 ;;
     --selftest) SELFTEST=1 ;;
     --dev-mock-keychain) DEV_MOCK_KEYCHAIN=1 ;;
     --launch-check) LAUNCH_CHECK=1 ;;
-    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,31p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 64 ;;
   esac
   shift
@@ -93,7 +98,15 @@ fi
 [[ $DEV_MOCK_KEYCHAIN == 1 && $CONFIG == release ]] && die "--dev-mock-keychain is development-only and cannot be combined with --release"
 
 [[ -d "$OUT/Chromium.app" ]] || die "no Chromium.app in $OUT (build the engine first; this script never does)"
-[[ -f "$OUT/libchrome_dll.dylib" ]] || die "no libchrome_dll.dylib in $OUT (component build output expected)"
+# Component dev builds reexport libchrome_dll.dylib and need the dylib closure next to the
+# app; non-component builds put everything in Chromium Framework.
+if [[ -f "$OUT/libchrome_dll.dylib" ]]; then
+  COMPONENT=1
+else
+  COMPONENT=0
+  otool -L "$OUT/Chromium.app/Contents/Frameworks/Chromium Framework.framework/Chromium Framework" | grep -q libchrome_dll \
+    && die "no libchrome_dll.dylib in $OUT, but its framework needs it (incomplete component build)"
+fi
 for header in rearc_engine_abi.h rearc_engine_entry_mac.h module.modulemap; do
   [[ -f "$BRIDGE/$header" ]] || die "missing $BRIDGE/$header"
 done
@@ -196,14 +209,18 @@ else
   echo "==> ad-hoc signed ReArc executable (set REARC_SIGN_IDENTITY for a stable signature)"
 fi
 
-# 4. Dylib closure next to the app (where the framework's rpath points).
+# 4. Dylib closure next to the app (where the framework's rpath points), component builds only.
 count=0
-for lib in "$OUT"/*.dylib; do
-  name="$(basename "$lib")"
-  if [[ $DYLIB_MODE == copy ]]; then cp -c "$lib" "$DIST/$name"; else ln -s "$lib" "$DIST/$name"; fi
-  count=$((count + 1))
-done
-echo "==> ${DYLIB_MODE} ${count} dylibs into $DIST"
+if [[ $COMPONENT == 1 ]]; then
+  for lib in "$OUT"/*.dylib; do
+    name="$(basename "$lib")"
+    if [[ $DYLIB_MODE == copy ]]; then cp -c "$lib" "$DIST/$name"; else ln -s "$lib" "$DIST/$name"; fi
+    count=$((count + 1))
+  done
+  echo "==> ${DYLIB_MODE} ${count} dylibs into $DIST"
+else
+  echo "==> monolithic engine build: no dylib closure outside the bundle"
+fi
 
 # 5. Verify every @rpath dependency of the executable, framework and closure resolves.
 FW_VERSION_DIR="$APP/$FRAMEWORK_REL/Versions/$VERSION"
@@ -220,7 +237,7 @@ check_deps() {
 }
 check_deps "$APP/Contents/MacOS/ReArc"
 check_deps "$FW_VERSION_DIR/Chromium Framework"
-for lib in "$DIST"/*.dylib; do check_deps "$lib"; done
+for lib in "$DIST"/*.dylib "$FW_VERSION_DIR/Libraries"/*.dylib; do [[ -e $lib ]] && check_deps "$lib"; done
 [[ $missing == 0 ]] || die "dylib closure incomplete"
 echo "==> dylib closure resolves (executable, framework, ${count} dylibs)"
 
@@ -248,6 +265,11 @@ if [[ $SELFTEST == 1 ]]; then
   echo "==> self-test (log: $LOG)"
   set +e
   # LSEnvironment's MallocNanoZone=0 only applies to LaunchServices launches.
+  # Debug engines' test-only client-certificate store reads net/data (ABI 1.41; mock keychain runs only).
+  CERTS="$REPO/engine/chromium/src/net/data/ssl/certificates"
+  if [[ $DEV_MOCK_KEYCHAIN == 1 && -f "$CERTS/client_root_ca.pem" ]]; then
+    export REARC_SELFTEST_CLIENT_CERT_DIR="$CERTS"
+  fi
   MallocNanoZone=0 "$APP/Contents/MacOS/ReArc" --rearc-selftest --user-data-dir="$PROFILE" >"$LOG" 2>&1
   status=$?
   set -e

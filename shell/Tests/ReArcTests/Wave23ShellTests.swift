@@ -99,7 +99,7 @@ final class Wave23ShellTests: XCTestCase {
         }
         XCTAssertFalse(ChromiumCapabilities(abiMinorVersion: 27) { $0 != "downloads" }.dangerousDownloads,
                        "Keep and Discard need the download events too")
-        XCTAssertFalse(ChromiumCapabilities(abiMinorVersion: 99, hasFeature: all).canInspect, "no DevTools frontend is advertised")
+        XCTAssertFalse(ChromiumCapabilities(abiMinorVersion: 27, hasFeature: all).canInspect, "no DevTools frontend before ABI 1.40")
     }
 
     func testOnlyTheSelfTestBlocklistsItsInertDownload() {

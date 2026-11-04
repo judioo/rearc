@@ -54,6 +54,13 @@ final class PagePromptCenter {
         var id: UInt64 { challenge.id }
     }
 
+    struct ClientCertificate: Identifiable {
+        let request: ClientCertificateRequest
+        /// nil cancels.
+        fileprivate let reply: (String?) -> Void
+        var id: UInt64 { request.id }
+    }
+
     /// What the suggestion list does with the engine (Chromium ABI 1.34).
     struct AutofillActions {
         enum AcceptOutcome { case accepted, busy, gone }
@@ -102,6 +109,10 @@ final class PagePromptCenter {
     @ObservationIgnored private var autofillShownAt = Date.distantPast
     @ObservationIgnored private var autofillActions: AutofillActions?
     @ObservationIgnored private var authQueue: [HTTPAuth] = []
+    private(set) var clientCertificate: ClientCertificate?
+    /// The identity selected in the certificate sheet.
+    var selectedCertificate: String?
+    @ObservationIgnored private var certificateQueue: [ClientCertificate] = []
 
     @ObservationIgnored private var dialogQueue: [Dialog] = []
     @ObservationIgnored private var permissionQueue: [Permission] = []
@@ -334,6 +345,48 @@ final class PagePromptCenter {
         if !authQueue.isEmpty { showHTTPAuth(authQueue.removeFirst()) }
     }
 
+    // MARK: Client certificates (Chromium ABI 1.41)
+
+    func presentClientCertificate(_ request: ClientCertificateRequest, reply: @escaping (String?) -> Void) {
+        let entry = ClientCertificate(request: request, reply: reply)
+        if clientCertificate == nil {
+            showClientCertificate(entry)
+        } else {
+            certificateQueue.append(entry)
+        }
+        router?.revealPage(of: self)
+    }
+
+    /// OK with the selected identity, or Cancel (nil).
+    func answerClientCertificate(_ fingerprint: String?) {
+        guard let current = clientCertificate else { return }
+        if let fingerprint, !current.request.identities.contains(where: { $0.fingerprint == fingerprint }) { return }
+        count(&answered, "client_certificate")
+        advanceClientCertificate()
+        current.reply(fingerprint)
+    }
+
+    func cancelClientCertificate(id: UInt64) {
+        if clientCertificate?.id == id {
+            count(&cancelled, "client_certificate")
+            advanceClientCertificate()
+        } else if let index = certificateQueue.firstIndex(where: { $0.id == id }) {
+            count(&cancelled, "client_certificate")
+            certificateQueue.remove(at: index)
+        }
+    }
+
+    private func showClientCertificate(_ entry: ClientCertificate) {
+        selectedCertificate = entry.request.sortedIdentities().first?.fingerprint
+        clientCertificate = entry
+    }
+
+    private func advanceClientCertificate() {
+        clientCertificate = nil
+        selectedCertificate = nil
+        if !certificateQueue.isEmpty { showClientCertificate(certificateQueue.removeFirst()) }
+    }
+
     // MARK: Autofill suggestions (Chromium ABI 1.34)
 
     /// Shows or updates the list. Chromium decides when it shows and hides,
@@ -520,6 +573,11 @@ final class PagePromptCenter {
         authUsername = ""
         authPassword = ""
         auths.forEach { $0.reply(nil) }
+        let certificates = [clientCertificate].compactMap { $0 } + certificateQueue
+        clientCertificate = nil
+        certificateQueue = []
+        selectedCertificate = nil
+        certificates.forEach { $0.reply(nil) }
         hideAutofill()
         if let chooser = fileChooser {
             fileChooser = nil
@@ -534,7 +592,8 @@ final class PagePromptCenter {
                                    ("permission", (permission == nil ? 0 : 1) + permissionQueue.count),
                                    ("password", password == nil ? 0 : 1),
                                    ("autofill_save", autofillSave == nil ? 0 : 1),
-                                   ("http_auth", (httpAuth == nil ? 0 : 1) + authQueue.count)] where pending > 0 {
+                                   ("http_auth", (httpAuth == nil ? 0 : 1) + authQueue.count),
+                                   ("client_certificate", (clientCertificate == nil ? 0 : 1) + certificateQueue.count)] where pending > 0 {
             cancelled[channel, default: 0] += pending
         }
         dialog = nil
@@ -547,6 +606,9 @@ final class PagePromptCenter {
         authQueue = []
         authUsername = ""
         authPassword = ""
+        clientCertificate = nil
+        certificateQueue = []
+        selectedCertificate = nil
         hideAutofill()
         if let chooser = fileChooser {
             fileChooser = nil
@@ -557,6 +619,7 @@ final class PagePromptCenter {
 
     var hasPendingPrompt: Bool {
         dialog != nil || permission != nil || password != nil || fileChooser != nil || autofillSave != nil || httpAuth != nil
+            || clientCertificate != nil
     }
 
     private func count(_ counter: inout [String: Int], _ channel: String) {

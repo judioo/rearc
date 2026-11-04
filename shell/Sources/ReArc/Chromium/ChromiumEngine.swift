@@ -1270,6 +1270,14 @@ extension ChromiumEngine: PageClosing {
         }
     }
 
+    func handleClientCertificate(_ event: ChromiumClientCertificateEvent) {
+        let id = event.identity.requestID
+        if event.identity.isCancellation { return pagePrompts.cancelClientCertificate(id: id) }
+        pagePrompts.presentClientCertificate(event.request) { [weak runtime] fingerprint in
+            runtime?.respondClientCertificate(id, fingerprint: fingerprint)
+        }
+    }
+
     func handleHTTPAuth(_ event: ChromiumHTTPAuthEvent) {
         let id = event.identity.requestID
         if event.identity.isCancellation { return pagePrompts.cancelHTTPAuth(id: id) }
@@ -1298,7 +1306,14 @@ extension ChromiumEngine: PageClosing {
         )
         let plan = PageContextMenuPlan.plan(for: event.params, options: options)
         pagePrompts.showContextMenu(plan, params: event.params, at: event.point) { [weak self] item in
-            self?.finishContextMenu(id, item: item)
+            guard let self else { return }
+            if item == .inspect, capabilities.devTools {
+                // Inspect stays an unsupported engine command: dismiss, then open the shell's frontend (ABI 1.40).
+                finishContextMenu(id, item: nil)
+                runtime.onInspectRequested?(self)
+                return
+            }
+            finishContextMenu(id, item: item)
         }
     }
 

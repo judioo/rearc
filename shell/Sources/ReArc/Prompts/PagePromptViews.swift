@@ -49,12 +49,17 @@ private struct PagePromptOverlay: ViewModifier {
                     HTTPAuthSheet(prompts: prompts, challenge: auth.challenge)
                         .id(auth.id)
                         .transition(.opacity)
+                } else if let certificate = prompts.clientCertificate {
+                    ClientCertificateSheet(prompts: prompts, request: certificate.request)
+                        .id(certificate.id)
+                        .transition(.opacity)
                 }
             }
             .animation(.spring(duration: 0.24, bounce: 0.12), value: prompts.permission?.id)
             .animation(.spring(duration: 0.24, bounce: 0.12), value: prompts.password?.id)
             .animation(.spring(duration: 0.24, bounce: 0.12), value: prompts.autofillSave?.id)
             .animation(.easeOut(duration: 0.14), value: prompts.httpAuth?.id)
+            .animation(.easeOut(duration: 0.14), value: prompts.clientCertificate?.id)
             .animation(.easeOut(duration: 0.14), value: prompts.dialog?.id)
     }
 }
@@ -415,5 +420,90 @@ private struct HTTPAuthSheet: View {
         .onAppear { focused = .username }
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
+    }
+}
+
+/// The page asks which certificate identifies you (Chromium ABI 1.41): the
+/// identities the engine offers, each with its subject, issuer and expiry.
+/// OK sends the selected one, Cancel none (the page then shows Chromium's error).
+private struct ClientCertificateSheet: View {
+    @Bindable var prompts: PagePromptCenter
+    let request: ClientCertificateRequest
+
+    var body: some View {
+        let identities = request.sortedIdentities()
+        ZStack(alignment: .top) {
+            Color.black.opacity(0.22)
+                .contentShape(Rectangle())
+                .onTapGesture {}
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Image(systemName: "person.text.rectangle.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(request.title).font(.headline)
+                }
+                Text(request.message)
+                    .font(.system(size: 13))
+                    .fixedSize(horizontal: false, vertical: true)
+                if !identities.isEmpty {
+                    ScrollView {
+                        VStack(spacing: 2) {
+                            ForEach(identities) { identity in row(identity) }
+                        }
+                    }
+                    .frame(maxHeight: 220)
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12)))
+                }
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button("Cancel") { prompts.answerClientCertificate(nil) }
+                        .keyboardShortcut(.cancelAction)
+                    Button("OK") { prompts.answerClientCertificate(prompts.selectedCertificate) }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(prompts.selectedCertificate == nil)
+                }
+            }
+            .padding(18)
+            .frame(width: 440)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
+            .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
+            .padding(.top, 64)
+        }
+        .onExitCommand { prompts.answerClientCertificate(nil) }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
+    }
+
+    private func row(_ identity: ClientCertificateIdentity) -> some View {
+        let selected = prompts.selectedCertificate == identity.fingerprint
+        let expired = identity.isExpired()
+        return Button { prompts.selectedCertificate = identity.fingerprint } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(identity.subject.isEmpty ? "Unnamed certificate" : identity.subject)
+                        .font(.system(size: 13, weight: .medium))
+                    Text("Issued by \(identity.issuer.isEmpty ? "unknown" : identity.issuer)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text((expired ? "Expired " : "Expires ") + identity.expires.formatted(date: .abbreviated, time: .omitted))
+                        .font(.system(size: 11))
+                        .foregroundStyle(expired ? .red : .secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(selected ? Color.accentColor.opacity(0.12) : .clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("SHA-256 \(identity.groupedFingerprint)")
+        .simultaneousGesture(TapGesture(count: 2).onEnded { prompts.answerClientCertificate(identity.fingerprint) })
     }
 }

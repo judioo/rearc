@@ -278,4 +278,87 @@ final class Wave28ShellTests: XCTestCase {
         XCTAssertEqual(model.store.activeSpace.name, "Chrome", "the imported space is shown")
         XCTAssertEqual(model.toast?.message, "Imported 1 bookmark into Chrome")
     }
+
+    // MARK: DevTools and client certificates (engine wave 18h)
+
+    private final class FakeDevToolsOpener: DevToolsOpening {
+        var opened: [Tab.ID] = []
+        func openDevTools(for tab: Tab, engine: any WebEngine) -> String? {
+            opened.append(tab.id)
+            return nil
+        }
+    }
+
+    func testCapabilitiesGateDevToolsAndClientCertificatesOnTheirMinors() {
+        let all: (String) -> Bool = { _ in true }
+        let old = ChromiumCapabilities(abiMinorVersion: 39, hasFeature: all)
+        XCTAssertFalse(old.devTools)
+        XCTAssertFalse(old.canInspect, "Inspect stays disabled before ABI 1.40")
+        XCTAssertFalse(old.clientCertificates)
+        let forty = ChromiumCapabilities(abiMinorVersion: 40, hasFeature: all)
+        XCTAssertTrue(forty.devTools && forty.canInspect)
+        XCTAssertFalse(forty.clientCertificates)
+        let current = ChromiumCapabilities(abiMinorVersion: 41, hasFeature: all)
+        XCTAssertTrue(current.clientCertificates)
+        XCTAssertTrue(current.summary.contains("devtools=1 client_certificates=1"))
+        XCTAssertFalse(ChromiumCapabilities(abiMinorVersion: 41, hasFeature: { $0 != "devtools" }).canInspect)
+    }
+
+    func testDevToolsOpenDockPopOutAndCloseThroughTheModel() throws {
+        let model = makeModel()
+        XCTAssertEqual(model.toggleDevTools(), "No page to inspect")
+        let tab = model.openInNewTab(URL(string: "https://inspect.test/")!)
+        XCTAssertEqual(model.toggleDevTools(), "Developer Tools need the Chromium engine", "WebKit has none")
+        let opener = FakeDevToolsOpener()
+        model.devToolsOpener = opener
+        XCTAssertNil(model.toggleDevTools())
+        XCTAssertNil(model.toggleDevTools(), "a second ⌥⌘I while it opens asks nothing more")
+        XCTAssertEqual(opener.opened, [tab.id])
+
+        let frontend = model.engineHost.engine(for: model.store.addTab(kind: .today, title: "F", url: URL(string: "about:blank")!),
+                                               profileID: model.store.activeProfileID)
+        model.store.selectTab(tab.id)
+        model.attachDevTools(frontend, frontendTabID: 77, for: tab.id)
+        XCTAssertTrue(model.dockedDevTools(for: tab.id) === frontend, "docked by default")
+        model.setDevToolsPlacement(.window)
+        XCTAssertNil(model.dockedDevTools(for: tab.id))
+        XCTAssertEqual(model.devTools.session(for: tab.id)?.placement, .window)
+        model.devToolsWindowClosed(for: tab.id)
+        XCTAssertNil(model.devTools.session(for: tab.id), "closing the window closes them")
+
+        model.attachDevTools(frontend, frontendTabID: 78, for: tab.id)
+        model.devToolsFrontendClosed(78)
+        XCTAssertNil(model.devToolsEngine(for: tab.id), "the engine closed the frontend with its page")
+        model.attachDevTools(frontend, frontendTabID: 79, for: tab.id)
+        model.releaseEngine(for: tab.id)
+        XCTAssertNil(model.devTools.session(for: tab.id), "closing the page closes its DevTools")
+        XCTAssertEqual(titles(ShellMenus.developer(model)).first, "Developer Tools")
+        XCTAssertEqual(ShellMenus.developer(model).first?.first?.menuKeyEquivalent, "i")
+    }
+
+    func testCertificateSheetQueuesAndRepliesOnce() {
+        let prompts = PagePromptCenter()
+        let a = ClientCertificateIdentity(fingerprint: String(repeating: "A", count: 64), subject: "Client Cert A", issuer: "B CA",
+                                          expires: Date().addingTimeInterval(86_400))
+        let d = ClientCertificateIdentity(fingerprint: String(repeating: "D", count: 64), subject: "Client Cert D", issuer: "E CA",
+                                          expires: Date().addingTimeInterval(86_400))
+        var replies: [(UInt64, String?)] = []
+        prompts.presentClientCertificate(ClientCertificateRequest(id: 1, origin: "https://m.test", identities: [d, a])) { replies.append((1, $0)) }
+        prompts.presentClientCertificate(ClientCertificateRequest(id: 2, origin: "https://m.test", identities: [a])) { replies.append((2, $0)) }
+        XCTAssertEqual(prompts.clientCertificate?.id, 1)
+        XCTAssertEqual(prompts.selectedCertificate, a.fingerprint, "the first sorted identity is preselected")
+        XCTAssertTrue(prompts.hasPendingPrompt)
+        prompts.answerClientCertificate(String(repeating: "F", count: 64))
+        XCTAssertTrue(replies.isEmpty, "an unlisted fingerprint is not sent")
+        prompts.answerClientCertificate(d.fingerprint)
+        XCTAssertEqual(replies.map(\.1), [d.fingerprint])
+        XCTAssertEqual(prompts.clientCertificate?.id, 2, "the next request shows")
+        prompts.cancelClientCertificate(id: 2)
+        XCTAssertNil(prompts.clientCertificate, "withdrawn by the engine: no reply")
+        XCTAssertEqual(replies.count, 1)
+        prompts.presentClientCertificate(ClientCertificateRequest(id: 3, origin: "https://m.test", identities: [a])) { replies.append((3, $0)) }
+        prompts.answerAllConservatively()
+        XCTAssertEqual(replies.last?.0, 3)
+        XCTAssertNil(replies.last?.1, "closing the page cancels it")
+    }
 }

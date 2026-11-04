@@ -202,6 +202,13 @@ final class BrowserViewModel {
     var boostEditorDraftByTab: [Tab.ID: BoostEditorDraft] = [:]
     /// The legacy (CSS and JavaScript) boost open in its editor sheet.
     var legacyBoostEditorID: UUID?
+    /// Open DevTools frontends, per sidebar tab, and their engines.
+    var devTools = DevToolsSessions()
+    @ObservationIgnored var devToolsEngines: [Tab.ID: any WebEngine] = [:]
+    /// Tabs whose frontend was asked for and has not arrived yet.
+    @ObservationIgnored var devToolsPending: Set<Tab.ID> = []
+    /// Set by the Chromium shell when the engine hosts DevTools (ABI 1.40).
+    @ObservationIgnored weak var devToolsOpener: DevToolsOpening?
     var boostSessionApplyByTab: [Tab.ID: BoostSessionApplyMap] = [:]
     var lastPickedSnapshotByTab: [Tab.ID: PickedElementSnapshot] = [:]
     var boostSelectorFingerprintByTab: [Tab.ID: BoostSelectorFingerprint] = [:]
@@ -468,6 +475,7 @@ final class BrowserViewModel {
         mediaSubscriptions[id] = nil
         mediaStateByTab[id] = nil
         tabMuteModel.markUserUnmuted(id)
+        closeDevTools(for: id)
         engineHost.remove(id)
         refreshNowPlaying()
     }

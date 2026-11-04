@@ -46,6 +46,8 @@ struct ChromiumCapabilities: Equatable {
     static let autofillSavePromptsFeature = "autofill_save_prompts"
     static let httpAuthFeature = "http_auth"
     static let linkOpenRequestsFeature = "link_open_requests"
+    static let devToolsFeature = "devtools"
+    static let clientCertificatesFeature = "client_certificates"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -88,6 +90,8 @@ struct ChromiumCapabilities: Equatable {
         autofillSavePromptsFeature: 37,
         httpAuthFeature: 38,
         linkOpenRequestsFeature: 39,
+        devToolsFeature: 40,
+        clientCertificatesFeature: 41,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -171,6 +175,10 @@ struct ChromiumCapabilities: Equatable {
     /// ⌘/⇧⌘/⇧/⌥⌘/middle-click link opens routed to the host (`ReArcEngineSetLinkOpenCallback`);
     /// requires `extensionWindows`, whose window report the reply is checked against.
     var linkOpenRequests: Bool
+    /// Registry-hosted bundled DevTools frontends (`ReArcTabOpenDevTools`).
+    var devTools: Bool
+    /// TLS client-certificate selection (`ReArcEngineSetClientCertificateCallback`, `ReArcClientCertificateRespond`).
+    var clientCertificates: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -219,11 +227,13 @@ struct ChromiumCapabilities: Equatable {
         autofillSavePrompts = adopted(Self.autofillSavePromptsFeature)
         httpAuth = adopted(Self.httpAuthFeature)
         linkOpenRequests = extensionWindows && adopted(Self.linkOpenRequestsFeature)
+        devTools = adopted(Self.devToolsFeature)
+        clientCertificates = adopted(Self.clientCertificatesFeature)
     }
 
-    /// Inspect in the page menu. No engine advertises a DevTools frontend
-    /// (WAVE-18D-REPORT "DevTools audit and disposition"), so it stays listed disabled.
-    var canInspect: Bool { false }
+    /// Inspect in the page menu: the shell opens a hosted frontend itself
+    /// (ABI 1.40); before it, Inspect stays listed disabled.
+    var canInspect: Bool { devTools }
 
     /// "Ask where to save" for downloads: download policy prompt 1 needs a host file chooser (ABI 1.19).
     var downloadSavePrompt: Bool { downloads && fileChooser }
@@ -286,6 +296,8 @@ struct ChromiumCapabilities: Equatable {
             (Self.autofillSavePromptsFeature, autofillSavePrompts),
             (Self.httpAuthFeature, httpAuth),
             (Self.linkOpenRequestsFeature, linkOpenRequests),
+            (Self.devToolsFeature, devTools),
+            (Self.clientCertificatesFeature, clientCertificates),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

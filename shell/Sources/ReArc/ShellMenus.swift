@@ -139,6 +139,16 @@ enum ShellMenus {
         ]]
     }
 
+    /// View > Developer, Chromium with `devtools` (ABI 1.40): the page's
+    /// DevTools, docked beside it (Arc's default) or in their own window.
+    static func developer(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("Developer Tools", "i", [.command, .option]) { model.toggleDevTools() },
+            ShellMenuItem("Open Developer Tools in a Window") { model.setDevToolsPlacement(.window) },
+            ShellMenuItem("Dock Developer Tools") { model.setDevToolsPlacement(.docked) },
+        ]]
+    }
+
     /// Tabs menu: Arc's Tab Switcher (forward/backward), recent tabs first.
     /// The app-wide key monitor handles the keys; the items show them.
     static func tabSwitcher(_ model: BrowserViewModel) -> [[ShellMenuItem]] {

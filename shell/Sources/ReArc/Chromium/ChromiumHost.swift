@@ -42,7 +42,17 @@ enum ChromiumHost {
                     ChromiumLaunchArguments.prepareSelfTestUserDataDir(URL(fileURLWithPath: dir, isDirectory: true))
                 }
                 let extensions = SelfTestExtensionFixture.write()
-                let code = runtime.run(arguments: ChromiumLaunchArguments.selfTestArguments(arguments, extensionDirs: extensions.map(\.path)),
+                // ABI 1.41's test-only certificate store needs the mock keychain; the real Keychain is never listed.
+                var mutualTLS: [String] = []
+                if keychain == .devMock {
+                    let (fixture, note) = SelfTestMutualTLS.start()
+                    mutualTLS = fixture?.switches ?? []
+                    test.mutualTLSNote = note
+                } else {
+                    test.mutualTLSNote = "the real-Keychain run lists no client identities"
+                }
+                let code = runtime.run(arguments: ChromiumLaunchArguments.selfTestArguments(arguments, extensionDirs: extensions.map(\.path))
+                                           + mutualTLS,
                                        keychain: keychain)
                 exit(test.exitCode(runResult: code))
             }
@@ -107,6 +117,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         case browser
         case littleArc(LittleArcWindow.ID)
         case privateBrowsing(PrivateWindowModel)
+        case devTools(Tab.ID)
     }
 
     private let runtime: ChromiumRuntime
@@ -121,6 +132,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private var downloadBackend: ChromiumDownloadBackend?
     /// Toolbar actions, popups, extension prompts, windows and tab requests (wave 27).
     private(set) var extensionHost: ChromiumExtensionHost?
+    private(set) var devToolsHost: ChromiumDevToolsHost?
     /// The window showing the HTML-fullscreen page, the native state the
     /// shell wants for it (nil: leave it as the user has it), and the
     /// transition in progress.
@@ -193,6 +205,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let extensionHost = ChromiumExtensionHost(runtime: runtime, model: model)
         extensionHost.install()
         self.extensionHost = extensionHost
+        let devToolsHost = ChromiumDevToolsHost(runtime: runtime, model: model)
+        devToolsHost.install()
+        self.devToolsHost = devToolsHost
         if runtime.capabilities.autofillSuggestions {
             // "Manage…" in the suggestions: Chromium's settings page for the product, as a tab.
             runtime.onAutofillSettings = { [weak model] url, _ in model?.openPageInNewTab(url, title: "Settings") }
@@ -371,6 +386,39 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
+    func presentDevToolsWindow(for tabID: Tab.ID) {
+        MainActor.assumeIsolated {
+            if let existing = window(forDevTools: tabID) {
+                existing.makeKeyAndOrderFront(nil)
+                return
+            }
+            guard let model, !terminating else { return }
+            let title = model.store.tab(withID: tabID).map { "Developer Tools – \($0.displayTitle)" } ?? "Developer Tools"
+            let window = makeWindow(
+                size: NSSize(width: 900, height: 620),
+                title: title,
+                content: NSHostingView(rootView: DevToolsWindowView(model: model, tabID: tabID))
+            )
+            window.styleMask.remove(.fullSizeContentView)
+            window.titlebarAppearsTransparent = false
+            window.titleVisibility = .visible
+            cascade(window, offset: 30)
+            track(window, .devTools(tabID))
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    func dismissDevToolsWindow(for tabID: Tab.ID) {
+        guard let window = window(forDevTools: tabID) else { return }
+        // Docking back: the window goes without closing the frontend.
+        windows[ObjectIdentifier(window)] = nil
+        closeWindow(window)
+    }
+
+    func window(forDevTools tabID: Tab.ID) -> NSWindow? {
+        windows.values.first { if case .devTools(tabID) = $0.role { return true } else { return false } }?.window
+    }
+
     func dismissLittleArcWindow(_ id: LittleArcWindow.ID) {
         window(forLittleArc: id).map(closeWindow)
     }
@@ -421,6 +469,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         guard !terminating else { return }
         if case .privateBrowsing(let privateWindow) = entry.role {
             model?.privateWindowClosed(privateWindow.id)
+        }
+        if case .devTools(let tabID) = entry.role {
+            model?.devToolsWindowClosed(for: tabID)
         }
         DispatchQueue.main.async {
             // Tears down the SwiftUI hierarchy (onDisappear runs, engines drop).
@@ -687,6 +738,11 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         if runtime.capabilities.navigationExtended {
             view.addItem(.separator())
             view.addItem(target.item("View Page Source", "u", [.command, .option]) { model.viewSelectedPageSource() })
+        }
+        if runtime.capabilities.devTools {
+            let developer = NSMenu(title: "Developer")
+            target.add(ShellMenus.developer(model), to: developer)
+            view.addSubmenu(developer, title: "Developer")
         }
         if runtime.capabilities.webUIDailyPages {
             view.addItem(.separator())

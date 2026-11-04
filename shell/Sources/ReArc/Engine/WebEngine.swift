@@ -145,6 +145,14 @@ protocol BrowserWindowPresenting: AnyObject {
     func presentLittleArcWindow(_ id: LittleArcWindow.ID)
     func dismissLittleArcWindow(_ id: LittleArcWindow.ID)
     func presentPrivateWindow(_ window: PrivateWindowModel)
+    /// A tab's DevTools in their own window (popped out from the docked pane).
+    func presentDevToolsWindow(for tabID: Tab.ID)
+    func dismissDevToolsWindow(for tabID: Tab.ID)
+}
+
+extension BrowserWindowPresenting {
+    func presentDevToolsWindow(for tabID: Tab.ID) {}
+    func dismissDevToolsWindow(for tabID: Tab.ID) {}
 }
 
 /// What an unload request did.

@@ -410,11 +410,21 @@ struct BrowserView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let tab = model.selectedTab(in: windowID) {
             let engine = model.engineHost.engine(for: tab, profileID: model.profileID(for: tab))
-            engine.makeView()
-                .id(tab.id)
+            if let frontend = model.dockedDevTools(for: tab.id) {
+                DevToolsDockedLayout(model: model, tabID: tab.id, frontend: frontend) {
+                    engine.makeView()
+                        .id(tab.id)
+                        .pageStatus(engine.activity) { engine.reload() }
+                        .findBar(model.findBar, for: engine)
+                }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .pageStatus(engine.activity) { engine.reload() }
-                .findBar(model.findBar, for: engine)
+            } else {
+                engine.makeView()
+                    .id(tab.id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .pageStatus(engine.activity) { engine.reload() }
+                    .findBar(model.findBar, for: engine)
+            }
         } else {
             EmptyStateView(theme: model.themeColor(in: windowID))
         }
