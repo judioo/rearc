@@ -47,6 +47,9 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
             self?.popups.tabClosed(event.tabID)
             self?.reporter.forget(tab: event.tabID)
         }
+        if capabilities.linkOpenRequests {
+            runtime.onLinkOpen = { [weak self] event in MainActor.assumeIsolated { self?.handleLinkOpen(event) } }
+        }
         if capabilities.extensionWindows {
             runtime.onExtensionTabRequest = { [weak self] request in MainActor.assumeIsolated { self?.handleTabRequest(request) } }
             observeWindows()
@@ -225,18 +228,9 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
             reconcileWindows()
             runtime.respondExtensionTabRequest(request.id, tab: tab)
         case .newTab(let space):
-            guard let tabID = runtime.createBlankTab(profile: request.profileID, role: .tab) else { return decline(request, "tab creation failed") }
-            let event = ChromiumTabEvent.created(profileID: request.profileID, tabID: tabID, url: "about:blank")
-            let blank = URL(string: "about:blank")!
-            let tab = store.addTab(kind: .today, title: "New Tab", url: blank, in: space)
-            let profileID = model.profileID(for: tab)
-            let engine = ChromiumEngine(runtime: runtime, adopting: event, initialURL: blank,
-                                        context: EngineProfileContext(profileID: profileID),
-                                        profileKey: runtime.profileKey(forEngineProfile: request.profileID) ?? .persistent(profileID),
-                                        shellID: tab.id)
-            engine.onNavigationCommit = { [weak model] url, title in model?.handleTabNavigationCommit(tabID: tab.id, url: url, title: title) }
-            model.engineHost.adopt(engine, for: tab, profileID: profileID)
-            model.observeFavicon(of: engine, tabID: tab.id)
+            guard let (tabID, tab) = adoptBlankTab(profile: request.profileID, in: space, model: model) else {
+                return decline(request, "tab creation failed")
+            }
             if request.active {
                 if space != store.activeSpaceID { store.selectSpace(space) }
                 model.selectTab(tab.id)
@@ -251,6 +245,80 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
             reconcileWindows()
             runtime.respondExtensionTabRequest(request.id, tab: tabID)
         }
+    }
+
+    /// A blank registry tab in `profile`, adopted as a today tab of `space`
+    /// (about:blank in the sidebar too, so selecting it loads nothing over
+    /// the navigation the engine starts when the request is answered).
+    @MainActor
+    private func adoptBlankTab(profile: UInt64, in space: UUID, model: BrowserViewModel, title: String = "New Tab") -> (UInt64, Tab)? {
+        guard let tabID = runtime.createBlankTab(profile: profile, role: .tab) else { return nil }
+        let event = ChromiumTabEvent.created(profileID: profile, tabID: tabID, url: "about:blank")
+        let blank = URL(string: "about:blank")!
+        let tab = model.store.addTab(kind: .today, title: title, url: blank, in: space)
+        let profileID = model.profileID(for: tab)
+        let engine = ChromiumEngine(runtime: runtime, adopting: event, initialURL: blank,
+                                    context: EngineProfileContext(profileID: profileID),
+                                    profileKey: runtime.profileKey(forEngineProfile: profile) ?? .persistent(profileID),
+                                    shellID: tab.id)
+        engine.onNavigationCommit = { [weak model] url, title in model?.handleTabNavigationCommit(tabID: tab.id, url: url, title: title) }
+        model.engineHost.adopt(engine, for: tab, profileID: profileID)
+        model.observeFavicon(of: engine, tabID: tab.id)
+        return (tabID, tab)
+    }
+
+    // MARK: Modified link opens (ABI 1.39)
+
+    /// ⌘-click and middle-click: a background tab; ⇧⌘-click: a new tab;
+    /// ⇧-click: Little Arc; a split disposition: a pane next to the source.
+    /// ⌥⌘ held at the click stays Little Arc (wave 26). The engine navigates
+    /// the new tab with the original request once it is answered.
+    @MainActor
+    private func handleLinkOpen(_ event: ChromiumLinkOpenEvent) {
+        guard let model else { return declineLink(event, "no browser model") }
+        let store = model.store
+        let source = runtime.engine(forTab: event.openerTabID)
+        let sourceTab = source.flatMap { engine in model.engineHost.allTabEngines().first { ($0.2 as AnyObject) === engine }?.0 }
+        let placement = LinkOpenPlacement.resolve(disposition: event.disposition, littleArcKeysHeld: model.takeLittleArcClick(),
+                                                  sourceTab: sourceTab)
+        func inProfile(_ space: UUID) -> Bool {
+            guard let profile = store.space(withID: space)?.profileID else { return false }
+            return runtime.engineProfileID(for: .persistent(profile)) == event.profileID
+        }
+        let active = store.activeSpaceID
+        let space = sourceTab.flatMap(store.spaceContaining(tabID:)).flatMap { inProfile($0) ? $0 : nil }
+            ?? ([active] + store.spaces.map(\.id)).first(where: inProfile)
+        ChromiumLog.info("link open \(event.requestID): disposition \(event.disposition) -> \(placement)")
+        switch placement {
+        case .decline(let reason):
+            declineLink(event, reason)
+        case .littleArc:
+            guard let tabID = runtime.createBlankTab(profile: event.profileID, role: .littleArc) else { return declineLink(event, "tab creation failed") }
+            _ = model.adoptChromiumLittleArc(ChromiumTabEvent.created(profileID: event.profileID, tabID: tabID, url: "about:blank"),
+                                             profileKey: runtime.profileKey(forEngineProfile: event.profileID), url: URL(string: "about:blank")!)
+            reconcileWindows()
+            runtime.respondLinkOpen(event.requestID, tab: tabID)
+        case .backgroundTab, .foregroundTab, .split:
+            guard let space else { return declineLink(event, "no space in the link's profile") }
+            guard let (tabID, tab) = adoptBlankTab(profile: event.profileID, in: space, model: model,
+                                                   title: URL(string: event.url)?.host() ?? "New Tab") else {
+                return declineLink(event, "tab creation failed")
+            }
+            if placement.isActive, space != store.activeSpaceID { store.selectSpace(space) }
+            if case .split(let anchor) = placement, let split = store.splitTab(tab.id, with: anchor) {
+                store.selectSplit(split.id, focusTabID: tab.id)
+                model.loadSelectedIfNeeded()
+            } else if placement.isActive {
+                model.selectTab(tab.id)
+            }
+            reconcileWindows()
+            runtime.respondLinkOpen(event.requestID, tab: tabID)
+        }
+    }
+
+    private func declineLink(_ event: ChromiumLinkOpenEvent, _ reason: String) {
+        ChromiumLog.info("link open \(event.requestID) declined: \(reason)")
+        runtime.respondLinkOpen(event.requestID, tab: 0)
     }
 
     private func decline(_ request: ExtensionTabRequest, _ reason: String) {

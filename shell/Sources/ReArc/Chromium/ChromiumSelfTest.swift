@@ -141,7 +141,7 @@ final class ChromiumSelfTest {
                         "dangerous_downloads", "tab_discard", "search_autocomplete", "html_fullscreen", "printing",
                         "page_drops", "picture_in_picture", "extension_tab_helpers", "extension_install_prompts",
                         "extension_actions", "autofill_suggestions", "password_leak_detection", "extension_windows",
-                        "autofill_save_prompts", "http_auth"]
+                        "autofill_save_prompts", "http_auth", "link_open_requests"]
         let foreground = ChromiumLaunchArguments.selfTestForegroundSwitches.filter(CommandLine.arguments.contains)
         log("renderer foreground switches (self-test only): "
             + ChromiumLaunchArguments.selfTestForegroundSwitches.joined(separator: " ")
@@ -3070,6 +3070,7 @@ extension ChromiumSelfTest {
         try await extensionChecks(model: model, store: store, shell: shell, tab: tab, engine: engine)
         try await autofillChecks(model: model, store: store, tab: tab, engine: engine, base: base, window: window)
         try await httpAuthChecks(model: model, tab: tab, engine: engine, base: base)
+        try await linkOpenChecks(model: model, store: store, tab: tab, engine: engine, base: base, window: window)
         model.selectTab(tab.id)
         loadShellTab(model, tab, engine, URL(string: "\(base)/a")!)
         try await wait("tab A after the wave 27 checks") { engine.pageTitle == Self.titleA && !engine.isLoading }
@@ -3304,6 +3305,73 @@ extension ChromiumSelfTest {
             + "second reply -> \(late.rearcName)")
     }
 
+    // MARK: Modified link opens (ABI 1.39)
+
+    /// ⌘-click: a background tab; ⇧⌘-click: a selected tab; ⌥⌘-click: Little
+    /// Arc. All on an ordinary link, which wave 26 could not open on Chromium.
+    @MainActor
+    private func linkOpenChecks(model: BrowserViewModel, store: SidebarStore, tab: Tab, engine: ChromiumEngine, base: String,
+                                window: NSWindow) async throws {
+        guard runtime.capabilities.linkOpenRequests else {
+            log("ABI-GAP link_open_requests not advertised (ABI minor \(minorText) < 39): ⌘-click on ordinary links opens nothing")
+            return
+        }
+        let unknown = runtime.respondLinkOpen(UInt64.max, tab: 0)
+        try check(unknown == ReArcStatus(REARC_NOT_FOUND), "a reply to an unknown link open returned \(unknown.rearcName)")
+        model.selectTab(tab.id)
+        loadShellTab(model, store.tab(withID: tab.id) ?? tab, engine, URL(string: "\(base)/links")!)
+        try await wait("tab A on the link fixture", timeout: 15) { engine.pageTitle == "links" && !engine.isLoading }
+        guard await bringToFront(window, for: "modified link clicks") else {
+            log("NOTE modified link clicks: synthesized input is not deliverable (app active \(NSApp.isActive)); not exercised in this run; "
+                + "unknown request -> \(unknown.rearcName)")
+            return
+        }
+        let link = try await cssCenter(of: "#plain", in: engine)
+        /// Clicks with `modifiers` until a new sidebar tab (or Little Arc) appears.
+        func modifiedClick(_ modifiers: NSEvent.ModifierFlags, opened: () -> Bool) async -> Bool {
+            for _ in 0..<3 {
+                focus(window)
+                model.noteMouseDown(modifiers: modifiers)
+                click(window, engine: engine, at: link, modifiers: modifiers)
+                if await eventually(timeout: 3, opened) { return true }
+            }
+            return false
+        }
+        var results: [String] = []
+        for (label, modifiers, selects) in [("⌘-click", NSEvent.ModifierFlags.command, false), ("⇧⌘-click", [.command, .shift], true)] {
+            let before = Set(store.displayTabs().map(\.id))
+            let eventsBefore = runtime.linkOpenEvents.count
+            guard await modifiedClick(modifiers, opened: { store.displayTabs().contains { !before.contains($0.id) } }) else {
+                results.append("\(label): NOTE no tab (app active \(NSApp.isActive), key \(window.isKeyWindow))")
+                continue
+            }
+            let created = store.displayTabs().first { !before.contains($0.id) }!
+            let createdEngine = try shellEngine(model, created)
+            try await wait("\(label) link loaded", timeout: 15) { createdEngine.currentURL?.path == "/a" && createdEngine.pageTitle == Self.titleA }
+            let event = runtime.linkOpenEvents.dropFirst(eventsBefore).first
+            let selected = store.selectedTabID == created.id
+            try check(selected == selects, "\(label): new tab selected \(selected), expected \(selects)")
+            try check(engine.pageTitle == "links" && store.spaceContaining(tabID: created.id) == store.activeSpaceID,
+                      "\(label): source '\(engine.pageTitle ?? "")', space of the new tab")
+            results.append("\(label) -> disposition \(event?.disposition ?? 0), \(selects ? "selected" : "background") tab on /a")
+            model.deleteTab(created.id)
+            model.selectTab(tab.id)
+        }
+        let littleBefore = store.littleArcLiveWindows.count
+        if await modifiedClick([.command, .option], opened: { store.littleArcLiveWindows.count > littleBefore }),
+           let record = store.littleArcLiveWindows.last, let little = model.littleArcEngine(for: record.id) as? ChromiumEngine {
+            try await wait("⌥⌘-clicked ordinary link in Little Arc", timeout: 15) { little.currentURL?.path == "/a" && little.pageTitle == Self.titleA }
+            results.append("⌥⌘-click -> disposition \(runtime.linkOpenEvents.last?.disposition ?? 0), Little Arc on /a")
+            model.windowPresenter?.dismissLittleArcWindow(record.id)
+            try await wait("the link's Little Arc closed") { store.littleArcWindow(withID: record.id) == nil }
+        } else {
+            results.append("⌥⌘-click: NOTE no Little Arc")
+        }
+        let passed = results.filter { !$0.contains("NOTE") }.count
+        log("\(passed == results.count ? "PASS" : "NOTE") modified link opens (ABI 1.39) on an ordinary link: \(results.joined(separator: "; ")); "
+            + "tab A stayed on its page; unknown request -> \(unknown.rearcName)")
+    }
+
     // MARK: HTTP authentication (ABI 1.38)
 
     @MainActor
@@ -3472,7 +3540,8 @@ final class SelfTestFixtureServer {
         // Wave 26: a target=_blank link for ⌥⌘-click to Little Arc.
         "/links": """
         <!doctype html><html><head><title>links</title></head><body style="margin:0;font:28px -apple-system">
-        <a id="blank" target="_blank" href="/a" style="display:block;padding:40px">new window link</a></body></html>
+        <a id="blank" target="_blank" href="/a" style="display:block;padding:40px">new window link</a>
+        <a id="plain" href="/a" style="display:block;padding:40px">ordinary link</a></body></html>
         """,
         "/leave": """
         <!doctype html><html><head><title>leave</title><script>

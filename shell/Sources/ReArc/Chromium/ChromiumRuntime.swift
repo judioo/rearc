@@ -532,6 +532,9 @@ final class ChromiumRuntime {
     var extensionPromptEvents: [ChromiumExtensionPromptEvent] = []
     var extensionActionEvents: [ChromiumExtensionActionEvent] = []
     var extensionTabRequests: [ExtensionTabRequest] = []
+    /// ⌘/⇧⌘/⇧/⌥⌘/middle-click link opens (ABI 1.39); without it they are refused.
+    var onLinkOpen: ((ChromiumLinkOpenEvent) -> Void)?
+    var linkOpenEvents: [ChromiumLinkOpenEvent] = []
     /// The shell profile that may take over the startup `Default` directory
     /// (the first profile); set before any of its tabs are created.
     var legacyDefaultOwner: Profile.ID?

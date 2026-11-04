@@ -45,6 +45,7 @@ struct ChromiumCapabilities: Equatable {
     static let extensionWindowsFeature = "extension_windows"
     static let autofillSavePromptsFeature = "autofill_save_prompts"
     static let httpAuthFeature = "http_auth"
+    static let linkOpenRequestsFeature = "link_open_requests"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -86,6 +87,7 @@ struct ChromiumCapabilities: Equatable {
         extensionWindowsFeature: 36,
         autofillSavePromptsFeature: 37,
         httpAuthFeature: 38,
+        linkOpenRequestsFeature: 39,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -166,6 +168,9 @@ struct ChromiumCapabilities: Equatable {
     var autofillSavePrompts: Bool
     /// HTTP Basic/Digest sign-in requests (`ReArcEngineSetHttpAuthCallback`, `ReArcHttpAuthRespond`).
     var httpAuth: Bool
+    /// ⌘/⇧⌘/⇧/⌥⌘/middle-click link opens routed to the host (`ReArcEngineSetLinkOpenCallback`);
+    /// requires `extensionWindows`, whose window report the reply is checked against.
+    var linkOpenRequests: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -213,6 +218,7 @@ struct ChromiumCapabilities: Equatable {
         extensionWindows = adopted(Self.extensionWindowsFeature)
         autofillSavePrompts = adopted(Self.autofillSavePromptsFeature)
         httpAuth = adopted(Self.httpAuthFeature)
+        linkOpenRequests = extensionWindows && adopted(Self.linkOpenRequestsFeature)
     }
 
     /// Inspect in the page menu. No engine advertises a DevTools frontend
@@ -279,6 +285,7 @@ struct ChromiumCapabilities: Equatable {
             (Self.extensionWindowsFeature, extensionWindows),
             (Self.autofillSavePromptsFeature, autofillSavePrompts),
             (Self.httpAuthFeature, httpAuth),
+            (Self.linkOpenRequestsFeature, linkOpenRequests),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

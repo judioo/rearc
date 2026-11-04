@@ -129,12 +129,53 @@ private let extensionTabRequestCallback: ReArcExtensionTabRequestCallback = { co
     MainActor.assumeIsolated { extensionRuntime(context).handleExtensionTabRequest(copied) }
 }
 
+/// Owned copy of `ReArcLinkOpenEvent` (ABI 1.39).
+struct ChromiumLinkOpenEvent: Equatable {
+    var profileID, openerTabID, contentGeneration, requestID: UInt64
+    var isWithdrawal: Bool
+    var disposition: UInt32
+    var userGesture: Bool
+    var url: String
+    /// Chromium-sanitized, display only; the engine keeps the real one.
+    var referrer: String
+}
+
+private let linkOpenCallback: ReArcLinkOpenCallback = { context, event in
+    guard let e = event?.pointee else { return }
+    let copied = ChromiumLinkOpenEvent(
+        profileID: e.profile_id, openerTabID: e.opener_tab_id, contentGeneration: e.content_generation, requestID: e.request_id,
+        isWithdrawal: e.phase == 1, disposition: e.disposition, userGesture: e.user_gesture, url: string(e.url), referrer: string(e.referrer)
+    )
+    MainActor.assumeIsolated { extensionRuntime(context).handleLinkOpen(copied) }
+}
+
 extension ChromiumRuntime {
     /// Registers the adopted extension channels; called at `ready`, before any tab exists.
     func registerExtensionChannels(context: UnsafeMutableRawPointer) {
         if capabilities.extensionInstallPrompts { ReArcEngineSetExtensionPromptCallback(extensionPromptCallback, context) }
         if capabilities.extensionActions { ReArcEngineSetExtensionActionCallback(extensionActionCallback, context) }
         if capabilities.extensionWindows { ReArcEngineSetExtensionTabRequestCallback(extensionTabRequestCallback, context) }
+        if capabilities.linkOpenRequests { ReArcEngineSetLinkOpenCallback(linkOpenCallback, context) }
+    }
+
+    fileprivate func handleLinkOpen(_ event: ChromiumLinkOpenEvent) {
+        ChromiumLog.info("link_open \(event.requestID) withdrawn \(event.isWithdrawal) disposition \(event.disposition) "
+            + "opener \(event.openerTabID) gesture \(event.userGesture) url \(event.url)")
+        linkOpenEvents.append(event)
+        guard !event.isWithdrawal else { return }
+        if let handler = onLinkOpen {
+            handler(event)
+        } else {
+            respondLinkOpen(event.requestID, tab: 0)
+        }
+    }
+
+    @discardableResult
+    func respondLinkOpen(_ request: UInt64, tab: UInt64) -> ReArcStatus {
+        guard capabilities.linkOpenRequests, isReady else { return ReArcStatus(REARC_UNSUPPORTED) }
+        let status = ReArcLinkOpenRespond(request, tab)
+        ChromiumLog.info("link open \(request) reply tab \(tab) -> \(status.rearcName)")
+        return status
     }
 
     // MARK: Events

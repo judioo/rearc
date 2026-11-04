@@ -479,3 +479,43 @@ public enum ExtensionTabPlacement: Equatable, Sendable {
         }
     }
 }
+
+// MARK: - Modified link opens (ABI 1.39)
+
+/// Chromium's disposition for a gestured HTTP(S) link open the engine hands
+/// to the host. At this pin ⌘-click and middle-click are background, ⇧⌘-click
+/// foreground, ⇧-click a new window and ⌥⌘-click a split.
+public enum LinkOpenDisposition: UInt32, Sendable {
+    case foregroundTab = 1, backgroundTab = 2, newWindow = 4, splitView = 5
+}
+
+/// Where the sidebar puts a link opened with a modifier or the middle button.
+public enum LinkOpenPlacement: Equatable, Sendable {
+    /// A today tab in the source's space, not selected (⌘-click, middle-click).
+    case backgroundTab
+    /// A today tab in the source's space, selected (⇧⌘-click).
+    case foregroundTab
+    /// A Little Arc window, Arc's small window for one page.
+    case littleArc
+    /// A new pane split with this sidebar tab.
+    case split(with: UUID)
+    case decline(String)
+
+    /// ⌥⌘ held at the click (`LittleArcChrome.clickOpensLittleArc`) keeps
+    /// wave 26's rule, which WebKit and target=_blank links follow too:
+    /// Little Arc, whatever the engine's disposition. A split needs a
+    /// sidebar tab to split with; without one it opens as a new tab.
+    public static func resolve(disposition raw: UInt32, littleArcKeysHeld: Bool, sourceTab: UUID?) -> LinkOpenPlacement {
+        guard let disposition = LinkOpenDisposition(rawValue: raw) else { return .decline("unsupported disposition \(raw)") }
+        if littleArcKeysHeld { return .littleArc }
+        switch disposition {
+        case .backgroundTab: return .backgroundTab
+        case .foregroundTab: return .foregroundTab
+        case .newWindow: return .littleArc
+        case .splitView: return sourceTab.map { .split(with: $0) } ?? .foregroundTab
+        }
+    }
+
+    /// Dispositions 1, 4 and 5 must answer with a tab that is active in its window.
+    public var isActive: Bool { self != .backgroundTab }
+}

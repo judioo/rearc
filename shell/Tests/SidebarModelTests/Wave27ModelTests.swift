@@ -290,3 +290,25 @@ final class Wave27ModelTests: XCTestCase {
         XCTAssertNil(preference.valueToApply(current: true, managed: true), "policy wins")
     }
 }
+
+final class Wave27LinkOpenTests: XCTestCase {
+    func testDispositionsMapOntoTheSidebar() {
+        let source = UUID()
+        XCTAssertEqual(LinkOpenPlacement.resolve(disposition: 2, littleArcKeysHeld: false, sourceTab: source), .backgroundTab)
+        XCTAssertEqual(LinkOpenPlacement.resolve(disposition: 1, littleArcKeysHeld: false, sourceTab: source), .foregroundTab)
+        XCTAssertEqual(LinkOpenPlacement.resolve(disposition: 4, littleArcKeysHeld: false, sourceTab: source), .littleArc)
+        XCTAssertEqual(LinkOpenPlacement.resolve(disposition: 5, littleArcKeysHeld: false, sourceTab: source), .split(with: source))
+        XCTAssertEqual(LinkOpenPlacement.resolve(disposition: 5, littleArcKeysHeld: false, sourceTab: nil), .foregroundTab,
+                       "a Little Arc or peek source has no sidebar tab to split with")
+        XCTAssertEqual(LinkOpenPlacement.resolve(disposition: 3, littleArcKeysHeld: false, sourceTab: source), .decline("unsupported disposition 3"))
+    }
+
+    func testOptionCommandClickStaysLittleArc() {
+        for raw: UInt32 in [1, 2, 4, 5] {
+            XCTAssertEqual(LinkOpenPlacement.resolve(disposition: raw, littleArcKeysHeld: true, sourceTab: UUID()), .littleArc)
+        }
+        XCTAssertFalse(LinkOpenPlacement.backgroundTab.isActive)
+        XCTAssertTrue(LinkOpenPlacement.split(with: UUID()).isActive)
+        XCTAssertTrue(LinkOpenPlacement.littleArc.isActive)
+    }
+}
