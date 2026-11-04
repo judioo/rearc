@@ -11,6 +11,7 @@ import SidebarModel
 /// inline in grey (Right Arrow takes it), and ⌘↩ / ⌥↩ / ⇧↩ open a page
 /// result in a new tab, a split or Little Arc (COMMAND-BAR §3, §6.3).
 struct CommandBarOverlay: View {
+    @Environment(\.themeChrome) private var themeChrome
     @Binding var text: String
     /// The inline completion's grey remainder after the typed text.
     var inlineSuffix: String?
@@ -122,6 +123,8 @@ struct CommandBarOverlay: View {
             }
         }
         .frame(width: 520)
+        // Tinted by the focused space (THEMES.md §3.6; roles still to confirm, §8).
+        .background(themeChrome.panel, in: RoundedRectangle(cornerRadius: 14))
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)

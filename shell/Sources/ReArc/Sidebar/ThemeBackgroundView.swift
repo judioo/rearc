@@ -152,6 +152,9 @@ struct ThemeChromeColors {
     var rowHover: Color
     var rowSelected: Color
     var focus: Color
+    /// Floating panels over the window (command bar, Peek): the theme's
+    /// `backgroundExtra` / dark `background` washed over the material.
+    var panel: Color
     var isDark: Bool
 
     init(theme: SpaceTheme, dark: Bool) {
@@ -169,6 +172,7 @@ struct ThemeChromeColors {
         rowSelected = Color(semantic.backgroundExtra).opacity(dark ? 0.16 : 0.92)
         rowHover = Color(semantic.backgroundExtra).opacity(dark ? 0.08 : 0.42)
         focus = Color(semantic.focus).opacity(semantic.focusAlpha)
+        panel = Color(dark ? semantic.background : semantic.backgroundExtra).opacity(dark ? 0.6 : 0.55)
         isDark = dark
     }
 
