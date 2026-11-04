@@ -284,10 +284,11 @@ struct BrowserView: View {
             SplitContentView(split: split, model: model, accent: model.themeColor(in: windowID))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let tab = model.selectedTab(in: windowID) {
-            model.engineHost.engine(for: tab, profileID: model.profileID(for: tab))
-                .makeView()
+            let engine = model.engineHost.engine(for: tab, profileID: model.profileID(for: tab))
+            engine.makeView()
                 .id(tab.id)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .findBar(model.findBar, for: engine)
         } else {
             EmptyStateView(theme: model.themeColor(in: windowID))
         }

@@ -231,4 +231,33 @@ final class Wave20ModelTests: XCTestCase {
         XCTAssertEqual(full.count, VisitHistory.capacity)
         XCTAssertNil(full.record(for: URL(string: "https://site0.test/")!), "the least recent visit goes")
     }
+
+    // MARK: Command bar
+
+    func testCommandBarRanksHistoryAfterTabsAndBeforeSearch() {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        store.addTab(kind: .today, title: "Docs", url: URL(string: "https://docs.test/guide")!)
+        var history = VisitHistory()
+        history.recordVisit(url: URL(string: "https://docs.test/guide")!, title: "Docs guide", at: now)
+        history.recordVisit(url: URL(string: "https://docs.test/api")!, title: "Docs API", at: now)
+        let results = CommandBarSearch.results(for: "docs", in: store, history: history, now: now)
+        XCTAssertEqual(results.first?.kind, .openTab)
+        let historyRows = results.filter { $0.kind == .history }
+        XCTAssertEqual(historyRows.map(\.destinationURL?.absoluteString), ["https://docs.test/api"], "an open tab is not repeated")
+        XCTAssertEqual(historyRows.first?.subtitle, "docs.test/api")
+        XCTAssertEqual(results.last?.kind, .search)
+        let historyIndex = results.firstIndex { $0.kind == .history }!
+        XCTAssertLessThan(historyIndex, results.firstIndex { $0.kind == .search }!)
+    }
+
+    func testTypedAddressGoesAheadOfHistory() {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        var history = VisitHistory()
+        history.recordVisit(url: URL(string: "https://example.test/deep/page")!, title: "Deep", at: now)
+        history.recordVisit(url: URL(string: "https://example.test/")!, title: "Home", at: now)
+        let results = CommandBarSearch.results(for: "example.test", in: store, history: history, now: now)
+        XCTAssertEqual(results.first?.kind, .openURL)
+        XCTAssertEqual(results.filter { $0.kind == .history }.map(\.title), ["Deep"], "the typed page itself is not repeated")
+        XCTAssertFalse(results.contains { $0.kind == .search })
+    }
 }

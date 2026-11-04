@@ -73,7 +73,8 @@ final class BrowserViewModel {
             focusedLittleArcID: focusedLittleArcID,
             mediaByTab: mediaStateByTab,
             tabMuteModel: tabMuteModel,
-            navigationSchemes: engineHost.navigationSchemes
+            navigationSchemes: engineHost.navigationSchemes,
+            history: visitHistory
         )
     }
 
@@ -111,6 +112,17 @@ final class BrowserViewModel {
     var lastCapturePreview: CaptureRecord?
     var captureErrorMessage: String?
 
+    /// Cmd+F bar; targets one page at a time.
+    let findBar = FindBarModel()
+    /// The sidebar's downloads tray (both engines).
+    let downloads: DownloadsController
+    /// Command-bar visit history, saved next to the sidebar file.
+    var visitHistory: VisitHistory
+    @ObservationIgnored let historyFileURL: URL?
+    @ObservationIgnored var historySaveWorkItem: DispatchWorkItem?
+    /// Last URL recorded per tab: a commit and its load-stop report the same visit.
+    @ObservationIgnored var lastRecordedVisit: [Tab.ID: String] = [:]
+
     init(
         store: SidebarStore? = nil,
         persistence: SidebarFilePersistence? = nil,
@@ -124,6 +136,11 @@ final class BrowserViewModel {
             ?? FaviconStore(directory: persistence.fileURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
         self.store = store ?? SidebarFilePersistence.loadStore(persistence: persistence)
         self.sidebarRecoveredFromCorruption = persistence.loadOutcome == .recoveredFromCorruptFile
+        let historyFile = Self.siblingFile(VisitHistoryFile.fileName, of: persistence.fileURL)
+        self.historyFileURL = historyFile
+        self.visitHistory = VisitHistoryFile.load(from: historyFile)
+        self.downloads = DownloadsController(fileURL: Self.siblingFile(DownloadListFile.fileName, of: persistence.fileURL))
+        engineHost.downloadCenter = downloads.webKit
         self.nowPlaying = nowPlaying ?? NowPlayingController()
         let engine = syncEngine ?? CloudKitSyncAvailability.makeEngine()
         self.syncEngine = engine
@@ -485,6 +502,7 @@ final class BrowserViewModel {
     func handleTabNavigationCommit(tabID: Tab.ID, url: URL?, title: String?) {
         boostSessionApplyByTab[tabID] = BoostSessionApplyMap()
         guard let url else { return }
+        recordVisit(tabID: tabID, url: url, title: title)
         let resolvedTitle = (title?.isEmpty == false) ? title : nil
         let fallback = store.tab(withID: tabID)?.title ?? url.host() ?? "Page"
         store.updateTab(tabID, title: resolvedTitle ?? fallback, url: url)
@@ -853,6 +871,8 @@ final class BrowserViewModel {
         boostEditorDraftByTab.removeAll()
         easelStore.flushAllCachedDocuments()
         persistence.flush()
+        saveVisitHistory()
+        downloads.save()
     }
 
     // MARK: - Command bar
@@ -935,7 +955,7 @@ final class BrowserViewModel {
                     }
                     return
                 }
-            case .openURL, .search:
+            case .openURL, .history, .search:
                 if let url = choice.destinationURL {
                     navigateCommandBar(to: url)
                     dismissCommandBar()
@@ -1199,6 +1219,15 @@ final class BrowserViewModel {
             updateSavedURLToCurrent()
         case .clearUnpinnedTabs:
             clearTodayTabs()
+        case .findInPage:
+            guard findTargetEngine != nil else { return "No page to search" }
+            dismissCommandBar()
+            showFindBar()
+        case .showDownloads:
+            dismissCommandBar()
+            downloads.isTrayPresented = true
+        case .clearCommandBarHistory:
+            clearVisitHistory()
         }
         return nil
     }

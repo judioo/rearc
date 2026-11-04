@@ -104,6 +104,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private var windows: [ObjectIdentifier: (window: NSWindow, role: WindowRole)] = [:]
     private var terminating = false
     private let menuTarget = ChromiumMenuTarget()
+    /// The tray's Chromium side; the controller only holds it weakly.
+    private var downloadBackend: ChromiumDownloadBackend?
     /// The self-test runs this shell on a throwaway sidebar and must not move
     /// the user's saved window frame.
     private let autosavesFrames: Bool
@@ -122,7 +124,10 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let persistence = SidebarFilePersistence()
         let store = SidebarFilePersistence.loadStore(persistence: persistence)
         runtime.legacyDefaultOwner = store.profiles.first?.id
-        return BrowserViewModel(store: store, persistence: persistence)
+        let model = BrowserViewModel(store: store, persistence: persistence)
+        // Profile opens complete asynchronously; each gets this policy before its first tab.
+        runtime.downloadDirectory = model.downloads.directory
+        return model
     }
 
     /// `model` must come from `makeModel` (or name the Default owner itself first).
@@ -150,6 +155,14 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         }
         runtime.onAdoptedTab = { [weak self] event in
             self?.adopt(event) ?? false
+        }
+        if runtime.capabilities.downloads {
+            let backend = ChromiumDownloadBackend(runtime: runtime, controller: model.downloads)
+            backend.install()
+            downloadBackend = backend
+            // Chromium's keep-dangerous flow lives on chrome://downloads (no native accept action).
+            model.downloads.canReviewDangerous = runtime.capabilities.webUIDailyPages
+            model.downloads.reviewDangerousPage = { [weak model] in model?.openBrowserPage(.downloads) }
         }
         runtime.onTerminateRequested = { [weak self, weak model] in
             self?.terminating = true
@@ -397,12 +410,20 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        if runtime.capabilities.findInPage {
+            edit.addItem(.separator())
+            target.add(ShellMenus.find(model), to: edit)
+        }
         main.addSubmenu(edit, title: "Edit")
 
         let view = NSMenu(title: "View")
         view.addItem(target.item("Toggle Sidebar", "s") { model.toggleSidebar() })
         view.addItem(.separator())
         target.add(ShellMenus.navigation(model), to: view)
+        if runtime.capabilities.downloads {
+            view.addItem(.separator())
+            target.add(ShellMenus.downloads(model), to: view)
+        }
         if runtime.capabilities.pageZoom {
             view.addItem(.separator())
             view.addItem(target.item("Zoom In", "=") { model.zoom(.zoomIn) })

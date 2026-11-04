@@ -55,9 +55,10 @@ struct SplitContentView: View {
 
     @ViewBuilder
     private func pane(for tab: Tab, focused: Bool) -> some View {
-        model.engineHost.engine(for: tab, profileID: model.profileID(for: tab))
-            .makeView()
+        let engine = model.engineHost.engine(for: tab, profileID: model.profileID(for: tab))
+        engine.makeView()
             .id(tab.id)
+            .findBar(model.findBar, for: engine)
             .overlay(
                 RoundedRectangle(cornerRadius: 0)
                     .strokeBorder(focused ? accent.opacity(0.45) : .clear, lineWidth: 2)

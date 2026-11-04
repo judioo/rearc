@@ -63,6 +63,9 @@ public enum AppCommandAction: Equatable, Hashable {
     case resetPinnedTabsInSpace
     case updatePinnedURL
     case clearUnpinnedTabs
+    case findInPage
+    case showDownloads
+    case clearCommandBarHistory
 }
 
 /// Read-only command-bar context for enablement and dynamic commands.
@@ -225,6 +228,10 @@ public struct AppCommand: Equatable, Identifiable {
                 if case .tab = $0 { return true }
                 return false
             }
+        case .findInPage:
+            return store.selectedTab != nil
+        case .showDownloads, .clearCommandBarHistory:
+            return true
         }
     }
 }
@@ -494,6 +501,28 @@ public enum AppCommandRegistry {
                 keywords: ["captures", "screenshots", "gallery", "media", "library"],
                 minQueryLength: 2,
                 action: .openCapturesGallery
+            ),
+            AppCommand(
+                id: "find-in-page",
+                title: "Find on Page",
+                keywords: ["find", "search", "page", "text", "match"],
+                minQueryLength: 2,
+                action: .findInPage
+            ),
+            AppCommand(
+                id: "show-downloads",
+                title: "Show Downloads",
+                // Not "downloads": with Chromium, Chromium's own Downloads page keeps that exact match.
+                keywords: ["tray", "files", "progress", "recent"],
+                minQueryLength: 2,
+                action: .showDownloads
+            ),
+            AppCommand(
+                id: "clear-command-bar-history",
+                title: "Clear Command Bar History",
+                keywords: ["clear", "history", "visited", "suggestions", "forget"],
+                minQueryLength: 3,
+                action: .clearCommandBarHistory
             ),
             AppCommand(
                 id: "browser-settings",

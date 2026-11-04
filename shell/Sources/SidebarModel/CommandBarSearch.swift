@@ -11,6 +11,8 @@ public enum CommandBarSearch {
     public enum ResultKind: Equatable {
         case openTab
         case openURL
+        /// A page from the shell's visit history (`VisitHistory`).
+        case history
         case search
         case command
     }
@@ -58,7 +60,13 @@ public enum CommandBarSearch {
         return (.blended, needle)
     }
 
-    /// Builds ranked results. Tab matches precede commands, then URL/search fallbacks.
+    /// Most history rows shown for one query.
+    public static let historyLimit = 5
+
+    /// Builds ranked results: open tabs first, then visit history (pages not
+    /// already open), then commands, then the search fallback. A query that
+    /// is itself an address puts its "Open" row ahead of history, so Enter
+    /// goes where the user typed.
     public static func results(
         for query: String,
         in store: SidebarStore,
@@ -67,7 +75,9 @@ public enum CommandBarSearch {
         focusedLittleArcID: LittleArcWindow.ID? = nil,
         mediaByTab: [Tab.ID: WebMediaState] = [:],
         tabMuteModel: TabMediaMuteModel = TabMediaMuteModel(),
-        navigationSchemes: NavigationURLPolicy.EngineSchemes = []
+        navigationSchemes: NavigationURLPolicy.EngineSchemes = [],
+        history: VisitHistory = VisitHistory(),
+        now: Date = Date()
     ) -> [Result] {
         let (mode, needle) = parseMode(query)
         let context = CommandBarContext(
@@ -86,9 +96,11 @@ public enum CommandBarSearch {
             return commandResults(matching: needle, context: context, store: store, allowEmpty: true)
         case .blended:
             guard !needle.isEmpty else { return [] }
-            var output = tabResults(for: needle, in: store)
-            output.append(contentsOf: commandResults(matching: needle, context: context, store: store, allowEmpty: false))
-            if let url = URLEntry.resolve(query, engine: navigationSchemes), looksLikeDirectNavigation(query) {
+            let tabs = tabResults(for: needle, in: store)
+            var output = tabs
+            let resolved = URLEntry.resolve(query, engine: navigationSchemes)
+            let direct = resolved.flatMap { looksLikeDirectNavigation(query) ? $0 : nil }
+            if let url = direct {
                 output.append(Result(
                     id: "url-\(url.absoluteString)",
                     kind: .openURL,
@@ -96,7 +108,13 @@ public enum CommandBarSearch {
                     subtitle: url.absoluteString,
                     destinationURL: url
                 ))
-            } else if let searchURL = URLEntry.resolve(query, engine: navigationSchemes) {
+            }
+            // Pages already open as tabs (or typed exactly) are not repeated as history.
+            var shown = Set(tabs.compactMap { $0.destinationURL.flatMap(VisitHistory.key(for:)) })
+            if let url = direct, let key = VisitHistory.key(for: url) { shown.insert(key) }
+            output.append(contentsOf: historyResults(for: needle, in: history, now: now, excluding: shown))
+            output.append(contentsOf: commandResults(matching: needle, context: context, store: store, allowEmpty: false))
+            if direct == nil, let searchURL = resolved {
                 output.append(Result(
                     id: "search-\(searchURL.absoluteString)",
                     kind: .search,
@@ -169,6 +187,26 @@ public enum CommandBarSearch {
                 tabID: item.tab.id,
                 spaceID: item.spaceID,
                 destinationURL: item.tab.url
+            )
+        }
+    }
+
+    // MARK: - History
+
+    private static func historyResults(
+        for needle: String,
+        in history: VisitHistory,
+        now: Date,
+        excluding shown: Set<String>
+    ) -> [Result] {
+        history.matches(for: needle, now: now, limit: historyLimit, excluding: shown).map { match in
+            let record = match.record
+            return Result(
+                id: "history-\(record.url.absoluteString)",
+                kind: .history,
+                title: record.displayTitle,
+                subtitle: VisitHistory.strippedAddress(record.url),
+                destinationURL: record.url
             )
         }
     }

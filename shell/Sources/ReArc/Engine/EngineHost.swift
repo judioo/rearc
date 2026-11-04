@@ -22,6 +22,8 @@ final class EngineHost {
     private var engines: [TabEngineKey: any WebEngine] = [:]
     private var ephemeralEngines: [EphemeralEngineKey: any WebEngine] = [:]
     private var littleArcEngines: [LittleArcEngineKey: any WebEngine] = [:]
+    /// WebKit engines hand their downloads to the tray (Chromium reports its own).
+    @ObservationIgnored weak var downloadCenter: WebKitDownloadCenter?
 
     /// Favorites are global in the sidebar, but each favorite tab's engine uses
     /// the **active** profile's storage at load time (see `BrowserViewModel.profileID(for:)`).
@@ -54,7 +56,9 @@ final class EngineHost {
             return ChromiumEngine(runtime: runtime, context: context, role: role, shellID: shellID, privateSession: privateSession)
         }
         #endif
-        return WKEngine(context: context)
+        let engine = WKEngine(context: context)
+        engine.downloadCenter = downloadCenter
+        return engine
     }
 
     /// Engine for a private window. Not cached: the window owns it, and its

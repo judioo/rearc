@@ -20,6 +20,10 @@ struct ChromiumCapabilities: Equatable {
     static let shutdownPendingClosesFeature = "shutdown_pending_closes"
     static let profileDirectoryFeature = "profile_directory"
     static let webUIDailyPagesFeature = "webui_daily_pages"
+    static let historyRecordingFeature = "history_recording"
+    static let passwordAutofillFeature = "password_autofill"
+    static let findInPageFeature = "find_in_page"
+    static let downloadsFeature = "downloads"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -36,6 +40,10 @@ struct ChromiumCapabilities: Equatable {
         shutdownPendingClosesFeature: 12,
         profileDirectoryFeature: 13,
         webUIDailyPagesFeature: 14,
+        historyRecordingFeature: 15,
+        passwordAutofillFeature: 15,
+        findInPageFeature: 16,
+        downloadsFeature: 17,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -66,6 +74,14 @@ struct ChromiumCapabilities: Equatable {
     var profileDirectory: Bool
     /// chrome://history, downloads, password-manager and extensions; requires `navigationExtended`.
     var webUIDailyPages: Bool
+    /// Chromium's HistoryTabHelper records every non-OTR tab (chrome://history). No Swift call.
+    var historyRecording: Bool
+    /// ChromePasswordManagerClient fills saved credentials. No save prompts yet. No Swift call.
+    var passwordAutofill: Bool
+    /// `ReArcTabFindStart/Next/Stop` and find result events.
+    var findInPage: Bool
+    /// Download events, `ReArcDownloadSetPolicy` and `ReArcDownloadAction`.
+    var downloads: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -88,7 +104,14 @@ struct ChromiumCapabilities: Equatable {
         shutdownPendingCloses = adopted(Self.shutdownPendingClosesFeature)
         profileDirectory = profiles && adopted(Self.profileDirectoryFeature)
         webUIDailyPages = navigationExtended && adopted(Self.webUIDailyPagesFeature)
+        historyRecording = adopted(Self.historyRecordingFeature)
+        passwordAutofill = adopted(Self.passwordAutofillFeature)
+        findInPage = adopted(Self.findInPageFeature)
+        downloads = adopted(Self.downloadsFeature)
     }
+
+    /// WAVE-18-REPORT concern A gate: both browser-less helper features at 1.15.
+    var browserlessHelpers: Bool { historyRecording && passwordAutofill }
 
     var navigationSchemes: NavigationURLPolicy.EngineSchemes {
         guard navigationExtended else { return [] }
@@ -116,6 +139,10 @@ struct ChromiumCapabilities: Equatable {
             (Self.shutdownPendingClosesFeature, shutdownPendingCloses),
             (Self.profileDirectoryFeature, profileDirectory),
             (Self.webUIDailyPagesFeature, webUIDailyPages),
+            (Self.historyRecordingFeature, historyRecording),
+            (Self.passwordAutofillFeature, passwordAutofill),
+            (Self.findInPageFeature, findInPage),
+            (Self.downloadsFeature, downloads),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

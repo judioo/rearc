@@ -73,6 +73,22 @@ enum ShellMenus {
         ]]
     }
 
+    /// Edit menu: find in page (Chrome/Safari shortcuts). Esc and Return live in the bar.
+    static func find(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("Find…", "f") { model.showFindBar() },
+            ShellMenuItem("Find Next", "g") { model.findNext(forward: true) },
+            ShellMenuItem("Find Previous", "g", [.command, .shift]) { model.findNext(forward: false) },
+        ]]
+    }
+
+    /// View menu: the sidebar's downloads tray (both engines).
+    static func downloads(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("Show Downloads", "j", [.command, .shift]) { model.toggleDownloadsTray() },
+        ]]
+    }
+
     /// View menu, Chromium with `webui_daily_pages` only: Chromium's own
     /// history, downloads, passwords and extensions pages (Arc's View and
     /// Extensions menus). Shortcuts follow Chrome on macOS.

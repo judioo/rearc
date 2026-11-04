@@ -99,6 +99,7 @@ struct CommandBarOverlay: View {
         switch kind {
         case .openTab: return "square.stack"
         case .openURL: return "link"
+        case .history: return "clock.arrow.circlepath"
         case .search: return "magnifyingglass"
         case .command: return "command"
         }

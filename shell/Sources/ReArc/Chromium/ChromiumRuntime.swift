@@ -311,6 +311,53 @@ private let pageMessageCallback: ReArcPageMessageCallback = { context, message i
     MainActor.assumeIsolated { runtime(from: context).handlePageMessage(copied) }
 }
 
+private let findCallback: ReArcFindCallback = { context, event in
+    guard let e = event?.pointee else { return }
+    let tab = e.tab_id, generation = e.content_generation
+    let copied = FindInPageEvent(
+        sessionID: e.session_id,
+        matchCount: e.match_count,
+        activeOrdinal: e.active_ordinal,
+        finalUpdate: e.final_update,
+        rawReason: e.reason
+    )
+    MainActor.assumeIsolated { runtime(from: context).handleFind(tab: tab, contentGeneration: generation, event: copied) }
+}
+
+/// Owned copy of `ReArcDownloadEvent`; its strings die with the callback.
+struct ChromiumDownloadEvent {
+    var profileID: UInt64
+    var downloadID: UInt32
+    var tabID: UInt64
+    var event: DownloadEvent
+
+    init?(_ pointer: UnsafePointer<ReArcDownloadEvent>?) {
+        guard let e = pointer?.pointee, let kind = DownloadEvent.Kind(rawValue: e.kind) else { return nil }
+        profileID = e.profile_id
+        downloadID = e.download_id
+        tabID = e.tab_id
+        event = DownloadEvent(
+            kind: kind,
+            guid: e.guid.map { String(cString: $0) } ?? "",
+            url: e.url.map { String(cString: $0) } ?? "",
+            targetPath: e.target_path.map { String(cString: $0) } ?? "",
+            mimeType: e.mime_type.map { String(cString: $0) } ?? "",
+            receivedBytes: e.received_bytes,
+            totalBytes: e.total_bytes,
+            state: DownloadState(engineState: e.state),
+            dangerType: e.danger_type,
+            interruptReason: e.interrupt_reason,
+            isPaused: e.paused,
+            canResume: e.can_resume
+        )
+    }
+}
+
+private let downloadCallback: ReArcDownloadCallback = { context, event in
+    guard let copied = ChromiumDownloadEvent(event) else { return }
+    MainActor.assumeIsolated { runtime(from: context).handleDownload(copied) }
+}
+
 /// Process-wide host side of the engine C ABI. Immortal: callback contexts must
 /// outlive `ReArcEngineRun`. Every entry point runs on the main thread.
 final class ChromiumRuntime {
@@ -340,6 +387,13 @@ final class ChromiumRuntime {
     var onAdoptedTab: ((ChromiumTabEvent) -> Bool)?
     /// Profile lifecycle transitions, for logs and the self-test.
     var onProfileEvent: ((String) -> Void)?
+    /// Download events (ABI 1.17), for the shell's tray.
+    var onDownloadEvent: ((ChromiumDownloadEvent) -> Void)?
+    /// Default download directory, written to every open profile's Chromium
+    /// download prefs (`ReArcDownloadSetPolicy`, save without asking).
+    var downloadDirectory: URL? {
+        didSet { if downloadDirectory != oldValue { applyDownloadPolicyToOpenProfiles() } }
+    }
     /// The shell profile that may take over the startup `Default` directory
     /// (the first profile); set before any of its tabs are created.
     var legacyDefaultOwner: Profile.ID?
@@ -438,6 +492,14 @@ final class ChromiumRuntime {
         }
         if capabilities.isolatedPageMessages {
             ReArcEngineSetPageMessageCallback(pageMessageCallback, context)
+        }
+        if capabilities.findInPage {
+            ReArcEngineSetFindCallback(findCallback, context)
+        }
+        if capabilities.downloads {
+            // Before any tab exists; each profile gets its policy when it opens.
+            ReArcEngineSetDownloadCallback(downloadCallback, context)
+            applyDownloadPolicy(profile: defaultProfileID)
         }
         onReady?()
     }
@@ -674,6 +736,8 @@ final class ChromiumRuntime {
             profileOrder.removeAll { $0 == key }
             profileOrder.append(key)
             profileEvent("opened \(key) -> engine profile \(engineID)\(offTheRecord ? " (off the record)" : "")")
+            // Before the waiters create tabs; OTR profiles too (Chromium would otherwise ask where to save).
+            applyDownloadPolicy(profile: engineID)
             waiters.forEach { $0(engineID) }
         } else {
             profileStates[key] = nil
@@ -901,6 +965,58 @@ final class ChromiumRuntime {
     fileprivate func handleZoom(document: ChromiumDocumentIdentity, factor: Double) {
         ChromiumLog.trace("zoom_event \(document) factor \(factor)")
         engines[document.tabID]?.value?.handleZoom(document: document, factor: factor)
+    }
+
+    fileprivate func handleFind(tab: UInt64, contentGeneration: UInt64, event: FindInPageEvent) {
+        ChromiumLog.trace(
+            "find_event tab \(tab) gen \(contentGeneration) session \(event.sessionID) matches \(event.matchCount) "
+                + "active \(event.activeOrdinal) final \(event.finalUpdate) reason \(event.reason)"
+        )
+        engines[tab]?.value?.handleFind(event)
+    }
+
+    fileprivate func handleDownload(_ download: ChromiumDownloadEvent) {
+        let e = download.event
+        ChromiumLog.trace(
+            "download_event \(e.kind) profile \(download.profileID) id \(download.downloadID) tab \(download.tabID) "
+                + "state \(e.state) \(e.receivedBytes)/\(e.totalBytes) paused \(e.isPaused) resumable \(e.canResume) "
+                + "danger \(e.dangerType) interrupt \(e.interruptReason) path \(e.targetPath.isEmpty ? "-" : e.targetPath)"
+        )
+        onDownloadEvent?(download)
+    }
+
+    // MARK: Downloads (ABI 1.17)
+
+    /// `ReArcDownloadSetPolicy(profile, directory, 0)`: save without a picker.
+    @discardableResult
+    func applyDownloadPolicy(profile: UInt64) -> ReArcStatus {
+        guard capabilities.downloads, profile != 0, isReady, !isStopping, let directory = downloadDirectory else {
+            return ReArcStatus(REARC_UNSUPPORTED)
+        }
+        let status = directory.path.withCString { ReArcDownloadSetPolicy(profile, $0, 0) }
+        if status != .rearcOK {
+            ChromiumLog.info("ReArcDownloadSetPolicy(profile \(profile), \(directory.path)) rejected: \(status.rearcName)")
+        } else {
+            ChromiumLog.trace("download policy: profile \(profile) saves to \(directory.path) without asking")
+        }
+        return status
+    }
+
+    private func applyDownloadPolicyToOpenProfiles() {
+        guard capabilities.downloads, isReady else { return }
+        var profiles: Set<UInt64> = [defaultProfileID]
+        for state in profileStates.values {
+            if case .open(let id) = state { profiles.insert(id) }
+        }
+        profiles.forEach { applyDownloadPolicy(profile: $0) }
+    }
+
+    /// `ReArcDownloadAction`: 0 pause, 1 resume, 2 cancel, 3 open, 4 reveal, 5 remove.
+    func downloadAction(profile: UInt64, id: UInt32, action: UInt32) -> ReArcStatus {
+        guard capabilities.downloads, isReady, !isStopping else { return ReArcStatus(REARC_UNSUPPORTED) }
+        let status = ReArcDownloadAction(profile, id, action)
+        ChromiumLog.trace("download action \(action) profile \(profile) id \(id) -> \(status.rearcName)")
+        return status
     }
 
     fileprivate func handlePageMessage(_ message: ChromiumPageMessage) {

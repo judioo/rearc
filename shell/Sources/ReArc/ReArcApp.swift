@@ -45,8 +45,14 @@ struct ReArcApp: App {
                 }
                 .keyboardShortcut("s")
             }
+            // Edit > Find: the page's find bar replaces the text-field finder.
+            CommandGroup(replacing: .textEditing) {
+                ShellMenuButtons(groups: ShellMenus.find(model))
+            }
             CommandGroup(after: .toolbar) {
                 ShellMenuButtons(groups: ShellMenus.navigation(model))
+                Divider()
+                ShellMenuButtons(groups: ShellMenus.downloads(model))
                 Divider()
                 Button("Zoom In") { model.zoom(.zoomIn) }
                     .keyboardShortcut("=")

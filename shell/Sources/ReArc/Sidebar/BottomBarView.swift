@@ -58,6 +58,11 @@ struct BottomBarView: View {
                 .frame(width: 8, height: 8)
                 .help(model.syncStatusHelp)
 
+            DownloadsButton(downloads: model.downloads, isPresented: Binding(
+                get: { model.downloads.isTrayPresented && model.isKeyBrowserWindow(window) },
+                set: { model.downloads.isTrayPresented = $0 }
+            ))
+
             Button { model.isArchivePresented = true } label: {
                 Image(systemName: "archivebox")
                     .font(.system(size: 12, weight: .medium))

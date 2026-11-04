@@ -107,6 +107,7 @@ struct PrivateWindowView: View {
             Divider()
             window.engine.makeView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .findBar(model.findBar, for: window.engine)
         }
         .frame(minWidth: 480, minHeight: 360)
         .background(Color.purple.opacity(0.08))

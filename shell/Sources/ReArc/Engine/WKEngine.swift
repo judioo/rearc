@@ -212,6 +212,11 @@ final class WKEngine: NSObject, WebEngine {
     var onBoostPageshow: (() -> Void)?
     var onNavigationCommit: ((URL?, String?) -> Void)?
     let supportsBoostEditor = true
+    /// Find-in-page session numbering and counts (`FindInPage.swift`).
+    @ObservationIgnored let findSession = WebKitFindSession()
+    @ObservationIgnored var onFindEvent: ((FindInPageEvent) -> Void)?
+    /// Receives this view's downloads (`WKDownload`); nil drops them.
+    @ObservationIgnored weak var downloadCenter: WebKitDownloadCenter?
 
     var onBoostEditorPick: ((PickedElementSnapshot) -> Void)? {
         didSet { boostEditorBridge.onPick = onBoostEditorPick }
@@ -613,6 +618,7 @@ extension WKEngine: WKNavigationDelegate {
             faviconPageURL = nil
         }
         clearBoostSessionOnNavigation()
+        endFindOnNavigation()
         refreshBoostsOnPage()
         onNavigationCommit?(currentURL, pageTitle)
     }
@@ -635,6 +641,37 @@ extension WKEngine: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         isLoading = false
         syncNavigationState(from: webView)
+    }
+
+    // MARK: Downloads (WKDownload)
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        decisionHandler(navigationAction.shouldPerformDownload && downloadCenter != nil ? .download : .allow)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        let download = downloadCenter != nil && WebKitDownloadCenter.shouldDownload(
+            response: navigationResponse.response,
+            canShowMIMEType: navigationResponse.canShowMIMEType,
+            isForMainFrame: navigationResponse.isForMainFrame
+        )
+        decisionHandler(download ? .download : .allow)
+    }
+
+    func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+        downloadCenter?.adopt(download, sourceURL: navigationAction.request.url)
+    }
+
+    func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+        downloadCenter?.adopt(download, sourceURL: navigationResponse.response.url)
     }
 }
 

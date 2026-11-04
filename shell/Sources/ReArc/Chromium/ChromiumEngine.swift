@@ -102,6 +102,10 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     @ObservationIgnored var onBoostPageMessage: ((ChromiumPageMessage) -> Void)?
     /// Editor-world messages that failed validation (wrong kind, stale document).
     @ObservationIgnored private(set) var droppedEditorMessages = 0
+    /// Find results and terminals for this tab (ABI 1.16).
+    @ObservationIgnored var onFindEvent: ((FindInPageEvent) -> Void)?
+    /// The active find session, 0 when none (ended sessions report a terminal first).
+    @ObservationIgnored private(set) var findSessionID: UInt64 = 0
 
     @ObservationIgnored private let mediaStateSubject = CurrentValueSubject<WebMediaState, Never>(.silent)
     /// The host holding this tab's single attachment lease.
@@ -909,6 +913,52 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
 }
 
 extension ChromiumEngine: PageZoomRefreshing {}
+
+/// Find in page over Chromium's FindTabHelper (ABI 1.16, C-ABI.md "Find in
+/// page"). Find needs laid-out content: the tab must be attached at a real
+/// size, which the bar guarantees by searching only the tab it is shown on.
+extension ChromiumEngine: FindInPageEngine {
+    var supportsFindInPage: Bool { runtime.capabilities.findInPage }
+
+    func startFind(_ text: String, matchCase: Bool, forward: Bool) -> UInt64? {
+        guard supportsFindInPage, tabID != 0, !text.isEmpty else { return nil }
+        var options = UInt32(0)
+        if forward { options |= UInt32(REARC_FIND_FORWARD) }
+        if matchCase { options |= UInt32(REARC_FIND_MATCH_CASE) }
+        var session: UInt64 = 0
+        // At most 16384 bytes of UTF-8; longer queries are cut at a character boundary.
+        var query = text
+        while query.utf8.count > 16_384 { query.removeLast() }
+        let status = query.withCString { ReArcTabFindStart(tabID, $0, options, &session) }
+        ChromiumLog.trace("tab \(tabID) find start (\(query.utf8.count) bytes, options \(options)) -> \(status.rearcName) session \(session)")
+        guard status == .rearcOK, session != 0 else {
+            ChromiumLog.info("tab \(tabID) find start rejected: \(status.rearcName)")
+            return nil
+        }
+        findSessionID = session
+        return session
+    }
+
+    @discardableResult
+    func findNext(forward: Bool) -> Bool {
+        guard supportsFindInPage, tabID != 0, findSessionID != 0 else { return false }
+        let status = ReArcTabFindNext(tabID, forward)
+        ChromiumLog.trace("tab \(tabID) find \(forward ? "next" : "previous") -> \(status.rearcName)")
+        // invalid_state: the session already ended (its terminal is on the way).
+        return status == .rearcOK
+    }
+
+    func stopFind(_ action: FindStopAction) {
+        guard supportsFindInPage, tabID != 0, findSessionID != 0 else { return }
+        let status = ReArcTabFindStop(tabID, action.rawValue)
+        ChromiumLog.trace("tab \(tabID) find stop \(action) -> \(status.rearcName)")
+    }
+
+    func handleFind(_ event: FindInPageEvent) {
+        if event.reason != .result, event.sessionID == findSessionID { findSessionID = 0 }
+        onFindEvent?(event)
+    }
+}
 
 private struct WeakHost {
     weak var value: ChromiumHostView?
