@@ -2,6 +2,7 @@ import SwiftUI
 
 /// In-window preview chrome over the content area (~70% of available space).
 struct PeekOverlayView: View {
+    @Environment(\.themeChrome) private var themeChrome
     let title: String
     let url: URL
     let webContent: AnyView
@@ -27,6 +28,8 @@ struct PeekOverlayView: View {
                     width: proxy.size.width * 0.70,
                     height: proxy.size.height * 0.70
                 )
+                // Tinted by the focused space (THEMES.md §3.6; roles still to confirm, §8).
+                .background(themeChrome.panel, in: RoundedRectangle(cornerRadius: 14))
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14)

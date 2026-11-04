@@ -5,7 +5,7 @@ import Foundation
 public enum SidebarWidth {
     public static let minimum: Double = 200
     public static let maximum: Double = 420
-    public static let standard: Double = 244
+    public static let standard: Double = 228
     static let defaultsKey = "ReArcSidebarWidth"
 
     public static func clamped(_ width: Double) -> Double {

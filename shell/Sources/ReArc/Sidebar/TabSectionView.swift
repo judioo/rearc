@@ -50,7 +50,7 @@ struct TabSectionView: View {
     private var selectedID: UUID? { model.store.selectedItemID(inSpace: spaceID) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 0) {
             if let title, !entries.isEmpty {
                 Text(title)
                     .font(.caption)
@@ -317,7 +317,9 @@ struct SectionEndDropZone: View {
                     .padding(.horizontal, 6)
             }
         }
-        .frame(maxWidth: .infinity, minHeight: placeholder == nil ? 10 : nil)
+        // Takes no room until a drag is under way, so the rows keep Arc's pitch.
+        .frame(maxWidth: .infinity, minHeight: placeholder == nil ? (draggedItemID == nil ? 0 : 10) : nil,
+               maxHeight: placeholder == nil && draggedItemID == nil ? 0 : nil)
         .contentShape(Rectangle())
         .onDrop(of: SidebarURLDropLoader.acceptedTypes, delegate: EndDropDelegate(zone: self, isTargeted: $isTargeted))
     }

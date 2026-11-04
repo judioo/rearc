@@ -104,6 +104,14 @@ final class SpacePagerController {
                    fraction: pages.fraction)
     }
 
+    /// The two spaces a swipe is between and how far it has gone, while a
+    /// swipe drives the page; the window theme then crossfades with it.
+    func transition(at time: TimeInterval) -> (from: Space.ID, to: Space.ID, fraction: Double)? {
+        guard isSwipeDriven, isAnimating, !reduceMotion, spaceIDs.count == paging.pageCount else { return nil }
+        let pages = paging.visiblePages(at: time)
+        return (spaceIDs[pages.from], spaceIDs[pages.to], pages.fraction)
+    }
+
     private func startFrames() {
         isAnimating = true
         restWork?.cancel()
@@ -157,8 +165,9 @@ struct SpacePagesView<Page: View>: View {
 }
 
 /// The window background behind the sidebar and around the page, drawn from
-/// the focused space's theme (Arc `WindowTheme`, SIDEBAR-SPEC §4.8). It
-/// follows a swipe frame by frame and crossfades on other switches.
+/// the focused space's theme (Arc `WindowTheme`, THEMES.md §3.4): the whole
+/// window is the theme, with no sidebar panel of its own. A swipe mixes the
+/// two spaces' rendered themes frame by frame; other switches dissolve.
 struct SpaceThemeBackground: View {
     let model: BrowserViewModel
     let window: SidebarWindowID?
@@ -169,15 +178,20 @@ struct SpaceThemeBackground: View {
         let space = model.space(in: window)
         let systemDark = SystemAppearance.isDark(colorScheme)
         TimelineView(.animation(paused: !(pager?.isSwipeDriven ?? false))) { context in
-            let palette = pager?.palette(
-                at: context.date.timeIntervalSinceReferenceDate,
-                theme: { model.store.space(withID: $0)?.theme },
-                darkAppearance: systemDark
-            ) ?? SpaceThemePalette(theme: space.theme, darkAppearance: space.theme.appearance.isDark(systemDark: systemDark))
-            SpaceThemeFill(palette: palette)
+            let swipe = pager?.transition(at: context.date.timeIntervalSinceReferenceDate)
+            let from = swipe.flatMap { model.store.space(withID: $0.from)?.theme }
+            let to = swipe.flatMap { model.store.space(withID: $0.to)?.theme }
+            if let swipe, let from, let to {
+                ThemeCrossfadeView(
+                    theme: space.theme,
+                    dark: from.appearance.isDark(systemDark: systemDark),
+                    swipe: (from, to, swipe.fraction),
+                    dark2: to.appearance.isDark(systemDark: systemDark)
+                )
+            } else {
+                ThemeCrossfadeView(theme: space.theme, dark: space.theme.appearance.isDark(systemDark: systemDark))
+            }
         }
-        .animation((pager?.isSwipeDriven ?? false) ? nil : .easeInOut(duration: 0.3), value: space.theme)
-        .animation((pager?.isSwipeDriven ?? false) ? nil : .easeInOut(duration: 0.3), value: space.id)
     }
 }
 

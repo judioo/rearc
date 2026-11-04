@@ -57,9 +57,19 @@ public struct SpaceTheme: Hashable, Codable, Sendable {
         didSet { noise = Self.clampedNoise(noise) }
     }
     public var appearance: SpaceAppearance
+    /// How strongly the colours cover the light underlay (Arc
+    /// `modifiers.intensityFactor`, default 0.8; THEMES.md §3.2). Below 1 the
+    /// theme reads as a milky tint.
+    public var intensity: Double {
+        didSet { intensity = Self.clampedIntensity(intensity) }
+    }
+    /// The texture the grain amount shows (`modifiers.overlay`).
+    public var texture: SpaceTexture
 
     /// Arc's dial holds three colours.
     public static let maxGradientColors = 3
+    public static let defaultIntensity = 0.8
+    public static let intensityRange = 0.2 ... 1.0
 
     public init(
         red: Double,
@@ -67,7 +77,9 @@ public struct SpaceTheme: Hashable, Codable, Sendable {
         blue: Double,
         gradientColors: [SpaceColor] = [],
         noise: Double = 0,
-        appearance: SpaceAppearance = .automatic
+        appearance: SpaceAppearance = .automatic,
+        intensity: Double = SpaceTheme.defaultIntensity,
+        texture: SpaceTexture = .grain
     ) {
         self.red = red
         self.green = green
@@ -75,13 +87,17 @@ public struct SpaceTheme: Hashable, Codable, Sendable {
         self.gradientColors = Array(gradientColors.prefix(Self.maxGradientColors - 1))
         self.noise = Self.clampedNoise(noise)
         self.appearance = appearance
+        self.intensity = Self.clampedIntensity(intensity)
+        self.texture = texture
     }
 
     enum CodingKeys: String, CodingKey {
-        case red, green, blue, gradientColors, noise, appearance
+        case red, green, blue, gradientColors, noise, appearance, intensity, texture
     }
 
-    /// Themes saved before wave 28 hold only `red`, `green` and `blue`.
+    /// Themes saved before wave 28 hold only `red`, `green` and `blue`. A
+    /// space still on the pre-wave-31 default (plain indigo) takes the new
+    /// Arc default, as a space without a stored theme does in Arc.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
@@ -90,8 +106,11 @@ public struct SpaceTheme: Hashable, Codable, Sendable {
             blue: try c.decode(Double.self, forKey: .blue),
             gradientColors: try c.decodeIfPresent([SpaceColor].self, forKey: .gradientColors) ?? [],
             noise: try c.decodeIfPresent(Double.self, forKey: .noise) ?? 0,
-            appearance: (try? c.decodeIfPresent(SpaceAppearance.self, forKey: .appearance)) ?? .automatic
+            appearance: (try? c.decodeIfPresent(SpaceAppearance.self, forKey: .appearance)) ?? .automatic,
+            intensity: try c.decodeIfPresent(Double.self, forKey: .intensity) ?? Self.defaultIntensity,
+            texture: (try? c.decodeIfPresent(SpaceTexture.self, forKey: .texture)) ?? .grain
         )
+        if self == Self.legacyDefault { self = Self.arcDefault }
     }
 
     /// The style keys are written only when set, so a plain colour theme
@@ -104,10 +123,16 @@ public struct SpaceTheme: Hashable, Codable, Sendable {
         if !gradientColors.isEmpty { try c.encode(gradientColors, forKey: .gradientColors) }
         if noise != 0 { try c.encode(noise, forKey: .noise) }
         if appearance != .automatic { try c.encode(appearance, forKey: .appearance) }
+        if intensity != Self.defaultIntensity { try c.encode(intensity, forKey: .intensity) }
+        if texture != .grain { try c.encode(texture, forKey: .texture) }
     }
 
     private static func clampedNoise(_ value: Double) -> Double {
         value.isFinite ? min(max(value, 0), 1) : 0
+    }
+
+    private static func clampedIntensity(_ value: Double) -> Double {
+        value.isFinite ? min(max(value, intensityRange.lowerBound), intensityRange.upperBound) : defaultIntensity
     }
 
     /// The base colour alone, with no gradient, grain or appearance.
@@ -131,16 +156,39 @@ public struct SpaceTheme: Hashable, Codable, Sendable {
 
     /// The gradient, grain and appearance alone (what the style sync record carries).
     public var style: SpaceThemeStyle {
-        get { SpaceThemeStyle(gradientColors: gradientColors, noise: noise, appearance: appearance) }
+        get {
+            SpaceThemeStyle(gradientColors: gradientColors, noise: noise, appearance: appearance,
+                            intensity: intensity, texture: texture)
+        }
         set {
             gradientColors = newValue.gradientColors
             noise = newValue.noise
             appearance = newValue.appearance
+            intensity = newValue.intensity
+            texture = newValue.texture
         }
     }
 
+    /// The colour a stop must hold so that, at the default intensity over
+    /// white, it lands on `screen` (the shader composites in encoded sRGB).
+    static func stop(onScreen screen: SpaceColor) -> SpaceColor {
+        func stored(_ value: Double) -> Double { (value - (1 - defaultIntensity)) / defaultIntensity }
+        return SpaceColor(red: stored(screen.red), green: stored(screen.green), blue: stored(screen.blue))
+    }
+
+    /// Arc's built-in theme for a space without one (THEMES.md §4.2):
+    /// lavender `#D8D9F4` → pale pink `#F4E5E5` on screen, diagonal, no grain.
+    public static let arcDefault: SpaceTheme = {
+        let first = stop(onScreen: SpaceColor(hex: "#D8D9F4")!)
+        return SpaceTheme(red: first.red, green: first.green, blue: first.blue,
+                          gradientColors: [stop(onScreen: SpaceColor(hex: "#F4E5E5")!)])
+    }()
+
+    /// ReArc's default before wave 31.
+    public static let legacyDefault = SpaceTheme(red: 0.45, green: 0.35, blue: 0.90)
+
     public static let presets: [SpaceTheme] = [
-        SpaceTheme(red: 0.45, green: 0.35, blue: 0.90), // indigo
+        arcDefault,
         SpaceTheme(red: 0.20, green: 0.60, blue: 0.86), // sky
         SpaceTheme(red: 0.25, green: 0.72, blue: 0.55), // mint
         SpaceTheme(red: 0.92, green: 0.55, blue: 0.30), // ember
@@ -163,20 +211,22 @@ public struct SpaceTheme: Hashable, Codable, Sendable {
         SpaceTheme(red: 0.15, green: 0.15, blue: 0.20, gradientColors: [SpaceColor(red: 0.40, green: 0.30, blue: 0.55)]),
     ]
 
-    /// Theme editor swatches: three rows of nine, after Arc's style editor
-    /// pads (`ColorPickerPastel1..9`, `ColorPickerGreyscale1..9`,
-    /// `ColorPickerDrab1..9`, SIDEBAR-SPEC §4.6). Values are ReArc's own.
+    /// Theme editor swatches: Arc's three pads of nine, measured from its
+    /// asset catalog (`ColorPickerPastel1..9`, `ColorPickerGreyscale1..9`,
+    /// `ColorPickerDrab1..9`; DESIGN-TOKENS §2.1).
     public static let editorPalette: [[SpaceTheme]] = [
-        // Vivid
-        [(0.45, 0.35, 0.90), (0.20, 0.60, 0.86), (0.25, 0.72, 0.55), (0.55, 0.78, 0.30), (0.95, 0.78, 0.25),
-         (0.92, 0.55, 0.30), (0.88, 0.32, 0.32), (0.85, 0.35, 0.55), (0.65, 0.40, 0.85)],
-        // Pastel
-        [(0.72, 0.68, 0.95), (0.65, 0.82, 0.95), (0.66, 0.90, 0.80), (0.80, 0.92, 0.66), (0.98, 0.92, 0.66),
-         (0.98, 0.80, 0.66), (0.96, 0.70, 0.70), (0.95, 0.72, 0.84), (0.85, 0.74, 0.95)],
-        // Greyscale and drab
-        [(0.95, 0.95, 0.96), (0.78, 0.78, 0.80), (0.55, 0.55, 0.60), (0.33, 0.33, 0.36), (0.15, 0.15, 0.17),
-         (0.55, 0.50, 0.42), (0.45, 0.52, 0.42), (0.40, 0.47, 0.55), (0.52, 0.42, 0.48)],
-    ].map { row in row.map { SpaceTheme(red: $0.0, green: $0.1, blue: $0.2) } }
+        ["#FDFBFA", "#FBEAF3", "#ECD2EA", "#F7CDD2", "#FAE1D5", "#FEF9E7", "#E4FCEC", "#E0F2FB", "#C5C6E2"],
+        ["#FFFFFF", "#E5E5E5", "#CCCCCC", "#B2B2B2", "#808080", "#666666", "#333333", "#1A1A1A", "#000000"],
+        ["#4B3B58", "#623856", "#854444", "#A77048", "#D1B46A", "#CDCCA8", "#84A885", "#34604B", "#2D4468"],
+    ].map { row in
+        row.map { hex in
+            let color = SpaceColor(hex: hex)!
+            return SpaceTheme(red: color.red, green: color.green, blue: color.blue)
+        }
+    }
+
+    /// The names of `editorPalette`'s rows.
+    public static let editorPaletteNames = ["Pastel", "Greyscale", "Drab"]
 }
 
 /// The part of a theme beyond its base colour. It syncs in its own record
@@ -186,11 +236,37 @@ public struct SpaceThemeStyle: Hashable, Codable, Sendable {
     public var gradientColors: [SpaceColor]
     public var noise: Double
     public var appearance: SpaceAppearance
+    public var intensity: Double
+    public var texture: SpaceTexture
 
-    public init(gradientColors: [SpaceColor] = [], noise: Double = 0, appearance: SpaceAppearance = .automatic) {
+    public init(
+        gradientColors: [SpaceColor] = [],
+        noise: Double = 0,
+        appearance: SpaceAppearance = .automatic,
+        intensity: Double = SpaceTheme.defaultIntensity,
+        texture: SpaceTexture = .grain
+    ) {
         self.gradientColors = gradientColors
         self.noise = noise
         self.appearance = appearance
+        self.intensity = intensity
+        self.texture = texture
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case gradientColors, noise, appearance, intensity, texture
+    }
+
+    /// Records written before wave 31 have no intensity or texture.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            gradientColors: try c.decodeIfPresent([SpaceColor].self, forKey: .gradientColors) ?? [],
+            noise: try c.decodeIfPresent(Double.self, forKey: .noise) ?? 0,
+            appearance: (try? c.decodeIfPresent(SpaceAppearance.self, forKey: .appearance)) ?? .automatic,
+            intensity: try c.decodeIfPresent(Double.self, forKey: .intensity) ?? SpaceTheme.defaultIntensity,
+            texture: (try? c.decodeIfPresent(SpaceTexture.self, forKey: .texture)) ?? .grain
+        )
     }
 
     public var isDefault: Bool { self == SpaceThemeStyle() }

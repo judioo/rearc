@@ -4,6 +4,7 @@ import SwiftUI
 /// WebKit-path SwiftUI app; launched by `ReArcMain`.
 struct ReArcApp: App {
     @State private var model = BrowserViewModel()
+    @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
 
     var body: some Scene {
         WindowGroup("ReArc") {
@@ -34,6 +35,7 @@ struct ReArcApp: App {
             CommandGroup(after: .appInfo) {
                 Button("Set ReArc as Default Browser…") { model.setAsDefaultBrowser() }
                 Toggle("Automatic Picture in Picture", isOn: $model.automaticPictureInPicture)
+                Toggle("Show URL in Toolbar", isOn: $urlInToolbar)
                 Picker("External Links", selection: $model.externalLinkDestination) {
                     ForEach(ExternalLinkDestination.allCases, id: \.self) { destination in
                         Text(destination.menuTitle).tag(destination)
