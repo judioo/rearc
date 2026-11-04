@@ -7,10 +7,20 @@ import Foundation
 enum ReArcMain {
     @MainActor
     static func main() {
-        let options = EngineLaunchOptions.parse(
+        let info = Bundle.main.infoDictionary
+        let chromiumOwnsApplication = EngineLaunchOptions.applicationClassRequiresChromium(infoDictionary: info) {
+            NSClassFromString($0) != nil
+        }
+        let parsed = EngineLaunchOptions.parse(
             arguments: CommandLine.arguments,
-            environment: ProcessInfo.processInfo.environment
+            environment: ProcessInfo.processInfo.environment,
+            infoDictionary: info
         )
+        let options = parsed.resolvingApplicationClass(requiresChromium: chromiumOwnsApplication)
+        if options.source == .applicationClass {
+            FileHandle.standardError.write(Data(("ReArc: this bundle's application class is Chromium's \(EngineLaunchOptions.chromiumApplicationClass); "
+                + "using the Chromium engine (the WebKit path cannot start here).\n").utf8))
+        }
         // Links from other apps (ReArc as the default browser), both engines.
         if !options.selfTest { ExternalLinkRouter.shared.install() }
         if options.engine == .chromium {
@@ -19,6 +29,11 @@ enum ReArcMain {
             #else
             unavailableChromium(options, reason: "this binary was built without Chromium (see scripts/bundle-chromium.sh)")
             #endif
+        }
+        if chromiumOwnsApplication {
+            // NSApplicationMain would instantiate BrowserCrApplication and abort; exit cleanly instead.
+            FileHandle.standardError.write(Data("ReArc: Chromium is unavailable in a Chromium bundle; cannot start the WebKit path here.\n".utf8))
+            exit(70)
         }
         ReArcApp.main()
     }

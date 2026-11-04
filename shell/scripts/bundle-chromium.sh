@@ -10,7 +10,10 @@
 #                                                        @loader_path/../../../../../.. resolves to $DIST
 #
 # Usage: scripts/bundle-chromium.sh [--release] [--copy-dylibs] [--dist DIR] [--skip-build] [--selftest]
-#                                   [--dev-mock-keychain]
+#                                   [--dev-mock-keychain] [--launch-check]
+#   --launch-check      after assembling, launch the bundle through LaunchServices (`open`, no
+#                       engine argument, with and without a link) and check it reaches ready on
+#                       the Chromium path (scripts/check-launch.sh; throwaway profile).
 #   REARC_CHROMIUM_OUT  engine output dir (default: engine/chromium/src/out/ReArc-dev-arm64)
 #   --dev-mock-keychain DEVELOPMENT ONLY, off by default, refused with --release. Marks the
 #                       bundle so the shell passes Chromium's --use-mock-keychain: cookies and
@@ -44,6 +47,7 @@ DYLIB_MODE=symlink
 BUILD=1
 SELFTEST=0
 DEV_MOCK_KEYCHAIN=0
+LAUNCH_CHECK=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,7 +57,8 @@ while [[ $# -gt 0 ]]; do
     --skip-build) BUILD=0 ;;
     --selftest) SELFTEST=1 ;;
     --dev-mock-keychain) DEV_MOCK_KEYCHAIN=1 ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    --launch-check) LAUNCH_CHECK=1 ;;
+    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 64 ;;
   esac
   shift
@@ -93,7 +98,8 @@ for header in rearc_engine_abi.h rearc_engine_entry_mac.h module.modulemap; do
   [[ -f "$BRIDGE/$header" ]] || die "missing $BRIDGE/$header"
 done
 # Same gate as engine/tests/run_c_abi.py: don't package a tree that is being rebuilt.
-if pgrep -fl "siso ninja" >/dev/null 2>&1; then
+# The bracket keeps the pattern from matching a wrapper whose own argv quotes it.
+if pgrep -fl 'siso[ ]ninja' >/dev/null 2>&1; then
   die "a Chromium build (siso ninja) is running; wait for it to finish"
 fi
 
@@ -133,6 +139,11 @@ PLIST="$APP/Contents/Info.plist"
 plutil -replace CFBundleExecutable -string ReArc "$PLIST"
 plutil -replace CFBundleName -string ReArc "$PLIST"
 plutil -replace CFBundleDisplayName -string ReArc "$PLIST"
+# The principal class stays Chromium's BrowserCrApplication, whose +initialize needs the
+# command line only ChromeMain sets up, so this bundle must never start the WebKit path.
+# Launches without an engine choice (Finder, the Dock, `open`, links from other apps)
+# read this key; LSEnvironment would cover LaunchServices launches only.
+plutil -replace ReArcDefaultEngine -string chromium "$PLIST"
 # A browser: LaunchServices offers it as the default for web links, and other apps'
 # http/https links arrive as GetURL Apple Events (ExternalLinkRouter). Set explicitly so
 # the bundle never depends on what the engine's own plist declares.
@@ -216,6 +227,10 @@ Run the Chromium engine:
 Run the self-test:
   "$APP/Contents/MacOS/ReArc" --rearc-selftest
 EOF
+
+if [[ $LAUNCH_CHECK == 1 ]]; then
+  "$SHELL_DIR/scripts/check-launch.sh" "$APP"
+fi
 
 if [[ $SELFTEST == 1 ]]; then
   if [[ $DEV_MOCK_KEYCHAIN == 1 ]]; then

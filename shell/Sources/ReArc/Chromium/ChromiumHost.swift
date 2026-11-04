@@ -31,7 +31,7 @@ enum ChromiumHost {
             }
             let arguments = ChromiumLaunchArguments.browserArguments(
                 CommandLine.arguments,
-                defaultUserDataDir: { defaultUserDataDir(selfTest: options.selfTest).path },
+                defaultUserDataDir: { defaultUserDataDir(selfTest: options.selfTest || options.launchProbePath != nil).path },
                 keychain: keychain
             )
             let runtime = ChromiumRuntime.shared
@@ -40,6 +40,11 @@ enum ChromiumHost {
                 runtime.onReady = { test.start() }
                 let code = runtime.run(arguments: ChromiumLaunchArguments.selfTestArguments(arguments), keychain: keychain)
                 exit(test.exitCode(runResult: code))
+            }
+            if let path = options.launchProbePath {
+                let probe = ChromiumLaunchProbe(runtime: runtime, options: options, resultPath: path)
+                runtime.onReady = { probe.start() }
+                exit(probe.exitCode(runResult: runtime.run(arguments: arguments, keychain: keychain)))
             }
             let shell = ChromiumShell(runtime: runtime)
             runtime.onReady = { shell.start(model: ChromiumShell.makeModel(runtime: runtime)) }

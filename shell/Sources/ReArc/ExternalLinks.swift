@@ -33,6 +33,9 @@ final class ExternalLinkRouter: NSObject {
         )
     }
 
+    /// Links received before a model attached (the launch probe reports them).
+    var pendingURLs: [URL] { pending }
+
     func attach(_ model: BrowserViewModel) {
         installHandler()
         self.model = model

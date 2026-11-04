@@ -28,6 +28,19 @@ over the C ABI in `engine/docs/C-ABI.md`) is used only when **both**:
 Otherwise the request is ignored with a warning on stderr and the WebKit path
 runs unchanged. `ReArcMain` makes this choice before `ReArcApp.main()`.
 
+The Chromium bundle needs no argument: `scripts/bundle-chromium.sh` writes
+`ReArcDefaultEngine=chromium` to its Info.plist, the lowest-precedence choice
+(then `REARC_ENGINE`, then the flag), so Finder, the Dock, `open` and links
+from other apps start Chromium. Its principal class is Chromium's
+`BrowserCrApplication`, whose `+initialize` aborts unless ChromeMain set up
+the command line, so the WebKit path can never run in that bundle: when that
+class is present, `ReArcMain` uses Chromium even for `--rearc-engine=webkit`
+(logged), and exits with status 70 rather than abort if Chromium cannot start.
+`scripts/check-launch.sh [ReArc.app]` (or `bundle-chromium.sh --launch-check`)
+launches the bundle with `open`, once plain and once with a link, under
+`--rearc-launch-probe` (a throwaway profile, no sidebar model), and checks
+that it reaches `ready` on Chromium with the link delivered.
+
 ### Build and run with Chromium
 
 Needs the existing engine output in `engine/chromium/src/out/ReArc-dev-arm64`
@@ -43,7 +56,7 @@ dist/chromium/ReArc.app/Contents/MacOS/ReArc --rearc-engine=chromium
 
 Options: `--release`, `--copy-dylibs` (clone the dylibs instead of
 symlinking them), `--dist DIR`, `--skip-build`, `--dev-mock-keychain` (see
-"Keychain" below).
+"Keychain" below), `--launch-check` (see above).
 
 Bundle layout (component build, see "Linking and startup" in C-ABI.md):
 
@@ -65,6 +78,7 @@ Flags and environment:
 |---|---|
 | `--rearc-engine=chromium\|webkit`, `REARC_ENGINE` | engine selection |
 | `--rearc-selftest` | Chromium runtime proof; exits 0 on success, nonzero on failure, 124 on the 120 s watchdog |
+| `--rearc-launch-probe=PATH` | reach `ready` on a temp profile, write `ready=1 engine=… source=… links=…` to PATH, quit (`scripts/check-launch.sh`) |
 | `--user-data-dir=PATH` | Chromium profile dir (default `~/Library/Application Support/ReArc/Chromium`; temp dir for the self-test) |
 | `REARC_CHROMIUM_TRACE=1` | log every tab/service event and engine call (including script evaluations) to stderr |
 
