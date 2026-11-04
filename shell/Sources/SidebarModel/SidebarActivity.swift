@@ -68,14 +68,17 @@ public enum PageLinkCopyFormat: String, CaseIterable, Sendable {
         }
     }
 
-    /// The confirmation toast.
+    /// The confirmation toast: Arc's "Copied Current URL" (its Markdown
+    /// copy reuses it; Copy as Quote's wording is inferred).
     public var confirmation: String {
         switch self {
-        case .plain: return "Copied URL"
-        case .markdown: return "Copied URL as Markdown"
+        case .plain, .markdown: return "Copied Current URL"
         case .quote: return "Copied as Quote"
         }
     }
+
+    /// Arc's toast when the copied link lost tracking parameters (`LinkCleaner`).
+    public static let cleanConfirmation = "Copied a clean link without trackers"
 
     /// `[title](url)`, with the title's brackets and the URL's parentheses escaped.
     public static func markdownLink(url: URL, title: String) -> String {

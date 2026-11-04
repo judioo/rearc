@@ -81,21 +81,21 @@ final class Wave26ShellTests: XCTestCase {
 
         model.copyURL()
         XCTAssertEqual(model.linkPasteboard.string(forType: .string), "https://docs.test/a")
-        XCTAssertEqual(model.toast?.message, "Copied URL")
+        XCTAssertEqual(model.toast?.message, "Copied Current URL")
 
         model.copyURL(format: .markdown)
         XCTAssertEqual(model.linkPasteboard.string(forType: .string), "[Docs (v2)](https://docs.test/a)")
-        XCTAssertEqual(model.toast?.message, "Copied URL as Markdown")
+        XCTAssertEqual(model.toast?.message, "Copied Current URL")
 
         _ = model.executeCommand(.copyAsQuote, commandID: nil)
         XCTAssertEqual(model.linkPasteboard.string(forType: .string), "> [Docs (v2)](https://docs.test/a)",
                        "a tab without a live page quotes the link")
 
-        let menu = ShellMenus.sidebarItems(model).flatMap { $0 }
+        let menu = ShellMenus.copyLink(model).flatMap { $0 }
         let markdown = menu.first { $0.title == "Copy URL as Markdown" }
         XCTAssertEqual(markdown?.menuKeyEquivalent, "c")
         XCTAssertEqual(markdown?.modifiers, [.command, .shift, .option])
-        XCTAssertNotNil(menu.first { $0.title == "Copy as Quote" })
+        XCTAssertNotNil(menu.first { $0.title == "Copy URL as Quote" })
     }
 
     // MARK: Unread

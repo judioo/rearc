@@ -10,24 +10,52 @@ struct ShellMenuItem: Identifiable {
         case character(Character)
         case leftArrow
         case rightArrow
+        case upArrow
+        case downArrow
+        case function(Int)
     }
 
     let title: String
     let key: Key?
     let modifiers: NSEvent.ModifierFlags
+    /// An alternate key for the item above it, as in Arc's nib (⌘← for Back,
+    /// F12 for Developer Tools): hidden, its key still works (Chromium path).
+    let isAlternate: Bool
     let action: () -> Void
 
-    var id: String { title }
+    var id: String { isAlternate ? "\(title) (alternate)" : title }
 
-    init(_ title: String, _ key: Key? = nil, _ modifiers: NSEvent.ModifierFlags = .command, action: @escaping () -> Void) {
+    init(_ title: String, _ key: Key? = nil, _ modifiers: NSEvent.ModifierFlags = .command, alternate: Bool = false,
+         action: @escaping () -> Void) {
         self.title = title
         self.key = key
         self.modifiers = modifiers
+        self.isAlternate = alternate
         self.action = action
     }
 
-    init(_ title: String, _ character: Character, _ modifiers: NSEvent.ModifierFlags = .command, action: @escaping () -> Void) {
-        self.init(title, .character(character), modifiers, action: action)
+    init(_ title: String, _ character: Character, _ modifiers: NSEvent.ModifierFlags = .command, alternate: Bool = false,
+         action: @escaping () -> Void) {
+        self.init(title, .character(character), modifiers, alternate: alternate, action: action)
+    }
+
+    /// Arc's binding for this item's keys, if it has one (docs/SHORTCUTS.md).
+    var arcShortcut: ArcShortcut? {
+        guard let shortcutKey else { return nil }
+        return ArcShortcuts.binding(for: shortcutKey, modifiers: ShortcutRouter.modifiers(of: modifiers))
+    }
+
+    var shortcutKey: ShortcutKey? {
+        switch key {
+        case .character("\t"): return .tab
+        case .character(let character): return .character(Character(character.lowercased()))
+        case .leftArrow: return .leftArrow
+        case .rightArrow: return .rightArrow
+        case .upArrow: return .upArrow
+        case .downArrow: return .downArrow
+        case .function(let number): return .function(number)
+        case nil: return nil
+        }
     }
 
     /// `NSMenuItem.keyEquivalent`.
@@ -36,8 +64,38 @@ struct ShellMenuItem: Identifiable {
         case .character(let character): return String(character)
         case .leftArrow: return String(Character(UnicodeScalar(NSLeftArrowFunctionKey)!))
         case .rightArrow: return String(Character(UnicodeScalar(NSRightArrowFunctionKey)!))
+        case .upArrow: return String(Character(UnicodeScalar(NSUpArrowFunctionKey)!))
+        case .downArrow: return String(Character(UnicodeScalar(NSDownArrowFunctionKey)!))
+        case .function(let number): return String(Character(UnicodeScalar(NSF1FunctionKey + number - 1)!))
         case nil: return ""
         }
+    }
+
+    /// The key and mask for an `NSMenuItem` (Chromium path): AppKit matches a
+    /// shifted shortcut by its shifted character with Shift left out of the
+    /// mask ("C" + ⌘ for ⇧⌘C, "+" + ⌃ for ⌃⇧=), as Arc's nib stores them; a
+    /// lowercase key with an explicit Shift never matches a real key press.
+    var appKitKeyEquivalent: (key: String, mask: NSEvent.ModifierFlags) {
+        Self.appKitKeyEquivalent(menuKeyEquivalent, modifiers)
+    }
+
+    /// US-layout shifted characters, for `appKitKeyEquivalent`.
+    private static let shiftedCharacters: [Character: Character] = [
+        "`": "~", "1": "!", "2": "@", "3": "#", "4": "$", "5": "%", "6": "^", "7": "&", "8": "*", "9": "(", "0": ")",
+        "-": "_", "=": "+", "[": "{", "]": "}", "\\": "|", ";": ":", "'": "\"", ",": "<", ".": ">", "/": "?",
+    ]
+
+    static func appKitKeyEquivalent(_ key: String, _ modifiers: NSEvent.ModifierFlags) -> (key: String, mask: NSEvent.ModifierFlags) {
+        guard modifiers.contains(.shift), key.count == 1, let character = key.first else { return (key, modifiers) }
+        let shifted: Character
+        if character.isLetter, character.isLowercase {
+            shifted = Character(character.uppercased())
+        } else if let mapped = shiftedCharacters[character] {
+            shifted = mapped
+        } else {
+            return (key, modifiers)  // Tab, Delete, arrows, function keys keep an explicit Shift.
+        }
+        return (String(shifted), modifiers.subtracting(.shift))
     }
 
     var keyEquivalent: KeyEquivalent? {
@@ -45,6 +103,9 @@ struct ShellMenuItem: Identifiable {
         case .character(let character): return KeyEquivalent(character)
         case .leftArrow: return .leftArrow
         case .rightArrow: return .rightArrow
+        case .upArrow: return .upArrow
+        case .downArrow: return .downArrow
+        case .function(let number): return KeyEquivalent(Character(UnicodeScalar(NSF1FunctionKey + number - 1)!))
         case nil: return nil
         }
     }
@@ -60,13 +121,16 @@ struct ShellMenuItem: Identifiable {
 }
 
 /// Wave 17 menu groups (dividers between groups). Arc's evidenced commands
-/// (SIDEBAR-SPEC §6) with the audit's default shortcuts.
+/// (SIDEBAR-SPEC §6); since wave 30 the keys are Arc's own (`ArcShortcuts`,
+/// docs/SHORTCUTS.md).
 enum ShellMenus {
     /// View menu: page navigation (Arc keeps these in the sidebar, not a toolbar).
     static func navigation(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [[
             ShellMenuItem("Back", "[") { model.goBack() },
+            ShellMenuItem("Back", .leftArrow, alternate: true) { model.goBack() },
             ShellMenuItem("Forward", "]") { model.goForward() },
+            ShellMenuItem("Forward", .rightArrow, alternate: true) { model.goForward() },
             ShellMenuItem("Reload Page", "r") { model.reload() },
             ShellMenuItem("Reload Ignoring Cache", "r", [.command, .shift]) { model.reload(ignoringCache: true) },
             ShellMenuItem("Stop Loading", ".") { model.stopLoading() },
@@ -79,6 +143,48 @@ enum ShellMenus {
             ShellMenuItem("Find…", "f") { model.showFindBar() },
             ShellMenuItem("Find Next", "g") { model.findNext(forward: true) },
             ShellMenuItem("Find Previous", "g", [.command, .shift]) { model.findNext(forward: false) },
+            ShellMenuItem("Jump to Selection", "j") { model.jumpToSelection() },
+        ]]
+    }
+
+    /// File menu: Arc's New Note (⌃⇧N) and New Easel (⌃⇧E).
+    static func documents(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("New Note", "n", [.control, .shift]) { _ = model.executeCommand(.newNote, commandID: nil) },
+            ShellMenuItem("New Easel", "e", [.control, .shift]) { _ = model.executeCommand(.newEasel, commandID: nil) },
+        ]]
+    }
+
+    /// View menu: Zoom In (⌘=, and ⌘+), Zoom Out (⌘-, and ⇧⌘-), Actual Size.
+    static func zoom(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("Zoom In", "=") { model.zoom(.zoomIn) },
+            ShellMenuItem("Zoom In", "=", [.command, .shift], alternate: true) { model.zoom(.zoomIn) },
+            ShellMenuItem("Zoom Out", "-") { model.zoom(.zoomOut) },
+            ShellMenuItem("Zoom Out", "-", [.command, .shift], alternate: true) { model.zoom(.zoomOut) },
+            ShellMenuItem("Actual Size", "0") { model.zoom(.reset) },
+        ]]
+    }
+
+    /// Tabs menu: Arc's Next/Previous Tab (⌥⌘↓ / ⌥⌘↑, sidebar order) and Cycle
+    /// Tab (⌃⌘← / ⌃⌘→, back and forth through the tabs visited).
+    static func tabNavigation(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("Next Tab", .downArrow, [.command, .option]) { model.selectNextTab() },
+            ShellMenuItem("Previous Tab", .upArrow, [.command, .option]) { model.selectPreviousTab() },
+            ShellMenuItem("Cycle Tab Backward", .leftArrow, [.command, .control]) { model.cycleTabHistory(forward: false) },
+            ShellMenuItem("Cycle Tab Forward", .rightArrow, [.command, .control]) { model.cycleTabHistory(forward: true) },
+        ]]
+    }
+
+    /// Tabs menu: Arc's View > Add Split View (⌃⇧=) and Close this Split Pane (⌃⇧-).
+    static func split(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("Add Split View", "=", [.control, .shift]) { model.addSplitView(orientation: .horizontal) },
+            ShellMenuItem("Close this Split Pane", "-", [.control, .shift]) { model.closeFocusedSplitPane() },
+            ShellMenuItem("Separate from Split View") {
+                if let tab = model.store.selectedTab { model.unsplitTabIfInSplit(tab.id) }
+            },
         ]]
     }
 
@@ -144,6 +250,10 @@ enum ShellMenus {
     static func developer(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [[
             ShellMenuItem("Developer Tools", "i", [.command, .option]) { model.toggleDevTools() },
+            ShellMenuItem("Developer Tools", .function(12), [], alternate: true) { model.toggleDevTools() },
+            // The frontend opens on its last panel: the ABI has no panel or inspect-mode choice.
+            ShellMenuItem("Inspect Elements", "c", [.command, .option]) { model.showDevTools() },
+            ShellMenuItem("JavaScript Console", "j", [.command, .option]) { model.showDevTools() },
             ShellMenuItem("Open Developer Tools in a Window") { model.setDevToolsPlacement(.window) },
             ShellMenuItem("Dock Developer Tools") { model.setDevToolsPlacement(.docked) },
         ]]
@@ -197,6 +307,16 @@ enum ShellMenus {
         ]
     }
 
+    /// Edit menu (Arc's place for them): Copy URL ⇧⌘C, as Markdown ⌥⇧⌘C and
+    /// as Quote ⌃⇧⌘C, links cleaned of trackers, with Arc's toast.
+    static func copyLink(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("Copy URL", "c", [.command, .shift]) { model.copyURL() },
+            ShellMenuItem("Copy URL as Markdown", "c", [.command, .shift, .option]) { model.copyURL(format: .markdown) },
+            ShellMenuItem("Copy URL as Quote", "c", [.command, .shift, .control]) { model.copyURL(format: .quote) },
+        ]]
+    }
+
     /// Tabs menu additions: pin/favorite, item commands, folders, archive.
     static func sidebarItems(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [
@@ -207,15 +327,12 @@ enum ShellMenus {
                     if let id = model.store.selectedTabID { model.beginRename(.tab(id)) }
                 },
                 ShellMenuItem("Duplicate Tab") { model.duplicateTab() },
-                ShellMenuItem("Copy URL", "c", [.command, .shift]) { model.copyURL() },
-                ShellMenuItem("Copy URL as Markdown", "c", [.command, .shift, .option]) { model.copyURL(format: .markdown) },
-                ShellMenuItem("Copy as Quote") { model.copyURL(format: .quote) },
                 ShellMenuItem("Archive Tab") { model.archiveTab() },
             ],
             [
                 ShellMenuItem("Reset Tab to Original URL") { model.resetTabToSavedURL() },
                 ShellMenuItem("Reset All Tabs in This Space") { model.resetPinnedTabs() },
-                ShellMenuItem("Clear Unpinned Tabs") { model.clearTodayTabs() },
+                ShellMenuItem("Clear Unpinned Tabs", "k", [.command, .shift]) { model.clearTodayTabs() },
             ],
             [
                 ShellMenuItem("Flip Split Orientation") { model.flipSplitOrientation() },
@@ -243,7 +360,7 @@ enum ShellMenus {
     /// `viewArchive`, `viewBoosts`; SIDEBAR-SPEC §6).
     static func library(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [
-            [ShellMenuItem("View Library") { model.openLibrary(nil) }],
+            [ShellMenuItem("View Library", "l", [.command, .shift]) { model.openLibrary(nil) }],
             LibrarySection.allCases.map { section in
                 ShellMenuItem(section.menuTitle) { model.openLibrary(section) }
             },
@@ -258,7 +375,7 @@ struct ShellMenuButtons: View {
     var body: some View {
         ForEach(groups.indices, id: \.self) { index in
             if index > 0 { Divider() }
-            ForEach(groups[index]) { item in
+            ForEach(groups[index].filter { !$0.isAlternate }) { item in
                 if let key = item.keyEquivalent {
                     Button(item.title, action: item.action)
                         .keyboardShortcut(key, modifiers: item.eventModifiers)

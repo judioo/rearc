@@ -79,7 +79,7 @@ final class Wave17ShellTests: XCTestCase {
         let ctrl3 = spaces.first { $0.title == "Space 3" }
         XCTAssertEqual(ctrl3?.menuKeyEquivalent, "3")
         XCTAssertEqual(ctrl3?.modifiers, .control)
-        let navigation = ShellMenus.navigation(model).flatMap { $0 }.map { "\($0.title)=\($0.menuKeyEquivalent)" }
+        let navigation = ShellMenus.navigation(model).flatMap { $0 }.filter { !$0.isAlternate }.map { "\($0.title)=\($0.menuKeyEquivalent)" }
         XCTAssertEqual(navigation, ["Back=[", "Forward=]", "Reload Page=r", "Reload Ignoring Cache=r", "Stop Loading=."])
         let pin = ShellMenus.sidebarItems(model).flatMap { $0 }.first { $0.title == "Pin/Unpin Tab" }
         XCTAssertEqual(pin?.menuKeyEquivalent, "d")

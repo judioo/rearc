@@ -54,7 +54,7 @@ final class Wave26ModelTests: XCTestCase {
                        "> first line\n>\n> second\n>\n> — [A](https://a.test/)")
         XCTAssertEqual(PageLinkCopyFormat.quote.text(url: URL(string: "https://a.test/")!, title: "A", selection: " \n "),
                        "> [A](https://a.test/)", "no selection quotes the link")
-        XCTAssertEqual(Set(PageLinkCopyFormat.allCases.map(\.confirmation)).count, 3)
+        XCTAssertEqual(Set(PageLinkCopyFormat.allCases.map(\.confirmation)).count, 2, "Arc's Markdown copy reuses Copied Current URL")
     }
 
     // MARK: Unread

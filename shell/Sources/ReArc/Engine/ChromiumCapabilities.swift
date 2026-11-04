@@ -48,6 +48,7 @@ struct ChromiumCapabilities: Equatable {
     static let linkOpenRequestsFeature = "link_open_requests"
     static let devToolsFeature = "devtools"
     static let clientCertificatesFeature = "client_certificates"
+    static let keyEquivalentEventsFeature = "key_equivalent_events"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -92,6 +93,7 @@ struct ChromiumCapabilities: Equatable {
         linkOpenRequestsFeature: 39,
         devToolsFeature: 40,
         clientCertificatesFeature: 41,
+        keyEquivalentEventsFeature: 42,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -179,6 +181,9 @@ struct ChromiumCapabilities: Equatable {
     var devTools: Bool
     /// TLS client-certificate selection (`ReArcEngineSetClientCertificateCallback`, `ReArcClientCertificateRespond`).
     var clientCertificates: Bool
+    /// The page's verdict on each Command/Control key (`ReArcEngineSetKeyEquivalentCallback`):
+    /// unconsumed keys run the shell's menu shortcut instead of being dropped.
+    var keyEquivalentEvents: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -229,6 +234,7 @@ struct ChromiumCapabilities: Equatable {
         linkOpenRequests = extensionWindows && adopted(Self.linkOpenRequestsFeature)
         devTools = adopted(Self.devToolsFeature)
         clientCertificates = adopted(Self.clientCertificatesFeature)
+        keyEquivalentEvents = adopted(Self.keyEquivalentEventsFeature)
     }
 
     /// Inspect in the page menu: the shell opens a hosted frontend itself
@@ -298,6 +304,7 @@ struct ChromiumCapabilities: Equatable {
             (Self.linkOpenRequestsFeature, linkOpenRequests),
             (Self.devToolsFeature, devTools),
             (Self.clientCertificatesFeature, clientCertificates),
+            (Self.keyEquivalentEventsFeature, keyEquivalentEvents),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

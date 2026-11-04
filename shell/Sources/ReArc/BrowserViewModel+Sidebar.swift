@@ -112,9 +112,14 @@ extension BrowserViewModel {
     /// Cmd+D: pin a Today tab, unpin a pinned one.
     func togglePin(_ tabID: Tab.ID? = nil) {
         guard let id = tabID ?? store.selectedTabID else { return }
+        let space = store.spaceContaining(tabID: id).flatMap { store.space(withID: $0) }?.name ?? ""
         switch store.kind(of: id) {
-        case .today: store.pinTab(id)
-        case .pinned: store.unpinTab(id)
+        case .today:
+            store.pinTab(id)
+            showToast("Pinned Tab to “\(space)”", systemImage: "pin.fill")
+        case .pinned:
+            store.unpinTab(id)
+            showToast("Un-Pinned Tab from “\(space)”", systemImage: "pin.slash")
         case .favorite, nil: return
         }
         loadSelectedIfNeeded()

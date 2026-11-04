@@ -357,6 +357,26 @@ private let fullscreenCallback: ReArcFullscreenCallback = { context, event in
     MainActor.assumeIsolated { runtime(from: context).handleFullscreen(copied) }
 }
 
+/// Owned copy of `ReArcKeyEquivalentEvent` (ABI 1.42): the page's verdict on
+/// a Command or Control key it was given.
+struct ChromiumKeyEquivalentEvent: Equatable {
+    var profileID, tabID: UInt64
+    var keyCode: UInt16
+    var modifiers: NSEvent.ModifierFlags
+    var consumed: Bool
+    var characters: String
+}
+
+private let keyEquivalentCallback: ReArcKeyEquivalentCallback = { context, event in
+    guard let e = event?.pointee else { return }
+    let copied = ChromiumKeyEquivalentEvent(
+        profileID: e.profile_id, tabID: e.tab_id, keyCode: UInt16(truncatingIfNeeded: e.key_code),
+        modifiers: NSEvent.ModifierFlags(rawValue: UInt(e.modifiers)), consumed: e.consumed,
+        characters: e.characters.map { String(cString: $0) } ?? ""
+    )
+    MainActor.assumeIsolated { runtime(from: context).handleKeyEquivalent(copied) }
+}
+
 /// Owned copy of `ReArcPrintRequestEvent` (ABI 1.28): the page asked to print.
 struct ChromiumPrintRequestEvent: Equatable {
     var profileID, tabID, contentGeneration: UInt64
@@ -489,6 +509,10 @@ final class ChromiumRuntime {
     var onDownloadEvent: ((ChromiumDownloadEvent) -> Void)?
     /// Page fullscreen requests and exits (ABI 1.27); without a handler the engine refuses requests.
     var onFullscreenEvent: ((ChromiumFullscreenEvent) -> Void)?
+    /// Page verdicts on Command/Control keys (ABI 1.42), for `ShortcutRouter`.
+    var onKeyEquivalent: ((ChromiumKeyEquivalentEvent) -> Void)?
+    /// The last verdicts received (self-test).
+    var keyEquivalentEvents: [ChromiumKeyEquivalentEvent] = []
     /// PiP's back-to-tab button (ABI 1.30 phase 2): present and focus the tab.
     var onPictureInPictureBackToTab: ((ChromiumEngine) -> Void)?
     /// Print requests received and PiP events, per kind (logs, self-test).
@@ -657,6 +681,10 @@ final class ChromiumRuntime {
         registerClientCertificateChannel(context: context)
         if capabilities.htmlFullscreen {
             ReArcEngineSetFullscreenCallback(fullscreenCallback, context)
+        }
+        // Wave 30 (ABI 1.42): unconsumed page keys come back to the shell's menu.
+        if capabilities.keyEquivalentEvents {
+            ReArcEngineSetKeyEquivalentCallback(keyEquivalentCallback, context)
         }
         // Wave 24 (ABI 1.28–1.30), before any tab.
         if capabilities.printing {
@@ -1253,6 +1281,14 @@ final class ChromiumRuntime {
             + "\(event.entered ? "entered" : "exited reason \(event.reason.map { "\($0)" } ?? "?")") display \(event.displayID)")
         engines[event.tabID]?.value?.handleFullscreen(event)
         onFullscreenEvent?(event)
+    }
+
+    fileprivate func handleKeyEquivalent(_ event: ChromiumKeyEquivalentEvent) {
+        ChromiumLog.trace("key_equivalent tab \(event.tabID) key \(event.keyCode) '\(event.characters)' "
+            + "flags 0x\(String(event.modifiers.rawValue, radix: 16)) consumed \(event.consumed)")
+        keyEquivalentEvents.append(event)
+        if keyEquivalentEvents.count > 40 { keyEquivalentEvents.removeFirst(keyEquivalentEvents.count - 40) }
+        onKeyEquivalent?(event)
     }
 
     fileprivate func handlePrintRequest(_ event: ChromiumPrintRequestEvent) {

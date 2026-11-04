@@ -116,7 +116,8 @@ extension BrowserViewModel {
     }
 
     /// One app-wide monitor sees Ctrl+Tab before the page or a menu does,
-    /// and Control's release ends the switcher. It also notes each click's keys.
+    /// and Control's release ends the switcher. It also notes each click's keys
+    /// and routes shortcuts pressed while a page has focus (`ShortcutRouter`).
     func installTabSwitcherMonitor() {
         guard tabSwitcherMonitor == nil else { return }
         tabSwitcherMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged, .leftMouseDown]) { [weak self] event in
@@ -126,8 +127,10 @@ extension BrowserViewModel {
                 self.noteMouseDown(modifiers: event.modifierFlags)
                 return event
             }
-            return self.handleTabSwitcherEvent(event) ? nil : event
+            if self.handleTabSwitcherEvent(event) { return nil }
+            return self.shortcutRouter.handleKeyDown(event) ? nil : event
         }
+        shortcutRouter.onPrompt = { [weak self] in self?.showShortcutPrompt($0) }
     }
 
     /// True when the event was the switcher's.

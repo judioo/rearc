@@ -64,6 +64,15 @@ struct ReArcApp: App {
                     .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("New Little Arc Window") { model.openBlankLittleArc() }
                     .keyboardShortcut("n", modifiers: [.command, .option])
+                Button("Open Command Bar") { model.focusLocation() }
+                    .keyboardShortcut("l")
+                Divider()
+                ShellMenuButtons(groups: ShellMenus.documents(model))
+            }
+            // Arc keeps Copy URL in the Edit menu.
+            CommandGroup(after: .pasteboard) {
+                Divider()
+                ShellMenuButtons(groups: ShellMenus.copyLink(model))
             }
             // Cmd+S — toggle the sidebar, replacing File > Save.
             CommandGroup(replacing: .saveItem) {
@@ -93,17 +102,9 @@ struct ReArcApp: App {
                 Divider()
                 ShellMenuButtons(groups: ShellMenus.pictureInPicture(model))
                 Divider()
-                Button("Zoom In") { model.zoom(.zoomIn) }
-                    .keyboardShortcut("=")
-                Button("Zoom Out") { model.zoom(.zoomOut) }
-                    .keyboardShortcut("-")
-                Button("Actual Size") { model.zoom(.reset) }
-                    .keyboardShortcut("0")
+                ShellMenuButtons(groups: ShellMenus.zoom(model))
             }
             CommandMenu("Tabs") {
-                Button("Focus Location") { model.focusLocation() }
-                    .keyboardShortcut("l")
-                Divider()
                 // Cmd+W — close the selected tab. There is no replaceable
                 // placement for File > Close Window, so BrowserView strips
                 // its key equivalent on launch, leaving this the sole ⌘W.
@@ -112,18 +113,10 @@ struct ReArcApp: App {
                 Button("Reopen Closed Tab") { model.reopenClosedTab() }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
                 Divider()
-                Button("Next Tab") { model.selectNextTab() }
-                    .keyboardShortcut("]", modifiers: [.command, .shift])
-                Button("Previous Tab") { model.selectPreviousTab() }
-                    .keyboardShortcut("[", modifiers: [.command, .shift])
+                ShellMenuButtons(groups: ShellMenus.tabNavigation(model))
                 ShellMenuButtons(groups: ShellMenus.tabSwitcher(model))
                 Divider()
-                Button("Add Split View") { model.addSplitView(orientation: .horizontal) }
-                Button("Separate from Split View") {
-                    if let tab = model.store.selectedTab {
-                        model.unsplitTabIfInSplit(tab.id)
-                    }
-                }
+                ShellMenuButtons(groups: ShellMenus.split(model))
                 Divider()
                 ShellMenuButtons(groups: ShellMenus.tabPositions(model))
                 Divider()

@@ -52,6 +52,25 @@ final class ChromiumHostView: NSView {
     /// The engine attachment ID this host holds, if any.
     var leaseAttachmentID: UInt64? { lease?.attachmentID }
 
+    /// The page's RenderWidgetHostViewCocoa, the view that takes its keys.
+    var pageKeyView: NSView? {
+        guard let root = lease?.view else { return nil }
+        var queue = [root]
+        while !queue.isEmpty {
+            let view = queue.removeFirst()
+            if !view.isHidden, NSStringFromClass(type(of: view)).contains("RenderWidgetHostViewCocoa") { return view }
+            queue.append(contentsOf: view.subviews)
+        }
+        return nil
+    }
+
+    /// Gives the page keyboard focus (after the command bar closes).
+    @discardableResult
+    func focusPage() -> Bool {
+        guard let window, let view = pageKeyView else { return false }
+        return window.firstResponder === view || window.makeFirstResponder(view)
+    }
+
     /// True when this host could attach: live and in a window that has not closed.
     var canAttach: Bool {
         guard !dismantled, let window else { return false }

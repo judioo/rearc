@@ -96,7 +96,8 @@ struct BrowserView: View {
                         model.submitCommandBar()
                     },
                     onSubmit: { model.submitCommandBar() },
-                    onCancel: { model.dismissCommandBar() }
+                    onCancel: { model.dismissCommandBar() },
+                    focusRequest: model.commandBarFocusRequest
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.97)))
             }

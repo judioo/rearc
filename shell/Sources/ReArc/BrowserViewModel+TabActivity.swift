@@ -2,7 +2,7 @@ import AppKit
 import SidebarModel
 import SwiftUI
 
-/// A short confirmation over the page (Arc's "Copied URL" toast).
+/// A short confirmation over the page (Arc's "Copied Current URL" toast).
 struct ShellToast: Equatable, Identifiable {
     let id = UUID()
     var message: String
@@ -12,6 +12,8 @@ struct ShellToast: Equatable, Identifiable {
 /// Engines that can read the page's selected text (Copy as Quote).
 protocol PageSelectionReading: AnyObject {
     func selectedText() async -> String?
+    /// ⌘J (Jump to Selection); false without a selection.
+    func scrollSelectionIntoView() async -> Bool
 }
 
 /// Wave 26 sidebar activity: the Pinned section's collapse, Copy URL
@@ -91,30 +93,35 @@ extension BrowserViewModel {
     func copyURL(of tabID: Tab.ID? = nil, format: PageLinkCopyFormat) {
         guard let id = tabID ?? store.selectedTabID, let tab = store.tab(withID: id) else { return }
         let engine = engineHost.engine(forTabID: id, profileID: profileID(for: tab))
-        let url = engine?.currentURL ?? tab.url
+        // Arc copies the link "without any trackers".
+        let (url, cleaned) = LinkCleaner.clean(engine?.currentURL ?? tab.url)
         let title = tab.customTitle ?? engine?.pageTitle ?? tab.title
         guard format == .quote, let reader = engine as? PageSelectionReading else {
-            writeToPasteboard(format.text(url: url, title: title), toast: format)
+            writeToPasteboard(format.text(url: url, title: title), toast: format, cleaned: cleaned)
             return
         }
         Task { @MainActor [weak self] in
             let selection = await reader.selectedText()
-            self?.writeToPasteboard(format.text(url: url, title: title, selection: selection), toast: format)
+            self?.writeToPasteboard(format.text(url: url, title: title, selection: selection), toast: format, cleaned: cleaned)
         }
     }
 
     /// The last text a copy command wrote (the self-test reads it back).
-    private func writeToPasteboard(_ text: String, toast format: PageLinkCopyFormat) {
+    private func writeToPasteboard(_ text: String, toast format: PageLinkCopyFormat, cleaned: Bool) {
         linkPasteboard.clearContents()
         linkPasteboard.setString(text, forType: .string)
         lastCopiedLinkText = text
-        showToast(format.confirmation, systemImage: "link")
+        if cleaned, format != .quote {
+            showToast(PageLinkCopyFormat.cleanConfirmation, systemImage: "checkmark.shield.fill")
+        } else {
+            showToast(format.confirmation, systemImage: format == .quote ? "quote.bubble.fill" : "link")
+        }
     }
 
-    func showToast(_ message: String, systemImage: String) {
+    func showToast(_ message: String, systemImage: String, duration: TimeInterval = 1.6) {
         let toast = ShellToast(message: message, systemImage: systemImage)
         withAnimation(.easeOut(duration: 0.15)) { self.toast = toast }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
             guard let self, self.toast?.id == toast.id else { return }
             withAnimation(.easeIn(duration: 0.2)) { self.toast = nil }
         }

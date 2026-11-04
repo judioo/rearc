@@ -34,6 +34,9 @@ struct CommandBarOverlay: View {
     let onSelectIndex: (Int) -> Void
     let onSubmit: () -> Void
     let onCancel: () -> Void
+    /// Bumped when the field must take focus again (after ⌘T swaps the page
+    /// that had it out from under the bar).
+    var focusRequest = 0
 
     private var isCommandMode: Bool { text.hasPrefix(">") }
 
@@ -129,6 +132,10 @@ struct CommandBarOverlay: View {
         )
         .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
         .onAppear { isFieldFocused = true }
+        .onChange(of: focusRequest) { _, _ in
+            isFieldFocused = false
+            DispatchQueue.main.async { isFieldFocused = true }
+        }
         .onExitCommand(perform: onCancel)
         .onKeyPress(.upArrow) {
             onMoveHighlight(-1)

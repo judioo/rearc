@@ -102,6 +102,12 @@ final class BrowserViewModel {
     /// The open Ctrl+Tab switcher.
     var tabSwitcher: TabSwitcherSession?
     @ObservationIgnored var tabSwitcherMonitor: Any?
+    /// Arc's shortcut priorities while a page has focus (wave 30).
+    @ObservationIgnored let shortcutRouter = ShortcutRouter()
+    /// Cycle Tab Backward/Forward's visit order (⌃⌘← / ⌃⌘→).
+    @ObservationIgnored var tabVisitCycle: TabVisitCycle?
+    /// The tab ⌘T made, removed again when its command bar closes untouched.
+    @ObservationIgnored var commandBarNewTabID: Tab.ID?
     /// The Little Arc whose window is key (nil when a browser window is).
     var keyLittleArcID: LittleArcWindow.ID?
     /// A Little Arc whose address field should start editing (⌘L, New Little Arc Window).
@@ -113,7 +119,7 @@ final class BrowserViewModel {
     /// ⌥⌘-click contents the Chromium shell adopted as Little Arcs (self-test).
     @ObservationIgnored var littleArcAdoptions = 0
     @ObservationIgnored var lastMouseDown: (modifiers: NSEvent.ModifierFlags, at: Date)?
-    /// The confirmation toast over the page ("Copied URL"), cleared after a moment.
+    /// The confirmation toast over the page ("Copied Current URL"), cleared after a moment.
     var toast: ShellToast?
     @ObservationIgnored var lastCopiedLinkText: String?
     /// Copy URL's pasteboard (tests use a private one).
@@ -132,6 +138,8 @@ final class BrowserViewModel {
     var commandBarTargetID: Tab.ID?
     /// The tab shown before ⌘T made the bar's new tab: a ⌥↩ split pairs with it.
     var commandBarSplitAnchorID: Tab.ID?
+    /// Bumped to give the command bar's field focus again (`CommandBarOverlay.focusRequest`).
+    var commandBarFocusRequest = 0
     var commandBarSuppressesInlineCompletion = false
 
     /// The site a Tab-triggered scoped search is aimed at (Arc site search pill).
@@ -606,12 +614,20 @@ final class BrowserViewModel {
         return space
     }
 
+    /// ⌘S (Arc's Show/Hide Sidebar): the content card takes the sidebar's
+    /// width (or gives it back) on Arc's spring; the page keeps keyboard
+    /// focus. While hidden, the window's leading edge floats it.
     func toggleSidebar() {
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(Self.sidebarAnimation) {
             isSidebarVisible.toggle()
             isSidebarPeeking = false
         }
     }
+
+    /// Arc animates the sidebar with a spring (`sidebarTransformAnimation`);
+    /// its parameters are not in the binary's strings, so these are inferred
+    /// (docs/SHORTCUTS.md "⌘S").
+    static let sidebarAnimation = Animation.spring(response: 0.35, dampingFraction: 0.85)
 
     /// Loads the selected tab's URL into its engine if the engine isn't
     /// already showing it (fresh engine or URL changed in the model).
@@ -1071,10 +1087,23 @@ final class BrowserViewModel {
         store.selectTab(tab.id)
         openCommandBar(target: tab.id, text: "")
         commandBarSplitAnchorID = previous
+        commandBarNewTabID = tab.id
+        // The page that had focus leaves with this update, taking the field's
+        // first focus with it: Arc's bar has the keyboard, so ask again.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isCommandBarPresented, self.commandBarNewTabID == tab.id else { return }
+            self.commandBarFocusRequest += 1
+        }
     }
 
-    /// Cmd+L: open the command bar aimed at the selected tab.
+    /// Cmd+L: open the command bar aimed at the selected tab, its URL filled
+    /// in and selected; pressed again it closes the bar (Arc's
+    /// `toggleOpenOmnibox:`).
     func focusLocation() {
+        if isCommandBarPresented {
+            dismissCommandBar()
+            return
+        }
         if let id = keyLittleArcID, store.littleArcWindow(withID: id) != nil {
             littleArcFocusRequest = id
             return
@@ -1116,6 +1145,13 @@ final class BrowserViewModel {
     }
 
     func dismissCommandBar() {
+        // Arc's ⌘T makes no tab until a result is chosen: drop ours if it stayed blank.
+        if let id = commandBarNewTabID, let tab = store.tab(withID: id), tab.url.absoluteString == "about:blank" {
+            let previous = commandBarSplitAnchorID
+            deleteTab(id)
+            if let previous, store.tab(withID: previous) != nil, store.focusTab(previous) { loadSelectedIfNeeded() }
+        }
+        commandBarNewTabID = nil
         isCommandBarPresented = false
         cancelCommandBarLive()
         commandBarSiteSearch = nil
@@ -1125,6 +1161,7 @@ final class BrowserViewModel {
         commandBarHighlightedIndex = 0
         commandBarError = nil
         commandBarURLIntent = nil
+        restorePageFocus()
     }
 
     func moveCommandBarHighlight(by delta: Int) {
@@ -1248,6 +1285,7 @@ final class BrowserViewModel {
     }
 
     private func openCommandBar(target: Tab.ID?, text: String) {
+        commandBarNewTabID = nil
         commandBarSiteSearch = nil
         commandBarSplitAnchorID = nil
         commandBarTargetID = target

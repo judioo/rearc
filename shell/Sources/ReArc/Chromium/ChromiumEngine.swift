@@ -1365,6 +1365,19 @@ extension ChromiumEngine: PageSelectionReading {
         guard supportsScriptEvaluation else { return nil }
         return try? await evaluate("String(window.getSelection ? window.getSelection() : '')", in: .editor) as? String
     }
+
+    func scrollSelectionIntoView() async -> Bool {
+        guard supportsScriptEvaluation else { return false }
+        return (try? await evaluate(PageSelectionScripts.scrollIntoView, in: .editor) as? Bool) ?? false
+    }
+}
+
+extension ChromiumEngine: PageFocusing {
+    /// The page's render widget view becomes first responder in its window.
+    @discardableResult
+    func focusPage() -> Bool {
+        leaseHolder?.focusPage() ?? false
+    }
 }
 
 extension ChromiumEngine: PageElementLocating {

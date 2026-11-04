@@ -920,4 +920,16 @@ extension WKEngine: PageSelectionReading {
     func selectedText() async -> String? {
         try? await webView.evaluateJavaScript("String(window.getSelection ? window.getSelection() : '')") as? String
     }
+
+    @MainActor
+    func scrollSelectionIntoView() async -> Bool {
+        (try? await webView.evaluateJavaScript(PageSelectionScripts.scrollIntoView, in: nil, contentWorld: .defaultClient) as? Bool) ?? false
+    }
+}
+
+extension WKEngine: PageFocusing {
+    @discardableResult
+    func focusPage() -> Bool {
+        webView.window?.makeFirstResponder(webView) ?? false
+    }
 }

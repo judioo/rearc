@@ -232,6 +232,14 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
                 MainActor.assumeIsolated { self?.handleFullscreen(event) }
             }
         }
+        if runtime.capabilities.keyEquivalentEvents {
+            // A key the page did not take runs the menu's shortcut (ShortcutRouter).
+            model.shortcutRouter.awaitsPageVerdicts = true
+            runtime.onKeyEquivalent = { [weak model] event in
+                model?.shortcutRouter.pageVerdict(
+                    keyCode: event.keyCode, modifiers: ShortcutRouter.modifiers(of: event.modifiers), consumed: event.consumed)
+            }
+        }
         runtime.onTerminateRequested = { [weak self, weak model] in
             self?.terminating = true
             model?.prepareForQuit()
@@ -671,6 +679,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         })
         app.addItem(.separator())
         app.addItem(withTitle: "Hide ReArc", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = app.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        app.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         app.addItem(.separator())
         // NSApp.terminate is routed to terminate_requested -> ReArcEngineShutdown.
         app.addItem(withTitle: "Quit ReArc", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -679,6 +690,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let file = NSMenu(title: "File")
         file.addItem(target.item("New Tab", "t") { model.newTab() })
         file.addItem(target.item("New Window", "n") { [weak self] in self?.openBrowserWindow() })
+        // Arc's Blank Window (⌃⌘N): a ReArc window always shows a space, so it is a new window.
+        file.addItem(target.item("New Blank Window", "n", [.command, .control]) { [weak self] in self?.openBrowserWindow() })
         file.addItem(target.item("New Little Arc Window", "n", [.command, .option]) { model.openBlankLittleArc() })
         if runtime.capabilities.profileOffTheRecord {
             file.addItem(target.item("New Private Window", "n", [.command, .shift]) {
@@ -686,6 +699,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             })
         }
         file.addItem(target.item("Reopen Closed Tab", "t", [.command, .shift]) { model.reopenClosedTab() })
+        file.addItem(target.item("Open Command Bar", "l") { model.focusLocation() })
+        file.addItem(.separator())
+        target.add(ShellMenus.documents(model), to: file)
         file.addItem(.separator())
         file.addItem(target.item("Close Window", "w", [.command, .shift]) { [weak self] in
             if let window = NSApp.keyWindow { self?.closeWindow(window) }
@@ -708,11 +724,20 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        // Chrome's selector, which RenderWidgetHostViewCocoa answers (Arc: ⇧⌘V).
+        edit.addItem(withTitle: "Paste and Match Style", action: Selector(("pasteAndMatchStyle:")), keyEquivalent: "V")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(.separator())
+        target.add(ShellMenus.copyLink(model), to: edit)
         if runtime.capabilities.findInPage {
             edit.addItem(.separator())
             target.add(ShellMenus.find(model), to: edit)
         }
+        edit.addItem(.separator())
+        let spelling = NSMenu(title: "Spelling and Grammar")
+        spelling.addItem(withTitle: "Show Spelling and Grammar", action: #selector(NSText.showGuessPanel(_:)), keyEquivalent: ":")
+        spelling.addItem(withTitle: "Check Document Now", action: #selector(NSText.checkSpelling(_:)), keyEquivalent: ";")
+        edit.addSubmenu(spelling, title: "Spelling and Grammar")
         main.addSubmenu(edit, title: "Edit")
 
         let view = NSMenu(title: "View")
@@ -731,10 +756,11 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         }
         if runtime.capabilities.pageZoom {
             view.addItem(.separator())
-            view.addItem(target.item("Zoom In", "=") { model.zoom(.zoomIn) })
-            view.addItem(target.item("Zoom Out", "-") { model.zoom(.zoomOut) })
-            view.addItem(target.item("Actual Size", "0") { model.zoom(.reset) })
+            target.add(ShellMenus.zoom(model), to: view)
         }
+        view.addItem(.separator())
+        let fullScreen = view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        fullScreen.keyEquivalentModifierMask = [.command, .control]
         if runtime.capabilities.navigationExtended {
             view.addItem(.separator())
             view.addItem(target.item("View Page Source", "u", [.command, .option]) { model.viewSelectedPageSource() })
@@ -754,8 +780,6 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         main.addSubmenu(view, title: "View")
 
         let tabs = NSMenu(title: "Tabs")
-        tabs.addItem(target.item("Focus Location", "l") { model.focusLocation() })
-        tabs.addItem(.separator())
         tabs.addItem(target.item("Close Tab", "w") { [weak self] in
             // A private or Little Arc window has one page: Cmd+W closes the window.
             if let window = NSApp.keyWindow, let entry = self?.windows[ObjectIdentifier(window)] {
@@ -764,14 +788,10 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             model.closeSelectedTab()
         })
         tabs.addItem(.separator())
-        tabs.addItem(target.item("Next Tab", "]", [.command, .shift]) { model.selectNextTab() })
-        tabs.addItem(target.item("Previous Tab", "[", [.command, .shift]) { model.selectPreviousTab() })
+        target.add(ShellMenus.tabNavigation(model), to: tabs)
         target.add(ShellMenus.tabSwitcher(model), to: tabs)
         tabs.addItem(.separator())
-        tabs.addItem(target.item("Add Split View", "") { model.addSplitView(orientation: .horizontal) })
-        tabs.addItem(target.item("Separate from Split View", "") {
-            if let tab = model.store.selectedTab { model.unsplitTabIfInSplit(tab.id) }
-        })
+        target.add(ShellMenus.split(model), to: tabs)
         tabs.addItem(.separator())
         target.add(ShellMenus.tabPositions(model), to: tabs)
         tabs.addItem(.separator())
@@ -784,6 +804,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
 
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         main.addSubmenu(windowMenu, title: "Window")
         NSApp.windowsMenu = windowMenu
         return main
@@ -812,8 +835,9 @@ final class ChromiumMenuTarget: NSObject, NSMenuItemValidation {
         _ modifiers: NSEvent.ModifierFlags = .command,
         action: @escaping () -> Void
     ) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: #selector(runAction(_:)), keyEquivalent: key)
-        item.keyEquivalentModifierMask = modifiers
+        let equivalent = ShellMenuItem.appKitKeyEquivalent(key, modifiers)
+        let item = NSMenuItem(title: title, action: #selector(runAction(_:)), keyEquivalent: equivalent.key)
+        item.keyEquivalentModifierMask = equivalent.mask
         item.target = self
         item.tag = actions.count + 1
         actions[item.tag] = action
@@ -829,7 +853,11 @@ final class ChromiumMenuTarget: NSObject, NSMenuItemValidation {
         for (index, group) in groups.enumerated() {
             if index > 0 { menu.addItem(.separator()) }
             for entry in group {
-                menu.addItem(item(entry.title, entry.menuKeyEquivalent, entry.modifiers, action: entry.action))
+                let menuItem = item(entry.title, entry.menuKeyEquivalent, entry.modifiers, action: entry.action)
+                // Arc's alternates (⌘← Back, F12): hidden, their keys still work.
+                menuItem.isHidden = entry.isAlternate
+                menuItem.allowsKeyEquivalentWhenHidden = entry.isAlternate
+                menu.addItem(menuItem)
             }
         }
     }
