@@ -74,14 +74,14 @@ final class Wave22ShellTests: XCTestCase {
     // MARK: Capabilities
 
     func testPromptChannelsNeedTheirMinorAndFlag() {
-        let all: (String) -> Bool = { $0 != ChromiumCapabilities.devToolsFeature }
+        let all: (String) -> Bool = { _ in true }
         let at22 = ChromiumCapabilities(abiMinorVersion: 22, hasFeature: all)
         XCTAssertTrue(at22.javascriptDialogs && at22.fileChooser && at22.permissionPrompts && at22.contextMenu && at22.passwordPrompts)
         XCTAssertTrue(at22.downloadSavePrompt)
-        XCTAssertFalse(at22.devTools)
+        XCTAssertFalse(at22.canInspect)
         XCTAssertTrue(at22.summary.contains("javascript_dialogs=1"))
         XCTAssertTrue(at22.summary.contains("password_prompts=1"))
-        XCTAssertTrue(at22.summary.contains("devtools=0"))
+        XCTAssertFalse(at22.summary.contains("devtools"))
 
         for (minor, adopted) in [(18, "javascript_dialogs"), (19, "file_chooser"), (20, "permission_prompts"), (21, "context_menu"), (22, "password_prompts")] {
             let before = ChromiumCapabilities(abiMinorVersion: UInt32(minor - 1), hasFeature: all)
@@ -96,9 +96,8 @@ final class Wave22ShellTests: XCTestCase {
         XCTAssertFalse(noFlag.passwordPrompts, "save offers need the 1.15 password client too")
         XCTAssertTrue(noFlag.javascriptDialogs)
 
-        let future = ChromiumCapabilities(abiMinorVersion: 25) { _ in true }
-        XCTAssertTrue(future.devTools, "Inspect only once an engine advertises inspection")
-        XCTAssertFalse(ChromiumCapabilities(abiMinorVersion: 24) { _ in true }.devTools)
+        // Wave 18d ships no DevTools frontend and the header advertises no such feature.
+        XCTAssertFalse(ChromiumCapabilities(abiMinorVersion: 999) { _ in true }.canInspect)
     }
 
     func testContextMenuItemsMapToEngineCommands() {

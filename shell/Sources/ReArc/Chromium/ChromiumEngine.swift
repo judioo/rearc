@@ -56,7 +56,7 @@ private let snapshotCallback: ReArcSnapshotCallback = { context, status, _, gene
 /// engine profile is open (named profiles open asynchronously); commands
 /// issued earlier wait for it.
 @Observable
-final class ChromiumEngine: WebEngine, NavigationCommitReporting {
+final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding, PageFullscreenControlling {
     let profileContext: EngineProfileContext
     @ObservationIgnored let role: EngineRole
     @ObservationIgnored let shellID: UUID
@@ -78,6 +78,10 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     private(set) var loadProgress: Double = 0
     private(set) var isCrashed = false
     private(set) var isMuted = false
+    /// ABI 1.25: logically discarded (kinds 5/6); the document comes back when shown.
+    private(set) var isDiscarded = false
+    /// ABI 1.27: the page is in HTML fullscreen.
+    private(set) var isPageFullscreen = false
     /// 0 secure, 1 insecure, 2 dangerous, 3 none, 4 unknown (engine security_state).
     private(set) var securityLevel: UInt32 = 4
     /// The engine's immutable icon_ref for the current icon (favicon event).
@@ -289,8 +293,15 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
             resumeCommitWaiters(throwing: nil)
             guard event.errorCode != ChromiumTabEvent.netErrorAborted else { return }
             lastError = "\(event.errorText ?? "net error") (\(event.errorCode))"
+        case .discarded, .discardCleared:
+            // Hosts without the feature ignore these kinds (C-ABI.md S7).
+            guard runtime.capabilities.tabDiscard else { return }
+            isDiscarded = event.kind == .discarded
+            if isDiscarded { isLoading = false }
         case .closed:
             ChromiumLog.info("tab \(tabID) closed by engine (reason \(event.closedReason))")
+            isDiscarded = false
+            isPageFullscreen = false
             tabID = 0
             engineProfileID = 0
             resumeCommitWaiters(throwing: ChromiumScriptError.noTab)
@@ -334,6 +345,53 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
         case .linkPeek:
             if let href = event.href, let url = URL(string: href) { linkPeekHandler?(url) }
         }
+    }
+
+    // MARK: Discard (ABI 1.25) and fullscreen (ABI 1.27)
+
+    /// `ReArcTabDiscard`: only a hidden, idle page with a committed entry.
+    func discard() -> DiscardOutcome {
+        guard runtime.capabilities.tabDiscard, tabID != 0 else { return .unsupported }
+        if isDiscarded { return .discarded }
+        let status = ReArcTabDiscard(tabID)
+        ChromiumLog.info("tab \(tabID) discard -> \(status.rearcName)")
+        switch status {
+        case .rearcOK:
+            // The kind 5 event follows; the shell shows the state right away.
+            isDiscarded = true
+            isLoading = false
+            return .discarded
+        case ReArcStatus(REARC_INVALID_STATE), ReArcStatus(REARC_BUSY):
+            return .refusedForNow
+        default:
+            return .unsupported
+        }
+    }
+
+    /// `ReArcTabGetDiscardState`, nil when the engine cannot say.
+    func queryDiscardState() -> Bool? {
+        guard runtime.capabilities.tabDiscard, tabID != 0 else { return nil }
+        var discarded = false
+        return ReArcTabGetDiscardState(tabID, &discarded) == .rearcOK ? discarded : nil
+    }
+
+    func handleFullscreen(_ event: ChromiumFullscreenEvent) {
+        guard event.tabID == tabID else { return }
+        isPageFullscreen = event.entered
+    }
+
+    func exitPageFullscreen() {
+        guard runtime.capabilities.htmlFullscreen, tabID != 0, isPageFullscreen else { return }
+        let status = ReArcTabExitFullscreen(tabID)
+        ChromiumLog.info("tab \(tabID) exit fullscreen (host) -> \(status.rearcName)")
+        if status == ReArcStatus(REARC_INVALID_STATE) { isPageFullscreen = false }
+    }
+
+    /// `ReArcTabGetFullscreenState`, nil when the engine cannot say.
+    func queryFullscreenState() -> Bool? {
+        guard runtime.capabilities.htmlFullscreen, tabID != 0 else { return nil }
+        var fullscreen = false
+        return ReArcTabGetFullscreenState(tabID, &fullscreen) == .rearcOK ? fullscreen : nil
     }
 
     // MARK: Navigation
@@ -1112,7 +1170,7 @@ extension ChromiumEngine: PageClosing {
             canGoBack: canGoBack,
             canGoForward: canGoForward,
             canViewSource: capabilities.navigationExtended,
-            canInspect: capabilities.devTools
+            canInspect: capabilities.canInspect
         )
         let plan = PageContextMenuPlan.plan(for: event.params, options: options)
         pagePrompts.showContextMenu(plan, params: event.params, at: event.point) { [weak self] item in

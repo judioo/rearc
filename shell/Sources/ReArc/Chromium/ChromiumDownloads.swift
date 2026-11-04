@@ -68,6 +68,32 @@ final class ChromiumDownloadBackend: DownloadBackend {
             handles[guid] = (download.profileID, download.downloadID)
         }
         controller?.apply(download.event, source: .chromium)
+        refreshWarning(download)
+    }
+
+    /// ABI 1.24: the warning booleans, not the danger code, say whether Keep
+    /// and Discard apply (4 is a pending check, 6 already validated).
+    private func refreshWarning(_ download: ChromiumDownloadEvent) {
+        let event = download.event
+        guard runtime.capabilities.dangerousDownloads, event.kind != .removed, event.state == .inProgress, !event.guid.isEmpty else { return }
+        let (status, warning) = runtime.downloadWarning(profile: download.profileID, id: download.downloadID)
+        if status == .rearcOK || status == ReArcStatus(REARC_NOT_FOUND) {
+            controller?.updateWarning(warning?.offersDecision == true ? warning : nil, for: event.guid)
+        }
+    }
+
+    func resolveDanger(_ decision: DownloadDangerDecision, id: String) -> Bool {
+        guard let handle = handles[id] else { return false }
+        let status = runtime.resolveDownloadDanger(profile: handle.profile, id: handle.id, decision: decision)
+        guard status == .rearcOK else { return false }
+        if decision == .keep {
+            // A second warning (insecure, then dangerous) may remain: ask again.
+            let (after, warning) = runtime.downloadWarning(profile: handle.profile, id: handle.id)
+            if after == .rearcOK || after == ReArcStatus(REARC_NOT_FOUND) {
+                controller?.updateWarning(warning?.offersDecision == true ? warning : nil, for: id)
+            }
+        }
+        return true
     }
 
     func handle(for id: String) -> (profile: UInt64, id: UInt32)? { handles[id] }

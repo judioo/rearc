@@ -28,6 +28,8 @@ extension ReArcStatus {
 struct ChromiumTabEvent {
     enum Kind: UInt32 {
         case created = 0, updated, closed, committed, failed
+        /// ABI 1.25 `tab_discard`: logically discarded / restored (also on state refresh).
+        case discarded, discardCleared
     }
 
     struct Changes: OptionSet {
@@ -324,6 +326,31 @@ private let findCallback: ReArcFindCallback = { context, event in
     MainActor.assumeIsolated { runtime(from: context).handleFind(tab: tab, contentGeneration: generation, event: copied) }
 }
 
+/// Owned copy of `ReArcFullscreenEvent` (ABI 1.27).
+struct ChromiumFullscreenEvent: Equatable {
+    enum Reason: UInt32 {
+        case page = 0, host, escape, closed, hidden
+    }
+
+    var profileID, tabID, contentGeneration: UInt64
+    /// Phase 0 entered, 1 exited.
+    var entered: Bool
+    /// Exit only.
+    var reason: Reason?
+    /// Chromium display ID the page asked for, -1 for none.
+    var displayID: Int64
+}
+
+private let fullscreenCallback: ReArcFullscreenCallback = { context, event in
+    guard let e = event?.pointee else { return }
+    let copied = ChromiumFullscreenEvent(
+        profileID: e.profile_id, tabID: e.tab_id, contentGeneration: e.content_generation,
+        entered: e.phase == 0, reason: e.phase == 0 ? nil : ChromiumFullscreenEvent.Reason(rawValue: e.reason),
+        displayID: e.display_id
+    )
+    MainActor.assumeIsolated { runtime(from: context).handleFullscreen(copied) }
+}
+
 /// Owned copy of `ReArcDownloadEvent`; its strings die with the callback.
 struct ChromiumDownloadEvent {
     var profileID: UInt64
@@ -389,6 +416,8 @@ final class ChromiumRuntime {
     var onProfileEvent: ((String) -> Void)?
     /// Download events (ABI 1.17), for the shell's tray.
     var onDownloadEvent: ((ChromiumDownloadEvent) -> Void)?
+    /// Page fullscreen requests and exits (ABI 1.27); without a handler the engine refuses requests.
+    var onFullscreenEvent: ((ChromiumFullscreenEvent) -> Void)?
     /// Default download directory, written to every open profile's Chromium
     /// download prefs (`ReArcDownloadSetPolicy`, save without asking).
     var downloadDirectory: URL? {
@@ -509,6 +538,9 @@ final class ChromiumRuntime {
         }
         // Prompt channels (ABI 1.18–1.22) before any tab, so no request falls to the no-host default.
         registerPromptChannels(context: context)
+        if capabilities.htmlFullscreen {
+            ReArcEngineSetFullscreenCallback(fullscreenCallback, context)
+        }
         if capabilities.downloads {
             // Before any tab exists; each profile gets its policy when it opens.
             ReArcEngineSetDownloadCallback(downloadCallback, context)
@@ -1038,6 +1070,31 @@ final class ChromiumRuntime {
         let status = ReArcDownloadAction(profile, id, action)
         ChromiumLog.trace("download action \(action) profile \(profile) id \(id) -> \(status.rearcName)")
         return status
+    }
+
+    /// `ReArcDownloadGetWarning` (ABI 1.24): the item's current warning, nil when rejected.
+    func downloadWarning(profile: UInt64, id: UInt32) -> (ReArcStatus, DownloadWarning?) {
+        guard capabilities.dangerousDownloads, isReady, !isStopping else { return (ReArcStatus(REARC_UNSUPPORTED), nil) }
+        var warning = ReArcDownloadWarning()
+        let status = ReArcDownloadGetWarning(profile, id, &warning)
+        guard status == .rearcOK else { return (status, nil) }
+        return (status, DownloadWarning(dangerType: warning.danger_type, insecureStatus: warning.insecure_status,
+                                        isDangerous: warning.is_dangerous, isInsecure: warning.is_insecure))
+    }
+
+    /// `ReArcDownloadResolveDanger`: keep (validate) or discard (remove item and file).
+    func resolveDownloadDanger(profile: UInt64, id: UInt32, decision: DownloadDangerDecision) -> ReArcStatus {
+        guard capabilities.dangerousDownloads, isReady, !isStopping else { return ReArcStatus(REARC_UNSUPPORTED) }
+        let status = ReArcDownloadResolveDanger(profile, id, decision.rawValue)
+        ChromiumLog.info("download \(id) danger \(decision) -> \(status.rearcName)")
+        return status
+    }
+
+    fileprivate func handleFullscreen(_ event: ChromiumFullscreenEvent) {
+        ChromiumLog.info("fullscreen_event tab \(event.tabID) gen \(event.contentGeneration) "
+            + "\(event.entered ? "entered" : "exited reason \(event.reason.map { "\($0)" } ?? "?")") display \(event.displayID)")
+        engines[event.tabID]?.value?.handleFullscreen(event)
+        onFullscreenEvent?(event)
     }
 
     fileprivate func handlePageMessage(_ message: ChromiumPageMessage) {

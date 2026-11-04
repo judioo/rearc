@@ -106,6 +106,13 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private let menuTarget = ChromiumMenuTarget()
     /// The tray's Chromium side; the controller only holds it weakly.
     private var downloadBackend: ChromiumDownloadBackend?
+    /// The window showing the HTML-fullscreen page, the native state the
+    /// shell wants for it (nil: leave it as the user has it), and the
+    /// transition in progress.
+    private weak var fullscreenWindow: NSWindow?
+    private var wantsNativeFullscreen: Bool?
+    private var fullscreenTransitioning = false
+    private var userLeavingFullscreen = false
     /// The self-test runs this shell on a throwaway sidebar and must not move
     /// the user's saved window frame.
     private let autosavesFrames: Bool
@@ -160,9 +167,17 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             let backend = ChromiumDownloadBackend(runtime: runtime, controller: model.downloads)
             backend.install()
             downloadBackend = backend
-            // Chromium's keep-dangerous flow lives on chrome://downloads (no native accept action).
-            model.downloads.canReviewDangerous = runtime.capabilities.webUIDailyPages
-            model.downloads.reviewDangerousPage = { [weak model] in model?.openBrowserPage(.downloads) }
+            // Keep and Discard are native from ABI 1.24; older engines review on chrome://downloads.
+            if !runtime.capabilities.dangerousDownloads {
+                model.downloads.canReviewDangerous = runtime.capabilities.webUIDailyPages
+                model.downloads.reviewDangerousPage = { [weak model] in model?.openBrowserPage(.downloads) }
+            }
+        }
+        model.commandBarServices = ChromiumCommandBarServices(runtime: runtime)
+        if runtime.capabilities.htmlFullscreen {
+            runtime.onFullscreenEvent = { [weak self] event in
+                MainActor.assumeIsolated { self?.handleFullscreen(event) }
+            }
         }
         runtime.onTerminateRequested = { [weak self, weak model] in
             self?.terminating = true
@@ -333,6 +348,122 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             window.contentView = nil
         }
     }
+
+    // MARK: HTML fullscreen (ABI 1.27)
+
+    /// The page's window goes native fullscreen with its chrome hidden, and
+    /// comes back as it was when the page leaves (Esc, page, navigation).
+    @MainActor
+    private func handleFullscreen(_ event: ChromiumFullscreenEvent) {
+        guard let model, let engine = runtime.engine(forTab: event.tabID) else { return }
+        if event.entered {
+            guard let window = engine.leaseHolder?.window ?? NSApp.keyWindow else { return }
+            if let previous = fullscreenWindow, previous !== window { return }
+            let tabID = engine.role == .tab ? engine.shellID : nil
+            let steps = model.pageEnteredFullscreen(
+                tabID: tabID,
+                engineTabID: event.tabID,
+                windowIsFullscreen: window.styleMask.contains(.fullScreen) && wantsNativeFullscreen == nil
+            )
+            fullscreenWindow = window
+            apply(steps, window: window, engine: engine)
+        } else if let window = fullscreenWindow {
+            apply(model.pageExitedFullscreen(engineTabID: event.tabID), window: window, engine: engine)
+            if wantsNativeFullscreen == nil, model.htmlFullscreen == nil { fullscreenWindow = nil }
+        }
+    }
+
+    @MainActor
+    private func apply(_ steps: [HTMLFullscreenSession.Step], window: NSWindow, engine: ChromiumEngine) {
+        for step in steps {
+            switch step {
+            case .enterNativeFullscreen:
+                wantsNativeFullscreen = true
+                reconcileNativeFullscreen(window)
+            case .exitNativeFullscreen:
+                wantsNativeFullscreen = false
+                reconcileNativeFullscreen(window)
+            case .exitPageFullscreen:
+                engine.exitPageFullscreen()
+            case .hideChrome, .restoreChrome:
+                // BrowserView follows BrowserViewModel.htmlFullscreen.
+                break
+            }
+        }
+    }
+
+    /// AppKit ignores a toggle during a fullscreen transition, so the shell
+    /// keeps the state it wants and toggles once the window is settled.
+    private func reconcileNativeFullscreen(_ window: NSWindow) {
+        ChromiumLog.trace("native fullscreen: wants \(wantsNativeFullscreen.map { "\($0)" } ?? "-") "
+            + "is \(window.styleMask.contains(.fullScreen)) transitioning \(fullscreenTransitioning)")
+        guard !fullscreenTransitioning, let wants = wantsNativeFullscreen else { return }
+        if window.styleMask.contains(.fullScreen) != wants {
+            fullscreenTransitioning = true
+            window.toggleFullScreen(nil)
+        } else if !wants {
+            // Back where the page found the window.
+            wantsNativeFullscreen = nil
+            if model?.htmlFullscreen == nil { fullscreenWindow = nil }
+        }
+    }
+
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        ChromiumLog.trace("window will enter fullscreen (tracked \((notification.object as? NSWindow) === fullscreenWindow))")
+        guard let window = notification.object as? NSWindow, window === fullscreenWindow else { return }
+        fullscreenTransitioning = true
+    }
+
+    func windowWillExitFullScreen(_ notification: Notification) {
+        ChromiumLog.trace("window will exit fullscreen (tracked \((notification.object as? NSWindow) === fullscreenWindow))")
+        guard let window = notification.object as? NSWindow, window === fullscreenWindow else { return }
+        // Not the shell's own toggle: the user is leaving (green button, ⌃⌘F).
+        if !fullscreenTransitioning, MainActor.assumeIsolated({ model?.htmlFullscreen != nil }) { userLeavingFullscreen = true }
+        fullscreenTransitioning = true
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        fullscreenTransitionEnded(notification)
+    }
+
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        ChromiumLog.info("window failed to enter fullscreen")
+        guard window === fullscreenWindow else { return }
+        fullscreenTransitioning = false
+        wantsNativeFullscreen = nil
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        fullscreenTransitionEnded(notification)
+    }
+
+    private func fullscreenTransitionEnded(_ notification: Notification) {
+        ChromiumLog.trace("window fullscreen transition ended: \(notification.name.rawValue) "
+            + "(tracked \((notification.object as? NSWindow) === fullscreenWindow))")
+        guard let window = notification.object as? NSWindow, window === fullscreenWindow else { return }
+        fullscreenTransitioning = false
+        MainActor.assumeIsolated {
+            if userLeavingFullscreen {
+                userLeavingFullscreen = false
+                wantsNativeFullscreen = nil
+                if let model, let session = model.htmlFullscreen, let engine = runtime.engine(forTab: session.engineTabID) {
+                    apply(model.windowExitedFullscreen(), window: window, engine: engine)
+                }
+                fullscreenWindow = nil
+                return
+            }
+        }
+        // A toggle from inside the transition's own notification is dropped.
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window, window === self.fullscreenWindow else { return }
+            self.reconcileNativeFullscreen(window)
+        }
+    }
+
+    /// The window holding the HTML-fullscreen page, if any (self-test).
+    var htmlFullscreenWindow: NSWindow? { fullscreenWindow }
+    /// No fullscreen transition is running for that window (self-test).
+    var isNativeFullscreenSettled: Bool { !fullscreenTransitioning }
 
     // MARK: Adopted (Chromium-created) tabs
 

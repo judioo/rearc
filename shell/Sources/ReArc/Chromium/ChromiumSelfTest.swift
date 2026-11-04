@@ -134,7 +134,8 @@ final class ChromiumSelfTest {
                         "isolated_page_messages", "rearc_safe_storage_branding", "os_permission_shutdown",
                         "shutdown_pending_closes", "profile_directory", "webui_daily_pages", "history_recording",
                         "password_autofill", "find_in_page", "downloads", "javascript_dialogs", "file_chooser",
-                        "permission_prompts", "context_menu", "password_prompts", "devtools"]
+                        "permission_prompts", "context_menu", "password_prompts", "history_query",
+                        "dangerous_downloads", "tab_discard", "search_autocomplete", "html_fullscreen", "printing"]
         let foreground = ChromiumLaunchArguments.selfTestForegroundSwitches.filter(CommandLine.arguments.contains)
         log("renderer foreground switches (self-test only): "
             + ChromiumLaunchArguments.selfTestForegroundSwitches.joined(separator: " ")
@@ -1522,7 +1523,7 @@ extension ChromiumSelfTest {
         let minor = capabilities.abiMinorVersion.map(String.init) ?? "absent"
         log("prompt channels: javascript_dialogs=\(capabilities.javascriptDialogs ? 1 : 0) file_chooser=\(capabilities.fileChooser ? 1 : 0) "
             + "permission_prompts=\(capabilities.permissionPrompts ? 1 : 0) context_menu=\(capabilities.contextMenu ? 1 : 0) "
-            + "password_prompts=\(capabilities.passwordPrompts ? 1 : 0) devtools=\(capabilities.devTools ? 1 : 0); "
+            + "password_prompts=\(capabilities.passwordPrompts ? 1 : 0) (Inspect disabled: no DevTools frontend); "
             + "synthesized input \(inputDeliverable(window) ? "deliverable" : "not deliverable (app inactive or window not key)")")
         let prompts = engine.pagePrompts
         try check(prompts.anchorView?.window === window, "the page prompt overlay is not in the tab's window")
@@ -1888,7 +1889,7 @@ extension ChromiumSelfTest {
         try check(linkPlan.items.prefix(2) == [.openLinkInNewTab, .openLinkInLittleArc] && linkPlan.items.contains(.copyLink)
                   && linkPlan.items.contains(.openLinkInNewSplit) == (prompts.ownerTabID != nil),
                   "link menu \(linkPlan.items.map(\.title))")
-        try check(linkPlan.entry(.inspect)?.isEnabled == runtime.capabilities.devTools, "Inspect enabled without an inspection engine")
+        try check(linkPlan.entry(.inspect)?.isEnabled == false, "Inspect enabled without an inspection engine")
         try await wait("dismissed link menu") { engine.contextMenuRequestID == nil && (runtime.promptReplies["context"] ?? 0) > repliesBefore }
         // A retried click can land late as a second menu; let it finish first.
         try await Task.sleep(nanoseconds: 400_000_000)
@@ -1918,7 +1919,7 @@ extension ChromiumSelfTest {
         try await Task.sleep(nanoseconds: 400_000_000)
         let held = try XUnwrap(engine.contextMenuRequestID)
         let inspect = engine.finishContextMenu(held, item: .inspect)
-        let expected = runtime.capabilities.devTools ? ReArcStatus.rearcOK : ReArcStatus(REARC_UNSUPPORTED)
+        let expected = ReArcStatus(REARC_UNSUPPORTED)
         try check(inspect == expected, "Inspect returned \(inspect.rearcName)")
         let again = runtime.contextCommand(held, .dismiss)
         try check(again == ReArcStatus(REARC_NOT_FOUND), "the dismissed menu still accepted a command (\(again.rearcName))")

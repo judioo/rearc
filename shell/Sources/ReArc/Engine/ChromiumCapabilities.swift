@@ -29,9 +29,11 @@ struct ChromiumCapabilities: Equatable {
     static let permissionPromptsFeature = "permission_prompts"
     static let contextMenuFeature = "context_menu"
     static let passwordPromptsFeature = "password_prompts"
-    /// Provisional: no engine advertises page inspection yet (ABI 1.21's
-    /// Inspect command is `unsupported`). Inspect stays disabled until one does.
-    static let devToolsFeature = "devtools"
+    static let historyQueryFeature = "history_query"
+    static let dangerousDownloadsFeature = "dangerous_downloads"
+    static let tabDiscardFeature = "tab_discard"
+    static let searchAutocompleteFeature = "search_autocomplete"
+    static let htmlFullscreenFeature = "html_fullscreen"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -57,7 +59,11 @@ struct ChromiumCapabilities: Equatable {
         permissionPromptsFeature: 20,
         contextMenuFeature: 21,
         passwordPromptsFeature: 22,
-        devToolsFeature: 25,
+        historyQueryFeature: 23,
+        dangerousDownloadsFeature: 24,
+        tabDiscardFeature: 25,
+        searchAutocompleteFeature: 26,
+        htmlFullscreenFeature: 27,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -106,8 +112,16 @@ struct ChromiumCapabilities: Equatable {
     var contextMenu: Bool
     /// Password save/update offers and `ReArcPasswordPromptRespond`; requires `passwordAutofill`.
     var passwordPrompts: Bool
-    /// Page inspection from the context menu (no engine has it yet).
-    var devTools: Bool
+    /// `ReArcHistoryQuery` / `ReArcHistoryDeleteURL` on persistent profiles (command-bar history).
+    var historyQuery: Bool
+    /// `ReArcDownloadGetWarning` / `ReArcDownloadResolveDanger`; requires `downloads`.
+    var dangerousDownloads: Bool
+    /// `ReArcTabDiscard` and tab-event kinds 5 (discarded) / 6 (discard cleared).
+    var tabDiscard: Bool
+    /// Default search provider, input classification and `ReArcAutocompleteStart`.
+    var searchAutocomplete: Bool
+    /// Page fullscreen requests (`ReArcEngineSetFullscreenCallback`, `ReArcTabExitFullscreen`).
+    var htmlFullscreen: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -139,8 +153,16 @@ struct ChromiumCapabilities: Equatable {
         permissionPrompts = adopted(Self.permissionPromptsFeature)
         contextMenu = adopted(Self.contextMenuFeature)
         passwordPrompts = passwordAutofill && adopted(Self.passwordPromptsFeature)
-        devTools = contextMenu && adopted(Self.devToolsFeature)
+        historyQuery = adopted(Self.historyQueryFeature)
+        dangerousDownloads = downloads && adopted(Self.dangerousDownloadsFeature)
+        tabDiscard = adopted(Self.tabDiscardFeature)
+        searchAutocomplete = adopted(Self.searchAutocompleteFeature)
+        htmlFullscreen = adopted(Self.htmlFullscreenFeature)
     }
+
+    /// Inspect in the page menu. No engine advertises a DevTools frontend
+    /// (WAVE-18D-REPORT "DevTools audit and disposition"), so it stays listed disabled.
+    var canInspect: Bool { false }
 
     /// "Ask where to save" for downloads: download policy prompt 1 needs a host file chooser (ABI 1.19).
     var downloadSavePrompt: Bool { downloads && fileChooser }
@@ -183,7 +205,11 @@ struct ChromiumCapabilities: Equatable {
             (Self.permissionPromptsFeature, permissionPrompts),
             (Self.contextMenuFeature, contextMenu),
             (Self.passwordPromptsFeature, passwordPrompts),
-            (Self.devToolsFeature, devTools),
+            (Self.historyQueryFeature, historyQuery),
+            (Self.dangerousDownloadsFeature, dangerousDownloads),
+            (Self.tabDiscardFeature, tabDiscard),
+            (Self.searchAutocompleteFeature, searchAutocomplete),
+            (Self.htmlFullscreenFeature, htmlFullscreen),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }
