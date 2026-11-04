@@ -75,7 +75,8 @@ The shell still calls `ReArcEngineConfigure(1, …)`. After `ready` it probes
 looked up with `dlsym` first and an engine that predates the export counts as
 minor 0. `ChromiumCapabilities` enables a feature only when the minor version
 is at least the one that introduced it (5 for the three below, 6–10 for the
-ABI 1.10 features, 11–14 for the ABI 1.14 ones) **and** `ReArcEngineHasFeature`
+ABI 1.10 features, 11–14 for the ABI 1.14 ones, 15–17 for the wave 20 ones)
+**and** `ReArcEngineHasFeature`
 advertises it, and logs
 `capabilities: ABI minor 14: navigation_extended=1 script_evaluation=1 …`.
 On an older engine the missing features stay off and the shell behaves as it
@@ -231,10 +232,79 @@ Follows "Exact Swift adoption" in `engine/docs/WAVE-16-REPORT.md` and
   flight (the engine joins them, and each callback still arrives once). A
   ProfileClose in flight still defers shutdown (`ChromiumShutdownGate`).
 - **Daily WebUI.** History, Downloads, Passwords and Extensions (see
-  Settings routing above). Admission does not mean history is recorded, a
-  download tray, page password filling or extension installs: those need
-  engine work (WAVE-18-REPORT concerns 2–9).
+  Settings routing above). Admission alone records no history and fills no
+  passwords; ABI 1.15 adds both (below). Extension installs still need
+  engine work.
 - `os_permission_shutdown` needs no Swift call; it is logged.
+
+### ABI 1.15–1.17 adoption (wave 20)
+
+Follows "Exact Swift adoption" in `engine/docs/WAVE-18-REPORT.md` (Wave
+18b, concerns A–C). Each item is gated on its minor and flag
+(`history_recording` and `password_autofill` at 15, `find_in_page` at 16,
+`downloads` at 17); Configure still takes 1. Every feature also works on
+WebKit, mapped onto WKWebView.
+
+- **History and passwords (1.15).** No Swift call: Chromium's
+  HistoryTabHelper records every non-OTR tab (chrome://history) and
+  ChromePasswordManagerClient fills saved credentials. There is no save
+  prompt yet, so the shell offers no "save password" UI. Tabs present at
+  their real size; no production `--disable-backgrounding-occluded-windows`.
+- **Find in page (1.16).** Edit > Find… (⌘F), Find Next (⌘G), Find Previous
+  (⇧⌘G), or "Find on Page" in the command bar, open a floating bar at the
+  page's top-trailing corner (`FindBar/`). It searches as you type and
+  shows "n of m". Return / Shift-Return step through matches, Aa toggles
+  match case, and Esc closes and keeps the selection. The field turns red
+  on no matches. `FindBarModel` drives one page at a time through
+  `FindInPageEngine` (`Engine/FindInPage.swift`). On Chromium, every
+  keystroke is a `ReArcTabFindStart` session. The find callback, registered
+  at `ready`, routes events by tab. Only `final_update` results of the
+  current session change the count (`FindInPageState`). A terminal
+  (navigated, closed, stopped, replaced) hides the count, and Return then
+  searches the new document. On WebKit, `WKWebView.find` highlights and
+  steps, and the shell counts case-folded occurrences of the query in the
+  page's `innerText`. Each find bar targets the key page: the private
+  window's, else the focused tab (the focused pane in a split).
+- **Downloads (1.17).** A downloads button sits in the sidebar's bottom bar.
+  Its ring fills while files transfer and it pulses when one starts. An
+  orange dot means a download needs attention. It opens a tray, and View >
+  Show Downloads (⇧⌘J) toggles it. Rows show the file icon, progress,
+  speed and time left, with pause/resume, cancel and Show in Finder. A
+  double-click opens a finished file. The context menu adds Copy Download
+  Link and Remove from List. The header has Clear and the download folder
+  menu (show, change). A dangerous download (`danger_type` not 0, 4, 6, 9,
+  10 or 15, still in progress) shows an orange warning with Discard
+  (cancel and remove), and Review… opens chrome://downloads (with
+  `webui_daily_pages`) for Chromium's keep-dangerous flow; no native accept
+  action exists. `DownloadsController` keeps the list newest first, keyed
+  by GUID, and saves it with the default directory in `Downloads.json`
+  next to `sidebar.json`. A row still in progress at launch becomes
+  "Interrupted when ReArc quit", and Chromium's restored items (kind 0)
+  merge back in by GUID. On Chromium the download callback is set at
+  `ready`, and `ReArcDownloadSetPolicy(profile, directory, 0)` runs for
+  each profile as its open completes, before its first tab, OTR included,
+  and again on a folder change (`ChromiumDownloadBackend`). Actions map to
+  `ReArcDownloadAction`; invalid_state waits for the next event, and
+  not_found falls back to Finder / Launch Services. No "Ask where to save"
+  option until the file chooser ABI. On WebKit, attachments and
+  main-frame responses WebKit cannot show become `WKDownload`s
+  (`WebKitDownloadCenter`). They are saved without asking into the same
+  folder, uniquified like Chromium ("name (1).ext"), and quarantined when
+  done. Pause is cancel-with-resume-data and resume is
+  `resumeDownload(fromResumeData:)`. WebKit runs no Safe Browsing check, so
+  there is no danger state there.
+- **Command-bar history.** The ABI has no history query (WAVE-18-REPORT:
+  "Not claimed: command-bar history queries"). The shell therefore records
+  committed navigations of sidebar tabs itself, on both engines, in
+  `History.json` (`VisitHistory`). Only http(s) pages are recorded, one
+  visit per navigation, never from private windows, peeks or Little Arc.
+  The store only feeds suggestions; chrome://history stays Chromium's full
+  history. Results are ranked by match quality (host start, then URL start,
+  then a title word, then a substring; every word must match) times
+  frecency (visit count, recency buckets). They are listed after open tabs,
+  without repeating an open tab's page, before commands and the search
+  fallback. A typed address keeps its Open row first. "Clear Command Bar
+  History" empties the store.
 
 ### Self-test
 
@@ -288,12 +358,39 @@ The self-test:
     Reload Ignoring Cache and Stop drive the selected tab), a private window
     whose close ends its off-the-record session, and closing every window
     without quitting, then reopening.
-16. Verifies every evaluation and profile request context was released
+16. With `find_in_page` (ABI ≥ 1.16): through `FindBarModel` on the
+    attached tab, 4 matches with ordinals 1→2→1→4 (backward wrap), 2 with
+    match case, "No matches" for a missing word, replaced, stopped and
+    navigated terminals, FindNext without a session `invalid_state`, and
+    empty text `invalid_argument`. With `downloads` (ABI ≥ 1.17): through
+    `DownloadsController` and `ChromiumDownloadBackend`, a 64 KiB attachment
+    saved to a temporary policy directory without a picker (the tab stays
+    on its page, the tray opens) and removed by a removed event. Then a
+    trickled 1 MiB file is paused (a second pause is `invalid_state`),
+    resumed, cancelled and removed (reveal is then `not_found`), and a
+    relative directory or prompt mode 1 is refused. Older engines log
+    ABI-GAP lines instead. In the real shell, ⌘F on tab A shows "1 of 1",
+    and the command bar offers the `/nav` visit as history.
+17. Verifies every evaluation and profile request context was released
     (`live script contexts: 0, profile contexts: 0`), then shuts down cleanly.
 
 With the mock keychain the run reaches `RESULT PASS`
 (`selftest-chromium-mockkeychain.log`). The real-Keychain run is covered
 below.
+
+The self-test (only the self-test) passes
+`--disable-backgrounding-occluded-windows`,
+`--disable-renderer-backgrounding` and
+`--disable-background-timer-throttling`. A run started from a terminal
+leaves the app inactive, with its windows occluded or the screen locked.
+Chromium then hides those pages and backgrounds their renderers. Wave 20
+measured an editor-world evaluation at 9 ms, then at 1938 ms after five
+idle seconds with the window occluded, and at 6 ms with it visible. Under
+load, the 3 s deadline of the editor-pick fallback then failed
+intermittently ("FAIL timeout" at about 19 s). The step now sends its
+synthesized click only when the app is active and the window key and
+visible (otherwise it logs a NOTE and posts the pick from the editor
+world), and gives that fallback 15 s.
 
 ### Keychain
 
@@ -305,9 +402,11 @@ it and macOS asks for authorization. Until the user answers, the async key read
 (`os_crypt_async` `GetKeyTask` → `SecItemCopyMatching` → `securityd`) blocks
 the cookie store, and the first `http(s)` load stays at progress 0.1.
 `data:` still commits because it needs no cookies, and shutdown is clean.
-The self-test logs `KEYCHAIN-STALL` and fails. `selftest-chromium.log` is
-such a run, and `selftest-chromium-keychain-stall.txt` has the sampled stack,
-signing identity and timeline. To proceed, answer the prompt with Always
+The self-test logs `KEYCHAIN-STALL` and fails.
+`selftest-chromium-keychain-stall.txt` has such a run's sampled stack,
+signing identity and timeline. Since the stable signing identity below has
+been granted access, `selftest-chromium.log` is a real-Keychain
+`RESULT PASS` (wave 20) with no authorization prompt. To proceed, answer the prompt with Always
 Allow and rerun with `--skip-build` (same code hash), or use the mock
 keychain:
 
@@ -395,7 +494,11 @@ Production needs:
     and the Chromium `NSMenu`.
   - `Engine/FaviconStore` — site icons by host, cached on disk next to
     `sidebar.json` (`Favicons/`).
-  - `CommandBar/` — centered floating URL/search panel.
+  - `CommandBar/` — centered floating URL/search panel (tabs, visit
+    history, commands, search).
+  - `FindBar/` — the find-in-page bar and its model.
+  - `Downloads/` — `DownloadsController`, the sidebar tray, and the
+    `WKDownload` backend (`ChromiumDownloads.swift` is the Chromium one).
   - `BrowserViewModel` — glue between store, engines, overlay, and shortcuts.
 
 ## Sidebar (wave 17)
