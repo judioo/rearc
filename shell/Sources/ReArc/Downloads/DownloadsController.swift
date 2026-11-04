@@ -16,10 +16,13 @@ protocol DownloadBackend: AnyObject {
     func directoryChanged(_ directory: URL)
     /// "Ask where to save each file" changed.
     func askWhereToSaveChanged(_ ask: Bool)
+    /// Keep or Discard a download the engine warned about; false when it cannot.
+    func resolveDanger(_ decision: DownloadDangerDecision, id: String) -> Bool
 }
 
 extension DownloadBackend {
     func askWhereToSaveChanged(_ ask: Bool) {}
+    func resolveDanger(_ decision: DownloadDangerDecision, id: String) -> Bool { false }
 }
 
 /// The downloads tray's model, shared by every window: the recent list
@@ -55,10 +58,12 @@ final class DownloadsController {
             chromium?.askWhereToSaveChanged(askWhereToSave)
         }
     }
-    /// Shows chrome://downloads (keep-dangerous flow); nil when unavailable.
+    /// Shows chrome://downloads (keep-dangerous flow before ABI 1.24); nil when unavailable.
     @ObservationIgnored var reviewDangerousPage: (() -> Void)?
     /// True while `reviewDangerousPage` can open a page.
     var canReviewDangerous = false
+    /// Chromium's current warnings (ABI 1.24 `dangerous_downloads`), by row; not persisted.
+    private(set) var warnings: [String: DownloadWarning] = [:]
     @ObservationIgnored private let fileURL: URL?
     @ObservationIgnored private var saveWorkItem: DispatchWorkItem?
     @ObservationIgnored private let workspace: NSWorkspace
@@ -83,12 +88,45 @@ final class DownloadsController {
 
     var records: [DownloadRecord] { list.records }
     var activeCount: Int { list.activeCount }
-    var hasDangerous: Bool { list.hasDangerous }
+    var hasDangerous: Bool { list.records.contains(where: needsDecision) }
+
+    /// Chromium's warning for a row changed (nil: none, or the item is gone).
+    func updateWarning(_ warning: DownloadWarning?, for id: String) {
+        guard warnings[id] != warning else { return }
+        warnings[id] = warning
+    }
+
+    /// The row waits for Keep or Discard: the engine's warning when it gave
+    /// one, else the danger code (WebKit has none; older engines).
+    func needsDecision(_ record: DownloadRecord) -> Bool {
+        guard record.isActive else { return false }
+        if let warning = warnings[record.id] { return warning.offersDecision }
+        return record.isDangerous
+    }
+
+    /// Keep is offered: the engine can validate this item natively.
+    func canKeep(_ record: DownloadRecord) -> Bool {
+        warnings[record.id]?.offersDecision == true
+    }
+
+    func warningText(for record: DownloadRecord) -> String? {
+        guard needsDecision(record) else { return nil }
+        return warnings[record.id]?.message ?? record.statusText
+    }
+
+    /// Keep a dangerous download (Chromium validates it; an item with an
+    /// insecure and a danger warning asks again for the second).
+    @discardableResult
+    func keep(_ id: String) -> Bool {
+        guard let record = list.record(withID: id), canKeep(record) else { return false }
+        return backend(for: record)?.resolveDanger(.keep, id: id) ?? false
+    }
 
     // MARK: Engine events
 
     func apply(_ event: DownloadEvent, source: DownloadSource, now: Date = Date()) {
         let change = list.apply(event, source: source, now: now)
+        if event.kind == .removed || event.state != .inProgress { warnings[event.guid] = nil }
         if case .inserted = change, event.state == .inProgress {
             startCount += 1
             isTrayPresented = true
@@ -116,8 +154,14 @@ final class DownloadsController {
         }
     }
 
-    /// Discard a dangerous download: cancel it and drop it from the list.
+    /// Discard a dangerous download: Chromium removes the item and its file
+    /// (ABI 1.24), otherwise it is cancelled and dropped from the list.
     func discard(_ id: String) {
+        if let record = list.record(withID: id), canKeep(record),
+           backend(for: record)?.resolveDanger(.discard, id: id) == true {
+            warnings[id] = nil
+            return
+        }
         perform(.remove, on: id)
     }
 

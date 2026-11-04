@@ -121,6 +121,10 @@ struct DownloadRowView: View {
     let record: DownloadRecord
     let downloads: DownloadsController
     @State private var hovering = false
+    @State private var confirmingKeep = false
+
+    /// Waiting for Keep or Discard (Chromium's warning, or the danger code).
+    private var isWarned: Bool { downloads.needsDecision(record) }
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -131,29 +135,29 @@ struct DownloadRowView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .strikethrough(record.state == .cancelled, color: .secondary)
-                if record.isActive, !record.isDangerous {
+                if record.isActive, !isWarned {
                     ProgressView(value: record.fractionCompleted ?? 0)
                         .progressViewStyle(.linear)
                         .controlSize(.mini)
                         .tint(record.isPaused ? .secondary : .accentColor)
                         .opacity(record.fractionCompleted == nil ? 0.4 : 1)
                 }
-                Text(record.statusText)
+                Text(downloads.warningText(for: record) ?? record.statusText)
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(statusStyle)
                     .lineLimit(1)
-                if record.isDangerous {
+                if isWarned {
                     dangerActions
                 }
             }
             Spacer(minLength: 4)
-            if !record.isDangerous { trailingActions }
+            if !isWarned { trailingActions }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
         .background(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(record.isDangerous ? Color.orange.opacity(0.1) : Color.primary.opacity(hovering ? 0.06 : 0))
+                .fill(isWarned ? Color.orange.opacity(0.1) : Color.primary.opacity(hovering ? 0.06 : 0))
         )
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
@@ -168,7 +172,7 @@ struct DownloadRowView: View {
                 .resizable()
                 .frame(width: 30, height: 30)
                 .opacity(record.state == .complete || record.isActive ? 1 : 0.5)
-            if record.isDangerous {
+            if isWarned {
                 badge("exclamationmark.triangle.fill", .orange)
             } else if record.state == .interrupted {
                 badge("exclamationmark.circle.fill", .red)
@@ -195,7 +199,7 @@ struct DownloadRowView: View {
     }
 
     private var statusStyle: AnyShapeStyle {
-        if record.isDangerous { return AnyShapeStyle(Color.orange) }
+        if isWarned { return AnyShapeStyle(Color.orange) }
         if record.state == .interrupted { return AnyShapeStyle(Color.red) }
         return AnyShapeStyle(.secondary)
     }
@@ -223,7 +227,21 @@ struct DownloadRowView: View {
         HStack(spacing: 8) {
             Button("Discard", role: .destructive) { downloads.discard(record.id) }
                 .controlSize(.small)
-            if downloads.canReviewDangerous {
+            if downloads.canKeep(record) {
+                Button("Keep…") { confirmingKeep = true }
+                    .controlSize(.small)
+                    .help("Save this file even though it may be harmful")
+                    .confirmationDialog(
+                        "Keep \(record.fileName)?",
+                        isPresented: $confirmingKeep
+                    ) {
+                        Button("Keep Anyway", role: .destructive) { downloads.keep(record.id) }
+                        Button("Discard") { downloads.discard(record.id) }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("\(downloads.warningText(for: record) ?? "This file may be harmful"). Only keep it if you trust its source.")
+                    }
+            } else if downloads.canReviewDangerous {
                 Button("Review…") { downloads.reviewDangerousPage?() }
                     .controlSize(.small)
                     .help("Keep or discard it on the Downloads page")
@@ -255,7 +273,7 @@ struct DownloadRowView: View {
         if record.isActive {
             if record.isPaused {
                 Button("Resume") { downloads.perform(.resume, on: record.id) }.disabled(!record.canResume)
-            } else if !record.isDangerous {
+            } else if !isWarned {
                 Button("Pause") { downloads.perform(.pause, on: record.id) }
             }
             Button("Cancel") { downloads.perform(.cancel, on: record.id) }
