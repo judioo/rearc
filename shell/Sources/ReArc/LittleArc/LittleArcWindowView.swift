@@ -35,6 +35,7 @@ struct LittleArcWindowView: View {
             }
         }
         .frame(minWidth: 420, minHeight: 320)
+        .overlay(alignment: .topLeading) { LittleArcProbeMarker(windowID: windowID) }
         .background(
             WindowKeyObserver(
                 onBecameKey: { model.keyLittleArcID = windowID },

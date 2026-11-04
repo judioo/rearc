@@ -90,6 +90,7 @@ extension BrowserViewModel {
     /// current tab, or steps it while it is open. Without Control held (the
     /// menu) it switches at once.
     func cycleRecentTabs(forward: Bool, controlHeld: Bool = NSEvent.modifierFlags.contains(.control)) {
+        PerfSignposts.interaction(.tabSwitcher, tabSwitcher == nil ? "open" : "step")
         if tabSwitcher != nil {
             tabSwitcher?.step(forward: forward)
             return

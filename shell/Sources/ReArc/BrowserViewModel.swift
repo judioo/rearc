@@ -153,7 +153,10 @@ final class BrowserViewModel {
             commandBarHighlightedIndex = 0
             // Deleting turns inline completion off until the next character (omnibox rule).
             commandBarSuppressesInlineCompletion = commandBarText.count < oldValue.count && oldValue.hasPrefix(commandBarText)
-            if commandBarText != oldValue { refreshCommandBarLive() }
+            if commandBarText != oldValue {
+                PerfSignposts.interaction(.commandBarKey, "\(commandBarText.count) chars")
+                refreshCommandBarLive()
+            }
         }
     }
     var commandBarHighlightedIndex = 0
@@ -172,6 +175,12 @@ final class BrowserViewModel {
     @ObservationIgnored var commandBarTextBeforeSiteSearch = ""
 
     var commandBarResults: [CommandBarSearch.Result] {
+        ModelSignposts.measure(ModelSignposts.model, "CommandBarResults", detail: "\(commandBarText.count) chars") {
+            computeCommandBarResults()
+        }
+    }
+
+    private func computeCommandBarResults() -> [CommandBarSearch.Result] {
         if let engine = commandBarSiteSearch {
             return CommandBarSearch.siteSearchResults(engine, query: commandBarText)
         }
@@ -402,6 +411,7 @@ final class BrowserViewModel {
     /// A sidebar click shows the item, closing the Library even when the
     /// item was already selected under it.
     func selectTab(_ id: Tab.ID) {
+        PerfSignposts.interaction(.tabSwitch, "select")
         closeLibrary()
         store.selectTab(id)
         loadSelectedIfNeeded()
@@ -565,11 +575,13 @@ final class BrowserViewModel {
     }
 
     func selectSpace(_ id: Space.ID) {
+        PerfSignposts.interaction(.spaceSwitch, "select")
         store.selectSpace(id)
         loadSelectedIfNeeded()
     }
 
     func selectProfile(_ id: Profile.ID) {
+        PerfSignposts.interaction(.profileSwitch, "select")
         store.selectProfile(id)
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
@@ -588,12 +600,14 @@ final class BrowserViewModel {
     }
 
     func cycleSpace(forward: Bool = true) {
+        PerfSignposts.interaction(.spaceSwitch, forward ? "next" : "previous")
         store.cycleSpace(forward: forward)
         loadSelectedIfNeeded()
     }
 
     /// Ctrl+1…9.
     func selectSpace(atIndex index: Int) {
+        PerfSignposts.interaction(.spaceSwitch, "index \(index)")
         guard store.selectSpace(atIndex: index) else { return }
         loadSelectedIfNeeded()
     }
@@ -633,11 +647,18 @@ final class BrowserViewModel {
     /// width (or gives it back) on Arc's spring; the page keeps keyboard
     /// focus. While hidden, the window's leading edge floats it.
     func toggleSidebar() {
-        withAnimation(Self.sidebarAnimation) {
+        PerfSignposts.interaction(.sidebarToggle, isSidebarVisible ? "hide" : "show")
+        withAnimation(Self.sidebarAnimation, completionCriteria: .logicallyComplete) {
             isSidebarVisible.toggle()
             isSidebarPeeking = false
+        } completion: { [weak self] in
+            self?.onShellAnimationComplete?(.sidebarToggle)
         }
     }
+
+    /// The bench's end event for shell animations (`--rearc-bench`).
+    enum ShellAnimation { case sidebarToggle, sidebarPeek }
+    @ObservationIgnored var onShellAnimationComplete: ((ShellAnimation) -> Void)?
 
     /// Arc animates the sidebar with a spring (`sidebarTransformAnimation`);
     /// its parameters are not in the binary's strings, so these are inferred
@@ -675,6 +696,10 @@ final class BrowserViewModel {
     }
 
     func syncAllTabBoosts() {
+        ModelSignposts.measure(ModelSignposts.model, "SyncAllBoosts") { syncAllTabBoostsNow() }
+    }
+
+    private func syncAllTabBoostsNow() {
         for (tabID, profileID, engine) in engineHost.allTabEngines() {
             guard let tab = store.tab(withID: tabID) else { continue }
             let entries = store.activeBoostEntries(for: tab)
@@ -754,6 +779,10 @@ final class BrowserViewModel {
     }
 
     func reconcileEngineOwnership() {
+        ModelSignposts.measure(ModelSignposts.model, "ReconcileEngines") { reconcileEngineOwnershipNow() }
+    }
+
+    private func reconcileEngineOwnershipNow() {
         var tabKeys = Set<EngineHost.TabEngineKey>()
         for space in store.spaces {
             for tab in store.displayTabs(in: space.id) {
@@ -874,6 +903,7 @@ final class BrowserViewModel {
     // MARK: - Peek
 
     func showPeek(url: URL) {
+        PerfSignposts.interaction(.peekOpen)
         dismissPeek()
         let originProfile = store.activeProfileID
         let (engineID, engine) = engineHost.ephemeralEngine(profileID: originProfile)
@@ -986,6 +1016,7 @@ final class BrowserViewModel {
 
     @discardableResult
     func openLittleArc(url: URL, title: String? = nil, profileID: Profile.ID? = nil) -> LittleArcWindow {
+        PerfSignposts.interaction(.littleArcOpen)
         let record = store.createLittleArcWindow(url: url, title: title, profileID: profileID)
         requestLittleArcWindow(record.id)
         loadLittleArcIfNeeded(record.id)
@@ -1072,6 +1103,7 @@ final class BrowserViewModel {
 
     /// Cmd+T: create a fresh today tab and open the command bar into it.
     func newTab() {
+        PerfSignposts.interaction(.newTab)
         let previous = store.selectedTabID
         let tab = store.addTab(kind: .today, title: "New Tab", url: URL(string: "about:blank")!)
         store.selectTab(tab.id)
@@ -1090,6 +1122,7 @@ final class BrowserViewModel {
     /// in and selected; pressed again it closes the bar (Arc's
     /// `toggleOpenOmnibox:`).
     func focusLocation() {
+        PerfSignposts.interaction(.commandBarOpen, isCommandBarPresented ? "close" : "open")
         if isCommandBarPresented {
             dismissCommandBar()
             return

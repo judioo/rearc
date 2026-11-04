@@ -28,7 +28,10 @@ final class FaviconStore {
         if let cached = images[key] { return cached }
         guard let directory, !missingOnDisk.contains(key) else { return nil }
         let file = directory.appendingPathComponent(Self.fileName(for: key))
-        guard let data = try? Data(contentsOf: file), let image = NSImage(data: data) else {
+        let read = ModelSignposts.measure(ModelSignposts.persistence, "FaviconDiskRead") {
+            (try? Data(contentsOf: file)).flatMap(NSImage.init(data:))
+        }
+        guard let image = read else {
             missingOnDisk.insert(key)
             return nil
         }

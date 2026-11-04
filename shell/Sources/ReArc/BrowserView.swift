@@ -116,6 +116,7 @@ struct BrowserView: View {
                 .transition(.opacity)
             }
         }
+        .overlay(alignment: .topLeading) { BrowserProbeMarkers(model: model, pager: pager) }
         .tint(model.themeColor(in: windowID))
         .environment(\.themeChrome, themeChrome)
         .environment(\.sidebarWindow, windowID)

@@ -224,6 +224,7 @@ extension BrowserViewModel {
     // MARK: - Cmd+1…9
 
     func selectItem(atPosition number: Int) {
+        PerfSignposts.interaction(.tabSwitch, "position \(number)")
         guard store.selectItem(atPosition: number) != nil else { return }
         loadSelectedIfNeeded()
     }
@@ -526,8 +527,11 @@ extension BrowserViewModel {
 
     func setSidebarPeeking(_ peeking: Bool) {
         guard !isSidebarVisible || !peeking, isSidebarPeeking != peeking else { return }
-        withAnimation(.easeOut(duration: 0.16)) {
+        PerfSignposts.interaction(.sidebarPeek, peeking ? "reveal" : "dismiss")
+        withAnimation(.easeOut(duration: 0.16), completionCriteria: .logicallyComplete) {
             isSidebarPeeking = peeking
+        } completion: { [weak self] in
+            self?.onShellAnimationComplete?(.sidebarPeek)
         }
     }
 }
