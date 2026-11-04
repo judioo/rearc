@@ -90,6 +90,15 @@ final class Wave20ShellTests: XCTestCase {
         XCTAssertFalse(ChromiumCapabilities.none.downloads)
     }
 
+    func testSelfTestKeepsRenderersForegroundAndTheProductDoesNot() {
+        let product = ChromiumLaunchArguments.browserArguments(["ReArc"], defaultUserDataDir: { "/tmp/p" }, keychain: .system)
+        XCTAssertTrue(Set(product).isDisjoint(with: ChromiumLaunchArguments.selfTestForegroundSwitches))
+        let selfTest = ChromiumLaunchArguments.selfTestArguments(product + ["--disable-renderer-backgrounding"])
+        XCTAssertEqual(selfTest.filter { $0 == "--disable-renderer-backgrounding" }.count, 1, "no duplicates")
+        XCTAssertTrue(selfTest.contains("--disable-backgrounding-occluded-windows"))
+        XCTAssertEqual(Array(selfTest.prefix(product.count)), product)
+    }
+
     // MARK: Find bar
 
     func testFindBarRestartsOnEveryKeystrokeAndShowsTheCurrentSession() {

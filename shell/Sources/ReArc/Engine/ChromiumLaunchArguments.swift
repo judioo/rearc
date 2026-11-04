@@ -53,6 +53,23 @@ enum ChromiumLaunchArguments {
         return result
     }
 
+    /// Self-test only, never the product: Chromium hides the pages of occluded
+    /// windows and backgrounds their renderers (lower process priority, timer
+    /// throttling). A run launched from a terminal leaves the app inactive with
+    /// its windows occluded or the screen locked; under machine load a
+    /// backgrounded renderer then answered trivial evaluations in about 2 s
+    /// instead of under 10 ms, and the 3 s evaluation deadline failed
+    /// intermittently. These switches keep self-test pages foreground.
+    static let selfTestForegroundSwitches = [
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+    ]
+
+    static func selfTestArguments(_ arguments: [String]) -> [String] {
+        arguments + selfTestForegroundSwitches.filter { !arguments.contains($0) }
+    }
+
     /// The `--user-data-dir` the engine runs with (last occurrence wins, as in Chromium).
     static func userDataDir(in arguments: [String]) -> String? {
         arguments.last { $0.hasPrefix(userDataDirFlag) }.map { String($0.dropFirst(userDataDirFlag.count)) }

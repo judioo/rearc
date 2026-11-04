@@ -38,7 +38,7 @@ enum ChromiumHost {
             if options.selfTest {
                 let test = ChromiumSelfTest(runtime: runtime)
                 runtime.onReady = { test.start() }
-                let code = runtime.run(arguments: arguments, keychain: keychain)
+                let code = runtime.run(arguments: ChromiumLaunchArguments.selfTestArguments(arguments), keychain: keychain)
                 exit(test.exitCode(runResult: code))
             }
             let shell = ChromiumShell(runtime: runtime)

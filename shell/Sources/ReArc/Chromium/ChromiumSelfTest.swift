@@ -132,7 +132,12 @@ final class ChromiumSelfTest {
                         "snapshot_viewport", "snapshot_full_page", "pip_control", "pip_native",
                         "profiles", "profile_off_the_record", "script_evaluation_identity", "page_zoom",
                         "isolated_page_messages", "rearc_safe_storage_branding", "os_permission_shutdown",
-                        "shutdown_pending_closes", "profile_directory", "webui_daily_pages"]
+                        "shutdown_pending_closes", "profile_directory", "webui_daily_pages", "history_recording",
+                        "password_autofill", "find_in_page", "downloads"]
+        let foreground = ChromiumLaunchArguments.selfTestForegroundSwitches.filter(CommandLine.arguments.contains)
+        log("renderer foreground switches (self-test only): "
+            + ChromiumLaunchArguments.selfTestForegroundSwitches.joined(separator: " ")
+            + "; app active \(NSApp.isActive)\(foreground.isEmpty ? "" : "; also on the command line")")
         log("features: " + features.map { "\($0)=\(ReArcEngineHasFeature($0) ? 1 : 0)" }.joined(separator: " "))
         try check(runtime.defaultProfileID != 0, "ready delivered a zero default profile")
 
@@ -317,6 +322,20 @@ final class ChromiumSelfTest {
             try await pageMessageChecks(engine: engine, window: window)
         } else {
             log("ABI-GAP isolated_page_messages not advertised: the picker uses the native overlay only")
+        }
+
+        // 12b. Find in page (ABI 1.16) through the shell's find bar model, on the attached tab.
+        if capabilities.findInPage {
+            try await findInPageChecks(engine: engine, base: base)
+        } else {
+            log("ABI-GAP find_in_page not advertised (ABI minor \(capabilities.abiMinorVersion.map(String.init) ?? "absent") < 16): Cmd+F is hidden on Chromium")
+        }
+
+        // 12c. Downloads (ABI 1.17) into a temporary policy directory, through the tray's controller.
+        if capabilities.downloads {
+            try await downloadChecks(engine: engine, base: base)
+        } else {
+            log("ABI-GAP downloads not advertised (ABI minor \(capabilities.abiMinorVersion.map(String.init) ?? "absent") < 17): the tray shows WebKit downloads only")
         }
 
         // 13. Two windows: the tab's one lease moves to a second window and back.
@@ -626,32 +645,45 @@ final class ChromiumSelfTest {
             throw Failure(description: "no <h1> or host for the trusted click")
         }
         window.makeKeyAndOrderFront(nil)
-        let viewPoint = PageZoom.viewPoint(fromCSSPoint: CGPoint(x: x, y: y), zoom: engine.zoomFactor)
-        let local = NSPoint(x: viewPoint.x, y: host.isFlipped ? viewPoint.y : host.bounds.height - viewPoint.y)
-        let location = host.convert(local, to: nil)
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                                              windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
-                window.sendEvent(event)
-            }
-        }
         var via = "trusted click -> editor-world listener -> rearcPostMessage"
-        do {
-            try await wait("editor pick page message", timeout: 5) { !picks.isEmpty }
-        } catch {
-            // Synthesized NSEvents may not reach the renderer as trusted input on every
-            // setup; the channel itself is then exercised from the editor world directly.
-            log("NOTE synthesized click produced no page message; posting the editor pick from the editor world")
+        // Synthesized NSEvents reach the renderer as trusted input only while the app
+        // is active and the window key and visible; otherwise Chromium drops them.
+        // Decide that up front instead of waiting for a click that cannot arrive.
+        let canDeliverInput = NSApp.isActive && window.isKeyWindow && window.occlusionState.contains(.visible)
+        if canDeliverInput {
+            let viewPoint = PageZoom.viewPoint(fromCSSPoint: CGPoint(x: x, y: y), zoom: engine.zoomFactor)
+            let local = NSPoint(x: viewPoint.x, y: host.isFlipped ? viewPoint.y : host.bounds.height - viewPoint.y)
+            let location = host.convert(local, to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                  windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                    window.sendEvent(event)
+                }
+            }
+            do {
+                try await wait("editor pick page message", timeout: 5) { !picks.isEmpty }
+            } catch {
+                log("NOTE synthesized click produced no page message although the window was key and visible")
+            }
+        } else {
+            log("NOTE app inactive or window not visible (active \(NSApp.isActive), key \(window.isKeyWindow), "
+                + "visible \(window.occlusionState.contains(.visible))): synthesized input cannot reach the page; "
+                + "posting the editor pick from the editor world")
+        }
+        if picks.isEmpty {
             via = "editor-world rearcPostMessage(snapshotAt)"
+            let started = Date()
             _ = try await engine.evaluate(
                 BoostEditorScripts.withPicker("(rearcPostMessage(JSON.stringify(p.snapshotAt(\(x), \(y)))), true)"),
-                in: .editor
+                in: .editor,
+                timeoutMS: 15_000
             )
-            try await wait("editor pick page message (direct)", timeout: 5) { !picks.isEmpty }
+            try await wait("editor pick page message (direct)", timeout: 10) { !picks.isEmpty }
+            via += String(format: " in %.0f ms", Date().timeIntervalSince(started) * 1000)
         }
         try check(picks.first?.descriptor.tag == "h1", "page-message pick was \(String(describing: picks.first?.descriptor.tag))")
-        _ = try await engine.evaluate("(rearcPostMessage(JSON.stringify({ type: 'cancel' })), true)", in: .editor)
-        try await wait("editor cancel page message", timeout: 5) { cancels > 0 }
+        _ = try await engine.evaluate("(rearcPostMessage(JSON.stringify({ type: 'cancel' })), true)", in: .editor, timeoutMS: 15_000)
+        try await wait("editor cancel page message", timeout: 10) { cancels > 0 }
         engine.setBoostPickerMode(false)
         engine.setBoostEditorOpen(false)
         engine.onBoostEditorPick = nil
@@ -659,6 +691,152 @@ final class ChromiumSelfTest {
         try await wait("editor scripts drained") { engine.evaluationsOutstanding == 0 }
         log("PASS editor page messages: \(via) -> <\(picks.first?.descriptor.tag ?? "")>; cancel delivered; "
             + "unknown kind dropped (dropped \(droppedBefore) -> \(engine.droppedEditorMessages))")
+    }
+
+    // MARK: Find in page (ABI 1.16)
+
+    @MainActor
+    private func findInPageChecks(engine: ChromiumEngine, base: String) async throws {
+        engine.load(URL(string: "\(base)/find")!)
+        try await wait("find fixture loaded") { engine.pageTitle == "find" && !engine.isLoading }
+        try check(engine.attachmentID != nil, "find needs an attached tab (a 0x0 view reports no matches)")
+        let invalid = ReArcTabFindNext(engine.tabID, true)
+        try check(invalid == ReArcStatus(REARC_INVALID_STATE), "FindNext without a session returned \(invalid.rearcName)")
+        let empty = "".withCString { text -> ReArcStatus in
+            var session: UInt64 = 0
+            return ReArcTabFindStart(engine.tabID, text, UInt32(REARC_FIND_FORWARD), &session)
+        }
+        try check(empty == ReArcStatus(REARC_INVALID_ARGUMENT), "empty find text returned \(empty.rearcName)")
+
+        var terminals: [FindInPageEvent.Reason] = []
+        let find = FindBarModel()
+        find.present(on: engine)
+        // The bar owns onFindEvent; wrap it to also count terminals.
+        let barHandler = engine.onFindEvent
+        engine.onFindEvent = { event in
+            if event.reason != .result { terminals.append(event.reason) }
+            barHandler?(event)
+        }
+        find.setQuery("needl")
+        find.setQuery("needle")
+        try await wait("find: 1 of 4") { find.statusText == "1 of 4" }
+        try check(terminals.contains(.replaced), "the first keystroke's session did not end as replaced (\(terminals))")
+        var steps = [find.statusText]
+        for forward in [true, false, false] {
+            let before = find.state.activeOrdinal
+            find.next(forward: forward)
+            try await wait("find \(forward ? "next" : "previous") from \(before)") { find.state.activeOrdinal != before }
+            steps.append(find.statusText)
+        }
+        try check(steps == ["1 of 4", "2 of 4", "1 of 4", "4 of 4"], "find ordinals \(steps)")
+        find.setMatchCase(true)
+        try await wait("case-sensitive count") { find.state.matchCase && find.state.matchCount == 2 }
+        find.setQuery("zzz-not-on-page")
+        try await wait("no matches") { find.hasNoMatches }
+        let noMatches = find.statusText
+        find.setQuery("needle")
+        try await wait("case-sensitive needle again") { find.state.matchCount == 2 }
+        let stopsBefore = terminals.filter { $0 == .stopped }.count
+        find.close()
+        // Closing detaches the bar's handler; the stop terminal is delivered after this turn.
+        engine.onFindEvent = { event in if event.reason != .result { terminals.append(event.reason) } }
+        try await wait("stop terminal") { terminals.filter { $0 == .stopped }.count == stopsBefore + 1 }
+        try check(engine.findSessionID == 0, "engine still holds find session \(engine.findSessionID)")
+
+        // A navigation ends the session exactly once; Return then searches the new document.
+        find.present(on: engine)
+        let handler = engine.onFindEvent
+        engine.onFindEvent = { event in
+            if event.reason != .result { terminals.append(event.reason) }
+            handler?(event)
+        }
+        try await wait("reopened bar repeats the query") { find.state.matchCount == 2 }
+        engine.load(URL(string: "\(base)/a")!)
+        try await wait("navigation terminal") { terminals.last == .navigated && find.state.sessionID == 0 }
+        try await wait("page A after find") { engine.pageTitle == Self.titleA && !engine.isLoading }
+        try check(find.statusText.isEmpty, "count still shown after navigation: '\(find.statusText)'")
+        find.close()
+        engine.onFindEvent = nil
+        log("PASS find in page (ABI 1.16, FindBarModel on the attached tab): 'needle' -> \(steps.joined(separator: " -> ")) "
+            + "(backward wrap); match case -> 2; '\(noMatches)' for a missing word; terminals \(terminals.map { "\($0)" }); "
+            + "FindNext without a session -> invalid_state, empty text -> invalid_argument")
+    }
+
+    // MARK: Downloads (ABI 1.17)
+
+    @MainActor
+    private func downloadChecks(engine: ChromiumEngine, base: String) async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rearc-selftest-downloads-\(UUID().uuidString)", isDirectory: true)
+        let controller = DownloadsController(fileURL: directory.appendingPathComponent("Downloads.json"))
+        controller.setDirectory(directory)
+        let backend = ChromiumDownloadBackend(runtime: runtime, controller: controller)
+        backend.install()
+        defer { runtime.onDownloadEvent = nil }
+        try check(runtime.downloadDirectory == directory.standardizedFileURL, "policy directory \(runtime.downloadDirectory?.path ?? "nil")")
+        let rejected = "relative/dir".withCString { ReArcDownloadSetPolicy(engine.engineProfileID, $0, 0) }
+        try check(rejected == ReArcStatus(REARC_INVALID_ARGUMENT), "relative policy directory returned \(rejected.rearcName)")
+        let picker = directory.path.withCString { ReArcDownloadSetPolicy(engine.engineProfileID, $0, 1) }
+        try check(picker == ReArcStatus(REARC_UNSUPPORTED), "prompt mode 1 returned \(picker.rearcName)")
+        try check(runtime.applyDownloadPolicy(profile: engine.engineProfileID) == .rearcOK, "policy for engine profile \(engine.engineProfileID)")
+
+        // 1. A small attachment lands in the policy directory without a picker or a navigation.
+        func row(_ name: String) -> DownloadRecord? {
+            controller.records.first { $0.fileName.hasPrefix(name) || $0.url.hasSuffix("/\(name)") }
+        }
+        let started = engine.navigateNow(URL(string: "\(base)/download/rearc-small.bin")!)
+        try check(started == .rearcOK, "navigating to the attachment returned \(started.rearcName)")
+        try await wait("small download complete", timeout: 20) { row("rearc-small.bin")?.state == .complete }
+        let small = try XUnwrap(row("rearc-small.bin"))
+        let size = (try? FileManager.default.attributesOfItem(atPath: small.targetPath))?[.size] as? Int ?? -1
+        try check(small.targetPath.hasPrefix(directory.standardizedFileURL.path), "saved to \(small.targetPath), not the policy directory")
+        try check(size == SelfTestFixtureServer.smallDownloadSize, "saved file has \(size) bytes")
+        try check(controller.isTrayPresented && controller.startCount >= 1, "a new download did not open the tray")
+        // The pending entry's URL may show while the navigation turns into a download; it must not stick.
+        try await wait("tab still on page A after the attachment", timeout: 5) { engine.currentURL?.path == "/a" }
+        controller.perform(.remove, on: small.id)
+        try await wait("removed event drops the row") { row("rearc-small.bin") == nil }
+        let removedHandle = backend.handle(for: small.id)
+        try check(removedHandle == nil, "backend kept a handle for the removed item")
+
+        // 2. A trickled 1 MiB file: pause -> resume -> progress -> cancel -> remove.
+        try check(engine.navigateNow(URL(string: "\(base)/download/rearc-trickle.bin")!) == .rearcOK, "trickle navigation rejected")
+        try await wait("trickle started", timeout: 20) { (row("rearc-trickle.bin")?.receivedBytes ?? 0) > 0 }
+        let id = try XUnwrap(row("rearc-trickle.bin")).id
+        let handle = try XUnwrap(backend.handle(for: id))
+        controller.perform(.pause, on: id)
+        try await wait("paused") { controller.list.record(withID: id).map { $0.isPaused && $0.canResume } ?? false }
+        let pausedAt = controller.list.record(withID: id)?.receivedBytes ?? 0
+        let pauseAgain = runtime.downloadAction(profile: handle.profile, id: handle.id, action: 0)
+        try check(pauseAgain == ReArcStatus(REARC_INVALID_STATE), "pausing a paused item returned \(pauseAgain.rearcName)")
+        controller.perform(.resume, on: id)
+        try await wait("resumed with progress", timeout: 20) {
+            guard let record = controller.list.record(withID: id) else { return false }
+            return !record.isPaused && record.receivedBytes > pausedAt
+        }
+        let resumedAt = controller.list.record(withID: id)?.receivedBytes ?? 0
+        controller.perform(.cancel, on: id)
+        try await wait("cancelled") { controller.list.record(withID: id)?.state == .cancelled }
+        let status = controller.list.record(withID: id)?.statusText ?? ""
+        controller.perform(.remove, on: id)
+        try await wait("cancelled row removed") { controller.list.record(withID: id) == nil }
+        let gone = runtime.downloadAction(profile: handle.profile, id: handle.id, action: 4)
+        try check(gone == ReArcStatus(REARC_NOT_FOUND), "reveal after remove returned \(gone.rearcName)")
+        controller.save()
+        let saved = DownloadListFile.load(from: directory.appendingPathComponent("Downloads.json"))
+        try check(saved.directory == directory.standardizedFileURL.path && saved.list.records.isEmpty,
+                  "persisted tray: \(saved.directory ?? "nil"), \(saved.list.records.count) row(s)")
+        try? FileManager.default.removeItem(at: directory)
+        log("PASS downloads (ABI 1.17, DownloadsController + ChromiumDownloadBackend): \(SelfTestFixtureServer.smallDownloadSize)-byte "
+            + "attachment saved without a picker to the policy directory (tab stayed on /a), tray opened, remove -> removed event; "
+            + "trickle paused at \(pausedAt) B (pause again -> invalid_state), resumed to \(resumedAt) B, '\(status)', "
+            + "removed (reveal -> not_found); relative directory -> invalid_argument, prompt 1 -> unsupported; "
+            + "\(backend.eventCount) events")
+    }
+
+    private func XUnwrap<T>(_ value: T?, _ label: String = #function) throws -> T {
+        guard let value else { throw Failure(description: "unexpected nil in \(label)") }
+        return value
     }
 
     // MARK: Two windows
@@ -944,6 +1122,7 @@ final class ChromiumSelfTest {
         log(String(format: "PASS zoom command: Zoom In -> tab A %.2f and same-host tab B %.2f (zoom events); Actual Size -> 1.00", zoomed, zoomed))
 
         try await sidebarNavigationChecks(model: model, store: store, tab: tabA, engine: engineA, base: base)
+        try await shellFindAndHistoryChecks(model: model, engine: engineA, base: base)
 
         // Private window: PrivateWindowModel on an off-the-record profile under the
         // active profile; its end closes that profile, and a new one starts empty.
@@ -1013,6 +1192,33 @@ final class ChromiumSelfTest {
     }
 
     // MARK: Sidebar navigation controls (wave 17)
+
+    /// The shell's own paths: Cmd+F on BrowserView's tab, and command-bar
+    /// history recorded from the navigations the shell just made.
+    @MainActor
+    private func shellFindAndHistoryChecks(model: BrowserViewModel, engine: ChromiumEngine, base: String) async throws {
+        let navURL = URL(string: "\(base)/nav")!
+        let visit = model.visitHistory.record(for: navURL)
+        try check(visit != nil, "the shell recorded no visit for /nav (\(model.visitHistory.count) visit(s))")
+        model.commandBarText = "nav:"
+        let historyRow = model.commandBarResults.first { $0.kind == .history }
+        try check(historyRow?.destinationURL.flatMap(VisitHistory.key(for:)) == VisitHistory.key(for: navURL),
+                  "command bar history row: \(historyRow.map { "\($0.title) \($0.destinationURL?.absoluteString ?? "")" } ?? "none")")
+        model.commandBarText = ""
+        if runtime.capabilities.findInPage {
+            model.showFindBar()
+            try check(model.findBar.isShown(for: engine), "Cmd+F did not open the find bar on tab A")
+            model.findBar.setQuery("selftest page")
+            try await wait("shell find bar result") { model.findBar.statusText == "1 of 1" }
+            model.findNext(forward: true)
+            try await wait("shell find next wraps") { model.findBar.state.activeOrdinal == 1 && model.findBar.state.sessionID != 0 }
+            model.closeFindBar()
+            try check(!model.findBar.isPresented, "find bar still open")
+        }
+        log("PASS shell find and history: /nav recorded (\(visit?.visitCount ?? 0) visit(s), '\(visit?.title ?? "")'), "
+            + "command bar 'nav:' -> history row '\(historyRow?.title ?? "")'"
+            + (runtime.capabilities.findInPage ? "; Cmd+F on tab A -> '1 of 1', Cmd+G wraps, Esc closes" : ""))
+    }
 
     /// The sidebar's back/forward/reload/stop and lock state act on the
     /// selected tab's engine through BrowserViewModel (the menu and command-bar
@@ -1220,6 +1426,11 @@ final class SelfTestFixtureServer {
         document.title = 'nav:' + performance.getEntriesByType('navigation')[0].type + ':' + n;
         </script></head><body style="font:32px -apple-system"><h1>ReArc selftest navigation page</h1></body></html>
         """,
+        // Four case-insensitive "needle"s, two of them lowercase.
+        "/find": """
+        <!doctype html><html><head><title>find</title></head><body style="font:24px -apple-system">
+        <p>needle in a haystack</p><p>Needle</p><p>NEEDLE</p><p>another needle</p></body></html>
+        """,
         // Held back (see `respond`) so a load is still in flight when the test stops it.
         "/slow": """
         <!doctype html><html><head><title>slow-loaded</title></head><body>slow</body></html>
@@ -1231,6 +1442,10 @@ final class SelfTestFixtureServer {
         "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGMQVDImCTGMahjVMHw1AAAaNGYB4V8qqwAAAABJRU5ErkJggg=="
     )!
     static let slowResponseDelay: TimeInterval = 6
+    static let smallDownloadSize = 64 * 1024
+    /// 1 MiB, 16 KiB every 100 ms: long enough to pause, resume and cancel mid-transfer.
+    static let trickleDownloadSize = 1024 * 1024
+    static let trickleChunk = 16 * 1024
 
     init() throws {
         let parameters = NWParameters.tcp
@@ -1285,6 +1500,9 @@ final class SelfTestFixtureServer {
     }
 
     private static func respond(_ connection: NWConnection, path: String) {
+        if path.hasPrefix("/download/") {
+            return download(connection, name: String(path.dropFirst("/download/".count)))
+        }
         let isIcon = path.hasPrefix("/favicon")
         let body = isIcon ? nil : pages[path]
         let found = isIcon || body != nil
@@ -1305,6 +1523,33 @@ final class SelfTestFixtureServer {
         } else {
             send()
         }
+    }
+
+    /// Attachments: `rearc-small.bin` in one write, `rearc-trickle.bin` in timed chunks.
+    private static func download(_ connection: NWConnection, name: String) {
+        let trickle = name.contains("trickle")
+        let size = trickle ? trickleDownloadSize : smallDownloadSize
+        print("[fixture] GET /download/\(name) -> 200 (\(size) bytes\(trickle ? ", trickled" : ""))")
+        fflush(stdout)
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: \(size)\r\n"
+            + "Content-Disposition: attachment; filename=\"\(name)\"\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        guard trickle else {
+            connection.send(content: Data(head.utf8) + Data(repeating: 0x52, count: size), completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+            return
+        }
+        connection.send(content: Data(head.utf8), completion: .contentProcessed { _ in })
+        func sendChunk(_ offset: Int) {
+            guard offset < size else { return connection.cancel() }
+            let count = min(trickleChunk, size - offset)
+            connection.send(content: Data(repeating: 0x54, count: count), completion: .contentProcessed { error in
+                // A cancelled download closes the socket; stop sending then.
+                guard error == nil else { return connection.cancel() }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { sendChunk(offset + count) }
+            })
+        }
+        sendChunk(0)
     }
 }
 #endif
