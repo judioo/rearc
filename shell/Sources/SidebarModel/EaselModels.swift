@@ -14,9 +14,17 @@ public struct EaselViewport: Equatable, Codable {
     }
 }
 
+/// An easel is a free canvas; a note is a text document (Arc keeps both in
+/// one library page, `EaselsAndNotesPage`, EASEL-CAPTURE §2-3).
+public enum EaselDocumentKind: String, Codable, CaseIterable, Sendable {
+    case easel
+    case note
+}
+
 public struct EaselDocument: Identifiable, Equatable, Codable {
     public var id: UUID
     public var title: String
+    public var kind: EaselDocumentKind
     public var createdAt: Date
     public var updatedAt: Date
     public var viewport: EaselViewport
@@ -26,6 +34,7 @@ public struct EaselDocument: Identifiable, Equatable, Codable {
     public init(
         id: UUID = UUID(),
         title: String,
+        kind: EaselDocumentKind = .easel,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         viewport: EaselViewport = EaselViewport(),
@@ -33,10 +42,36 @@ public struct EaselDocument: Identifiable, Equatable, Codable {
     ) {
         self.id = id
         self.title = title
+        self.kind = kind
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.viewport = viewport
         self.blocks = blocks
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, kind, createdAt, updatedAt, viewport, blocks
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+        viewport = try c.decode(EaselViewport.self, forKey: .viewport)
+        blocks = try c.decode([EaselBlock].self, forKey: .blocks)
+        kind = try c.decodeIfPresent(EaselDocumentKind.self, forKey: .kind)
+            ?? Self.inferredKind(title: title, blocks: blocks)
+    }
+
+    /// Documents saved before wave 28 have no kind. New Note made one text
+    /// block at a fixed frame in a document titled "Note", so a document of
+    /// one text block that keeps either reads as a note.
+    static func inferredKind(title: String, blocks: [EaselBlock]) -> EaselDocumentKind {
+        guard blocks.count == 1, case .text = blocks[0].payload else { return .easel }
+        let noteFrame = EaselFrame(x: 120, y: 120, width: 420, height: 200)
+        return title == "Note" || blocks[0].frame == noteFrame ? .note : .easel
     }
 }
 
@@ -195,10 +230,10 @@ public enum EaselDocumentOps {
 
     public static func noteDocument(title: String = "Note") -> EaselDocument {
         let textBlock = EaselBlock(
-            frame: EaselFrame(x: 120, y: 120, width: 420, height: 200),
+            frame: EaselFrame(x: 120, y: 120, width: 420, height: 200), // inferredKind matches this frame
             payload: .text(runs: [EaselRichTextRun(text: "")])
         )
-        return EaselDocument(title: title, blocks: [textBlock])
+        return EaselDocument(title: title, kind: .note, blocks: [textBlock])
     }
 
     public static func emptyEasel(title: String = "Untitled Easel") -> EaselDocument {

@@ -46,6 +46,8 @@ public enum AppCommandAction: Equatable, Hashable {
     case capturePage
     case captureVisibleArea
     case openCapturesGallery
+    /// Arc `openLibrary` (nil: the last page) and its View menu pages.
+    case openLibrary(LibrarySection?)
     case openBrowserPage(BrowserInternalPage)
     case viewPageSource
     case goBack
@@ -227,7 +229,7 @@ public struct AppCommand: Equatable, Identifiable {
             return true
         case .toggleBoost, .editBoost, .pickElementToEdit:
             return store.selectedTab != nil
-        case .newEasel, .newNote, .openCapturesGallery:
+        case .newEasel, .newNote, .openCapturesGallery, .openLibrary:
             return true
         case .capturePage, .captureVisibleArea:
             return store.selectedTab != nil
@@ -580,10 +582,24 @@ public enum AppCommandRegistry {
             ),
             AppCommand(
                 id: "open-captures-gallery",
-                title: "Open Captures Gallery",
-                keywords: ["captures", "screenshots", "gallery", "media", "library"],
+                title: "View Media",
+                keywords: ["captures", "screenshots", "gallery", "media", "videos", "library"],
                 minQueryLength: 2,
                 action: .openCapturesGallery
+            ),
+            AppCommand(
+                id: "open-library",
+                title: "View Library",
+                keywords: ["library", "home", "spaces", "media", "easels", "notes", "boosts"],
+                minQueryLength: 2,
+                action: .openLibrary(nil)
+            ),
+            AppCommand(
+                id: "view-easels-and-notes",
+                title: "View Easels & Notes",
+                keywords: ["easels", "notes", "library", "documents"],
+                minQueryLength: 2,
+                action: .openLibrary(.easels)
             ),
             AppCommand(
                 id: "find-in-page",
