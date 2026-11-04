@@ -110,10 +110,14 @@ fi
 for header in rearc_engine_abi.h rearc_engine_entry_mac.h module.modulemap; do
   [[ -f "$BRIDGE/$header" ]] || die "missing $BRIDGE/$header"
 done
-# Same gate as engine/tests/run_c_abi.py: don't package a tree that is being rebuilt.
-# The bracket keeps the pattern from matching a wrapper whose own argv quotes it.
-if pgrep -fl 'siso[ ]ninja' >/dev/null 2>&1; then
-  die "a Chromium build (siso ninja) is running; wait for it to finish"
+# Like engine/tests/run_c_abi.py, don't package a tree that is being rebuilt, but only
+# a build of THIS out dir blocks: a release build in out/ReArc-release-* doesn't block a
+# dev bundle and vice versa. siso's -C is relative to chromium/src or absolute, so match
+# the dir name after -C. The bracket keeps the pattern from matching a wrapper whose own
+# argv quotes it.
+OUT_NAME="$(basename "$OUT")"
+if pgrep -fl "siso[ ]ninja.* -C ([^ ]*/)?${OUT_NAME}( |/|\$)" >/dev/null 2>&1; then
+  die "a Chromium build (siso ninja) of $OUT_NAME is running; wait for it to finish"
 fi
 
 VERSION="$(plutil -extract CFBundleShortVersionString raw "$OUT/Chromium.app/Contents/Info.plist")"
