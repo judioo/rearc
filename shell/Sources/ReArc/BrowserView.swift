@@ -21,17 +21,17 @@ struct BrowserView: View {
     var body: some View {
         ZStack {
             HStack(spacing: 0) {
-                if model.isSidebarVisible {
+                if model.isSidebarVisible, !isPageFullscreen {
                     SidebarView(model: model, draggedItemID: $draggedItemID)
                         .transition(.move(edge: .leading))
                 }
                 contentCard
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .topTrailing) { zoomBadge }
+            .overlay(alignment: .topTrailing) { if !isPageFullscreen { zoomBadge } }
             .background(SpaceThemeBackground(model: model, window: windowID, pager: pager).ignoresSafeArea())
 
-            if !model.isSidebarVisible, model.isSidebarPeeking {
+            if !model.isSidebarVisible, model.isSidebarPeeking, !isPageFullscreen {
                 HStack(spacing: 0) {
                     SidebarView(model: model, draggedItemID: $draggedItemID)
                         .background(SpaceThemeBackground(model: model, window: windowID, pager: pager))
@@ -120,7 +120,7 @@ struct BrowserView: View {
         )
         .background(
             SidebarEdgeHoverMonitor(
-                isEnabled: !model.isSidebarVisible,
+                isEnabled: !model.isSidebarVisible && !isPageFullscreen,
                 isPeeking: model.isSidebarPeeking,
                 dismissWidth: model.sidebarWidth + 36,
                 onChange: { model.setSidebarPeeking($0) }
@@ -247,6 +247,11 @@ struct BrowserView: View {
         }
     }
 
+    /// This window shows a page in HTML fullscreen: only the page, edge to edge.
+    private var isPageFullscreen: Bool {
+        model.isHTMLFullscreen(in: windowID)
+    }
+
     private var spaceProfileChangeText: (title: String, message: String, action: String) {
         model.pendingSpaceProfileChange.map(model.spaceProfileChangeMessage) ?? ("", "", "")
     }
@@ -317,8 +322,13 @@ struct BrowserView: View {
 
     /// The page as a rounded card inset on the theme background (Arc's
     /// content frame); with the sidebar hidden it is inset on every side.
+    /// In HTML fullscreen the same view loses its inset and corners: a
+    /// different view tree would detach the page, which ends fullscreen.
     private var contentCard: some View {
-        contentArea
+        let fullscreen = isPageFullscreen
+        let radius: CGFloat = fullscreen ? 0 : 8
+        let inset: CGFloat = fullscreen ? 0 : 8
+        return contentArea
             .overlay {
                 if let dragged = draggedItemID, model.canDropToSplit(dragged, in: windowID) {
                     ContentSplitDropZone(draggedItemID: dragged, accent: model.themeColor(in: windowID)) { id, edge in
@@ -327,15 +337,16 @@ struct BrowserView: View {
                     }
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .fill(Color(nsColor: .windowBackgroundColor))
-                    .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+                    .shadow(color: .black.opacity(fullscreen ? 0 : 0.18), radius: 2, y: 1)
             )
-            .padding(.vertical, 8)
-            .padding(.trailing, 8)
-            .padding(.leading, model.isSidebarVisible ? 0 : 8)
+            .padding(.vertical, inset)
+            .padding(.trailing, inset)
+            .padding(.leading, model.isSidebarVisible && !fullscreen ? 0 : inset)
+            .ignoresSafeArea(edges: fullscreen ? .all : [])
     }
 
     @ViewBuilder

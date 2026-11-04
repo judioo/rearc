@@ -244,6 +244,9 @@ final class WKEngine: NSObject, WebEngine {
         } else {
             configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: context.websiteDataStoreIdentifier)
         }
+        // Element.requestFullscreen(): WebKit runs its own fullscreen window over
+        // the browser window and restores the page when it exits (Esc included).
+        configuration.preferences.isElementFullscreenEnabled = true
         let webView = ReArcWebView(frame: .zero, configuration: configuration)
         self.webView = webView
         super.init()

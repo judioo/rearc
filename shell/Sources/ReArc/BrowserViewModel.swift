@@ -169,6 +169,8 @@ final class BrowserViewModel {
     @ObservationIgnored var historySaveWorkItem: DispatchWorkItem?
     /// Last URL recorded per tab: a commit and its load-stop report the same visit.
     @ObservationIgnored var lastRecordedVisit: [Tab.ID: String] = [:]
+    /// The page in HTML fullscreen, and what to restore when it leaves.
+    var htmlFullscreen: HTMLFullscreenSession?
     /// Tabs whose engine the shell dropped to unload them (rows dim until shown).
     var unloadedTabIDs: Set<Tab.ID> = []
     /// Last time each tab was on screen, for the automatic unload.
