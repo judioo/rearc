@@ -581,6 +581,83 @@ PiP.
   for registry tabs (WAVE-18E-REPORT), so the shell drives it. WebKit
   follows the same rules within its gesture limit.
 
+### ABI 1.31–1.38 adoption (wave 27)
+
+Follows `engine/docs/C-ABI.md` (sections 1.31–1.38),
+`engine/docs/WAVE-18F-REPORT.md` and `engine/docs/WAVE-18G-REPORT.md`. Each
+feature is gated on its minor and flag (`extension_tab_helpers` 31,
+`extension_install_prompts` 32, `extension_actions` 33,
+`autofill_suggestions` 34, `password_leak_detection` 35,
+`extension_windows` 36, `autofill_save_prompts` 37, `http_auth` 38).
+Configure still takes 1. `ChromiumRuntime` registers every adopted
+callback at `ready`, before any tab (`ChromiumExtensions.swift`,
+`ChromiumAutofill.swift`); a request for a tab the shell does not know gets
+the conservative answer (cancel, decline, dismiss, ignore). WebKit has no
+extensions or autofill, so those stay hidden there.
+
+- **Extensions toolbar.** As in Arc, pinned actions sit in the sidebar's
+  top row, beside the navigation buttons: icon, badge (Chromium's text and
+  colors, four characters at most) and a dot when blocked scripts wait for
+  a click. The puzzle button lists every extension of the tab (Chromium's
+  registry order) with its pin, then Manage Extensions (chrome://extensions)
+  and Chrome Web Store; View > Chrome Web Store opens the store too. Pins
+  are the shell's (`ExtensionPins`, user defaults). Actions are per tab and
+  re-read on every action event, which carries no state.
+- **Popups.** A click calls `ReArcTabRunExtensionAction`. A popup result
+  registers the popup tab before its created event, so it is never adopted
+  as a sidebar tab. Its registry tab attaches in a borderless panel under
+  the button (`ExtensionPopupPresenter`), sized by the renderer's resize
+  events within 25×25–800×600. It closes on the page's `window.close()`,
+  focus loss, Escape, a tab switch and a second click on its button. The
+  panel is ordered out, never closed, so its engine window registration
+  stays valid. Side-panel actions show a toast (unsupported by the engine).
+- **Prompts.** Install, re-enable, permission and uninstall confirmations
+  are NSAlert sheets on the tab's window (the key window for prompts that
+  belong to no tab), with Chromium's localized title, buttons, permission
+  lines and the extension's icon. A withdrawal closes the sheet without a
+  reply. Installed and failed notices show as a toast.
+- **Logical windows.** Arc has no tab strips, so each space is a window to
+  extensions, and so is each Little Arc window; the key window's space is
+  focused. `ExtensionWindowReporter` (pure, tested) diffs that model against
+  the engine's side effects and sends only the changes, driven by
+  observation of the store with a 2 s safety net. `tabs.create` and
+  `runtime.openOptionsPage` get a blank today tab in the current space (or
+  the window's space for an explicit window ID, never another profile's),
+  which the engine then navigates; `windows.create` opens a Little Arc;
+  activation selects the tab. Anything else is declined (answer 0).
+- **Autofill suggestions.** Chromium decides when the list shows and hides,
+  fills, previews and routes the field's keys (Up/Down select, Return and
+  Tab accept, Escape hides; the selection arrives as phase 2). The shell
+  draws address, card, password, IBAN, autocomplete and datalist rows with
+  icons in a non-activating child panel anchored to the reported field
+  bounds, below the field or above it near the screen's bottom
+  (`AutofillPopupLayout`). The panel never becomes key, since Chromium hides
+  the list when the page loses focus. A click accepts (an early accept that
+  returns busy is retried after Chromium's 500 ms guard); hover previews.
+  Password rows show fixed bullets, never the engine's label. Manage… opens
+  the URL the engine returns (chrome://settings/contactInfo, /payments,
+  /autofill or chrome://password-manager/passwords) as a tab.
+- **Save offers.** Chromium's local card and address offers appear as a
+  card at the page's top trailing corner, under a password offer: Save (or
+  Update), No Thanks (decline), and the close button (ignore). Card
+  summaries carry the network, last four, expiry and name only.
+- **HTTP auth.** Basic and Digest challenges show a sign-in sheet over that
+  tab only: challenger, the server's realm, a warning on plain http,
+  username and password. Cancel shows the server's 401 page. The
+  credentials go back once (`ReArcHttpAuthRespond`) and the fields are
+  cleared; Chromium keeps its auth cache. WebKit's `didReceive challenge`
+  uses the same sheet. Client certificates are not in the ABI.
+- **Check Passwords for Leaks.** ReArc > Check Passwords for Leaks shows the
+  default profile's `profile.password_manager_leak_detection` (on by
+  default, as in Chrome) and sets it on every open persistent profile; an
+  explicit choice is applied to profiles as they open. A managed (policy)
+  profile keeps its policy; off-the-record profiles never check.
+
+Not adopted yet: ABI 1.39 `link_open_requests` (modified link clicks routed
+to host tab creation, which would replace the wave 26 ⌥⌘-click and
+background-tab paths) and engine wave 18h's DevTools, both committed while
+this wave ran.
+
 ### Self-test
 
 The self-test:
@@ -737,7 +814,28 @@ The self-test:
     and Back on the key Little Arc; ⌥⌘-click on a `target=_blank` link
     adopted as a Little Arc; an Air Traffic Control rule sending a GetURL
     link to a Little Arc; and the Site Control Center's zoom.
-21. Verifies every evaluation, profile request and command-bar call
+21. Wave 27, each gated on its minor and flag. Before any sign-in the
+    leak check is read (on, not managed), turned off and kept off for every
+    self-test profile, so no sign-in reaches Google's leak service. In the
+    real shell, with two local unpacked MV3 fixtures written per run
+    (`--load-extension`, never the Web Store): the popup action's title,
+    badge "7" in red and icon; pinning; the popup attached in its panel,
+    resized to its 320×180 content, `getViews({type:'popup'})` = 1, no
+    sidebar tab, then closed by its own `window.close()` (one retry if the
+    popup loads without running its script, seen once); a shell dismiss; the
+    click fixture's `tabs.create` answered with a today tab in the current
+    space, where the extension saw tab A active in the space's window; its
+    `management.uninstallSelf` confirmation as a host prompt, cancelled. A
+    datalist field shows the suggestion panel under it without taking the
+    keyboard; Down moves the selection, a click fills the value, Manage…
+    opens chrome://settings/autofill. A typed address form gives a save
+    offer, declined. HTTP Basic against the loopback fixture: Cancel shows
+    the 401 page, Sign In loads it. Input-driven steps log NOTEs when the
+    app cannot become active. Self-test runs also get engine/tests'
+    no-outside-network switches (no background networking or component
+    updates, every non-loopback name unresolvable), secure DNS off in the
+    fresh profile, and the autofill focus test switch.
+22. Verifies every evaluation, profile request and command-bar call
     context was released (`live script contexts: 0, profile contexts: 0`),
     then shuts down cleanly.
 
