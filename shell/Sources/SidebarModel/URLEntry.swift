@@ -19,8 +19,13 @@ public enum URLEntry {
             return url
         }
 
+        return searchURL(for: trimmed)
+    }
+
+    /// The web search for `text` (command bar fallback, "Search for …" in the page menu).
+    public static func searchURL(for text: String) -> URL? {
         var components = URLComponents(string: "https://duckduckgo.com/")
-        components?.queryItems = [URLQueryItem(name: "q", value: trimmed)]
+        components?.queryItems = [URLQueryItem(name: "q", value: text)]
         return components?.url
     }
 }

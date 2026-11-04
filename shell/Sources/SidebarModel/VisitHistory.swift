@@ -213,10 +213,13 @@ public enum DownloadListFile {
     public struct Contents: Codable, Equatable, Sendable {
         public var version = 1
         public var directory: String?
+        /// "Ask where to save each file" (absent in files from before wave 22: off).
+        public var askWhereToSave: Bool?
         public var list: DownloadList
 
-        public init(directory: String? = nil, list: DownloadList = DownloadList()) {
+        public init(directory: String? = nil, askWhereToSave: Bool? = nil, list: DownloadList = DownloadList()) {
             self.directory = directory
+            self.askWhereToSave = askWhereToSave
             self.list = list
         }
     }

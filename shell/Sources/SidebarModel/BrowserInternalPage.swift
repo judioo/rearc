@@ -48,6 +48,13 @@ public enum BrowserInternalPage: String, CaseIterable, Hashable, Sendable {
         NavigationURLPolicy.allows(url, engine: engine)
     }
 
+    /// Chromium's per-site page (permissions and their reset) for a serialized origin.
+    public static func siteDetailsURL(origin: String) -> URL? {
+        var components = URLComponents(string: "chrome://settings/content/siteDetails")
+        components?.queryItems = [URLQueryItem(name: "site", value: origin)]
+        return components?.url
+    }
+
     /// Chrome's singleton-tab rule: an open tab on the same WebUI host is reused.
     public func isShown(by url: URL) -> Bool {
         url.scheme?.lowercased() == "chrome" && url.host()?.lowercased() == self.url.host()
