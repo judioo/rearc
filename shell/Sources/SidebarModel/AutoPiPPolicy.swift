@@ -26,7 +26,9 @@ public enum AutoPiPDecision: Equatable, Sendable {
     case suppress(reason: String)
 }
 
-/// Pure auto-PiP decision engine (Chromium handles real PiP in the future engine).
+/// Pure auto-PiP decisions: window occlusion (Arc
+/// `autoPictureInPictureOnWindowOccluded`) and switching away from a tab
+/// whose video plays (Arc's automatic Picture in Picture).
 public enum AutoPiPPolicy {
 
     public static func effectiveHostPreference(
@@ -73,5 +75,48 @@ public enum AutoPiPPolicy {
         var copy = settings
         copy.perHost[host] = .snoozedUntil(now.addingTimeInterval(duration))
         return copy
+    }
+
+    /// Switching tabs: the tab that left the screen with a playing video goes
+    /// into Picture in Picture (one at a time: the engine keeps a single PiP
+    /// window), and a tab ReArc put there leaves it when it is shown again.
+    public static func tabSwitchPlan(
+        previouslyVisible: Set<UUID>,
+        nowVisible: Set<UUID>,
+        media: [UUID: WebMediaState],
+        hosts: [UUID: String],
+        autoEntered: Set<UUID>,
+        isEnabled: Bool,
+        settings: AutoPiPPolicyState,
+        now: Date
+    ) -> AutoPiPTabSwitchPlan {
+        var plan = AutoPiPTabSwitchPlan()
+        plan.exit = nowVisible.subtracting(previouslyVisible)
+            .filter { autoEntered.contains($0) && media[$0]?.isPictureInPicture == true }
+            .sorted { $0.uuidString < $1.uuidString }
+        // A video already in PiP (that is not leaving it now) keeps the window.
+        let otherInPiP = media.contains { $0.value.isPictureInPicture && !plan.exit.contains($0.key) }
+        guard isEnabled, !otherInPiP else { return plan }
+        let hidden = previouslyVisible.subtracting(nowVisible).sorted { $0.uuidString < $1.uuidString }
+        let eligible = hidden.filter { id in
+            guard let state = media[id], state.isPlaying, state.canPictureInPicture, !state.isPictureInPicture,
+                  let host = hosts[id], !host.isEmpty else { return false }
+            return effectiveHostPreference(host: host, settings: settings, now: now) == .enabled
+        }
+        // Prefer the tab you can hear (a muted autoplay preview is not what you were watching).
+        plan.enter = eligible.first { media[$0]?.isAudible == true } ?? eligible.first
+        return plan
+    }
+}
+
+public struct AutoPiPTabSwitchPlan: Equatable, Sendable {
+    /// The hidden tab to put in Picture in Picture.
+    public var enter: UUID?
+    /// Shown tabs to bring back from Picture in Picture.
+    public var exit: [UUID] = []
+
+    public init(enter: UUID? = nil, exit: [UUID] = []) {
+        self.enter = enter
+        self.exit = exit
     }
 }

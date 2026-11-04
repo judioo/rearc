@@ -29,6 +29,10 @@ public enum AppCommandAction: Equatable, Hashable {
     case unmuteAllTabs
     case pauseAllMedia
     case snoozeAutoPiPForSite
+    /// Enter or leave Picture in Picture for the selected tab's video.
+    case togglePictureInPicture
+    case printPage
+    case exportPageAsPDF
     case newBoostForSite
     case manageBoosts
     case toggleBoost(UUID)
@@ -198,6 +202,11 @@ public struct AppCommand: Equatable, Identifiable {
         case .snoozeAutoPiPForSite:
             guard let tab = store.selectedTab else { return false }
             return tab.url.host() != nil
+        case .togglePictureInPicture:
+            guard let id = store.selectedTabID, let media = context.mediaByTab[id] else { return false }
+            return media.canPictureInPicture || media.isPictureInPicture
+        case .printPage, .exportPageAsPDF:
+            return store.selectedTab != nil
         case .newBoostForSite:
             guard let tab = store.selectedTab else { return false }
             return BoostScopeMatcher.urlIsEligibleForBoosts(tab.url)
@@ -481,6 +490,27 @@ public enum AppCommandRegistry {
                 keywords: ["pip", "picture", "picture-in-picture", "snooze", "auto", "site"],
                 minQueryLength: 2,
                 action: .snoozeAutoPiPForSite
+            ),
+            AppCommand(
+                id: "picture-in-picture",
+                title: "Picture in Picture",
+                keywords: ["pip", "picture-in-picture", "float", "video", "popout", "exit"],
+                minQueryLength: 2,
+                action: .togglePictureInPicture
+            ),
+            AppCommand(
+                id: "print-page",
+                title: "Print…",
+                keywords: ["print", "printer", "paper"],
+                minQueryLength: 2,
+                action: .printPage
+            ),
+            AppCommand(
+                id: "export-pdf",
+                title: "Export as PDF…",
+                keywords: ["pdf", "save", "export", "print"],
+                minQueryLength: 2,
+                action: .exportPageAsPDF
             ),
             AppCommand(
                 id: "new-boost-site",
