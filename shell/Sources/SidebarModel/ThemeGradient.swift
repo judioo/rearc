@@ -29,18 +29,19 @@ public struct ThemeGradient: Hashable, Sendable {
 
     /// The theme in one appearance. Light draws the stops over white, as the
     /// shader does with `translucencyStyle: light`. Arc's dark treatment is
-    /// not known (THEMES.md §8); ReArc darkens each stop to 40 % of its
-    /// OKLab lightness over black, so the hue survives.
+    /// not known (THEMES.md §8); ReArc darkens each stop to a third of its
+    /// OKLab lightness, keeps (and lifts) its chroma so the hue survives, and
+    /// lays it over the theme's dark `background` role instead of black.
     public init(theme: SpaceTheme, dark: Bool) {
         let stops = theme.stops.map { stop -> OKLab in
             let lab = stop.spaceColor.oklab
-            return dark ? OKLab(l: lab.l * 0.4, a: lab.a * 0.7, b: lab.b * 0.7) : lab
+            return dark ? OKLab(l: lab.l * 0.33, a: lab.a * 1.4, b: lab.b * 1.4) : lab
         }
         self.init(
             base: Array(stops.prefix(2)),
             overlay: stops.count > 2 ? stops[2] : nil,
             alpha: theme.intensity,
-            underlay: dark ? .black : .white
+            underlay: dark ? SpaceThemeRoles(theme: theme).dark.background : .white
         )
     }
 

@@ -417,13 +417,10 @@ struct BrowserView: View {
     static let cardRadius: CGFloat = 8
 
     /// About 70 % white over the theme in light (`#F6F4FA` → `#FAF7F7` on the
-    /// default); the dark background role, mostly opaque, in dark.
+    /// default); a near-black wash over it in dark (Arc's dark card is
+    /// unobserved, §8).
     private var cardFill: Color {
-        let theme = model.space(in: windowID).theme
-        if themeChrome.isDark {
-            return Color(SpaceThemeRoles(theme: theme).dark.backgroundExtra).opacity(0.88)
-        }
-        return Color.white.opacity(0.7)
+        themeChrome.isDark ? Color(white: 0.1).opacity(0.85) : Color.white.opacity(0.7)
     }
 
     @ViewBuilder

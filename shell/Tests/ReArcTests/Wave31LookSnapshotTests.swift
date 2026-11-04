@@ -61,6 +61,11 @@ final class Wave31LookSnapshotTests: XCTestCase {
         try FileManager.default.copyItem(at: URL(fileURLWithPath: fixture), to: copy)
         let persistence = SidebarFilePersistence(fileURL: copy)
         let store = SidebarFilePersistence.loadStore(persistence: persistence)
+        if env["REARC_LOOK_DARK"] != nil {
+            var theme = store.spaces[0].theme
+            theme.appearance = .dark
+            store.setSpaceTheme(store.spaces[0].id, theme: theme)
+        }
         let model = BrowserViewModel(store: store, persistence: persistence, syncEngine: LocalSyncEngine(),
                                      faviconStore: FaviconStore(directory: nil))
         model.sidebarWidth = 228
