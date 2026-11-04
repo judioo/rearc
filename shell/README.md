@@ -720,6 +720,57 @@ on its minor and flag (`devtools`, `client_certificates`).
   Arc-wins keys work while a page has focus, as the monitor runs them before
   the page.
 
+### ABI 1.43 adoption (wave 32)
+
+- **Arc's media strip.** `MediaControlsStackView` replaces `MiniPlayerView`
+  at the bottom of the sidebar, 8 pt above the bottom bar (where Arc's
+  update pill would sit) with 8 pt side insets. Each strip is 33 pt tall at
+  the sidebar's width less 16 (212 pt in Arc's 228 pt sidebar), radius 8, an
+  opaque `#FDFDFF` fill (an elevated `#2B2B30` in dark mode) and a soft
+  all-round shadow. It has five equal slots: favicon (back to tab), previous,
+  play/pause, next and volume. Glyphs use `PlaybackControlForeground`, black at
+  50 % (white at 66 % in dark mode); disabled previous and next are at 35 % of
+  that. Hover draws a round highlight behind a glyph. Hovering the card
+  expands it upward with a title row (favicon, title, site, "Close Mini
+  Player") over grouped transport controls, "Open Picture in Picture" when it
+  applies, and the speaker. It collapses 350 ms after the pointer leaves.
+- **When strips show** (`SidebarModel.MediaControlsModel`, MINI-PLAYER.md
+  §3.2). A tab gets an entry when it starts playing, and its strip shows while
+  the tab is not on screen in that window (its space's selection, or any pane
+  of its split). A paused strip stays. The entry goes when the session ends
+  (no playback, pause or sound), when the tab closes, or after Close; a closed
+  strip comes back the next time the tab starts playing. Several sources stack
+  newest first, three at most: collapsed, the front card with two peeking
+  behind it; on hover, a list.
+- **Track state.** `ReArcTabGetMediaActions` (ABI 1.43) gives the media
+  session's actions on every media event, so previous and next are enabled
+  only when the page handles them. Below 1.43 both stay enabled and the engine
+  rejects an unsupported skip. WebKit reports paused media but no track
+  actions.
+- **Live video (`pip_embedded`).** Engine patch `tab/062-embedded-video-overlay`
+  renders Chromium's video-PiP surface into an engine NSView
+  (`ReArcEngineSetVideoOverlayCallback`) instead of Chromium's floating
+  window. `ChromiumRuntime` keeps a `ChromiumVideoOverlay` per overlay and
+  `ChromiumEngine.liveVideo` exposes the shown one (`LiveVideoHandle`). The
+  same view moves between hosts, and the video keeps its native frame rate
+  while its tab is hidden.
+  - **Video in Sidebar** (ReArc > Video in Sidebar, on by default; a ReArc
+    addition the user asked for): the video sits in the sidebar above its
+    strip row in one 8 pt card, 16:9 at the sidebar's width (height from the
+    video's aspect, clamped to 90–160 pt). Hover shows play/pause, back to tab,
+    pop out, close and a scrubber. A click on the video goes to the tab. With
+    the setting on, switching away from a playing video enters PiP even when
+    Automatic Picture in Picture is off, since that is how the video gets to
+    the sidebar. With the sidebar hidden, the video uses the panel.
+  - **Arc mode** (Video in Sidebar off): the video plays in a floating panel
+    (`LiveVideoPanelController`, a non-activating panel above other windows)
+    and its strip is hidden. The panel's minimize collapses it into the strip,
+    whose "Open Picture in Picture" pops it back out. A video popped out from
+    the sidebar gets a "Back to Sidebar" button instead of minimize.
+  - Close (×) ends PiP and pauses; the paused strip stays. Ending the media
+    or closing the tab removes the video. Back to tab ends the session through
+    the engine (PiP phase 2) and selects the tab.
+
 ### Self-test
 
 The self-test:
@@ -1049,7 +1100,10 @@ Production needs:
 ### Chromium limits
 
 - **Picture in Picture** is video only (no Document PiP). Host-started PiP
-  needs a normal player with unmuted audio (no WebRTC or canvas streams).
+  needs a normal player with unmuted audio (no WebRTC or canvas streams), so
+  the live video in the sidebar is limited to those players; other media get
+  the strip only. The strip's volume control is mute only (no per-tab volume
+  slider), and there are no camera or microphone controls for capture tabs.
 - **Unhandled drops navigate.** A file or link dropped outside a page's drop
   target opens in that tab, as in Chrome; the engine gives the host no veto.
 - **No print preview.** Printing shows the native print panel over the
