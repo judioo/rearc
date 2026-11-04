@@ -29,6 +29,9 @@ struct TabContextMenu: View {
                 .disabled(!tab.isAwayFromSavedURL)
         }
         Divider()
+        Button("Unload Tab") { model.unloadTab(tab.id) }
+            .disabled(!model.canUnloadTab(tab.id))
+            .help("Frees the page's memory; the tab stays here and reloads when you open it")
         Button("Rename…") { model.beginRename(.tab(tab.id)) }
         Button("Duplicate") { model.duplicateTab(tab.id) }
         Button("Copy Link") { model.copyURL(of: tab.id) }

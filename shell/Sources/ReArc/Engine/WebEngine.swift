@@ -126,3 +126,28 @@ protocol BrowserWindowPresenting: AnyObject {
     func dismissLittleArcWindow(_ id: LittleArcWindow.ID)
     func presentPrivateWindow(_ window: PrivateWindowModel)
 }
+
+/// What an unload request did.
+enum DiscardOutcome: Equatable {
+    case discarded
+    /// The page is visible, loading, playing or guarded; it can be tried again later.
+    case refusedForNow
+    /// The engine cannot discard this page (no `tab_discard`, no tab).
+    case unsupported
+}
+
+/// Engines that can unload a hidden page and keep its tab, history and
+/// scripts (Chromium `tab_discard`, ABI 1.25). The page reloads when it is
+/// shown again. WebKit has no such call: the shell drops its engine instead.
+protocol TabDiscarding: AnyObject {
+    var isDiscarded: Bool { get }
+    func discard() -> DiscardOutcome
+}
+
+/// Engines whose pages can ask for fullscreen through the shell window
+/// (Chromium `html_fullscreen`, ABI 1.27; WKWebView runs its own fullscreen window).
+protocol PageFullscreenControlling: AnyObject {
+    var isPageFullscreen: Bool { get }
+    /// The host left fullscreen: ask the page to leave too.
+    func exitPageFullscreen()
+}

@@ -11,6 +11,8 @@ struct TabRowView<Menu: View>: View {
     let showsAudibleIndicator: Bool
     var isMuted = false
     var isDropTarget = false
+    /// Unloaded (discarded) until shown again: the icon dims.
+    var isUnloaded = false
     let onSelect: () -> Void
     let onClose: () -> Void
     var onMute: (() -> Void)? = nil
@@ -25,6 +27,9 @@ struct TabRowView<Menu: View>: View {
         HStack(spacing: 8) {
             SiteIconView(image: favicon, token: tab.faviconToken, size: 16)
                 .frame(width: 18, height: 18)
+                .saturation(isUnloaded ? 0 : 1)
+                .opacity(isUnloaded ? 0.4 : 1)
+                .help(isUnloaded ? "Unloaded — reloads when you open it" : "")
 
             Text(tab.displayTitle)
                 .font(.callout)

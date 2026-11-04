@@ -100,6 +100,7 @@ struct TabSectionView: View {
                 showsAudibleIndicator: model.showsAudibleIndicator(for: tab.id),
                 isMuted: model.isUserMuted(tab.id),
                 isDropTarget: isDropInto(tab.id),
+                isUnloaded: model.isTabUnloaded(tab.id),
                 onSelect: { model.selectTab(tab.id) },
                 onClose: { model.closeTab(tab.id) },
                 onMute: { model.toggleMute(tab.id) },

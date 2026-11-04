@@ -23,6 +23,13 @@ struct ArchiveView: View {
                 }
                 .fixedSize()
                 .help("Today tabs in \(store.activeProfile.name) not selected for this long move here")
+                Menu("Unload Inactive Tabs: \(model.tabUnloadThreshold.title)") {
+                    ForEach(TabUnloadThreshold.allCases, id: \.self) { threshold in
+                        Button(threshold.title) { model.tabUnloadThreshold = threshold }
+                    }
+                }
+                .fixedSize()
+                .help("Tabs not shown for this long are unloaded: they stay in the sidebar and reload when shown")
             }
             .padding([.horizontal, .top], 16)
 

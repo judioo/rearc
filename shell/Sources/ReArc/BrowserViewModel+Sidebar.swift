@@ -470,10 +470,12 @@ extension BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
-    /// Checks every five minutes; the shortest threshold is 12 hours.
+    /// Checks every five minutes (auto-archive's shortest threshold is 12
+    /// hours, the tab unload's 30 minutes).
     func startAutoArchiveTimer() {
         let timer = Timer(timeInterval: 300, repeats: true) { [weak self] _ in
             self?.runAutoArchive()
+            self?.runAutoUnload()
         }
         RunLoop.main.add(timer, forMode: .common)
         autoArchiveTimer?.invalidate()

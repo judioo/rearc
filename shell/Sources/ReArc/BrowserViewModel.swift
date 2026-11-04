@@ -169,6 +169,15 @@ final class BrowserViewModel {
     @ObservationIgnored var historySaveWorkItem: DispatchWorkItem?
     /// Last URL recorded per tab: a commit and its load-stop report the same visit.
     @ObservationIgnored var lastRecordedVisit: [Tab.ID: String] = [:]
+    /// Tabs whose engine the shell dropped to unload them (rows dim until shown).
+    var unloadedTabIDs: Set<Tab.ID> = []
+    /// Last time each tab was on screen, for the automatic unload.
+    @ObservationIgnored var tabLastShown: [Tab.ID: Date] = [:]
+    /// Unload inactive tabs after this long unseen (remembered).
+    var tabUnloadThreshold: TabUnloadThreshold = .load(from: .standard) {
+        didSet { tabUnloadThreshold.save(to: tabUnloadDefaults) }
+    }
+    @ObservationIgnored var tabUnloadDefaults: UserDefaults = .standard
 
     init(
         store: SidebarStore? = nil,
@@ -343,16 +352,36 @@ final class BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
+    /// Back to the saved URL, unloaded. A Chromium page still on its saved
+    /// URL is discarded in place (history kept); otherwise the engine goes.
     func unloadPinnedTab(_ id: Tab.ID) {
+        let atSavedURL = store.tab(withID: id).map { !$0.isAwayFromSavedURL } ?? false
+        let engine = discardableEngine(for: id)
         guard store.unloadPinnedTab(id) else { return }
-        releaseEngine(for: id)
-        loadSelectedIfNeeded()
+        finishUnload(id, discarding: atSavedURL ? engine : nil)
     }
 
     func unloadFavorite(_ id: Tab.ID) {
+        let engine = discardableEngine(for: id)
         store.unloadFavorite(id)
-        releaseEngine(for: id)
+        finishUnload(id, discarding: engine)
+    }
+
+    private func discardableEngine(for id: Tab.ID) -> (any WebEngine)? {
+        guard let tab = store.tab(withID: id),
+              let engine = engineHost.engine(forTabID: id, profileID: profileID(for: tab)),
+              engine is TabDiscarding else { return nil }
+        return engine
+    }
+
+    private func finishUnload(_ id: Tab.ID, discarding engine: (any WebEngine)?) {
+        if engine == nil {
+            releaseEngine(for: id)
+            unloadedTabIDs.insert(id)
+        }
+        // The selection moved; its page shows (and this one hides) before the discard.
         loadSelectedIfNeeded()
+        if let engine { unloadEngine(engine, tabID: id, dropIfRefused: true) }
     }
 
     /// Remove from Favorites: deletes the favorite.
@@ -508,6 +537,7 @@ final class BrowserViewModel {
     /// Loads the selected tab's URL into its engine if the engine isn't
     /// already showing it (fresh engine or URL changed in the model).
     func loadSelectedIfNeeded() {
+        noteVisibleTabsShown()
         if store.selectedEaselRef != nil { return }
         if let split = activeSplit {
             for tab in split.tabs {
