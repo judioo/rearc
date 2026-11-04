@@ -101,6 +101,8 @@ struct ChromiumServiceEvent {
     var faviconCleared: Bool
     var playback: UInt32
     var audible, muted, hasMetadata: Bool
+    /// Meaningful only with the ABI 1.30 PiP callback registered.
+    var pipAvailable, pipActive: Bool
     var title, artist, album: String?
     var security: UInt32
     var href: String?
@@ -118,6 +120,8 @@ struct ChromiumServiceEvent {
         audible = e.audible
         muted = e.muted
         hasMetadata = e.has_metadata
+        pipAvailable = e.pip_available
+        pipActive = e.pip_active
         title = e.title.map { String(cString: $0) }
         artist = e.artist.map { String(cString: $0) }
         album = e.album.map { String(cString: $0) }
@@ -132,7 +136,9 @@ struct ChromiumServiceEvent {
             hasMetadata: hasMetadata,
             title: title,
             artist: artist,
-            album: album
+            album: album,
+            pipAvailable: pipAvailable,
+            pipActive: pipActive
         )
     }
 }
@@ -351,6 +357,71 @@ private let fullscreenCallback: ReArcFullscreenCallback = { context, event in
     MainActor.assumeIsolated { runtime(from: context).handleFullscreen(copied) }
 }
 
+/// Owned copy of `ReArcPrintRequestEvent` (ABI 1.28): the page asked to print.
+struct ChromiumPrintRequestEvent: Equatable {
+    var profileID, tabID, contentGeneration: UInt64
+    /// 0 window.print(), 1 another page request.
+    var source: UInt32
+}
+
+private let printCallback: ReArcPrintCallback = { context, event in
+    guard let e = event?.pointee else { return }
+    let copied = ChromiumPrintRequestEvent(
+        profileID: e.profile_id, tabID: e.tab_id, contentGeneration: e.content_generation, source: e.source
+    )
+    MainActor.assumeIsolated { runtime(from: context).handlePrintRequest(copied) }
+}
+
+/// Owned copy of `ReArcPictureInPictureEvent` (ABI 1.30).
+struct ChromiumPictureInPictureEvent: Equatable {
+    enum Phase: UInt32 {
+        case entered = 0, exited, backToTab
+    }
+
+    var profileID, tabID, contentGeneration: UInt64
+    var phase: Phase
+}
+
+private let pictureInPictureCallback: ReArcPictureInPictureCallback = { context, event in
+    guard let e = event?.pointee, let phase = ChromiumPictureInPictureEvent.Phase(rawValue: e.phase) else { return }
+    let copied = ChromiumPictureInPictureEvent(
+        profileID: e.profile_id, tabID: e.tab_id, contentGeneration: e.content_generation, phase: phase
+    )
+    MainActor.assumeIsolated { runtime(from: context).handlePictureInPicture(copied) }
+}
+
+/// Context for one `ReArcTabPrintToPDF`. Retained (+1) across the C call;
+/// released once, by the completion or on synchronous rejection.
+final class PrintToPDFBox {
+    static var live = 0
+
+    let body: (ReArcStatus, UInt64, Data?) -> Void
+
+    init(_ body: @escaping (ReArcStatus, UInt64, Data?) -> Void) {
+        self.body = body
+        Self.live += 1
+    }
+
+    deinit {
+        Self.live -= 1
+    }
+}
+
+let printToPDFCallback: ReArcPdfCallback = { context, status, _, generation, data, size in
+    guard let context else {
+        if let data { ReArcBufferFree(data) }
+        return
+    }
+    var pdf: Data?
+    if let data {
+        if status == .rearcOK, size > 0 { pdf = Data(bytes: data, count: size) }
+        // The host owns the bytes even when the result is stale or rejected.
+        ReArcBufferFree(data)
+    }
+    let box = Unmanaged<PrintToPDFBox>.fromOpaque(context).takeRetainedValue()
+    MainActor.assumeIsolated { box.body(status, generation, pdf) }
+}
+
 /// Owned copy of `ReArcDownloadEvent`; its strings die with the callback.
 struct ChromiumDownloadEvent {
     var profileID: UInt64
@@ -418,6 +489,13 @@ final class ChromiumRuntime {
     var onDownloadEvent: ((ChromiumDownloadEvent) -> Void)?
     /// Page fullscreen requests and exits (ABI 1.27); without a handler the engine refuses requests.
     var onFullscreenEvent: ((ChromiumFullscreenEvent) -> Void)?
+    /// PiP's back-to-tab button (ABI 1.30 phase 2): present and focus the tab.
+    var onPictureInPictureBackToTab: ((ChromiumEngine) -> Void)?
+    /// Print requests received and PiP events, per kind (logs, self-test).
+    private(set) var printRequests = 0
+    private(set) var pictureInPictureEvents: [ChromiumPictureInPictureEvent] = []
+    /// The drop policy the engine accepted at `ready` (nil: drops into pages stay aborted).
+    private(set) var dropPolicy: PageDropPolicy?
     /// Default download directory, written to every open profile's Chromium
     /// download prefs (`ReArcDownloadSetPolicy`, save without asking).
     var downloadDirectory: URL? {
@@ -540,6 +618,16 @@ final class ChromiumRuntime {
         registerPromptChannels(context: context)
         if capabilities.htmlFullscreen {
             ReArcEngineSetFullscreenCallback(fullscreenCallback, context)
+        }
+        // Wave 24 (ABI 1.28–1.30), before any tab.
+        if capabilities.printing {
+            ReArcEngineSetPrintCallback(printCallback, context)
+        }
+        if capabilities.pageDrops {
+            applyDropPolicy(.shell)
+        }
+        if capabilities.pictureInPicture {
+            ReArcEngineSetPictureInPictureCallback(pictureInPictureCallback, context)
         }
         if capabilities.downloads {
             // Before any tab exists; each profile gets its policy when it opens.
@@ -1096,6 +1184,38 @@ final class ChromiumRuntime {
         engines[event.tabID]?.value?.handleFullscreen(event)
         onFullscreenEvent?(event)
     }
+
+    fileprivate func handlePrintRequest(_ event: ChromiumPrintRequestEvent) {
+        printRequests += 1
+        ChromiumLog.info("print_request tab \(event.tabID) gen \(event.contentGeneration) source \(event.source)")
+        engines[event.tabID]?.value?.handlePrintRequest(event)
+    }
+
+    fileprivate func handlePictureInPicture(_ event: ChromiumPictureInPictureEvent) {
+        pictureInPictureEvents.append(event)
+        ChromiumLog.info("pip_event tab \(event.tabID) gen \(event.contentGeneration) phase \(event.phase)")
+        guard let engine = engines[event.tabID]?.value else { return }
+        engine.handlePictureInPicture(event)
+        if event.phase == .backToTab { onPictureInPictureBackToTab?(engine) }
+    }
+
+    /// `ReArcEngineSetDropPolicy` (ABI 1.29). Each call replaces the whole policy.
+    @discardableResult
+    func applyDropPolicy(_ policy: PageDropPolicy) -> ReArcStatus {
+        guard capabilities.pageDrops else { return ReArcStatus(REARC_UNSUPPORTED) }
+        guard policy.isValid else { return ReArcStatus(REARC_INVALID_ARGUMENT) }
+        let owned = policy.blockedTypes.map { strdup($0) }
+        defer { owned.forEach { free($0) } }
+        let pointers: [UnsafePointer<CChar>?] = owned.map { UnsafePointer($0) }
+        let status = pointers.withUnsafeBufferPointer {
+            ReArcEngineSetDropPolicy(policy.accept.rawValue, $0.baseAddress, $0.count)
+        }
+        ChromiumLog.info("drop policy accept \(policy.accept.rawValue) blocked \(policy.blockedTypes) -> \(status.rearcName)")
+        if status == .rearcOK { dropPolicy = policy }
+        return status
+    }
+
+    var livePrintContexts: Int { PrintToPDFBox.live }
 
     fileprivate func handlePageMessage(_ message: ChromiumPageMessage) {
         ChromiumLog.trace("page_message \(message.document) boost \(message.boostID) \(message.json.utf8.count) bytes")

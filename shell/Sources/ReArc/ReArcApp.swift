@@ -33,6 +33,7 @@ struct ReArcApp: App {
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Set ReArc as Default Browser…") { model.setAsDefaultBrowser() }
+                Toggle("Automatic Picture in Picture", isOn: $model.automaticPictureInPicture)
                 Picker("External Links", selection: $model.externalLinkDestination) {
                     ForEach(ExternalLinkDestination.allCases, id: \.self) { destination in
                         Text(destination.menuTitle).tag(destination)
@@ -67,6 +68,9 @@ struct ReArcApp: App {
                 }
                 .keyboardShortcut("s")
             }
+            CommandGroup(replacing: .printItem) {
+                ShellMenuButtons(groups: ShellMenus.printing(model))
+            }
             // Edit > Find: the page's find bar replaces the text-field finder.
             CommandGroup(replacing: .textEditing) {
                 ShellMenuButtons(groups: ShellMenus.find(model))
@@ -75,6 +79,8 @@ struct ReArcApp: App {
                 ShellMenuButtons(groups: ShellMenus.navigation(model))
                 Divider()
                 ShellMenuButtons(groups: ShellMenus.downloads(model))
+                Divider()
+                ShellMenuButtons(groups: ShellMenus.pictureInPicture(model))
                 Divider()
                 Button("Zoom In") { model.zoom(.zoomIn) }
                     .keyboardShortcut("=")

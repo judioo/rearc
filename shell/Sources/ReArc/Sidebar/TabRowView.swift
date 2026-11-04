@@ -13,9 +13,12 @@ struct TabRowView<Menu: View>: View {
     var isDropTarget = false
     /// Unloaded (discarded) until shown again: the icon dims.
     var isUnloaded = false
+    /// Its video plays in the Picture in Picture window; the badge brings it back.
+    var isInPictureInPicture = false
     let onSelect: () -> Void
     let onClose: () -> Void
     var onMute: (() -> Void)? = nil
+    var onPictureInPicture: (() -> Void)? = nil
     var onCloseOption: (() -> Void)? = nil
     /// Set for a pinned tab away from its saved URL: shows "Back to pinned URL".
     var onReset: (() -> Void)? = nil
@@ -43,6 +46,19 @@ struct TabRowView<Menu: View>: View {
             }
 
             Spacer(minLength: 0)
+
+            if isInPictureInPicture {
+                Button {
+                    onPictureInPicture?()
+                } label: {
+                    Image(systemName: "pip.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Playing in Picture in Picture — click to bring the video back")
+                .accessibilityLabel("Picture in Picture")
+            }
 
             if showsAudibleIndicator {
                 Button {

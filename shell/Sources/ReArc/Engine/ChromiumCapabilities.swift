@@ -34,6 +34,9 @@ struct ChromiumCapabilities: Equatable {
     static let tabDiscardFeature = "tab_discard"
     static let searchAutocompleteFeature = "search_autocomplete"
     static let htmlFullscreenFeature = "html_fullscreen"
+    static let printingFeature = "printing"
+    static let pageDropsFeature = "page_drops"
+    static let pictureInPictureFeature = "picture_in_picture"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -64,6 +67,9 @@ struct ChromiumCapabilities: Equatable {
         tabDiscardFeature: 25,
         searchAutocompleteFeature: 26,
         htmlFullscreenFeature: 27,
+        printingFeature: 28,
+        pageDropsFeature: 29,
+        pictureInPictureFeature: 30,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -122,6 +128,12 @@ struct ChromiumCapabilities: Equatable {
     var searchAutocomplete: Bool
     /// Page fullscreen requests (`ReArcEngineSetFullscreenCallback`, `ReArcTabExitFullscreen`).
     var htmlFullscreen: Bool
+    /// Print requests (`ReArcEngineSetPrintCallback`) and `ReArcTabPrintToPDF`.
+    var printing: Bool
+    /// Drops into pages under `ReArcEngineSetDropPolicy` (before it, drops are aborted).
+    var pageDrops: Bool
+    /// Video PiP (`ReArcEngineSetPictureInPictureCallback`, `ReArcTabSetPictureInPicture`).
+    var pictureInPicture: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -158,6 +170,9 @@ struct ChromiumCapabilities: Equatable {
         tabDiscard = adopted(Self.tabDiscardFeature)
         searchAutocomplete = adopted(Self.searchAutocompleteFeature)
         htmlFullscreen = adopted(Self.htmlFullscreenFeature)
+        printing = adopted(Self.printingFeature)
+        pageDrops = adopted(Self.pageDropsFeature)
+        pictureInPicture = adopted(Self.pictureInPictureFeature)
     }
 
     /// Inspect in the page menu. No engine advertises a DevTools frontend
@@ -210,6 +225,9 @@ struct ChromiumCapabilities: Equatable {
             (Self.tabDiscardFeature, tabDiscard),
             (Self.searchAutocompleteFeature, searchAutocomplete),
             (Self.htmlFullscreenFeature, htmlFullscreen),
+            (Self.printingFeature, printing),
+            (Self.pageDropsFeature, pageDrops),
+            (Self.pictureInPictureFeature, pictureInPicture),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

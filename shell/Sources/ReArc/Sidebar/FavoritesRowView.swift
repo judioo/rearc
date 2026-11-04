@@ -25,13 +25,14 @@ struct FavoritesRowView: View {
                         favicon: model.favicon(for: tab),
                         isSelected: tab.id == selectedID,
                         isUnloaded: model.isTabUnloaded(tab.id),
+                        isInPictureInPicture: model.isPictureInPicture(tab.id),
                         insertion: insertion(for: tab.id)
                     )
                     .onTapGesture { model.selectTab(tab.id) }
                     .contextMenu { TabContextMenu(model: model, tab: tab) }
                     .onDrag {
                         draggedTabID = tab.id
-                        return NSItemProvider(object: tab.id.uuidString as NSString)
+                        return SidebarDragPayload.itemProvider(for: tab.id)
                     }
                     .onDrop(
                         of: [.plainText],
@@ -123,6 +124,7 @@ private struct FavoriteIconView: View {
     let favicon: NSImage?
     let isSelected: Bool
     var isUnloaded = false
+    var isInPictureInPicture = false
     let insertion: SidebarDropPosition?
     @State private var isHovering = false
 
@@ -143,6 +145,17 @@ private struct FavoriteIconView: View {
                         .fill(Color.accentColor)
                         .frame(width: 7, height: 7)
                         .offset(x: 2, y: -2)
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if isInPictureInPicture {
+                    Image(systemName: "pip.fill")
+                        .font(.system(size: 8, weight: .bold))
+                        .padding(2)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 3))
+                        .offset(x: 2, y: 2)
+                        .help("Playing in Picture in Picture")
+                        .accessibilityLabel("Picture in Picture")
                 }
             }
             .overlay(alignment: insertion == .before ? .leading : .trailing) {

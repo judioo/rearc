@@ -10,6 +10,9 @@ struct ChromiumMediaSnapshot: Equatable {
     var title: String?
     var artist: String?
     var album: String?
+    /// ABI 1.30 with a PiP callback registered; false otherwise.
+    var pipAvailable = false
+    var pipActive = false
 }
 
 /// Maps engine media events onto `WebMediaState` (C-ABI.md "Services
@@ -21,7 +24,9 @@ enum ChromiumMediaMapping {
         var next = state
         next.isPlaying = snapshot.playback == 0
         next.isAudible = snapshot.audible
-        next.canPictureInPicture = false
+        // Real only while the shell's PiP callback is registered (ABI 1.30); false before.
+        next.canPictureInPicture = snapshot.pipAvailable
+        next.isPictureInPicture = snapshot.pipActive
         if snapshot.hasMetadata {
             next.title = nonEmpty(snapshot.title)
             next.artist = nonEmpty(snapshot.artist)

@@ -101,9 +101,11 @@ struct TabSectionView: View {
                 isMuted: model.isUserMuted(tab.id),
                 isDropTarget: isDropInto(tab.id),
                 isUnloaded: model.isTabUnloaded(tab.id),
+                isInPictureInPicture: model.isPictureInPicture(tab.id),
                 onSelect: { model.selectTab(tab.id) },
                 onClose: { model.closeTab(tab.id) },
                 onMute: { model.toggleMute(tab.id) },
+                onPictureInPicture: { model.setPictureInPicture(false, tabID: tab.id) },
                 onCloseOption: { model.unsplitTabIfInSplit(tab.id) },
                 onReset: tab.isAwayFromSavedURL ? { model.resetTabToSavedURL(tab.id) } : nil
             ) {
@@ -177,10 +179,10 @@ struct SidebarDropRow<Content: View>: View {
             .overlay(alignment: .bottom) { insertionLine(.after) }
             .onDrag {
                 draggedItemID = entry.id
-                return NSItemProvider(object: entry.id.uuidString as NSString)
+                return SidebarDragPayload.itemProvider(for: entry.id)
             }
             .onDrop(
-                of: [.plainText],
+                of: SidebarURLDropLoader.acceptedTypes,
                 delegate: SidebarRowDropDelegate(
                     target: entry,
                     rowHeight: height,
@@ -212,6 +214,10 @@ struct SidebarRowDropDelegate: DropDelegate {
     @Binding var dropState: SidebarDropState?
 
     private func position(for info: DropInfo) -> SidebarDropPosition? {
+        if draggedItemID == nil, SidebarURLDropLoader.hasLinks(info) {
+            // A link from a page or another app: a new tab next to this row.
+            return info.location.y / max(rowHeight, 1) < 0.5 ? .before : .after
+        }
         guard let draggedItemID, draggedItemID != target.id,
               let dragged = model.store.entry(withID: draggedItemID) else { return nil }
         let fraction = info.location.y / max(rowHeight, 1)
@@ -233,7 +239,7 @@ struct SidebarRowDropDelegate: DropDelegate {
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        draggedItemID != nil
+        draggedItemID != nil || SidebarURLDropLoader.hasLinks(info)
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -243,7 +249,7 @@ struct SidebarRowDropDelegate: DropDelegate {
         }
         let state = SidebarDropState(targetID: target.id, position: position)
         if dropState != state { dropState = state }
-        return DropProposal(operation: .move)
+        return DropProposal(operation: draggedItemID == nil ? .copy : .move)
     }
 
     func dropExited(info: DropInfo) {
@@ -254,6 +260,12 @@ struct SidebarRowDropDelegate: DropDelegate {
         defer {
             draggedItemID = nil
             dropState = nil
+        }
+        if draggedItemID == nil, let position = position(for: info) {
+            let target = target.id, model = model
+            return SidebarURLDropLoader.load(info) { urls in
+                model.openDroppedURLs(urls, relativeTo: target, after: position == .after)
+            }
         }
         guard let draggedItemID, let position = position(for: info) else { return false }
         withAnimation(.easeInOut(duration: 0.15)) {
@@ -305,14 +317,16 @@ struct SectionEndDropZone: View {
         }
         .frame(maxWidth: .infinity, minHeight: placeholder == nil ? 10 : nil)
         .contentShape(Rectangle())
-        .onDrop(of: [.plainText], delegate: EndDropDelegate(zone: self, isTargeted: $isTargeted))
+        .onDrop(of: SidebarURLDropLoader.acceptedTypes, delegate: EndDropDelegate(zone: self, isTargeted: $isTargeted))
     }
 
     private struct EndDropDelegate: DropDelegate {
         let zone: SectionEndDropZone
         @Binding var isTargeted: Bool
 
-        func validateDrop(info: DropInfo) -> Bool { zone.draggedItemID != nil }
+        func validateDrop(info: DropInfo) -> Bool {
+            zone.draggedItemID != nil || SidebarURLDropLoader.hasLinks(info)
+        }
 
         func dropEntered(info: DropInfo) {
             isTargeted = true
@@ -320,7 +334,8 @@ struct SectionEndDropZone: View {
         }
 
         func dropUpdated(info: DropInfo) -> DropProposal? {
-            DropProposal(operation: zone.draggedItemID == nil ? .forbidden : .move)
+            if zone.draggedItemID == nil { return DropProposal(operation: SidebarURLDropLoader.hasLinks(info) ? .copy : .forbidden) }
+            return DropProposal(operation: .move)
         }
 
         func dropExited(info: DropInfo) { isTargeted = false }
@@ -328,7 +343,10 @@ struct SectionEndDropZone: View {
         func performDrop(info: DropInfo) -> Bool {
             isTargeted = false
             defer { zone.draggedItemID = nil }
-            guard let dragged = zone.draggedItemID else { return false }
+            guard let dragged = zone.draggedItemID else {
+                let model = zone.model, destination = zone.destination
+                return SidebarURLDropLoader.load(info) { urls in model.openDroppedURLs(urls, appendingTo: destination) }
+            }
             let store = zone.model.store
             let count = store.entries(in: store.resolvedParent(zone.destination)).filter { $0.id != dragged }.count
             withAnimation(.easeInOut(duration: 0.15)) {
@@ -336,5 +354,35 @@ struct SectionEndDropZone: View {
             }
             return true
         }
+    }
+}
+
+/// Reads links and files dropped on the sidebar from pages and other apps.
+enum SidebarURLDropLoader {
+    /// Sidebar drags carry their UUID as plain text (and `SidebarDragType`).
+    static let acceptedTypes: [UTType] = [.plainText, .url, .fileURL]
+
+    static func hasLinks(_ info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.url, .fileURL])
+    }
+
+    /// Loads every dropped URL, then calls `open` once on the main queue. False when nothing can load.
+    static func load(_ info: DropInfo, open: @escaping ([URL]) -> Void) -> Bool {
+        let providers = info.itemProviders(for: [.fileURL, .url])
+        guard !providers.isEmpty else { return false }
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var urls = [URL?](repeating: nil, count: providers.count)
+        for (index, provider) in providers.enumerated() {
+            group.enter()
+            _ = provider.loadObject(ofClass: NSURL.self) { object, _ in
+                lock.lock()
+                urls[index] = (object as? NSURL).map { $0 as URL }
+                lock.unlock()
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { open(urls.compactMap { $0 }) }
+        return true
     }
 }

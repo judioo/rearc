@@ -76,6 +76,34 @@ struct ContentSplitDropZone: View {
     }
 }
 
+/// What every sidebar drag carries: the item's UUID as text (read by the
+/// sidebar's own drop targets) and `SidebarDragType`, which keeps the drag
+/// away from web pages (Chromium's drop policy blocks it, `ReArcWebView`
+/// declines it) so it can only land on the shell.
+enum SidebarDragPayload {
+    static let pasteboardType = NSPasteboard.PasteboardType(SidebarDragType.identifier)
+
+    static func itemProvider(for id: UUID) -> NSItemProvider {
+        let provider = NSItemProvider(object: id.uuidString as NSString)
+        provider.registerDataRepresentation(forTypeIdentifier: SidebarDragType.identifier, visibility: .all) { completion in
+            completion(Data(id.uuidString.utf8), nil)
+            return nil
+        }
+        return provider
+    }
+
+    /// The dragged item, from the private type first, else the UUID text.
+    static func itemID(from pasteboard: NSPasteboard) -> UUID? {
+        let text = pasteboard.data(forType: pasteboardType).flatMap { String(data: $0, encoding: .utf8) }
+            ?? pasteboard.string(forType: .string)
+        return text.flatMap(UUID.init(uuidString:))
+    }
+
+    static func isSidebarDrag(_ pasteboard: NSPasteboard) -> Bool {
+        pasteboard.types?.contains(pasteboardType) == true
+    }
+}
+
 /// An AppKit drop target, so it sits above the engine's own view (WKWebView
 /// and Chromium's host view register for drags themselves). It ignores
 /// clicks (`hitTest` is nil); dragging destinations are found by drag type.
@@ -107,7 +135,7 @@ private struct SplitDropTarget: NSViewRepresentable {
 
         override init(frame: NSRect) {
             super.init(frame: frame)
-            registerForDraggedTypes([.string])
+            registerForDraggedTypes([SidebarDragPayload.pasteboardType, .string])
         }
 
         required init?(coder: NSCoder) { nil }
@@ -137,8 +165,8 @@ private struct SplitDropTarget: NSViewRepresentable {
 
         override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
             onHover?(nil)
-            let text = sender.draggingPasteboard.string(forType: .string)
-            guard let id = text.flatMap(UUID.init(uuidString:)) ?? fallbackID, let edge = edge(sender) else { return false }
+            guard let id = SidebarDragPayload.itemID(from: sender.draggingPasteboard) ?? fallbackID,
+                  let edge = edge(sender) else { return false }
             return onDrop?(id, edge) ?? false
         }
 

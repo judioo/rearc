@@ -34,7 +34,8 @@ private final class MediaStateMessageHandler: NSObject, WKScriptMessageHandler {
             isAudible: body["isAudible"] as? Bool ?? false,
             title: body["title"] as? String,
             artist: body["artist"] as? String,
-            canPictureInPicture: body["canPictureInPicture"] as? Bool ?? false
+            canPictureInPicture: body["canPictureInPicture"] as? Bool ?? false,
+            isPictureInPicture: body["isPictureInPicture"] as? Bool ?? false
         )
         onState?(state)
     }
@@ -85,19 +86,24 @@ final class WKEngine: NSObject, WebEngine {
           }
         }
         var meta = mediaSessionMeta();
+        var inPiP = !!document.pictureInPictureElement || media.some(function(el) {
+          return el.webkitPresentationMode === 'picture-in-picture';
+        });
         var payload = {
           isPlaying: isPlaying,
           isAudible: isAudible,
           title: meta.title,
           artist: meta.artist,
-          canPictureInPicture: canPiP
+          canPictureInPicture: canPiP,
+          isPictureInPicture: inPiP
         };
         if (window.webkit && window.webkit.messageHandlers[handlerName]) {
           window.webkit.messageHandlers[handlerName].postMessage(payload);
         }
       }
       function attach(el) {
-        ['play', 'pause', 'ended', 'volumechange', 'loadeddata'].forEach(function(ev) {
+        ['play', 'pause', 'ended', 'volumechange', 'loadeddata', 'enterpictureinpicture',
+         'leavepictureinpicture', 'webkitpresentationmodechanged'].forEach(function(ev) {
           el.addEventListener(ev, scan);
         });
       }
@@ -168,7 +174,18 @@ final class WKEngine: NSObject, WebEngine {
           var video = videos[0];
           if (video.requestPictureInPicture) {
             video.requestPictureInPicture().catch(function(){});
+          } else if (video.webkitSupportsPresentationMode &&
+                     video.webkitSupportsPresentationMode('picture-in-picture')) {
+            video.webkitSetPresentationMode('picture-in-picture');
           }
+        },
+        exitPiP: function() {
+          if (document.pictureInPictureElement && document.exitPictureInPicture) {
+            document.exitPictureInPicture().catch(function(){});
+          }
+          document.querySelectorAll('video').forEach(function(v) {
+            if (v.webkitPresentationMode === 'picture-in-picture') v.webkitSetPresentationMode('inline');
+          });
         },
         meetAutoPiP: function() {
           if (!/meet\\.google\\.com$/i.test(location.hostname) &&
@@ -203,6 +220,7 @@ final class WKEngine: NSObject, WebEngine {
     private let boostPageshowBridge = BoostPageshowHandler()
     private let boostEditorBridge = BoostEditorMessageHandler()
     private let contextMenuBridge = ContextMenuMessageHandler()
+    private let printBridge = PrintRequestMessageHandler()
     /// Dialogs, open panels, media permissions and the page menu (WKUIDelegate).
     let pagePrompts = PagePromptCenter()
     @ObservationIgnored private var lastPromptID: UInt64 = 0
@@ -257,6 +275,7 @@ final class WKEngine: NSObject, WebEngine {
         controller.add(contextMenuBridge, name: ContextMenuMessageHandler.handlerName)
         controller.add(mediaBridge, name: MediaStateMessageHandler.handlerName)
         controller.add(boostPageshowBridge, name: BoostInjectionScriptBuilder.pageshowHandler)
+        controller.add(printBridge, name: PrintRequestMessageHandler.handlerName)
         reinstallBaseScripts(on: controller)
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -266,6 +285,10 @@ final class WKEngine: NSObject, WebEngine {
         }
         boostPageshowBridge.onPageshow = { [weak self] in
             self?.onBoostPageshow?()
+        }
+        printBridge.onRequest = { [weak self] in
+            guard let self else { return }
+            PagePrinter.shared.print(self)
         }
         observeNavigationState()
     }
@@ -319,11 +342,21 @@ final class WKEngine: NSObject, WebEngine {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         ))
+        controller.addUserScript(WKUserScript(
+            source: PrintRequestMessageHandler.scriptSource,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
     }
 
     func load(_ url: URL) {
         currentURL = url
-        webView.load(URLRequest(url: url))
+        if url.isFileURL {
+            // A file dropped on the sidebar: WebKit reads local files only through loadFileURL.
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        } else {
+            webView.load(URLRequest(url: url))
+        }
     }
 
     func reload(ignoringCache: Bool) {
@@ -358,8 +391,9 @@ final class WKEngine: NSObject, WebEngine {
         evaluateMedia("pauseAll()")
     }
 
-    func pictureInPicture() {
-        // WK-LIMIT: PiP often requires a recent user gesture; native engine uses Chromium PiP.
+    func setPictureInPicture(_ active: Bool) {
+        guard active else { return evaluateMedia("exitPiP()") }
+        // WK-LIMIT: PiP often requires a recent user gesture; Chromium enters through its media session.
         evaluateMedia("requestPiP()")
         evaluateMedia("meetAutoPiP()")
     }

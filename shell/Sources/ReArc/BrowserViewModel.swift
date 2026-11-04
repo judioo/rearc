@@ -36,6 +36,14 @@ final class BrowserViewModel {
     var tabMuteModel = TabMediaMuteModel()
     private(set) var windowOcclusionState: WindowOcclusionState = .visible
     private var autoPiPTriggeredThisOcclusion: Set<Tab.ID> = []
+    /// Tabs ReArc put in PiP on a tab switch; showing one again brings its video back.
+    @ObservationIgnored var autoPiPEnteredTabIDs: Set<Tab.ID> = []
+    /// The tabs on screen at the last selection change (what "switched away" compares with).
+    @ObservationIgnored var pipVisibleTabIDs: Set<Tab.ID> = []
+    /// ReArc > Automatic Picture in Picture (Arc's setting; on by default).
+    var automaticPictureInPicture = UserDefaults.standard.object(forKey: BrowserViewModel.automaticPictureInPictureKey) as? Bool ?? true {
+        didSet { externalLinkDefaults.set(automaticPictureInPicture, forKey: Self.automaticPictureInPictureKey) }
+    }
 
     var isSidebarVisible = true
     /// Points; dragged from the sidebar's trailing edge, saved when the drag ends.
@@ -539,6 +547,7 @@ final class BrowserViewModel {
     /// Loads the selected tab's URL into its engine if the engine isn't
     /// already showing it (fresh engine or URL changed in the model).
     func loadSelectedIfNeeded() {
+        applyAutoPiPOnTabSwitch()
         noteVisibleTabsShown()
         if store.selectedEaselRef != nil { return }
         if let split = activeSplit {
@@ -652,6 +661,10 @@ final class BrowserViewModel {
     }
 
     private func applyMediaState(_ state: WebMediaState, tabID: Tab.ID, tab: Tab) {
+        if mediaStateByTab[tabID]?.isPictureInPicture == true, !state.isPictureInPicture {
+            // Left PiP (its window closed, the page, back to tab): nothing to undo on return.
+            autoPiPEnteredTabIDs.remove(tabID)
+        }
         mediaStateByTab[tabID] = state
         if !state.isAudible, !tabMuteModel.userMutedTabIDs.contains(tabID) {
             tabMuteModel.markUserUnmuted(tabID)
@@ -705,7 +718,8 @@ final class BrowserViewModel {
         }
         for candidate in candidates {
             let state = mediaState(for: candidate.id)
-            let hasVideo = state.isPlaying && state.canPictureInPicture
+            let hasVideo = state.isPlaying && state.canPictureInPicture && !state.isPictureInPicture
+            guard automaticPictureInPicture else { return }
             let decision = AutoPiPPolicy.shouldAutoPiP(
                 host: candidate.url.host(),
                 occlusionState: windowOcclusionState,
@@ -1324,6 +1338,15 @@ final class BrowserViewModel {
         case .snoozeAutoPiPForSite:
             guard let host = store.selectedTab?.url.host() else { return "No site selected" }
             store.snoozeAutoPiP(forHost: host)
+        case .togglePictureInPicture:
+            dismissCommandBar()
+            togglePictureInPicture()
+        case .printPage:
+            dismissCommandBar()
+            printPage()
+        case .exportPageAsPDF:
+            dismissCommandBar()
+            exportPageAsPDF()
         case .newBoostForSite:
             guard let tab = store.selectedTab else { return "No tab selected" }
             let host = tab.url.host() ?? "site"

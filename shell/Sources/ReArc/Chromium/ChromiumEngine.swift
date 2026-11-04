@@ -82,6 +82,10 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     private(set) var isDiscarded = false
     /// ABI 1.27: the page is in HTML fullscreen.
     private(set) var isPageFullscreen = false
+    /// ABI 1.30: this tab's video is in the Picture in Picture window (PiP events).
+    private(set) var isPictureInPicture = false
+    /// Print requests the page made (ABI 1.28), for logs and the self-test.
+    @ObservationIgnored private(set) var printRequestCount = 0
     /// 0 secure, 1 insecure, 2 dangerous, 3 none, 4 unknown (engine security_state).
     private(set) var securityLevel: UInt32 = 4
     /// The engine's immutable icon_ref for the current icon (favicon event).
@@ -302,6 +306,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
             ChromiumLog.info("tab \(tabID) closed by engine (reason \(event.closedReason))")
             isDiscarded = false
             isPageFullscreen = false
+            isPictureInPicture = false
             tabID = 0
             engineProfileID = 0
             resumeCommitWaiters(throwing: ChromiumScriptError.noTab)
@@ -338,7 +343,14 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
             }
         case .media:
             isMuted = event.muted
-            let state = ChromiumMediaMapping.apply(event.mediaSnapshot, to: mediaState)
+            var snapshot = event.mediaSnapshot
+            if !runtime.capabilities.pictureInPicture {
+                snapshot.pipAvailable = false
+                snapshot.pipActive = false
+            }
+            var state = ChromiumMediaMapping.apply(snapshot, to: mediaState)
+            // The PiP event is authoritative; a media event can lag it.
+            if runtime.capabilities.pictureInPicture { state.isPictureInPicture = isPictureInPicture || snapshot.pipActive }
             if state != mediaState { mediaStateSubject.send(state) }
         case .security:
             securityLevel = event.security
@@ -504,18 +516,82 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
         }
     }
 
-    /// PiP is not advertised by ABI 1 (`pip_control` absent); the call reports unsupported.
+    /// `ReArcTabSetPictureInPicture`: unsupported before ABI 1.30 (or without the
+    /// PiP callback); invalid_state when Chromium offers no eligible video.
     @discardableResult
-    func requestPictureInPicture() -> ReArcStatus {
+    func requestPictureInPicture(_ active: Bool = true) -> ReArcStatus {
         guard ensureTab() else { return ReArcStatus(REARC_ENGINE_NOT_READY) }
-        return ReArcTabSetPictureInPicture(tabID, true)
+        let status = ReArcTabSetPictureInPicture(tabID, active)
+        ChromiumLog.info("tab \(tabID) picture in picture \(active ? "enter" : "exit") -> \(status.rearcName)")
+        return status
     }
 
-    func pictureInPicture() {
-        let status = requestPictureInPicture()
+    func setPictureInPicture(_ active: Bool) {
+        let status = requestPictureInPicture(active)
         if status != .rearcOK {
             lastError = "Picture in Picture: \(status.rearcName)"
         }
+    }
+
+    func handlePictureInPicture(_ event: ChromiumPictureInPictureEvent) {
+        guard event.tabID == tabID else { return }
+        switch event.phase {
+        case .entered, .exited:
+            isPictureInPicture = event.phase == .entered
+            var state = mediaState
+            state.isPictureInPicture = isPictureInPicture
+            if state != mediaState { mediaStateSubject.send(state) }
+        case .backToTab:
+            break
+        }
+    }
+
+    // MARK: Printing (ABI 1.28)
+
+    /// The page called window.print() (or asked otherwise): the shell's print panel.
+    func handlePrintRequest(_ event: ChromiumPrintRequestEvent) {
+        guard event.tabID == tabID else { return }
+        printRequestCount += 1
+        PagePrinter.shared.print(self)
+    }
+
+    /// `ReArcTabPrintToPDF` on the current document; one job per tab (busy).
+    /// Main actor: every ABI call is main-thread-only.
+    @MainActor
+    func printToPDF(paper: PrintPaperSetup?, pageRanges: String? = nil) async -> (ReArcStatus, Data?) {
+        guard runtime.capabilities.printing else { return (ReArcStatus(REARC_UNSUPPORTED), nil) }
+        guard await waitForTab() else { return (ReArcStatus(REARC_ENGINE_NOT_READY), nil) }
+        let tab = tabID
+        return await withCheckedContinuation { continuation in
+            let box = PrintToPDFBox { status, _, data in continuation.resume(returning: (status, data)) }
+            let context = Unmanaged.passRetained(box).toOpaque()
+            var options = ReArcPrintOptions()
+            options.scale = 0
+            options.margin_top_in = -1
+            options.margin_bottom_in = -1
+            options.margin_left_in = -1
+            options.margin_right_in = -1
+            if let paper {
+                options.landscape = paper.landscape
+                options.paper_width_in = paper.widthInches
+                options.paper_height_in = paper.heightInches
+            }
+            let status: ReArcStatus = Self.withOptionalCString(pageRanges) { ranges in
+                options.page_ranges = ranges
+                return ReArcTabPrintToPDF(tab, &options, printToPDFCallback, context)
+            }
+            ChromiumLog.info("tab \(tab) print to PDF \(paper.map { "\($0.widthInches)x\($0.heightInches)in\($0.landscape ? " landscape" : "")" } ?? "default")"
+                + "\(pageRanges.map { " pages \($0)" } ?? "") -> \(status.rearcName)")
+            if status != .rearcOK {
+                Unmanaged<PrintToPDFBox>.fromOpaque(context).release()
+                continuation.resume(returning: (status, nil))
+            }
+        }
+    }
+
+    private static func withOptionalCString<R>(_ string: String?, _ body: (UnsafePointer<CChar>?) -> R) -> R {
+        guard let string else { return body(nil) }
+        return string.withCString { body($0) }
     }
 
     // MARK: Zoom (ABI 1.8)

@@ -137,6 +137,24 @@ final class ReArcWebView: WKWebView {
     static let openImageInNewWindow = "WKMenuItemIdentifierOpenImageInNewWindow"
     static let searchWeb = "WKMenuItemIdentifierSearchWeb"
 
+    // Sidebar drags (tabs, folders, spaces) never reach the page, as Chromium's
+    // drop policy blocks them; everything else drops as WebKit decides.
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        SidebarDragPayload.isSidebarDrag(sender.draggingPasteboard) ? [] : super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        SidebarDragPayload.isSidebarDrag(sender.draggingPasteboard) ? [] : super.draggingUpdated(sender)
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        SidebarDragPayload.isSidebarDrag(sender.draggingPasteboard) ? false : super.prepareForDragOperation(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        SidebarDragPayload.isSidebarDrag(sender.draggingPasteboard) ? false : super.performDragOperation(sender)
+    }
+
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
         guard let prompts else { return }

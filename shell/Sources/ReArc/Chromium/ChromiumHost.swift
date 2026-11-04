@@ -174,6 +174,16 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             }
         }
         model.commandBarServices = ChromiumCommandBarServices(runtime: runtime)
+        if runtime.capabilities.pictureInPicture {
+            runtime.onPictureInPictureBackToTab = { [weak self, weak model] engine in
+                MainActor.assumeIsolated {
+                    model?.revealTab(showing: engine)
+                    let window = engine.leaseHolder?.window ?? self?.browserWindows.first
+                    window?.makeKeyAndOrderFront(nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            }
+        }
         if runtime.capabilities.htmlFullscreen {
             runtime.onFullscreenEvent = { [weak self] event in
                 MainActor.assumeIsolated { self?.handleFullscreen(event) }
@@ -514,6 +524,11 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             app.addItem(.separator())
         }
         app.addItem(target.item("Set ReArc as Default Browser…", "") { model.setAsDefaultBrowser() })
+        if runtime.capabilities.pictureInPicture {
+            app.addItem(target.checkItem("Automatic Picture in Picture", isOn: { model.automaticPictureInPicture }) {
+                model.automaticPictureInPicture.toggle()
+            })
+        }
         let links = NSMenu(title: "External Links")
         for destination in ExternalLinkDestination.allCases {
             links.addItem(target.checkItem(destination.menuTitle, isOn: { model.externalLinkDestination == destination }) {
@@ -541,6 +556,10 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         file.addItem(target.item("Close Window", "w", [.command, .shift]) { [weak self] in
             if let window = NSApp.keyWindow { self?.closeWindow(window) }
         })
+        if runtime.capabilities.printing {
+            file.addItem(.separator())
+            target.add(ShellMenus.printing(model), to: file)
+        }
         main.addSubmenu(file, title: "File")
 
         let edit = NSMenu(title: "Edit")
@@ -564,6 +583,10 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         if runtime.capabilities.downloads {
             view.addItem(.separator())
             target.add(ShellMenus.downloads(model), to: view)
+        }
+        if runtime.capabilities.pictureInPicture {
+            view.addItem(.separator())
+            target.add(ShellMenus.pictureInPicture(model), to: view)
         }
         if runtime.capabilities.pageZoom {
             view.addItem(.separator())

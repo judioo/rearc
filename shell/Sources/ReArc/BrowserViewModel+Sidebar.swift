@@ -275,6 +275,44 @@ extension BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
+    /// Links dropped on a sidebar row from a page or another app: Today tabs
+    /// placed before or after that row, in drop order; the first is shown.
+    @discardableResult
+    func openDroppedURLs(_ urls: [URL], relativeTo targetID: UUID, after: Bool) -> [Tab.ID] {
+        let tabs = makeDroppedTabs(urls)
+        var anchor = targetID, placeAfter = after
+        for tab in tabs {
+            _ = store.moveItem(tab.id, relativeTo: anchor, after: placeAfter)
+            anchor = tab.id
+            placeAfter = true
+        }
+        return showDroppedTabs(tabs)
+    }
+
+    /// Links dropped after a section's last row (or on an empty section).
+    @discardableResult
+    func openDroppedURLs(_ urls: [URL], appendingTo destination: SidebarStore.ItemDestination) -> [Tab.ID] {
+        let tabs = makeDroppedTabs(urls)
+        for tab in tabs {
+            let count = store.entries(in: store.resolvedParent(destination)).filter { $0.id != tab.id }.count
+            _ = store.moveItem(tab.id, to: destination, index: count)
+        }
+        return showDroppedTabs(tabs)
+    }
+
+    private func makeDroppedTabs(_ urls: [URL]) -> [Tab] {
+        SidebarURLDrop.tabURLs(from: urls, engine: engineHost.navigationSchemes).map {
+            store.addTab(kind: .today, title: SidebarURLDrop.placeholderTitle(for: $0), url: $0)
+        }
+    }
+
+    private func showDroppedTabs(_ tabs: [Tab]) -> [Tab.ID] {
+        guard let first = tabs.first else { return [] }
+        reconcileEngineOwnership()
+        selectTab(first.id)
+        return tabs.map(\.id)
+    }
+
     /// Drop onto a folder row: append to the folder and open it.
     func moveItem(_ id: UUID, intoFolder folderID: UUID) {
         let count = store.folder(withID: folderID)?.children.count ?? 0

@@ -198,7 +198,7 @@ private struct SpaceIconButton: View {
         .contextMenu { SpaceContextMenu(model: model, space: space) }
         .onDrag {
             draggedSpaceID = space.id
-            return NSItemProvider(object: space.id.uuidString as NSString)
+            return SidebarDragPayload.itemProvider(for: space.id)
         }
         .onDrop(of: [.plainText], delegate: SpaceIconDropDelegate(icon: self, isTargeted: $isTargeted))
     }

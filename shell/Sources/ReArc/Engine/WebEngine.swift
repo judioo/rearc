@@ -74,8 +74,11 @@ protocol WebEngine: AnyObject {
     func skipToNextTrack()
     func skipToPreviousTrack()
     func pauseAllMedia()
-    /// Best-effort PiP; WKWebView may reject without a user gesture (WK-LIMIT).
-    func pictureInPicture()
+    /// Puts the page's playing video in Picture in Picture (true) or brings
+    /// it back (false). Chromium (ABI 1.30) uses its media session and its own
+    /// floating window; WKWebView the standard PiP API, which may want a
+    /// recent user gesture (WK-LIMIT).
+    func setPictureInPicture(_ active: Bool)
 
     /// Browser page zoom, 1.0 = 100% (`PageZoom.range`).
     var zoomFactor: Double { get }
@@ -100,6 +103,7 @@ protocol WebEngine: AnyObject {
 
 extension WebEngine {
     func reload() { reload(ignoringCache: false) }
+    func pictureInPicture() { setPictureInPicture(true) }
 }
 
 /// Engines that close a page through its beforeunload handler ("Leave

@@ -82,6 +82,21 @@ enum ShellMenus {
         ]]
     }
 
+    /// File menu: print the key page (⌘P, as every browser) and Export as PDF… (Safari's name).
+    static func printing(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("Export as PDF…") { model.exportPageAsPDF() },
+            ShellMenuItem("Print…", "p") { model.printPage() },
+        ]]
+    }
+
+    /// View menu: the selected tab's video in or out of Picture in Picture.
+    static func pictureInPicture(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("Picture in Picture") { model.togglePictureInPicture() },
+        ]]
+    }
+
     /// View menu: the sidebar's downloads tray (both engines).
     static func downloads(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [[
