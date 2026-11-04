@@ -588,8 +588,66 @@ Production needs:
 Limits: splits and easels cannot go into folders (folders hold tabs and
 folders), and folders live only in Pinned. Folder expansion is shared by
 all windows (Arc keeps it per window). The Archive and the auto-archive
-threshold are local and not journaled for sync. An existing space cannot
-change profile yet (the dialog picks it at creation).
+threshold are local and not journaled for sync. Since wave 21 an existing
+space can change profile.
+
+## Wave 21: spaces, splits, command bar, boosts, links
+
+- **Swipe between spaces.** A two-finger horizontal swipe on the sidebar
+  pages through the spaces of the window's profile (Arc
+  `SidebarPagingContainer`). The first few points decide the axis, so
+  vertical scrolling still scrolls. The page follows the fingers,
+  rubber-bands past the first and last space, and on release settles on a
+  spring that keeps the release velocity (`SpacePaging`, closed form, so a
+  new swipe grabs the page mid-spring with no jump). One swipe moves at
+  most one space. Clicks, ⌃1…9 and ⌥⌘←/→ spring the page too. With Reduce
+  Motion a swipe switches on release with a crossfade and nothing slides.
+  Swipes are read in the key window only.
+- **Themed window.** The window background is the focused space's theme
+  blended into a gradient (`SpaceThemePalette`: lighter toward the top in
+  light mode, deep in dark mode). The sidebar sits on it with light or dark
+  text by the background's brightness, and the page is an inset rounded
+  card. During a swipe the colour moves with the page; other switches
+  crossfade in 0.3 s. Gradient stops, grain and per-space appearance are
+  still not modelled.
+- **Change a space's profile**: Change Profile in the space menu, the
+  Profile row of Edit Space, or the Move Space to <profile> command. It asks
+  first. The space keeps its tabs, folders and splits, moves to the end of
+  the new profile's spaces and stays on screen (the active profile follows
+  it). Engines on the old profile close and the tabs reload on the new
+  profile's storage, so sign-ins, cookies and back/forward history stay
+  behind. A profile keeps at least one space.
+- **Drag to split.** Drag a sidebar tab over the page: the half it would
+  take (nearest edge: left, right, top or bottom) is highlighted, and a drop
+  makes the split with the page's tab, or adds a pane to the split on
+  screen (up to four) and turns it to the drop's axis. The drop target is an
+  AppKit view above the engine view that exists only during a sidebar drag
+  of a tab that can split there, so drops from other apps still reach the
+  page. Dropping on a sidebar tab row still makes a folder.
+- **Tab to search.** Type the start of a site's name, alias or domain
+  ("you", "yt", "github.com"): the field shows "Search YouTube  Tab". Tab
+  turns it into a pill in the site's colour and Enter searches that site
+  (an empty query opens it). Delete on an empty query removes the pill and
+  restores the text. Thirteen seeded sites (`SiteSearchCatalog`).
+- **Boosts library.** View Boosts (command bar, Tabs menu, the sidebar's +
+  menu) lists the active profile's boosts with a master switch, a switch per
+  boost, script consent for script boosts, and New (a typed site or the
+  page on screen), Edit on This Page, Open Site, Rename, Duplicate and
+  Delete. Changes reinstall the boosts of open tabs.
+- **Default browser and external links.** ReArc > Set ReArc as Default
+  Browser… (or the command) asks macOS through
+  `NSWorkspace.setDefaultApplication` for http and https; macOS confirms
+  with the user. It only works from an app bundle and says so otherwise.
+  Links from other apps arrive as `GetURL` Apple Events on both engines
+  (`ExternalLinkRouter`; the link that launches the app waits for the
+  model). They open in Little Arc (the default) or a new tab in the space in
+  front, chosen under ReArc > External Links (remembered). A page already
+  open is focused instead. `bundle-chromium.sh` declares the http/https URL
+  types, and `scripts/bundle-webkit-dev.sh` builds `dist/webkit/ReArc Dev.app`,
+  a WebKit-only bundle (id `com.rearc.browser.webkit-dev`) that can receive
+  links: `open -a "dist/webkit/ReArc Dev.app" https://example.com` sends one
+  without changing the default browser. Tests use a fake service and never
+  touch LaunchServices.
 
 ## Model rules worth knowing
 
@@ -634,6 +692,8 @@ change profile yet (the dialog picks it at creation).
 | ⇧⌘C | Copy the page URL |
 | ⌃1 … ⌃9 | Switch to space 1–9 of the active profile |
 | ⌥⌘→ / ⌥⌘← | Next / previous space |
+| Two-finger swipe on the sidebar | Previous / next space |
+| Tab / ⌫ in the command bar | Search the typed site / remove the site pill |
 
 ## Sync: not implemented
 
