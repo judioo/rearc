@@ -1763,6 +1763,32 @@ final class ChromiumSelfTest {
         log("PASS command bar ⌘↩ opened \(routedEngine.currentURL?.absoluteString ?? "") in a new tab; Ctrl+Tab (MRU switcher) "
             + "highlighted tab A and releasing Control selected it")
         try await optionCommandClickChecks(model: model, store: store, tab: tab, engine: engine, base: base, window: window)
+
+        // Air Traffic Control: a rule sends a link from another app to a Little Arc in the profile.
+        let savedRouting = model.linkRouting
+        let savedDestination = model.externalLinkDestination
+        defer {
+            model.linkRouting = savedRouting
+            model.externalLinkDestination = savedDestination
+        }
+        model.externalLinkDestination = .activeSpace
+        model.linkRouting = LinkRoutingState(rules: [
+            LinkRoutingRule(matchType: .contains, pattern: "/a?atc=", destination: .littleArc(store.activeProfileID)),
+        ])
+        let tabsBefore = store.displayTabs().count
+        ExternalLinkRouter.shared.receive(URL(string: "\(base)/a?atc=1")!)
+        guard let routed = store.littleArcLiveWindows.last, routed.url.query == "atc=1",
+              let routedEngine = model.littleArcEngine(for: routed.id) as? ChromiumEngine else {
+            throw Failure(description: "Air Traffic Control sent the link nowhere (\(store.displayTabs().count - tabsBefore) new tabs)")
+        }
+        try await wait("Air Traffic Control Little Arc loaded", timeout: 20) {
+            routedEngine.pageTitle == Self.titleA && !routedEngine.isLoading && routedEngine.attachmentID != nil
+        }
+        try check(store.displayTabs().count == tabsBefore, "the routed link also opened a tab")
+        model.windowPresenter?.dismissLittleArcWindow(routed.id)
+        try await wait("Air Traffic Control Little Arc closed") { store.littleArcWindow(withID: routed.id) == nil }
+        log("PASS Air Traffic Control: a 'URL contains' rule sent a GetURL link to a Little Arc (tab \(routedEngine.tabID)) "
+            + "instead of the default (current space)")
     }
 
     /// ⌥⌘-click on a link in tab A: Chromium makes a background tab, which the

@@ -184,6 +184,11 @@ struct BrowserView: View {
                 model.clearLittleArcOpenRequests()
             }
         }
+        .onChange(of: model.isAirTrafficControlPresented) { _, presented in
+            guard presented else { return }
+            model.isAirTrafficControlPresented = false
+            openWindow(id: "airTrafficControl")
+        }
         .onChange(of: model.privateWindowOpenRequests) { _, requests in
             for id in requests {
                 openWindow(id: "private", value: id)

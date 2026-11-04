@@ -329,4 +329,38 @@ final class Wave26ShellTests: XCTestCase {
         model.noteMouseDown(modifiers: [.command, .option], at: now)
         XCTAssertFalse(model.takeLittleArcClick(now: now.addingTimeInterval(3)), "too late for that click")
     }
+
+    // MARK: Air Traffic Control
+
+    func testAirTrafficControlRoutesExternalLinksToASpace() throws {
+        let model = makeModel { store in store.addSpace(name: "Work") }
+        model.linkRouting = LinkRoutingState()
+        model.externalLinkDestination = .littleArc
+        let work = try XCTUnwrap(model.store.spaces.first { $0.name == "Work" })
+        let page = model.store.addTab(kind: .today, title: "Here", url: URL(string: "https://here.test/")!)
+        model.store.selectTab(page.id)
+
+        let rule = model.addLinkRoutingRule()
+        XCTAssertEqual(rule.pattern, "here.test", "a new rule starts from the page on screen")
+        model.linkRouting.rules[0].pattern = "github.com"
+        model.linkRouting.rules[0].destination = .space(work.id)
+        XCTAssertEqual(LinkRoutingState.load(from: model.externalLinkDefaults).rules.first?.pattern, "github.com", "saved")
+        XCTAssertEqual(model.describeExternalRoute("github.com/rearc"), "New tab in Work")
+        XCTAssertNil(model.describeExternalRoute("  "))
+
+        model.openExternalURL(URL(string: "https://github.com/rearc")!)
+        XCTAssertEqual(model.store.activeSpaceID, work.id, "the rule's space comes to the front")
+        XCTAssertEqual(model.store.selectedTab?.url.absoluteString, "https://github.com/rearc")
+        XCTAssertTrue(model.store.littleArcLiveWindows.isEmpty)
+
+        model.openExternalURL(URL(string: "https://elsewhere.test/")!)
+        XCTAssertEqual(model.store.littleArcLiveWindows.last?.url.absoluteString, "https://elsewhere.test/", "other links use the default")
+
+        model.removeLinkRoutingRule(rule.id)
+        XCTAssertTrue(model.linkRouting.rules.isEmpty)
+        var presented = 0
+        model.presentAirTrafficControl = { presented += 1 }
+        _ = model.executeCommand(.showAirTrafficControl, commandID: nil)
+        XCTAssertEqual(presented, 1)
+    }
 }

@@ -104,6 +104,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private var windows: [ObjectIdentifier: (window: NSWindow, role: WindowRole)] = [:]
     /// ReArc > iCloud Sync… (Settings… is Chromium's own WebUI on this path).
     private var syncSettingsWindow: NSWindow?
+    private var airTrafficControlWindow: NSWindow?
     private var terminating = false
     private let menuTarget = ChromiumMenuTarget()
     /// The tray's Chromium side; the controller only holds it weakly.
@@ -145,6 +146,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         self.model = model
         model.windowPresenter = self
+        model.presentAirTrafficControl = { [weak self] in self?.presentAirTrafficControl() }
         model.onProfileDeleted = { [weak self, runtime] id in
             // EngineHost already dropped the profile's engines. Its private windows
             // close first (their off-the-record children must go before the parent).
@@ -305,6 +307,26 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     }
 
     @MainActor
+    func presentAirTrafficControl() {
+        guard let model, !terminating else { return }
+        if let window = airTrafficControlWindow {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 360),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.title = "Air Traffic Control"
+        window.contentView = NSHostingView(rootView: AirTrafficControlView(model: model))
+        window.center()
+        airTrafficControlWindow = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
     func presentSyncSettings() {
         guard let model, !terminating else { return }
         if let window = syncSettingsWindow {
@@ -560,6 +582,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             })
         }
         app.addSubmenu(links, title: "External Links")
+        app.addItem(target.item("Air Traffic Control…", "") { [weak self] in self?.presentAirTrafficControl() })
         app.addItem(target.checkItem("Open Little Arc from Anywhere (\(LittleArcHotkeyPreference.display))",
                                      isOn: { model.isLittleArcHotkeyEnabled }) {
             model.isLittleArcHotkeyEnabled.toggle()

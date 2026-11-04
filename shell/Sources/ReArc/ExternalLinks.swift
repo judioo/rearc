@@ -96,14 +96,23 @@ struct SystemDefaultBrowser: DefaultBrowserSetting {
 
 extension BrowserViewModel {
 
-    /// A link from another app: focus it if already open, else Little Arc or
-    /// a new tab in the current space, per the user's choice.
+    /// A link from another app: an Air Traffic Control rule's space or Little
+    /// Arc profile, else focus it if already open, else Little Arc or a new
+    /// tab in the current space, per the user's choice.
     func openExternalURL(_ url: URL) {
-        switch ExternalLinkRouting.route(url, destination: externalLinkDestination, in: store, engine: engineHost.navigationSchemes) {
+        switch ExternalLinkRouting.route(url, destination: externalLinkDestination, in: store, engine: engineHost.navigationSchemes,
+                                         rules: linkRouting) {
         case .littleArc(let url, let profileID):
             openLittleArc(url: url, profileID: profileID)
-        case .newTab(let url, _):
-            openInNewTab(url)
+        case .newTab(let url, let spaceID):
+            if spaceID == store.activeSpaceID {
+                openInNewTab(url)
+            } else {
+                // An Air Traffic Control space: switch to it (and its profile) first.
+                let tab = store.addTab(kind: .today, title: url.host() ?? "New Tab", url: url, in: spaceID)
+                store.focusTab(tab.id)
+                loadSelectedIfNeeded()
+            }
         case .focusTab(let id):
             store.focusTab(id)
             loadSelectedIfNeeded()

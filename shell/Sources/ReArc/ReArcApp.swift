@@ -40,6 +40,7 @@ struct ReArcApp: App {
                     }
                 }
                 Toggle("Open Little Arc from Anywhere (\(LittleArcHotkeyPreference.display))", isOn: $model.isLittleArcHotkeyEnabled)
+                Button("Air Traffic Control…") { model.showAirTrafficControl() }
                 if let preference = model.webKitSearchPreference {
                     Picker("Search Engine", selection: Binding(
                         get: { preference.providerID },
@@ -125,6 +126,11 @@ struct ReArcApp: App {
                 ShellMenuButtons(groups: ShellMenus.spaces(model))
             }
         }
+
+        Window("Air Traffic Control", id: "airTrafficControl") {
+            AirTrafficControlView(model: model)
+        }
+        .windowResizability(.contentSize)
 
         Settings {
             SyncSettingsView(model: model)

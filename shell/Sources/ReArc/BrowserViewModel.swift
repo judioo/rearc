@@ -60,6 +60,15 @@ final class BrowserViewModel {
         didSet { externalLinkDestination.save(to: externalLinkDefaults) }
     }
     @ObservationIgnored var externalLinkDefaults: UserDefaults = .standard
+    /// Air Traffic Control: rules that send links from other apps to a space
+    /// or a Little Arc profile; saved with the external-link choice.
+    var linkRouting: LinkRoutingState = .load(from: .standard) {
+        didSet { linkRouting.save(to: externalLinkDefaults) }
+    }
+    /// The Air Traffic Control settings window (both paths).
+    var isAirTrafficControlPresented = false
+    /// Set by the Chromium shell, which owns its windows.
+    @ObservationIgnored var presentAirTrafficControl: (() -> Void)?
     @ObservationIgnored var defaultBrowser: any DefaultBrowserSetting = SystemDefaultBrowser()
     /// Bumped when the default-browser state may have changed (menus re-read it).
     var defaultBrowserRevision = 0
@@ -1433,6 +1442,9 @@ final class BrowserViewModel {
             setAsDefaultBrowser()
         case .setExternalLinkDestination(let destination):
             externalLinkDestination = destination
+        case .showAirTrafficControl:
+            dismissCommandBar()
+            showAirTrafficControl()
         case .toggleBoost(let packageID):
             let library = store.boostLibrary()
             guard let install = library.installation(for: packageID) else {
