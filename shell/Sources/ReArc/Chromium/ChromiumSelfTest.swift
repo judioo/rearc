@@ -1870,6 +1870,7 @@ extension ChromiumSelfTest {
         engine.load(URL(string: "\(base)/dialogs")!)
         try await wait("context menu fixture") { engine.pageTitle == "dialogs" && !engine.isLoading }
         let link = try await cssCenter(of: "#link", in: engine)
+        let repliesBefore = runtime.promptReplies["context"] ?? 0
         var delivered = false
         for attempt in 0..<3 where !delivered {
             focus(window)
@@ -1888,15 +1889,17 @@ extension ChromiumSelfTest {
                   && linkPlan.items.contains(.openLinkInNewSplit) == (prompts.ownerTabID != nil),
                   "link menu \(linkPlan.items.map(\.title))")
         try check(linkPlan.entry(.inspect)?.isEnabled == runtime.capabilities.devTools, "Inspect enabled without an inspection engine")
-        let repliesBefore = runtime.promptReplies["context"] ?? 0
         try await wait("dismissed link menu") { engine.contextMenuRequestID == nil && (runtime.promptReplies["context"] ?? 0) > repliesBefore }
+        // A retried click can land late as a second menu; let it finish first.
+        try await Task.sleep(nanoseconds: 400_000_000)
 
         // Page menu: Reload runs in the engine.
         _ = try await engine.evaluate("(window.rearcMarker = 1, true)", in: .page)
         menus.choice = .reload
         let plain = try await cssCenter(of: "#plain", in: engine)
-        try await rightClickUntil(window, engine: engine, at: plain, "page menu") { menus.plans.count == 2 }
-        let pagePlan = menus.plans[1]
+        let pageBase = menus.plans.count
+        try await rightClickUntil(window, engine: engine, at: plain, "page menu") { menus.plans.count > pageBase }
+        let pagePlan = menus.plans[pageBase]
         try check(pagePlan.items.contains(.reload) && pagePlan.items.contains(.back) && !pagePlan.items.contains(.copyLink),
                   "page menu \(pagePlan.items.map(\.title))")
         try await waitAsync("reload from the page menu") {
@@ -1906,9 +1909,14 @@ extension ChromiumSelfTest {
         }
 
         // Inspect is refused (unsupported) and the request is dismissed instead.
+        try await Task.sleep(nanoseconds: 400_000_000)
         menus.hold = true
-        try await rightClickUntil(window, engine: engine, at: plain, "held menu") { menus.plans.count == 3 && engine.contextMenuRequestID != nil }
-        let held = engine.contextMenuRequestID!
+        let heldBase = menus.plans.count
+        try await rightClickUntil(window, engine: engine, at: plain, "held menu") {
+            menus.plans.count > heldBase && engine.contextMenuRequestID != nil
+        }
+        try await Task.sleep(nanoseconds: 400_000_000)
+        let held = try XUnwrap(engine.contextMenuRequestID)
         let inspect = engine.finishContextMenu(held, item: .inspect)
         let expected = runtime.capabilities.devTools ? ReArcStatus.rearcOK : ReArcStatus(REARC_UNSUPPORTED)
         try check(inspect == expected, "Inspect returned \(inspect.rearcName)")
