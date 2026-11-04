@@ -173,7 +173,8 @@ final class ChromiumSelfTest {
         let dataStatus = engine.navigateNow(dataURL)
         if capabilities.navigationExtended {
             try check(dataStatus == .rearcOK, "data: URL rejected synchronously: \(dataStatus.rearcName)")
-            try await wait("data: commit with title '\(Self.titleData)'") {
+            // The first renderer starts cold; under a heavy engine build that alone took over 15 s (wave 28).
+            try await wait("data: commit with title '\(Self.titleData)'", timeout: 45) {
                 engine.currentURL?.scheme == "data" && engine.pageTitle == Self.titleData
             }
             log("PASS data: URL committed with title '\(engine.pageTitle ?? "")'")
@@ -951,8 +952,9 @@ final class ChromiumSelfTest {
 
     @MainActor
     private func cookies(_ engine: ChromiumEngine) async throws -> String {
-        // Never-attached (hidden) tabs can be slow to run script in this debug build.
-        try await engine.evaluate("document.cookie", in: .page, timeoutMS: 10_000) as? String ?? ""
+        // Never-attached (hidden) tabs can be slow to run script in this debug build; under a heavy
+        // engine build next to it 10 s was not enough (wave 28), so this takes the ABI's 30 s maximum.
+        try await engine.evaluate("document.cookie", in: .page, timeoutMS: 30_000) as? String ?? ""
     }
 
     @MainActor
@@ -2109,7 +2111,7 @@ extension ChromiumSelfTest {
         let minor = capabilities.abiMinorVersion.map(String.init) ?? "absent"
         log("prompt channels: javascript_dialogs=\(capabilities.javascriptDialogs ? 1 : 0) file_chooser=\(capabilities.fileChooser ? 1 : 0) "
             + "permission_prompts=\(capabilities.permissionPrompts ? 1 : 0) context_menu=\(capabilities.contextMenu ? 1 : 0) "
-            + "password_prompts=\(capabilities.passwordPrompts ? 1 : 0) (Inspect disabled: no DevTools frontend); "
+            + "password_prompts=\(capabilities.passwordPrompts ? 1 : 0) (Inspect \(capabilities.canInspect ? "opens the shell's DevTools" : "disabled: no DevTools frontend")); "
             + "synthesized input \(inputDeliverable(window) ? "deliverable" : "not deliverable (app inactive or window not key)")")
         let prompts = engine.pagePrompts
         try check(prompts.anchorView?.window === window, "the page prompt overlay is not in the tab's window")
@@ -3279,43 +3281,29 @@ extension ChromiumSelfTest {
         return value
     }
 
-    /// Wave 28: File > Import from Another Browser opens chrome://settings/importData. Script cannot
-    /// run on WebUI, so the dialog is seen in the page: its scrim darkens the Settings page. Nothing
-    /// is imported (that would read this Mac's real Safari, Chrome or Firefox data).
+    /// Wave 28: File > Import from Another Browser opens chrome://settings/importData. WebUI
+    /// refuses both script and snapshots, so the dialog itself cannot be observed; the step checks
+    /// that the route commits and stays (Settings closes the dialog by leaving it). Nothing is
+    /// imported (that would read this Mac's real Safari, Chrome or Firefox data).
     @MainActor
     private func importDataChecks(engine: ChromiumEngine) async throws {
-        try await Task.sleep(nanoseconds: 1_500_000_000)
-        let settings = Self.meanLuminance(try await engine.captureSnapshot(scope: .visible))
         let status = engine.navigateNow(BrowserInternalPage.importData.url)
         try check(status == .rearcOK, "chrome://settings/importData rejected: \(status.rearcName)")
         try await wait("chrome://settings/importData commit", timeout: 25) {
             engine.currentURL?.host() == "settings" && engine.currentURL?.path == "/importData" && !engine.isLoading
         }
         try await Task.sleep(nanoseconds: 1_500_000_000)
-        let dialog = Self.meanLuminance(try await engine.captureSnapshot(scope: .visible))
         let route = engine.currentURL?.path ?? ""
-        if let settings, let dialog, abs(settings - dialog) > 0.04, route == "/importData" {
-            log(String(format: "PASS import: chrome://settings/importData opens Chromium's import dialog in the registry tab "
-                + "(route kept, page luminance %.2f -> %.2f under its scrim); no import run", settings, dialog))
-        } else {
-            log("NOTE import: chrome://settings/importData committed (route '\(route)') but no dialog scrim was seen "
-                + "(luminance \(settings.map { String(format: "%.2f", $0) } ?? "?") -> \(dialog.map { String(format: "%.2f", $0) } ?? "?"))")
+        let snapshot: String
+        do {
+            _ = try await engine.captureSnapshot(scope: .visible)
+            snapshot = "a snapshot was allowed"
+        } catch {
+            snapshot = "snapshots of WebUI are refused (\(error))"
         }
-    }
-
-    /// The average luminance of a PNG, sampled on a grid.
-    static func meanLuminance(_ png: Data) -> Double? {
-        guard let image = CaptureImaging.cgImage(png) else { return nil }
-        let rep = NSBitmapImageRep(cgImage: image)
-        var total = 0.0, count = 0.0
-        for gx in 1 ..< 20 {
-            for gy in 1 ..< 20 {
-                guard let color = rep.colorAt(x: image.width * gx / 20, y: image.height * gy / 20)?.usingColorSpace(.sRGB) else { continue }
-                total += 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
-                count += 1
-            }
-        }
-        return count > 0 ? total / count : nil
+        try check(route == "/importData", "the import route did not stay: '\(route)'")
+        log("PASS import: chrome://settings/importData committed in the settings tab and kept its route for 1.5 s, title "
+            + "'\(engine.pageTitle ?? "")'; the dialog is not observable (script on WebUI is refused, \(snapshot)); no import run")
     }
 
     // MARK: Extensions (ABI 1.31–1.33, 1.36)
