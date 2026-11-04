@@ -3,8 +3,9 @@ import SwiftUI
 import SidebarModel
 
 /// Root window layout: sidebar on the left, web content filling the rest,
-/// command bar floating centered on top. The active space's theme color is
-/// applied as a subtle window tint. With the sidebar hidden (Cmd+S), pointing
+/// command bar floating centered on top. The window background is the
+/// focused space's theme (Arc `WindowTheme`), with the page inset on it as a
+/// rounded card; it follows a space swipe and crossfades on other switches. With the sidebar hidden (Cmd+S), pointing
 /// at the window's leading edge floats it over the page until the pointer
 /// leaves (Arc `SidebarHovering`).
 struct BrowserView: View {
@@ -12,26 +13,28 @@ struct BrowserView: View {
     @Environment(\.openWindow) private var openWindow
     /// This window's identity for its own focused space (Arc `focusedSpaceID`).
     @State private var windowID = SidebarWindowID()
+    /// This window's space paging (swipe and animated switches).
+    @State private var pager = SpacePagerController()
+    /// The sidebar item being dragged, if any (content edges then offer split drop zones).
+    @State private var draggedItemID: UUID?
 
     var body: some View {
         ZStack {
             HStack(spacing: 0) {
                 if model.isSidebarVisible {
-                    SidebarView(model: model)
+                    SidebarView(model: model, draggedItemID: $draggedItemID)
                         .transition(.move(edge: .leading))
                 }
-                contentArea
+                contentCard
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .topTrailing) { zoomBadge }
-            // Subtle space-theme window tint (this window's space).
-            .background(model.themeColor(in: windowID).opacity(0.10))
+            .background(SpaceThemeBackground(model: model, window: windowID, pager: pager).ignoresSafeArea())
 
             if !model.isSidebarVisible, model.isSidebarPeeking {
                 HStack(spacing: 0) {
-                    SidebarView(model: model)
-                        .background(model.themeColor(in: windowID).opacity(0.10))
-                        .background(.regularMaterial)
+                    SidebarView(model: model, draggedItemID: $draggedItemID)
+                        .background(SpaceThemeBackground(model: model, window: windowID, pager: pager))
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                         .shadow(color: .black.opacity(0.25), radius: 12, x: 2)
                         .padding(.vertical, 6)
@@ -91,6 +94,7 @@ struct BrowserView: View {
         }
         .tint(model.themeColor(in: windowID))
         .environment(\.sidebarWindow, windowID)
+        .environment(\.spacePager, pager)
         .animation(.easeInOut(duration: 0.15), value: model.isCommandBarPresented)
         .frame(minWidth: 760, minHeight: 520)
         .background(
@@ -271,6 +275,21 @@ struct BrowserView: View {
 
             BoostEditorDrawerView(model: model, draft: draft)
         }
+    }
+
+    /// The page as a rounded card inset on the theme background (Arc's
+    /// content frame); with the sidebar hidden it is inset on every side.
+    private var contentCard: some View {
+        contentArea
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor))
+                    .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+            )
+            .padding(.vertical, 8)
+            .padding(.trailing, 8)
+            .padding(.leading, model.isSidebarVisible ? 0 : 8)
     }
 
     @ViewBuilder

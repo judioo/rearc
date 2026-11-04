@@ -8,10 +8,19 @@ import SidebarModel
 struct SidebarView: View {
     let model: BrowserViewModel
     @Environment(\.sidebarWindow) private var window
-    @State private var draggedItemID: UUID?
+    @Binding var draggedItemID: UUID?
     @State private var dropState: SidebarDropState?
+    @Environment(\.spacePager) private var sharedPager
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var localPager = SpacePagerController()
+
+    private var pager: SpacePagerController { sharedPager ?? localPager }
+    private var focusedSpace: Space { model.space(in: window) }
 
     var body: some View {
+        let spaceIDs = model.store.spaces(in: focusedSpace.profileID).map(\.id)
+        let palette = SpaceThemePalette(theme: focusedSpace.theme, darkAppearance: colorScheme == .dark)
         VStack(spacing: 0) {
             SidebarToolbarView(model: model)
                 .padding(.bottom, 8)
@@ -21,34 +30,22 @@ struct SidebarView: View {
 
             Divider().padding(.vertical, 8)
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    let space = model.space(in: window)
-                    let content = model.store.content(for: space.id)
-                    SpaceHeaderView(model: model, space: space, theme: model.themeColor(in: window))
-                    TabSectionView(
-                        title: nil,
-                        section: .pinned,
-                        spaceID: space.id,
-                        entries: content.pinned,
-                        model: model,
-                        draggedItemID: $draggedItemID,
-                        dropState: $dropState
-                    )
-                    TodayHeaderView(model: model, spaceID: space.id, hasTabs: !content.today.isEmpty)
-                    TabSectionView(
-                        title: nil,
-                        section: .unpinned,
-                        spaceID: space.id,
-                        entries: content.today,
-                        model: model,
-                        draggedItemID: $draggedItemID,
-                        dropState: $dropState
-                    )
-                    NewTabRowView { model.newTab() }
-                }
-                .padding(.horizontal, 8)
+            SpacePagesView(pager: pager, focusedSpaceID: focusedSpace.id) { spaceID in
+                spacePage(spaceID)
             }
+            .background(
+                SidebarSwipeMonitor(
+                    isEnabled: draggedItemID == nil,
+                    onBegin: { pager.beginSwipe() },
+                    onChange: { pager.swipe(byPoints: $0, pageWidth: Double(model.sidebarWidth)) },
+                    onEnd: {
+                        if let id = pager.endSwipe(), id != model.space(in: window).id {
+                            model.selectSpace(id)
+                        }
+                    },
+                    onCancel: { pager.cancelSwipe() }
+                )
+            )
 
             if let miniID = model.miniPlayerTabID, let tab = model.store.tab(withID: miniID) {
                 let media = model.mediaState(for: miniID)
@@ -67,8 +64,49 @@ struct SidebarView: View {
         }
         .frame(width: model.sidebarWidth)
         .frame(maxHeight: .infinity)
-        .background(.ultraThinMaterial)
+        // The sidebar sits on the window's theme background; text follows its brightness.
+        .environment(\.colorScheme, palette.prefersLightForeground ? .dark : .light)
         .overlay(alignment: .trailing) { SidebarResizeHandle(model: model) }
+        .onAppear { pager.reduceMotion = reduceMotion }
+        .onChange(of: reduceMotion) { _, value in pager.reduceMotion = value }
+        .onChange(of: spaceIDs, initial: true) { _, ids in
+            pager.sync(spaceIDs: ids, focused: focusedSpace.id, animated: false)
+        }
+        .onChange(of: focusedSpace.id) { _, id in
+            pager.sync(spaceIDs: spaceIDs, focused: id, animated: true)
+        }
+    }
+
+    /// One space's page: header, pinned, Today and the New Tab row.
+    private func spacePage(_ spaceID: Space.ID) -> some View {
+        let space = model.store.space(withID: spaceID) ?? focusedSpace
+        let content = model.store.content(for: space.id)
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                SpaceHeaderView(model: model, space: space, theme: Color(space.theme))
+                TabSectionView(
+                    title: nil,
+                    section: .pinned,
+                    spaceID: space.id,
+                    entries: content.pinned,
+                    model: model,
+                    draggedItemID: $draggedItemID,
+                    dropState: $dropState
+                )
+                TodayHeaderView(model: model, spaceID: space.id, hasTabs: !content.today.isEmpty)
+                TabSectionView(
+                    title: nil,
+                    section: .unpinned,
+                    spaceID: space.id,
+                    entries: content.today,
+                    model: model,
+                    draggedItemID: $draggedItemID,
+                    dropState: $dropState
+                )
+                NewTabRowView { model.newTab() }
+            }
+            .padding(.horizontal, 8)
+        }
     }
 }
 
