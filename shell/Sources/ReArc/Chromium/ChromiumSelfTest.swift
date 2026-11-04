@@ -19,7 +19,7 @@ final class ChromiumSelfTest {
         let description: String
     }
 
-    static let watchdogSeconds = 180.0
+    static let watchdogSeconds = 240.0
     static let titleA = "ReArc Selftest A"
     static let titleData = "ReArc Selftest Data"
     static let boostPackageID = UUID(uuidString: "5E1F7E57-B005-4000-8000-000000000001")!
@@ -372,8 +372,10 @@ final class ChromiumSelfTest {
         try await wait("evaluations drained") { engine.evaluationsOutstanding == 0 }
         try check(runtime.liveScriptContexts == 0, "\(runtime.liveScriptContexts) evaluation context(s) never released")
         try check(runtime.liveProfileContexts == 0, "\(runtime.liveProfileContexts) profile request context(s) never released")
-        log("PASS every evaluation and profile request context released exactly once "
-            + "(live script contexts: \(runtime.liveScriptContexts), profile contexts: \(runtime.liveProfileContexts))")
+        try check(runtime.liveCommandBarContexts == 0, "\(runtime.liveCommandBarContexts) command-bar call context(s) never released")
+        log("PASS every evaluation, profile request and command-bar call context released exactly once "
+            + "(live script contexts: \(runtime.liveScriptContexts), profile contexts: \(runtime.liveProfileContexts), "
+            + "command-bar contexts: \(runtime.liveCommandBarContexts))")
     }
 
     // MARK: Script evaluation
@@ -828,6 +830,10 @@ final class ChromiumSelfTest {
         try await wait("cancelled row removed") { controller.list.record(withID: id) == nil }
         let gone = runtime.downloadAction(profile: handle.profile, id: handle.id, action: 4)
         try check(gone == ReArcStatus(REARC_NOT_FOUND), "reveal after remove returned \(gone.rearcName)")
+        let dangerous = runtime.capabilities.dangerousDownloads
+            ? try await dangerousDownloadChecks(engine: engine, base: base, controller: controller, directory: directory)
+            : "ABI-GAP dangerous_downloads not advertised: dangerous items are reviewed on chrome://downloads"
+        log(dangerous)
         let asked = runtime.capabilities.downloadSavePrompt
             ? try await askWhereToSaveChecks(engine: engine, base: base, controller: controller, backend: backend, directory: directory)
             : "ABI-GAP Ask where to save needs file_chooser (ABI 1.19)"
@@ -1132,6 +1138,17 @@ final class ChromiumSelfTest {
 
         try await sidebarNavigationChecks(model: model, store: store, tab: tabA, engine: engineA, base: base)
         try await shellFindAndHistoryChecks(model: model, engine: engineA, base: base)
+        try await commandBarEngineChecks(model: model, engine: engineA, base: base)
+        if runtime.capabilities.tabDiscard {
+            try await discardChecks(model: model, shown: tabA, shownEngine: engineA, hidden: tabB, hiddenEngine: engineB)
+        } else {
+            log("ABI-GAP tab_discard not advertised: Unload Tab drops the engine")
+        }
+        if runtime.capabilities.htmlFullscreen {
+            try await fullscreenChecks(model: model, shell: shell, window: first, tab: tabA, engine: engineA, base: base)
+        } else {
+            log("ABI-GAP html_fullscreen not advertised: page fullscreen requests are refused")
+        }
 
         // Private window: PrivateWindowModel on an off-the-record profile under the
         // active profile; its end closes that profile, and a new one starts empty.
@@ -1227,6 +1244,293 @@ final class ChromiumSelfTest {
         log("PASS shell find and history: /nav recorded (\(visit?.visitCount ?? 0) visit(s), '\(visit?.title ?? "")'), "
             + "command bar 'nav:' -> history row '\(historyRow?.title ?? "")'"
             + (runtime.capabilities.findInPage ? "; Cmd+F on tab A -> '1 of 1', Cmd+G wraps, Esc closes" : ""))
+    }
+
+    // MARK: Wave 23: dangerous downloads (ABI 1.24)
+
+    /// Two inert .sh downloads that Chromium's manual hash blocklist marks
+    /// dangerous, started with a link transition (a typed navigation to a
+    /// download skips the warning): Keep validates one to completion, Discard
+    /// removes the other and its file. Nothing opens either file.
+    @MainActor
+    private func dangerousDownloadChecks(engine: ChromiumEngine, base: String, controller: DownloadsController, directory: URL) async throws -> String {
+        func row(_ name: String) -> DownloadRecord? {
+            controller.records.first { $0.fileName.hasPrefix(name) || $0.url.hasSuffix("/\(name)") }
+        }
+        func linkDownload(_ name: String) throws {
+            let status = "\(base)/download/\(name)".withCString { ReArcTabNavigate(engine.tabID, $0, 1) }
+            try check(status == .rearcOK, "link-transition download of \(name) returned \(status.rearcName)")
+        }
+        let size = ChromiumLaunchArguments.selfTestDangerousDownloadSize
+
+        try linkDownload("rearc-danger-keep.sh")
+        try await wait("dangerous download warning (keep)", timeout: 20) { row("rearc-danger-keep.sh").map(controller.canKeep) ?? false }
+        let keepID = try XUnwrap(row("rearc-danger-keep.sh")).id
+        let warning = try XUnwrap(controller.warnings[keepID])
+        try check(warning.isDangerous && controller.hasDangerous, "keep warning \(warning)")
+        try check(controller.keep(keepID), "Keep was not accepted")
+        try await wait("kept download completes", timeout: 20) { row("rearc-danger-keep.sh")?.state == .complete }
+        let kept = try XUnwrap(row("rearc-danger-keep.sh"))
+        let keptSize = (try? FileManager.default.attributesOfItem(atPath: kept.targetPath))?[.size] as? Int ?? -1
+        try check(keptSize == size && !controller.needsDecision(kept), "kept file \(kept.targetPath) has \(keptSize) bytes")
+
+        try linkDownload("rearc-danger-discard.sh")
+        try await wait("dangerous download warning (discard)", timeout: 20) { row("rearc-danger-discard.sh").map(controller.canKeep) ?? false }
+        let discardRecord = try XUnwrap(row("rearc-danger-discard.sh"))
+        controller.discard(discardRecord.id)
+        try await wait("discarded download removed", timeout: 20) { row("rearc-danger-discard.sh") == nil }
+        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        try check(!leftovers.contains { $0.contains("discard") || $0.hasSuffix(".crdownload") }, "discarded files left: \(leftovers)")
+        try await wait("tab still on page A after the downloads", timeout: 5) { engine.currentURL?.path == "/a" }
+
+        controller.perform(.remove, on: kept.id)
+        try await wait("kept row removed") { row("rearc-danger-keep.sh") == nil }
+        try? FileManager.default.removeItem(atPath: kept.targetPath)
+        return "PASS dangerous downloads (ABI 1.24): danger \(warning.dangerType) on a blocklisted inert .sh -> tray Keep -> "
+            + "complete \(keptSize) B; second -> tray Discard -> item and file removed (directory: \(leftovers.sorted()))"
+    }
+
+    // MARK: Wave 23: command bar from the engine (ABI 1.23, 1.26)
+
+    @MainActor
+    private func historyRows(_ profile: UInt64, _ text: String) async -> [ChromiumHistoryRow] {
+        await withCheckedContinuation { continuation in
+            let status = runtime.queryHistory(profile: profile, text: text, limit: 100) { _, rows in continuation.resume(returning: rows) }
+            if status != .rearcOK { continuation.resume(returning: []) }
+        }
+    }
+
+    /// History rows from HistoryService with Remove from History, the
+    /// default search, classification and live suggestions (from a loopback
+    /// provider, so nothing reaches a real search engine), and a superseded
+    /// autocomplete query ending cancelled.
+    @MainActor
+    private func commandBarEngineChecks(model: BrowserViewModel, engine: ChromiumEngine, base: String) async throws {
+        let capabilities = runtime.capabilities
+        guard let services = model.commandBarServices as? ChromiumCommandBarServices else {
+            throw Failure(description: "the Chromium shell did not install its command-bar services")
+        }
+        let profile = engine.engineProfileID
+        let navURL = URL(string: "\(base)/nav")!
+        var notes: [String] = []
+        model.dismissCommandBar()
+        if capabilities.searchAutocomplete {
+            // A loopback default search first, so no typed text reaches a real search engine.
+            let original = model.searchProvider
+            let loopback = SearchProvider(id: "selftest", name: "ReArc Selftest Search", keyword: "search.selftest.invalid",
+                                          searchTemplate: "\(base)/search?q=%s", suggestTemplate: "\(base)/suggest?q=%s")
+            var setStatus: ReArcStatus?
+            runtime.setDefaultSearchProvider(profile: profile, loopback) { setStatus = $0 }
+            try await wait("default search set") { setStatus != nil }
+            try check(setStatus == .rearcOK, "ReArcSearchSetDefaultProvider returned \(setStatus?.rearcName ?? "-")")
+            services.refreshSearchProvider(for: model.store.activeProfileID)
+            try await wait("default search read back", timeout: 10) { model.searchProvider.searchTemplate == loopback.searchTemplate }
+            notes.append("default search '\(original.name)' -> loopback '\(model.searchProvider.name)' (ReArcSearchSetDefaultProvider)")
+        }
+        model.isCommandBarPresented = true
+
+        if capabilities.historyQuery {
+            var rows: [ChromiumHistoryRow] = []
+            try await waitAsync("HistoryService lists /nav", timeout: 15) {
+                rows = await historyRows(profile, "nav")
+                return rows.contains { $0.url.hasSuffix("/nav") }
+            }
+            model.commandBarText = "nav"
+            try await wait("engine history in the command bar", timeout: 10) {
+                model.commandBarLive?.history?.contains { $0.url.path == "/nav" } == true
+                    && model.commandBarResults.contains { $0.kind == .history && $0.destinationURL?.path == "/nav" }
+            }
+            let index = try XUnwrap(model.commandBarResults.firstIndex { $0.kind == .history && $0.destinationURL?.path == "/nav" })
+            let engineVisits = rows.first { $0.url.hasSuffix("/nav") }?.visitCount ?? 0
+            model.commandBarHighlightedIndex = index
+            try check(model.deleteHighlightedCommandBarHistoryRow(), "Shift+Delete did not remove the /nav row")
+            try await waitAsync("HistoryService forgets /nav", timeout: 15) {
+                !(await historyRows(profile, "nav")).contains { $0.url.hasSuffix("/nav") }
+            }
+            try check(model.visitHistory.record(for: navURL) == nil, "History.json still lists /nav")
+            try await wait("command bar re-queried without /nav", timeout: 10) {
+                model.commandBarLive.map { $0.applies(to: "nav") && !($0.history ?? []).contains { $0.url.path == "/nav" } } ?? false
+            }
+            let refused = await withCheckedContinuation { continuation in
+                let status = runtime.queryHistory(profile: profile, text: "", limit: 0) { status, _ in continuation.resume(returning: status) }
+                if status != .rearcOK { continuation.resume(returning: status) }
+            }
+            try check(refused == ReArcStatus(REARC_INVALID_ARGUMENT), "limit 0 returned \(refused.rearcName)")
+            notes.append("history: HistoryService /nav (\(engineVisits) visit(s)) -> command-bar row -> Shift+Delete removed it from "
+                + "HistoryService and History.json; limit 0 -> \(refused.rearcName)")
+        } else {
+            notes.append("ABI-GAP history_query not advertised: the command bar uses History.json")
+        }
+
+        if capabilities.searchAutocomplete {
+            let provider = model.searchProvider
+
+            let suggestBefore = SelfTestFixtureServer.suggestQueries.count
+            model.commandBarText = "panda selftest words"
+            try await wait("classification and suggestions", timeout: 15) {
+                guard let live = model.commandBarLive, live.applies(to: "panda selftest words"),
+                      case .search(let url) = live.classification else { return false }
+                // Remote suggestions arrive in a later partial result than the typed-text match.
+                return url.absoluteString.hasPrefix("\(base)/search") && model.commandBarResults.contains { $0.kind == .suggestion }
+            }
+            let suggestion = try XUnwrap(model.commandBarResults.first { $0.kind == .suggestion })
+            let suggestionRows = model.commandBarResults.filter { $0.kind == .suggestion }.count
+            try check(suggestion.title == "panda selftest words suggestion one" && suggestion.destinationURL?.path == "/search",
+                      "suggestion row \(suggestion.title) \(suggestion.destinationURL?.absoluteString ?? "")")
+            try check(model.commandBarResults.last?.destinationURL?.absoluteString.hasPrefix("\(base)/search") == true,
+                      "the search fallback does not use the engine's provider")
+            try check(SelfTestFixtureServer.suggestQueries.count > suggestBefore, "no suggest request reached the provider")
+
+            let address = "127.0.0.1:\(URL(string: base)?.port ?? 0)/a"
+            model.commandBarText = address
+            try await wait("an address classifies as a URL", timeout: 10) {
+                guard let live = model.commandBarLive, live.applies(to: address), case .url(let url) = live.classification else { return false }
+                return url.path == "/a"
+            }
+            try check(model.commandBarResults.first { $0.kind != .openTab }?.kind == .openURL, "the typed address is not the first row")
+
+            var first: [ChromiumAutocompleteUpdate] = []
+            var second: [ChromiumAutocompleteUpdate] = []
+            let q1 = runtime.startAutocomplete(profile: profile, text: "rearc first") { first.append($0) }
+            let q2 = runtime.startAutocomplete(profile: profile, text: "rearc second") { second.append($0) }
+            try await wait("superseded autocomplete ends", timeout: 15) { first.last?.done == true && second.last?.done == true }
+            try check(q1 != nil && q2 != nil && q1 != q2, "autocomplete query IDs \(String(describing: q1)) \(String(describing: q2))")
+            try check(first.last?.status == ReArcStatus(REARC_CANCELLED) && second.last?.status == .rearcOK,
+                      "superseded query ended \(first.last?.status.rearcName ?? "-"), newer \(second.last?.status.rearcName ?? "-")")
+            notes.append("search: \(provider.searchTemplate); 'panda selftest words' -> search "
+                + "with \(suggestionRows) suggestion row(s) from the provider's suggest endpoint; "
+                + "'\(address)' -> URL; superseded query -> cancelled, newer -> OK; deliveries \(services.deliveries)")
+        } else {
+            notes.append("ABI-GAP search_autocomplete not advertised: the shell search preference and suggest fetch are used")
+        }
+        model.dismissCommandBar()
+        try await wait("command-bar call contexts released", timeout: 10) { runtime.liveCommandBarContexts == 0 }
+        log("PASS command bar from the engine: " + notes.joined(separator: "; "))
+    }
+
+    // MARK: Wave 23: tab discard (ABI 1.25)
+
+    @MainActor
+    private func discardChecks(model: BrowserViewModel, shown: Tab, shownEngine: ChromiumEngine, hidden: Tab, hiddenEngine: ChromiumEngine) async throws {
+        try await wait("hidden tab idle", timeout: 15) { !hiddenEngine.isLoading && hiddenEngine.currentURL?.path == "/boost" }
+        let visible = shownEngine.discard()
+        try check(visible == .refusedForNow && !shownEngine.isDiscarded, "discarding the shown tab returned \(visible)")
+        let generation = hiddenEngine.contentGeneration
+        let documentBefore = runtime.documentIdentity(tab: hiddenEngine.tabID)
+        model.unloadTab(hidden.id)
+        try await wait("hidden tab discarded", timeout: 10) {
+            hiddenEngine.isDiscarded && hiddenEngine.queryDiscardState() == true && model.isTabUnloaded(hidden.id)
+        }
+        try check(model.engineHost.engine(forTabID: hidden.id, profileID: model.profileID(for: hidden)) === hiddenEngine,
+                  "discard dropped the engine")
+        try check(!model.canUnloadTab(hidden.id), "Unload Tab still offered for a discarded tab")
+        model.selectTab(hidden.id)
+        try await wait("discarded tab restored when shown", timeout: 20) {
+            guard !hiddenEngine.isDiscarded, hiddenEngine.attachmentID != nil, !hiddenEngine.isLoading,
+                  !model.isTabUnloaded(hidden.id), let after = runtime.documentIdentity(tab: hiddenEngine.tabID) else { return false }
+            // The restored page is a new document (its identity advances on commit).
+            return documentBefore.map { !after.isSameDocument(as: $0) } ?? true
+        }
+        try check(hiddenEngine.queryDiscardState() == false && hiddenEngine.contentGeneration == generation,
+                  "restored tab: discarded \(String(describing: hiddenEngine.queryDiscardState())) generation \(hiddenEngine.contentGeneration) vs \(generation)")
+        model.selectTab(shown.id)
+        try await wait("tab A shown again", timeout: 10) { shownEngine.attachmentID != nil }
+        log("PASS tab discard (ABI 1.25): shown tab -> refused; Unload Tab on hidden tab B -> discarded (kind 5, state true, "
+            + "engine and content generation \(generation) kept, row dimmed); selecting B restored it as a new document "
+            + "(\(documentBefore.map { "\($0.documentGeneration)" } ?? "?") -> "
+            + "\(runtime.documentIdentity(tab: hiddenEngine.tabID).map { "\($0.documentGeneration)" } ?? "?"))")
+    }
+
+    // MARK: Wave 23: HTML fullscreen (ABI 1.27)
+
+    @MainActor
+    private func enterPageFullscreen(_ model: BrowserViewModel, window: NSWindow, engine: ChromiumEngine, button: CGPoint) async throws -> Bool {
+        for _ in 0..<3 {
+            focus(window)
+            click(window, engine: engine, at: button)
+            if await eventually(timeout: 3, { engine.isPageFullscreen && model.htmlFullscreen != nil }) { return true }
+        }
+        return false
+    }
+
+    /// The page asks for fullscreen from a click; the shell window goes
+    /// native fullscreen without its sidebar. Leaving by the page's own
+    /// exitFullscreen(), by Escape and by the window (⌃⌘F) each restore it.
+    @MainActor
+    private func fullscreenChecks(model: BrowserViewModel, shell: ChromiumShell, window: NSWindow, tab: Tab, engine: ChromiumEngine, base: String) async throws {
+        model.selectTab(tab.id)
+        engine.load(URL(string: "\(base)/fullscreen")!)
+        try await wait("fullscreen fixture", timeout: 15) { engine.pageTitle == "fs-ready" && !engine.isLoading && engine.attachmentID != nil }
+        let button = try await cssCenter(of: "#go", in: engine)
+        let sidebarBefore = model.isSidebarVisible
+        guard try await enterPageFullscreen(model, window: window, engine: engine, button: button) else {
+            log("NOTE HTML fullscreen: the synthesized click produced no fullscreen request (app active \(NSApp.isActive), "
+                + "key \(window.isKeyWindow)); fullscreen is not exercised in this run")
+            return
+        }
+        try check(model.htmlFullscreenTabID == tab.id && shell.htmlFullscreenWindow === window, "fullscreen session \(String(describing: model.htmlFullscreen))")
+        try await wait("window native fullscreen", timeout: 10) { window.styleMask.contains(.fullScreen) && shell.isNativeFullscreenSettled }
+        try check(engine.queryFullscreenState() == true, "engine does not report fullscreen")
+
+        // 1. The page leaves.
+        _ = try await engine.evaluate("document.exitFullscreen().then(function () { return true; })", in: .page)
+        do {
+            try await wait("page exit restores the window", timeout: 10) {
+                model.htmlFullscreen == nil && !window.styleMask.contains(.fullScreen) && engine.pageTitle == "fs-off"
+                    && shell.isNativeFullscreenSettled
+            }
+        } catch {
+            throw Failure(description: "page exit: session \(String(describing: model.htmlFullscreen)) window fullscreen "
+                + "\(window.styleMask.contains(.fullScreen)) title \(engine.pageTitle ?? "-")")
+        }
+        try check(model.isSidebarVisible == sidebarBefore && engine.queryFullscreenState() == false, "state after the page's exit")
+        var paths = ["page exitFullscreen()"]
+
+        // 2. Escape (the engine exits, reason 2).
+        try await Task.sleep(nanoseconds: 300_000_000)
+        if try await enterPageFullscreen(model, window: window, engine: engine, button: button) {
+            try await wait("window native fullscreen again", timeout: 10) { window.styleMask.contains(.fullScreen) && shell.isNativeFullscreenSettled }
+            for kind in [NSEvent.EventType.keyDown, .keyUp] {
+                if let event = NSEvent.keyEvent(with: kind, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                windowNumber: window.windowNumber, context: nil, characters: "\u{1b}",
+                                                charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) {
+                    window.sendEvent(event)
+                }
+            }
+            if await eventually(timeout: 5, { model.htmlFullscreen == nil }) {
+                try await wait("Escape restores the window", timeout: 10) {
+                    !window.styleMask.contains(.fullScreen) && shell.isNativeFullscreenSettled
+                }
+                paths.append("Escape")
+            } else {
+                log("NOTE HTML fullscreen: the synthesized Escape did not reach the page; leaving through the page instead")
+                _ = try await engine.evaluate("document.exitFullscreen().then(function () { return true; })", in: .page)
+                try await wait("page exit after the Escape attempt", timeout: 10) {
+                    model.htmlFullscreen == nil && !window.styleMask.contains(.fullScreen)
+                }
+            }
+        }
+
+        // 3. The user leaves native fullscreen; the page follows (reason 1, host).
+        try await Task.sleep(nanoseconds: 300_000_000)
+        if try await enterPageFullscreen(model, window: window, engine: engine, button: button) {
+            try await wait("window native fullscreen a third time", timeout: 10) {
+                window.styleMask.contains(.fullScreen) && shell.isNativeFullscreenSettled
+            }
+            // As the green button or ⌃⌘F would, once the window has settled.
+            try await Task.sleep(nanoseconds: 200_000_000)
+            window.toggleFullScreen(nil)
+            try await wait("leaving native fullscreen ends the page's", timeout: 10) {
+                model.htmlFullscreen == nil && !window.styleMask.contains(.fullScreen) && engine.pageTitle == "fs-off"
+                    && engine.queryFullscreenState() == false
+            }
+            paths.append("window (⌃⌘F)")
+        }
+        try check(model.isSidebarVisible == sidebarBefore, "the sidebar did not come back")
+        engine.load(URL(string: "\(base)/a")!)
+        try await wait("tab A back on /a", timeout: 15) { engine.pageTitle == Self.titleA && !engine.isLoading }
+        log("PASS HTML fullscreen (ABI 1.27): click -> requestFullscreen -> window native fullscreen, sidebar hidden; "
+            + "left by \(paths.joined(separator: ", ")); window and sidebar restored each time")
     }
 
     /// The sidebar's back/forward/reload/stop and lock state act on the
@@ -1975,6 +2279,7 @@ final class SelfTestFixtureServer {
     private let queue = DispatchQueue(label: "net.rearc.selftest.fixture")
 
     static let pages: [String: String] = [
+        "/search": "<!doctype html><html><head><title>search results</title></head><body>search</body></html>",
         "/a": """
         <!doctype html><html><head><title>\(ChromiumSelfTest.titleA)</title><link rel="icon" href="/favicon.png"></head>
         <body style="margin:0;background:#2a6;font:32px -apple-system"><h1>ReArc selftest page A</h1>
@@ -2000,6 +2305,19 @@ final class SelfTestFixtureServer {
         sessionStorage.setItem('rearcNav', String(n));
         document.title = 'nav:' + performance.getEntriesByType('navigation')[0].type + ':' + n;
         </script></head><body style="font:32px -apple-system"><h1>ReArc selftest navigation page</h1></body></html>
+        """,
+        // A button that asks for element fullscreen (needs the click's user activation).
+        "/fullscreen": """
+        <!doctype html><html><head><title>fs-ready</title></head><body style="margin:0;font:24px -apple-system">
+        <button id="go" style="position:absolute;left:0;top:0;width:400px;height:300px">fullscreen</button><script>
+        document.getElementById('go').onclick = function () {
+          document.documentElement.requestFullscreen().then(function () { document.title = 'fs-on'; },
+                                                          function () { document.title = 'fs-denied'; });
+        };
+        document.addEventListener('fullscreenchange', function () {
+          if (!document.fullscreenElement) document.title = 'fs-off';
+        });
+        </script></body></html>
         """,
         // Four case-insensitive "needle"s, two of them lowercase.
         "/find": """
@@ -2142,6 +2460,9 @@ final class SelfTestFixtureServer {
         let isIcon = path.hasPrefix("/favicon")
         // Form submissions carry a query; pages are keyed by path.
         let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+        if route == "/suggest" {
+            return suggest(connection, path: path)
+        }
         let body = isIcon ? nil : pages[route]
         let found = isIcon || body != nil
         print("[fixture] GET \(path) -> \(found ? 200 : 404)")
@@ -2163,16 +2484,37 @@ final class SelfTestFixtureServer {
         }
     }
 
+    /// OpenSearch suggestions for the self-test's loopback search provider.
+    private static func suggest(_ connection: NWConnection, path: String) {
+        // Form encoding: '+' is a space. Chromium drops a response whose echoed query differs.
+        let raw = URLComponents(string: path)?.percentEncodedQueryItems?.first { $0.name == "q" }?.value ?? ""
+        let terms = raw.replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? raw
+        suggestLock.withLock { recordedSuggestQueries.append(terms) }
+        let body = (try? JSONSerialization.data(withJSONObject: [terms, ["\(terms) suggestion one", "\(terms) suggestion two"]])) ?? Data()
+        print("[fixture] GET \(path) -> 200 (suggest)")
+        fflush(stdout)
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: \(body.count)\r\n"
+            + "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+        connection.send(content: Data(head.utf8) + body, completion: .contentProcessed { _ in connection.cancel() })
+    }
+
+    /// Terms the suggest endpoint was asked for (written on the fixture queue).
+    private static let suggestLock = NSLock()
+    private static var recordedSuggestQueries: [String] = []
+    static var suggestQueries: [String] { suggestLock.withLock { recordedSuggestQueries } }
+
     /// Attachments: `rearc-small.bin` in one write, `rearc-trickle.bin` in timed chunks.
     private static func download(_ connection: NWConnection, name: String) {
         let trickle = name.contains("trickle")
-        let size = trickle ? trickleDownloadSize : smallDownloadSize
+        // Inert bytes that the self-test's manual hash blocklist marks dangerous.
+        let danger = name.contains("danger")
+        let size = trickle ? trickleDownloadSize : danger ? ChromiumLaunchArguments.selfTestDangerousDownloadSize : smallDownloadSize
         print("[fixture] GET /download/\(name) -> 200 (\(size) bytes\(trickle ? ", trickled" : ""))")
         fflush(stdout)
         let head = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: \(size)\r\n"
             + "Content-Disposition: attachment; filename=\"\(name)\"\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
         guard trickle else {
-            connection.send(content: Data(head.utf8) + Data(repeating: 0x52, count: size), completion: .contentProcessed { _ in
+            connection.send(content: Data(head.utf8) + Data(repeating: danger ? 0x61 : 0x52, count: size), completion: .contentProcessed { _ in
                 connection.cancel()
             })
             return

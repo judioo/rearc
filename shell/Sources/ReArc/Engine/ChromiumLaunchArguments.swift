@@ -66,8 +66,19 @@ enum ChromiumLaunchArguments {
         "--disable-background-timer-throttling",
     ]
 
+    /// Self-test only: Chromium's manual Safe Browsing hash blocklist names
+    /// the fixture's inert download (65536 bytes of "a"), so it arrives as
+    /// dangerous content for Keep and Discard (engine/tests/run_c_abi.py
+    /// "danger"). Nothing opens or runs the file.
+    static let selfTestDangerousDownloadSize = 65536
+    static let selfTestDangerousDownloadSHA256 = "bf718b6f653bebc184e1479f1935b8da974d701b893afcf49e701f3e2f9f9c5a"
+    static var selfTestDangerSwitch: String {
+        "--safebrowsing-manual-download-blacklist=" + selfTestDangerousDownloadSHA256
+    }
+
     static func selfTestArguments(_ arguments: [String]) -> [String] {
-        arguments + selfTestForegroundSwitches.filter { !arguments.contains($0) }
+        let extra = selfTestForegroundSwitches + [selfTestDangerSwitch]
+        return arguments + extra.filter { !arguments.contains($0) }
     }
 
     /// The `--user-data-dir` the engine runs with (last occurrence wins, as in Chromium).
