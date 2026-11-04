@@ -75,7 +75,8 @@ The shell still calls `ReArcEngineConfigure(1, …)`. After `ready` it probes
 looked up with `dlsym` first and an engine that predates the export counts as
 minor 0. `ChromiumCapabilities` enables a feature only when the minor version
 is at least the one that introduced it (5 for the three below, 6–10 for the
-ABI 1.10 features, 11–14 for the ABI 1.14 ones, 15–17 for the wave 20 ones)
+ABI 1.10 features, 11–14 for the ABI 1.14 ones, 15–17 for the wave 20 ones,
+18–22 for the wave 22 prompt channels)
 **and** `ReArcEngineHasFeature`
 advertises it, and logs
 `capabilities: ABI minor 14: navigation_extended=1 script_evaluation=1 …`.
@@ -247,8 +248,8 @@ WebKit, mapped onto WKWebView.
 
 - **History and passwords (1.15).** No Swift call: Chromium's
   HistoryTabHelper records every non-OTR tab (chrome://history) and
-  ChromePasswordManagerClient fills saved credentials. There is no save
-  prompt yet, so the shell offers no "save password" UI. Tabs present at
+  ChromePasswordManagerClient fills saved credentials. Save offers arrive
+  with ABI 1.22 (wave 22, below). Tabs present at
   their real size; no production `--disable-backgrounding-occluded-windows`.
 - **Find in page (1.16).** Edit > Find… (⌘F), Find Next (⌘G), Find Previous
   (⇧⌘G), or "Find on Page" in the command bar, open a floating bar at the
@@ -285,11 +286,11 @@ WebKit, mapped onto WKWebView.
   each profile as its open completes, before its first tab, OTR included,
   and again on a folder change (`ChromiumDownloadBackend`). Actions map to
   `ReArcDownloadAction`; invalid_state waits for the next event, and
-  not_found falls back to Finder / Launch Services. No "Ask where to save"
-  option until the file chooser ABI. On WebKit, attachments and
+  not_found falls back to Finder / Launch Services. "Ask where to save"
+  needs the ABI 1.19 file chooser (wave 22, below). On WebKit, attachments and
   main-frame responses WebKit cannot show become `WKDownload`s
-  (`WebKitDownloadCenter`). They are saved without asking into the same
-  folder, uniquified like Chromium ("name (1).ext"), and quarantined when
+  (`WebKitDownloadCenter`). Unless Ask where to save is on, they are saved
+  without asking into the same folder, uniquified like Chromium ("name (1).ext"), and quarantined when
   done. Pause is cancel-with-resume-data and resume is
   `resumeDownload(fromResumeData:)`. WebKit runs no Safe Browsing check, so
   there is no danger state there.
@@ -305,6 +306,109 @@ WebKit, mapped onto WKWebView.
   without repeating an open tab's page, before commands and the search
   fallback. A typed address keeps its Open row first. "Clear Command Bar
   History" empties the store.
+
+### ABI 1.18–1.22 adoption (wave 22)
+
+Follows "Host prompt channels (wave 18c)" in `engine/docs/C-ABI.md` and
+`engine/docs/WAVE-18C-REPORT.md`. Each channel is gated on its minor and
+flag (`javascript_dialogs` 18, `file_chooser` 19, `permission_prompts` 20,
+`context_menu` 21, `password_prompts` 22, which also needs
+`password_autofill`); Configure still takes 1. `ChromiumRuntime` registers
+every adopted callback at `ready`, before any tab
+(`ChromiumPrompts.swift`). The callbacks copy the borrowed strings and
+arrays, then route by tab ID to the engine. A request for a tab the shell
+does not know gets the conservative answer at once (reject, cancel,
+dismiss). Phase 1 events withdraw a request without a reply. Every reply
+is one main-thread call that consumes the request, and a late reply is
+`not_found`.
+
+Both engines feed one `PagePromptCenter` per page (`Prompts/`). The
+overlay is part of every engine view (tabs, split panes, peek, Little
+Arc, private windows), so a prompt dims and blocks only its own page.
+The sidebar, other tabs and other windows keep working.
+
+- **JavaScript dialogs.** alert, confirm and prompt show as a sheet
+  centered over the page: "<host> says", the page's text (plain and
+  scrollable), the prompt field, and OK / Cancel with Return and Esc.
+  From the second dialog on the same document, the sheet offers "Don't
+  allow this page to create more dialogs". After that, alerts are
+  acknowledged and confirms and prompts cancelled without UI until the
+  next document (`JavaScriptDialogGuard`). Navigation, a closed frame or
+  tab, and engine cancellation withdraw the sheet. Prompt text is clipped
+  to the ABI's 64 KiB. Keyboard focus returns to the page after the last
+  dialog.
+- **Leave site?** Cmd+W and the row's close button go through
+  `ReArcTabClose(tab, force: false)` (`PageClosing`). Chromium runs the
+  page's beforeunload, and "Leave site?" (or "Reload site?") arrives as a
+  dialog. The tab is shown first if it was in the background. Stay vetoes
+  the close (completion OK, cancelled) and the tab stays. Navigation runs
+  through the same prompt, and Stay puts the URL field and sidebar tab
+  back on the committed page. Chromium shows the prompt only after the
+  page had user activation. Other closes (Delete Tab, a closed split, a
+  deleted space) still force-close.
+- **File choosers.** NSOpenPanel or NSSavePanel opens as a sheet on the
+  page's window, so only that window waits: open, open multiple, upload
+  folder (the engine walks it, skipping symlinks), directory and save.
+  The page's accept list becomes `allowedContentTypes` when macOS knows
+  every type, and otherwise the advisory filter is dropped. Replies are
+  checked against the ABI rules (absolute, no `..`, one path unless
+  multiple, 4096 paths of 4096 bytes), because an invalid reply would
+  leave the request pending. Engine cancellation closes the panel.
+- **Ask where to save.** "Ask Where to Save Each File" in the downloads
+  tray's folder menu is saved in `Downloads.json`. On Chromium it sets
+  `ReArcDownloadSetPolicy(profile, directory, 1)` for every open profile.
+  Chromium then asks for the path through the file chooser (save mode),
+  and the shell answers with a save panel on the downloading tab's window
+  (`ChromiumDownloadBackend` presents it in the key window when no live
+  tab owns the request). The panel confirms replacing a file, and Cancel
+  cancels the download. WebKit asks in `decideDestination`. The toggle is
+  disabled on Chromium engines before 1.19.
+- **Permission prompts.** A card at the page's top leading corner, next to
+  the sidebar's URL field: "<host> wants to" with one line per request
+  ("Use your camera and microphone" for a coalesced request), the
+  embedding site for iframes, and a note when macOS also authorizes the
+  device (camera, microphone, location). It offers Block, Allow, × to
+  dismiss, and "Remember this decision" (on by default) as `persist`.
+  Dismiss never persists. Every answer is recorded in `SitePermissions.json`
+  (remembered answers of persistent profiles only; a private session's go
+  with it). The URL field shows a permissions icon for sites with
+  answers, orange when something is blocked. Its popover lists them.
+  On Chromium, which keeps remembered settings itself, it links to Site
+  Settings (`chrome://settings/content/siteDetails?site=<origin>`). On
+  WebKit each answer resets in place. Both bundles declare the camera,
+  microphone and location usage strings and sign with the device
+  entitlements (`scripts/ReArc.entitlements`).
+- **Page menu.** `PageContextMenuPlan` builds Chrome's variants from the
+  event: link, image (Open Image in New Tab, Save Image As…, Copy Image,
+  Copy Image Address), selection and editable (Cut / Copy / Paste with
+  the page's edit flags, Select All), and the page (Back, Forward, Reload,
+  Select All, View Page Source). Arc adds Open Link in Little Arc, Open
+  Link in New Split (sidebar tabs only), Copy Link and Search for
+  "<selection>". The NSMenu opens at the event's point after the callback
+  returns. Engine items run as `ReArcContextMenuCommand`, and Arc items
+  run in the shell and dismiss the request. Every menu ends with a
+  command, closing without a choice included. A refused command (disabled,
+  or Inspect) is followed by a dismiss. Inspect is listed disabled: the
+  engine answers `unsupported` (wave 18d has no DevTools frontend yet).
+  It is enabled only for an engine that advertises the provisional
+  `devtools` feature, and none does through ABI 1.27.
+- **Password offers.** A card at the page's top trailing corner: "Save
+  password for <host>?" (or Update) with the username, Never (not for
+  updates), Not Now and Save. The answer goes back as
+  `ReArcPasswordPromptRespond`. No password crosses the ABI and the shell
+  stores nothing. Chromium saves, blocklists and encrypts, and
+  chrome://password-manager manages the store.
+- **WebKit.** WKUIDelegate drives the same center: alert, confirm and
+  prompt panels, `runOpenPanelWith` (open, multiple, folder), and camera
+  and microphone requests. Remembered answers are replayed from
+  `SitePermissions.json`, since WebKit keeps none. `ReArcWebView` keeps
+  WKWebView's own menu, which already has its variants and commands. It
+  turns "Open … in New Window" into "Open … in New Tab", replaces the web
+  search item with "Search for …", and adds Little Arc and New Split. A
+  `contextmenu` listener reports the link, image and selection just
+  before the menu opens. WebKit has no public beforeunload, geolocation
+  or notification delegate, so pages leave without asking and location
+  and notifications are unavailable there.
 
 ### Self-test
 
@@ -368,10 +472,38 @@ The self-test:
     on its page, the tray opens) and removed by a removed event. Then a
     trickled 1 MiB file is paused (a second pause is `invalid_state`),
     resumed, cancelled and removed (reveal is then `not_found`), and a
-    relative directory or prompt mode 1 is refused. Older engines log
-    ABI-GAP lines instead. In the real shell, ⌘F on tab A shows "1 of 1",
-    and the command bar offers the `/nav` visit as history.
-17. Verifies every evaluation and profile request context was released
+    relative directory is refused. With `file_chooser`, prompt mode 1 is
+    accepted, and Ask where to save sends the save-path request through
+    the tab's prompt center. The chosen path gets the file, and a cancelled
+    panel cancels the download. Older engines log ABI-GAP lines instead.
+    In the real shell, ⌘F on tab A shows "1 of 1", and the command bar
+    offers the `/nav` visit as history.
+17. Prompt channels (ABI 1.18–1.22), each gated on its minor and flag,
+    through the tab's `PagePromptCenter` (the calls its buttons make; the
+    file panels and the menu are replaced by recorders, since an NSMenu's
+    tracking loop would block the run):
+    - `<input type=file multiple accept=.txt,text/plain>` opens an
+      open-multiple chooser with that filter, and the two files reach the
+      page. `webkitdirectory` uploads a folder's two files, skipping a
+      symlink. Navigation closes a held panel.
+    - The link menu (dismissed) and the page menu, whose Reload runs in
+      the engine. Inspect is `unsupported` and is then dismissed.
+    - Typed sign-in gives a save offer for the username, answered Not Now.
+    - "Leave site?": Stay keeps the page on navigation and vetoes a normal
+      close; Leave continues.
+    - alert, confirm (false), prompt (default text, typed reply), the
+      dialog limit on the second dialog, and a suppressed confirm answered
+      without UI. Navigation withdraws a pending alert, and its late reply
+      is `not_found`.
+    - Notifications allowed this time (asked again), then blocked and
+      remembered (no further prompt). Geolocation dismissed
+      (`PERMISSION_DENIED`), and navigation withdraws a pending request.
+
+    The input-driven steps (file input, menu, typing, beforeunload's
+    activation) use synthesized events. Each focuses the page and retries.
+    When input still cannot reach the page (app inactive), a step logs a
+    NOTE instead of failing.
+18. Verifies every evaluation and profile request context was released
     (`live script contexts: 0, profile contexts: 0`), then shuts down cleanly.
 
 With the mock keychain the run reaches `RESULT PASS`
@@ -462,6 +594,15 @@ Production needs:
   saved (Chromium's private zoom map).
 - **One live view per tab.** A tab shown in two windows renders in one, and
   the other shows a placeholder.
+- **No Inspect.** The page menu lists Inspect disabled: the engine has no
+  browser-less DevTools frontend (WAVE-18C-REPORT "What was not done").
+- **Password leak check.** When a sign-in is submitted, Chromium's password
+  manager runs its leak check against Google's endpoint (the self-test logs
+  its 400 for the fixture's credentials). Turning it off is engine or prefs
+  work.
+- **Prompts Chromium does not route here.** File System Access pickers,
+  screen and tab sharing, device choosers and extension prompts are not part
+  of these channels.
 - **Hidden-tab loads can be slow.** A tab that was never attached sometimes
   takes several seconds to start its first network request, or to run script.
 
@@ -499,6 +640,11 @@ Production needs:
   - `FindBar/` — the find-in-page bar and its model.
   - `Downloads/` — `DownloadsController`, the sidebar tray, and the
     `WKDownload` backend (`ChromiumDownloads.swift` is the Chromium one).
+  - `Prompts/` — `PagePromptCenter` (one per page), the dialog sheet and
+    the permission and password cards, the file panel and NSMenu presenters,
+    `SitePermissionsController`, and the view model's link routing and
+    close-through-page (`ChromiumPrompts.swift` and `WKEngine+PagePrompts`
+    are the engines' sides).
   - `BrowserViewModel` — glue between store, engines, overlay, and shortcuts.
 
 ## Sidebar (wave 17)
