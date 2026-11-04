@@ -41,6 +41,27 @@ final class PagePromptCenter {
         var id: UInt64 { prompt.id }
     }
 
+    struct AutofillSave: Identifiable {
+        let offer: AutofillSaveOffer
+        fileprivate let reply: (AutofillSaveAction) -> Void
+        var id: UInt64 { offer.id }
+    }
+
+    struct HTTPAuth: Identifiable {
+        let challenge: HTTPAuthChallenge
+        /// nil cancels.
+        fileprivate let reply: ((username: String, password: String)?) -> Void
+        var id: UInt64 { challenge.id }
+    }
+
+    /// What the suggestion list does with the engine (Chromium ABI 1.34).
+    struct AutofillActions {
+        enum AcceptOutcome { case accepted, busy, gone }
+        var accept: (_ request: UInt64, _ row: Int) -> AcceptOutcome
+        var select: (_ request: UInt64, _ row: Int?) -> Void
+        var dismiss: (_ request: UInt64) -> Void
+    }
+
     // MARK: Identity (set by EngineHost when the engine is made)
 
     /// The sidebar tab this page belongs to; nil for peeks, Little Arc and private windows.
@@ -69,6 +90,18 @@ final class PagePromptCenter {
     /// "Remember this decision" (sends persist).
     var rememberPermission = true
     private(set) var password: Password?
+    private(set) var autofillSave: AutofillSave?
+    private(set) var httpAuth: HTTPAuth?
+    /// The sign-in sheet's fields; cleared as soon as it is answered.
+    var authUsername = ""
+    var authPassword = ""
+    /// The suggestion list drawn for the focused field (Chromium only).
+    private(set) var autofill: AutofillPopup?
+    /// The row under the pointer (previewed in the page).
+    var autofillHover: Int?
+    @ObservationIgnored private var autofillShownAt = Date.distantPast
+    @ObservationIgnored private var autofillActions: AutofillActions?
+    @ObservationIgnored private var authQueue: [HTTPAuth] = []
 
     @ObservationIgnored private var dialogQueue: [Dialog] = []
     @ObservationIgnored private var permissionQueue: [Permission] = []
@@ -81,6 +114,7 @@ final class PagePromptCenter {
 
     @ObservationIgnored var filePanels: FilePanelPresenting = SystemFilePanelPresenter()
     @ObservationIgnored var contextMenus: PageContextMenuPresenting = NSMenuContextMenuPresenter()
+    @ObservationIgnored var autofillPanels: AutofillPanelPresenting = AutofillPanelPresenter()
     @ObservationIgnored private var fileChooser: (id: UInt64, request: FileChooserRequest, handle: FilePanelHandle?, reply: ([String]?) -> Void)?
     /// The view under the page (the overlay's anchor): window for sheets, coordinates for menus.
     @ObservationIgnored weak var anchorView: NSView?
@@ -229,6 +263,143 @@ final class PagePromptCenter {
         password = nil
     }
 
+    // MARK: Card and address save offers (Chromium ABI 1.37)
+
+    func presentAutofillSave(_ offer: AutofillSaveOffer, reply: @escaping (AutofillSaveAction) -> Void) {
+        // One offer per page (Chromium withdraws the old one too).
+        if let previous = autofillSave {
+            autofillSave = nil
+            previous.reply(.ignore)
+        }
+        autofillSave = AutofillSave(offer: offer, reply: reply)
+    }
+
+    func answerAutofillSave(_ action: AutofillSaveAction) {
+        guard let current = autofillSave else { return }
+        autofillSave = nil
+        count(&answered, "autofill_save")
+        current.reply(action)
+    }
+
+    func cancelAutofillSave(id: UInt64) {
+        guard autofillSave?.id == id else { return }
+        count(&cancelled, "autofill_save")
+        autofillSave = nil
+    }
+
+    // MARK: HTTP authentication (Chromium ABI 1.38, WebKit challenges)
+
+    func presentHTTPAuth(_ challenge: HTTPAuthChallenge, reply: @escaping ((username: String, password: String)?) -> Void) {
+        let entry = HTTPAuth(challenge: challenge, reply: reply)
+        if httpAuth == nil {
+            showHTTPAuth(entry)
+        } else {
+            authQueue.append(entry)
+        }
+        router?.revealPage(of: self)
+    }
+
+    /// Log In (true) or Cancel. Over-long credentials are refused by the sheet.
+    func answerHTTPAuth(signIn: Bool) {
+        guard let current = httpAuth else { return }
+        let credentials = signIn ? (username: authUsername, password: authPassword) : nil
+        if let credentials, !HTTPAuthChallenge.isValidCredential(credentials.username) || !HTTPAuthChallenge.isValidCredential(credentials.password) {
+            return
+        }
+        count(&answered, "http_auth")
+        advanceHTTPAuth()
+        current.reply(credentials)
+    }
+
+    func cancelHTTPAuth(id: UInt64) {
+        if httpAuth?.id == id {
+            count(&cancelled, "http_auth")
+            advanceHTTPAuth()
+        } else if let index = authQueue.firstIndex(where: { $0.id == id }) {
+            count(&cancelled, "http_auth")
+            authQueue.remove(at: index)
+        }
+    }
+
+    private func showHTTPAuth(_ entry: HTTPAuth) {
+        authUsername = ""
+        authPassword = ""
+        httpAuth = entry
+    }
+
+    private func advanceHTTPAuth() {
+        httpAuth = nil
+        authUsername = ""
+        authPassword = ""
+        if !authQueue.isEmpty { showHTTPAuth(authQueue.removeFirst()) }
+    }
+
+    // MARK: Autofill suggestions (Chromium ABI 1.34)
+
+    /// Shows or updates the list. Chromium decides when it shows and hides,
+    /// and routes the field's arrow keys, Return, Tab and Escape itself.
+    func showAutofill(_ popup: AutofillPopup, actions: AutofillActions) {
+        if autofill?.requestID != popup.requestID {
+            autofillShownAt = Date()
+            autofillHover = nil
+        }
+        autofillActions = actions
+        autofill = popup
+        autofillPanels.show(popup, for: self)
+    }
+
+    /// Keyboard selection in the field (phase 2).
+    func selectAutofillRow(requestID: UInt64, row: Int?) {
+        guard var popup = autofill, popup.requestID == requestID else { return }
+        popup.selected = row
+        autofill = popup
+        autofillPanels.show(popup, for: self)
+    }
+
+    /// The engine hid the list (phase 1), or the page went away.
+    func hideAutofill(requestID: UInt64? = nil) {
+        guard let popup = autofill, requestID == nil || popup.requestID == requestID else { return }
+        autofill = nil
+        autofillHover = nil
+        autofillPanels.hide(for: self)
+    }
+
+    /// A click on a row. Within Chromium's early-accept guard the engine
+    /// answers busy, and the accept is retried once the guard has passed.
+    func acceptAutofillRow(_ row: Int) {
+        guard let popup = autofill, let actions = autofillActions,
+              popup.rows.contains(where: { $0.id == row && $0.isAcceptable && $0.kind != .separator }) else { return }
+        switch actions.accept(popup.requestID, row) {
+        case .accepted:
+            count(&answered, "autofill")
+        case .gone:
+            hideAutofill(requestID: popup.requestID)
+        case .busy:
+            let delay = AutofillAcceptPolicy.retryDelay(shownAt: autofillShownAt)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.autofill?.requestID == popup.requestID else { return }
+                if actions.accept(popup.requestID, row) == .accepted { self.count(&self.answered, "autofill") }
+            }
+        }
+    }
+
+    /// Pointer over a fill row previews it in the page; nil clears the preview.
+    func previewAutofillRow(_ row: Int?) {
+        guard let popup = autofill else { return }
+        autofillHover = row
+        let previewable = row.flatMap { id in popup.rows.first { $0.id == id && $0.kind == .fill } } != nil
+        autofillActions?.select(popup.requestID, previewable ? row : nil)
+    }
+
+    func dismissAutofill() {
+        guard let popup = autofill else { return }
+        autofillActions?.dismiss(popup.requestID)
+        hideAutofill(requestID: popup.requestID)
+    }
+
+    /// Seconds the current list has been shown (the self-test waits out the guard).
+    var autofillShownFor: TimeInterval { Date().timeIntervalSince(autofillShownAt) }
+
     // MARK: File chooser
 
     /// Shows the open or save panel as a sheet on the page's window. `reply`
@@ -339,6 +510,17 @@ final class PagePromptCenter {
             self.password = nil
             password.reply(.notNow)
         }
+        if let save = autofillSave {
+            autofillSave = nil
+            save.reply(.ignore)
+        }
+        let auths = [httpAuth].compactMap { $0 } + authQueue
+        httpAuth = nil
+        authQueue = []
+        authUsername = ""
+        authPassword = ""
+        auths.forEach { $0.reply(nil) }
+        hideAutofill()
         if let chooser = fileChooser {
             fileChooser = nil
             chooser.handle?.close()
@@ -350,7 +532,9 @@ final class PagePromptCenter {
     func withdrawAll() {
         for (channel, pending) in [("dialog", (dialog == nil ? 0 : 1) + dialogQueue.count),
                                    ("permission", (permission == nil ? 0 : 1) + permissionQueue.count),
-                                   ("password", password == nil ? 0 : 1)] where pending > 0 {
+                                   ("password", password == nil ? 0 : 1),
+                                   ("autofill_save", autofillSave == nil ? 0 : 1),
+                                   ("http_auth", (httpAuth == nil ? 0 : 1) + authQueue.count)] where pending > 0 {
             cancelled[channel, default: 0] += pending
         }
         dialog = nil
@@ -358,6 +542,12 @@ final class PagePromptCenter {
         permission = nil
         permissionQueue = []
         password = nil
+        autofillSave = nil
+        httpAuth = nil
+        authQueue = []
+        authUsername = ""
+        authPassword = ""
+        hideAutofill()
         if let chooser = fileChooser {
             fileChooser = nil
             count(&cancelled, "file")
@@ -365,7 +555,9 @@ final class PagePromptCenter {
         }
     }
 
-    var hasPendingPrompt: Bool { dialog != nil || permission != nil || password != nil || fileChooser != nil }
+    var hasPendingPrompt: Bool {
+        dialog != nil || permission != nil || password != nil || fileChooser != nil || autofillSave != nil || httpAuth != nil
+    }
 
     private func count(_ counter: inout [String: Int], _ channel: String) {
         counter[channel, default: 0] += 1

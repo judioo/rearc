@@ -512,6 +512,26 @@ final class ChromiumRuntime {
     /// Prompt channel events received and replies sent, per channel (logs, self-test).
     var promptEvents: [String: Int] = [:]
     var promptReplies: [String: Int] = [:]
+
+    // Wave 27 (ABI 1.31–1.38): extensions, autofill, save offers, HTTP auth.
+    /// Install/uninstall prompts and notices; without it requests are cancelled.
+    var onExtensionPrompt: ((ChromiumExtensionPromptEvent) -> Void)?
+    var onExtensionActionEvent: ((ChromiumExtensionActionEvent) -> Void)?
+    /// tabs.create / windows.create / options / activate; without it requests are declined.
+    var onExtensionTabRequest: ((ExtensionTabRequest) -> Void)?
+    /// The created event of a popup tab `runExtensionAction` announced; false closes it.
+    var onExtensionPopupCreated: ((ChromiumTabEvent) -> Bool)?
+    /// Every tab.closed, after the engine saw it.
+    var onTabClosed: ((ChromiumTabEvent) -> Void)?
+    /// "Manage…" in the suggestions: Chromium's settings page for the product.
+    var onAutofillSettings: ((URL, ChromiumEngine?) -> Void)?
+    /// ReArc > Check Passwords for Leaks; applied to each persistent profile as it opens.
+    var leakDetectionPreference = PasswordLeakDetectionPreference()
+    var expectedExtensionPopups: Set<UInt64> = []
+    /// Recorded for the self-test.
+    var extensionPromptEvents: [ChromiumExtensionPromptEvent] = []
+    var extensionActionEvents: [ChromiumExtensionActionEvent] = []
+    var extensionTabRequests: [ExtensionTabRequest] = []
     /// The shell profile that may take over the startup `Default` directory
     /// (the first profile); set before any of its tabs are created.
     var legacyDefaultOwner: Profile.ID?
@@ -616,6 +636,9 @@ final class ChromiumRuntime {
         }
         // Prompt channels (ABI 1.18–1.22) before any tab, so no request falls to the no-host default.
         registerPromptChannels(context: context)
+        // Wave 27 (ABI 1.32–1.38), before any tab.
+        registerExtensionChannels(context: context)
+        registerAutofillChannels(context: context)
         if capabilities.htmlFullscreen {
             ReArcEngineSetFullscreenCallback(fullscreenCallback, context)
         }
@@ -686,6 +709,14 @@ final class ChromiumRuntime {
 
     /// The shell key of an open engine profile: Chromium-created tabs (popups)
     /// inherit their opener's BrowserContext. nil while that profile closes.
+    /// Profiles whose open completed.
+    var openProfileKeys: [ChromiumProfileKey] {
+        profileStates.compactMap { key, state in
+            if case .open = state { return key }
+            return nil
+        }
+    }
+
     func profileKey(forEngineProfile engineID: UInt64) -> ChromiumProfileKey? {
         guard engineID != 0 else { return nil }
         return profileStates.first { _, state in
@@ -871,6 +902,7 @@ final class ChromiumRuntime {
             profileEvent("opened \(key) -> engine profile \(engineID)\(offTheRecord ? " (off the record)" : "")")
             // Before the waiters create tabs; OTR profiles too (Chromium would otherwise ask where to save).
             applyDownloadPolicy(profile: engineID)
+            if !offTheRecord { applyLeakDetectionPreference(profile: engineID) }
             waiters.forEach { $0(engineID) }
         } else {
             profileStates[key] = nil
@@ -1077,6 +1109,14 @@ final class ChromiumRuntime {
                 + "changes \(event.changes.rawValue) url \(event.url ?? "-") title \(event.title ?? "-") "
                 + "loading \(event.isLoading) main \(event.isMainFrame) err \(event.errorCode) \(event.errorText ?? "")"
         )
+        if event.kind == .created, engines[event.tabID] == nil, takeExpectedExtensionPopup(event.tabID) {
+            // An extension action popup (disposition 3, opener = the clicked tab): never a sidebar tab.
+            if onExtensionPopupCreated?(event) != true {
+                ChromiumLog.info("closing extension popup tab \(event.tabID): no popup host")
+                forceCloseTab(event.tabID)
+            }
+            return
+        }
         if event.kind == .created, engines[event.tabID] == nil {
             let adopted = onAdoptedTab?(event) ?? false
             if !adopted {
@@ -1090,6 +1130,7 @@ final class ChromiumRuntime {
         if event.kind == .closed {
             engines[event.tabID] = nil
             if engineTabIDs[engine.shellID] == event.tabID { engineTabIDs[engine.shellID] = nil }
+            onTabClosed?(event)
         }
     }
 

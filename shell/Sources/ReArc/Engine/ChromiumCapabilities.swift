@@ -37,6 +37,14 @@ struct ChromiumCapabilities: Equatable {
     static let printingFeature = "printing"
     static let pageDropsFeature = "page_drops"
     static let pictureInPictureFeature = "picture_in_picture"
+    static let extensionTabHelpersFeature = "extension_tab_helpers"
+    static let extensionInstallPromptsFeature = "extension_install_prompts"
+    static let extensionActionsFeature = "extension_actions"
+    static let autofillSuggestionsFeature = "autofill_suggestions"
+    static let passwordLeakDetectionFeature = "password_leak_detection"
+    static let extensionWindowsFeature = "extension_windows"
+    static let autofillSavePromptsFeature = "autofill_save_prompts"
+    static let httpAuthFeature = "http_auth"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -70,6 +78,14 @@ struct ChromiumCapabilities: Equatable {
         printingFeature: 28,
         pageDropsFeature: 29,
         pictureInPictureFeature: 30,
+        extensionTabHelpersFeature: 31,
+        extensionInstallPromptsFeature: 32,
+        extensionActionsFeature: 33,
+        autofillSuggestionsFeature: 34,
+        passwordLeakDetectionFeature: 35,
+        extensionWindowsFeature: 36,
+        autofillSavePromptsFeature: 37,
+        httpAuthFeature: 38,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -134,6 +150,22 @@ struct ChromiumCapabilities: Equatable {
     var pageDrops: Bool
     /// Video PiP (`ReArcEngineSetPictureInPictureCallback`, `ReArcTabSetPictureInPicture`).
     var pictureInPicture: Bool
+    /// Extension tab helpers on registry tabs (content scripts, messaging, activeTab). No Swift call.
+    var extensionTabHelpers: Bool
+    /// Extension install/re-enable/permission/uninstall prompts (`ReArcEngineSetExtensionPromptCallback`).
+    var extensionInstallPrompts: Bool
+    /// Toolbar actions and popups (`ReArcTabGetExtensionActions`, `ReArcTabRunExtensionAction`).
+    var extensionActions: Bool
+    /// Host-drawn autofill suggestions (`ReArcEngineSetAutofillCallback`, `ReArcAutofillAccept`).
+    var autofillSuggestions: Bool
+    /// `ReArcProfileGet/SetPasswordLeakDetection`.
+    var passwordLeakDetection: Bool
+    /// Logical extension windows and tab requests (`ReArcTabSetExtensionWindow`, `ReArcEngineSetExtensionTabRequestCallback`).
+    var extensionWindows: Bool
+    /// Local card/address save offers (`ReArcEngineSetAutofillSaveCallback`).
+    var autofillSavePrompts: Bool
+    /// HTTP Basic/Digest sign-in requests (`ReArcEngineSetHttpAuthCallback`, `ReArcHttpAuthRespond`).
+    var httpAuth: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -173,6 +205,14 @@ struct ChromiumCapabilities: Equatable {
         printing = adopted(Self.printingFeature)
         pageDrops = adopted(Self.pageDropsFeature)
         pictureInPicture = adopted(Self.pictureInPictureFeature)
+        extensionTabHelpers = adopted(Self.extensionTabHelpersFeature)
+        extensionInstallPrompts = adopted(Self.extensionInstallPromptsFeature)
+        extensionActions = adopted(Self.extensionActionsFeature)
+        autofillSuggestions = adopted(Self.autofillSuggestionsFeature)
+        passwordLeakDetection = adopted(Self.passwordLeakDetectionFeature)
+        extensionWindows = adopted(Self.extensionWindowsFeature)
+        autofillSavePrompts = adopted(Self.autofillSavePromptsFeature)
+        httpAuth = adopted(Self.httpAuthFeature)
     }
 
     /// Inspect in the page menu. No engine advertises a DevTools frontend
@@ -181,6 +221,9 @@ struct ChromiumCapabilities: Equatable {
 
     /// "Ask where to save" for downloads: download policy prompt 1 needs a host file chooser (ABI 1.19).
     var downloadSavePrompt: Bool { downloads && fileChooser }
+
+    /// The toolbar (actions, popups) and the extensions menu; prompts are registered on their own flag.
+    var extensionToolbar: Bool { extensionActions }
 
     /// WAVE-18-REPORT concern A gate: both browser-less helper features at 1.15.
     var browserlessHelpers: Bool { historyRecording && passwordAutofill }
@@ -228,6 +271,14 @@ struct ChromiumCapabilities: Equatable {
             (Self.printingFeature, printing),
             (Self.pageDropsFeature, pageDrops),
             (Self.pictureInPictureFeature, pictureInPicture),
+            (Self.extensionTabHelpersFeature, extensionTabHelpers),
+            (Self.extensionInstallPromptsFeature, extensionInstallPrompts),
+            (Self.extensionActionsFeature, extensionActions),
+            (Self.autofillSuggestionsFeature, autofillSuggestions),
+            (Self.passwordLeakDetectionFeature, passwordLeakDetection),
+            (Self.extensionWindowsFeature, extensionWindows),
+            (Self.autofillSavePromptsFeature, autofillSavePrompts),
+            (Self.httpAuthFeature, httpAuth),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

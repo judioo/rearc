@@ -1238,6 +1238,46 @@ extension ChromiumEngine: PageClosing {
         }
     }
 
+    // MARK: Wave 27: autofill (ABI 1.34), save offers (1.37), HTTP auth (1.38)
+
+    func handleAutofill(_ event: ChromiumAutofillEvent) {
+        switch event.phase {
+        case .shown:
+            pagePrompts.showAutofill(event.popup, actions: PagePromptCenter.AutofillActions(
+                accept: { [weak runtime] request, row in
+                    guard let runtime else { return .gone }
+                    let status = runtime.acceptAutofill(request, index: row)
+                    if status == .rearcOK { return .accepted }
+                    return status == ReArcStatus(REARC_BUSY) ? .busy : .gone
+                },
+                select: { [weak runtime] request, row in runtime?.selectAutofill(request, index: row) },
+                dismiss: { [weak runtime] request in runtime?.dismissAutofill(request) }
+            ))
+        case .selection:
+            pagePrompts.selectAutofillRow(requestID: event.requestID, row: event.popup.selected)
+        case .hidden:
+            pagePrompts.hideAutofill(requestID: event.requestID)
+        case .openSettings:
+            break
+        }
+    }
+
+    func handleAutofillSave(_ event: ChromiumAutofillSaveEvent) {
+        let id = event.identity.requestID
+        if event.identity.isCancellation { return pagePrompts.cancelAutofillSave(id: id) }
+        pagePrompts.presentAutofillSave(event.offer) { [weak runtime] action in
+            runtime?.respondAutofillSave(id, action)
+        }
+    }
+
+    func handleHTTPAuth(_ event: ChromiumHTTPAuthEvent) {
+        let id = event.identity.requestID
+        if event.identity.isCancellation { return pagePrompts.cancelHTTPAuth(id: id) }
+        pagePrompts.presentHTTPAuth(event.challenge) { [weak runtime] credentials in
+            runtime?.respondHTTPAuth(id, credentials: credentials)
+        }
+    }
+
     /// The menu Chromium asked for, built from the event. Engine items run as
     /// `ReArcContextMenuCommand`; Arc items run in the shell and dismiss the
     /// request. A refused command (disabled, unsupported Inspect) leaves the

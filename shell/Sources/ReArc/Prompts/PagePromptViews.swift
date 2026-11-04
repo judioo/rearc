@@ -27,10 +27,17 @@ private struct PagePromptOverlay: ViewModifier {
                 }
             }
             .overlay(alignment: .topTrailing) {
-                if let password = prompts.password {
-                    PasswordPromptCard(prompts: prompts, prompt: password.prompt)
-                        .id(password.id)
-                        .transition(.move(edge: .top).combined(with: .opacity))
+                VStack(alignment: .trailing, spacing: 8) {
+                    if let password = prompts.password {
+                        PasswordPromptCard(prompts: prompts, prompt: password.prompt)
+                            .id(password.id)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                    if let save = prompts.autofillSave {
+                        AutofillSaveCard(prompts: prompts, offer: save.offer)
+                            .id(save.id)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                 }
             }
             .overlay {
@@ -38,10 +45,16 @@ private struct PagePromptOverlay: ViewModifier {
                     JavaScriptDialogSheet(prompts: prompts, dialog: dialog)
                         .id(dialog.id)
                         .transition(.opacity)
+                } else if let auth = prompts.httpAuth {
+                    HTTPAuthSheet(prompts: prompts, challenge: auth.challenge)
+                        .id(auth.id)
+                        .transition(.opacity)
                 }
             }
             .animation(.spring(duration: 0.24, bounce: 0.12), value: prompts.permission?.id)
             .animation(.spring(duration: 0.24, bounce: 0.12), value: prompts.password?.id)
+            .animation(.spring(duration: 0.24, bounce: 0.12), value: prompts.autofillSave?.id)
+            .animation(.easeOut(duration: 0.14), value: prompts.httpAuth?.id)
             .animation(.easeOut(duration: 0.14), value: prompts.dialog?.id)
     }
 }
@@ -274,5 +287,133 @@ private struct PasswordPromptCard: View {
         .shadow(color: .black.opacity(0.2), radius: 16, y: 5)
         .padding(.top, 10)
         .padding(.trailing, 12)
+    }
+}
+
+// MARK: - Card and address save offer (Chromium ABI 1.37)
+
+private struct AutofillSaveCard: View {
+    let prompts: PagePromptCenter
+    let offer: AutofillSaveOffer
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: offer.symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(Color.accentColor))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(offer.title)
+                        .font(.system(size: 13, weight: .semibold))
+                    ForEach(offer.summaryLines, id: \.self) { line in
+                        Text(line)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Text(offer.footnote)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer(minLength: 8)
+                Button { prompts.answerAutofillSave(.ignore) } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 18, height: 18)
+                        .background(Circle().fill(Color.primary.opacity(0.08)))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Not now")
+            }
+            HStack(spacing: 8) {
+                Spacer(minLength: 12)
+                Button("No Thanks") { prompts.answerAutofillSave(.decline) }
+                Button(offer.acceptTitle) { prompts.answerAutofillSave(.accept) }
+                    .buttonStyle(.borderedProminent)
+            }
+            .controlSize(.small)
+        }
+        .padding(14)
+        .frame(width: 320)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
+        .shadow(color: .black.opacity(0.2), radius: 16, y: 5)
+        .padding(.top, 10)
+        .padding(.trailing, 12)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(offer.title)
+    }
+}
+
+// MARK: - HTTP sign-in (Chromium ABI 1.38, WebKit challenges)
+
+/// Tab-scoped like the JavaScript dialog: only this page waits.
+private struct HTTPAuthSheet: View {
+    @Bindable var prompts: PagePromptCenter
+    let challenge: HTTPAuthChallenge
+    @FocusState private var focused: Field?
+
+    private enum Field { case username, password }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color.black.opacity(0.22)
+                .contentShape(Rectangle())
+                .onTapGesture {}
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Image(systemName: "person.badge.key.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(challenge.title).font(.headline)
+                }
+                Text(challenge.message)
+                    .font(.system(size: 13))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let note = challenge.realmNote {
+                    Text(note)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if challenge.isInsecure {
+                    Label("Your connection to this site is not private.", systemImage: "lock.open.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.orange)
+                }
+                TextField("Username", text: $prompts.authUsername)
+                    .textFieldStyle(.roundedBorder)
+                    .textContentType(.username)
+                    .focused($focused, equals: .username)
+                    .onSubmit { focused = .password }
+                SecureField("Password", text: $prompts.authPassword)
+                    .textFieldStyle(.roundedBorder)
+                    .textContentType(.password)
+                    .focused($focused, equals: .password)
+                    .onSubmit { prompts.answerHTTPAuth(signIn: true) }
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button("Cancel") { prompts.answerHTTPAuth(signIn: false) }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Sign In") { prompts.answerHTTPAuth(signIn: true) }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(18)
+            .frame(width: 380)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
+            .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
+            .padding(.top, 64)
+        }
+        .onExitCommand { prompts.answerHTTPAuth(signIn: false) }
+        .onAppear { focused = .username }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
     }
 }

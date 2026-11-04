@@ -46,6 +46,8 @@ private final class MediaStateMessageHandler: NSObject, WKScriptMessageHandler {
 /// WKWebView-backed stand-in for the real Chromium engine.
 @Observable
 final class WKEngine: NSObject, WebEngine {
+    /// Sign-in requests are numbered per process (the sheet keys on the ID).
+    static var nextAuthChallengeID: UInt64 = 0
     private static let linkPeekScriptSource = """
     document.addEventListener('click', function(e) {
       if (!e.shiftKey) return;
@@ -758,6 +760,32 @@ extension WKEngine: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
         downloadCenter?.adopt(download, sourceURL: navigationResponse.response.url)
+    }
+
+    /// HTTP Basic/Digest sign-in through the page's sign-in sheet (the
+    /// Chromium path's ABI 1.38 sheet); other challenges keep WebKit's handling.
+    func webView(
+        _ webView: WKWebView,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let space = challenge.protectionSpace
+        guard [NSURLAuthenticationMethodHTTPBasic, NSURLAuthenticationMethodHTTPDigest].contains(space.authenticationMethod) else {
+            return completionHandler(.performDefaultHandling, nil)
+        }
+        Self.nextAuthChallengeID += 1
+        let scheme = space.authenticationMethod == NSURLAuthenticationMethodHTTPDigest ? "digest" : "basic"
+        let request = HTTPAuthChallenge(
+            id: Self.nextAuthChallengeID,
+            challenger: "\(space.protocol ?? "http")://\(space.host):\(space.port)",
+            scheme: scheme,
+            realm: space.realm ?? "",
+            isProxy: space.isProxy()
+        )
+        pagePrompts.presentHTTPAuth(request) { credentials in
+            guard let credentials else { return completionHandler(.cancelAuthenticationChallenge, nil) }
+            completionHandler(.useCredential, URLCredential(user: credentials.username, password: credentials.password, persistence: .forSession))
+        }
     }
 }
 
