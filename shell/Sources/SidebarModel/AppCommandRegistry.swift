@@ -51,6 +51,12 @@ public enum AppCommandAction: Equatable, Hashable {
     case reloadIgnoringCache
     case stopLoading
     case copyURL
+    /// SIDEBAR-SPEC §4.9: Copy URL as Markdown / as Quote.
+    case copyURLAsMarkdown
+    case copyAsQuote
+    /// SIDEBAR-SPEC §6 `expandPinnedSection` / `collapsePinnedSection`.
+    case expandPinnedSection
+    case collapsePinnedSection
     case nextSpace
     case previousSpace
     case renameSpace
@@ -224,7 +230,7 @@ public struct AppCommand: Equatable, Identifiable {
             guard let tab = store.selectedTab else { return false }
             return NavigationURLPolicy.viewSourceURL(for: tab.url, engine: context.navigationSchemes) != nil
         case .goBack, .goForward, .reloadPage, .reloadIgnoringCache, .stopLoading, .copyURL,
-             .renameTab, .duplicateTab:
+             .copyURLAsMarkdown, .copyAsQuote, .renameTab, .duplicateTab:
             return store.selectedTab != nil
         case .nextSpace, .previousSpace:
             return store.spacesInActiveProfile.count > 1
@@ -232,6 +238,8 @@ public struct AppCommand: Equatable, Identifiable {
             return true
         case .deleteSpace:
             return store.spaces.count > 1
+        case .expandPinnedSection, .collapsePinnedSection:
+            return !store.content(for: store.activeSpaceID).pinned.isEmpty
         case .expandAllFolders, .collapseAllFolders:
             return !store.folderOutline().isEmpty
         case .addToFavorites, .archiveTab:
@@ -677,6 +685,34 @@ public enum AppCommandRegistry {
         ),
         AppCommand(id: "stop-loading", title: "Stop Loading", keywords: ["stop", "cancel", "loading"], minQueryLength: 2, action: .stopLoading),
         AppCommand(id: "copy-url", title: "Copy URL", keywords: ["copy", "url", "link", "address"], minQueryLength: 2, action: .copyURL),
+        AppCommand(
+            id: "copy-url-markdown",
+            title: "Copy URL as Markdown",
+            keywords: ["copy", "url", "link", "markdown", "md"],
+            minQueryLength: 2,
+            action: .copyURLAsMarkdown
+        ),
+        AppCommand(
+            id: "copy-quote",
+            title: "Copy as Quote",
+            keywords: ["copy", "quote", "selection", "markdown", "cite"],
+            minQueryLength: 2,
+            action: .copyAsQuote
+        ),
+        AppCommand(
+            id: "expand-pinned",
+            title: "Expand Pinned Section",
+            keywords: ["pinned", "expand", "show"],
+            minQueryLength: 2,
+            action: .expandPinnedSection
+        ),
+        AppCommand(
+            id: "collapse-pinned",
+            title: "Collapse Pinned Section",
+            keywords: ["pinned", "collapse", "hide"],
+            minQueryLength: 2,
+            action: .collapsePinnedSection
+        ),
         AppCommand(id: "next-space", title: "Next Space", keywords: ["space", "next", "switch"], minQueryLength: 2, action: .nextSpace),
         AppCommand(
             id: "previous-space",
