@@ -195,4 +195,68 @@ final class Wave28ShellTests: XCTestCase {
         XCTAssertNil(PageElementRect(["x": "nope"]))
         XCTAssertTrue(titles(ShellMenus.capture(model)).contains("Capture in Portrait Mode"))
     }
+
+    // MARK: Notes
+
+    private func noteEditor(_ content: NoteContent) -> (NoteTextEditor.Coordinator, NoteTextView, () -> NoteContent?) {
+        var latest: NoteContent?
+        let coordinator = NoteTextEditor.Coordinator(onChange: { latest = $0 }, onOpenLink: { _ in })
+        let view = NoteTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 400))
+        view.isRichText = true
+        view.delegate = coordinator
+        view.coordinator = coordinator
+        coordinator.textView = view
+        coordinator.load(content)
+        return (coordinator, view, { latest })
+    }
+
+    func testNoteTextRoundTripsThroughTheAttributedString() {
+        let content = NoteContent(blocks: [
+            NoteBlock(.heading(2), text: "Plan"),
+            NoteBlock(runs: [NoteRun("a "), NoteRun("b", bold: true, italic: true), NoteRun(" c", underline: true)]),
+            NoteBlock(.numbered, text: "one"),
+            NoteBlock(.checklist(checked: true), runs: [NoteRun("done", code: true)]),
+            NoteBlock(.bullet, runs: [NoteRun("link", link: URL(string: "https://x.test"))]),
+            NoteBlock(.quote, runs: [NoteRun("cut", strikethrough: true)]),
+            NoteBlock(),
+        ])
+        let text = NoteTextFormatting.attributedString(content)
+        XCTAssertEqual(NoteTextFormatting.content(text, emptyLastStyle: .paragraph), content)
+        XCTAssertEqual(NoteTextFormatting.content(text).blocks.last?.style, .quote, "without it, an empty last line continues the one before")
+        XCTAssertTrue(text.string.hasPrefix("Plan\na b c\n1.\tone\n☑\tdone\n•\tlink\ncut\n"))
+        let position = NoteTextFormatting.blockPosition(of: (text.string as NSString).range(of: "one").location + 2, in: content)
+        XCTAssertEqual(position.block, 2)
+        XCTAssertEqual(position.offset, 2)
+        XCTAssertEqual(NoteTextFormatting.location(of: position, in: content), (text.string as NSString).range(of: "one").location + 2)
+    }
+
+    func testNoteEditorContinuesListsAndFormatsMarkdownShortcuts() throws {
+        let (coordinator, view, latest) = noteEditor(NoteContent(blocks: [NoteBlock(.bullet, text: "milk")]))
+        view.setSelectedRange(NSRange(location: (view.string as NSString).length, length: 0))
+        XCTAssertTrue(coordinator.textView(view, doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        XCTAssertEqual(latest()?.blocks.map(\.style), [.bullet, .bullet], "Return continues the list")
+        XCTAssertTrue(coordinator.textView(view, doCommandBy: #selector(NSResponder.insertNewline(_:))))
+        XCTAssertEqual(latest()?.blocks.map(\.style), [.bullet, .paragraph], "Return on an empty item ends it")
+
+        view.insertText("[] ", replacementRange: view.selectedRange())
+        XCTAssertEqual(latest()?.blocks.last?.style, .checklist(checked: false), "a typed shortcut formats the line")
+        XCTAssertEqual(latest()?.blocks.last?.text, "")
+        view.insertText("eggs", replacementRange: view.selectedRange())
+        XCTAssertEqual(latest()?.blocks.last?.text, "eggs")
+
+        let markerIndex = (view.string as NSString).range(of: "☐").location
+        XCTAssertTrue(coordinator.clicked(atCharacter: markerIndex))
+        XCTAssertEqual(latest()?.blocks.last?.style, .checklist(checked: true), "a click on the box checks it")
+
+        let eggs = (view.string as NSString).range(of: "eggs")
+        view.setSelectedRange(eggs)
+        coordinator.toggleInline(.noteBold)
+        XCTAssertEqual(latest()?.blocks.last?.runs, [NoteRun("eggs", bold: true)])
+        coordinator.setLink(URL(string: "https://eggs.test"))
+        XCTAssertEqual(latest()?.blocks.last?.runs.first?.link, URL(string: "https://eggs.test"))
+
+        view.setSelectedRange(NSRange(location: eggs.location, length: 0))
+        XCTAssertTrue(coordinator.textView(view, doCommandBy: #selector(NSResponder.deleteBackward(_:))))
+        XCTAssertEqual(latest()?.blocks.last?.style, .paragraph, "delete at the start clears the list style first")
+    }
 }

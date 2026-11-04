@@ -125,6 +125,7 @@ struct TabSectionView: View {
             EaselRowView(
                 ref: ref,
                 title: model.easelTitle(for: ref),
+                isNote: model.easelDocumentStore.document(id: ref.easelDocumentID)?.kind == .note,
                 isSelected: selectedID == ref.id,
                 onSelect: { model.selectEasel(ref.id) },
                 onClose: { model.deleteEaselSidebarItem(ref.id) },

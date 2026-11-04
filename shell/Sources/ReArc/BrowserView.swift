@@ -396,9 +396,15 @@ struct BrowserView: View {
             LibraryView(model: model, window: windowID, section: section)
         } else if let ref = model.selectedEaselRef(in: windowID),
            let document = model.easelDocument(forSidebarItem: ref.id) {
-            EaselEditorView(model: model, sidebarItemID: ref.id, document: document)
-                .id(document.id)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if document.kind == .note {
+                NoteEditorView(model: model, sidebarItemID: ref.id, document: document)
+                    .id(document.id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                EaselEditorView(model: model, sidebarItemID: ref.id, document: document)
+                    .id(document.id)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         } else if let split = model.activeSplit(in: windowID) {
             SplitContentView(split: split, model: model, accent: model.themeColor(in: windowID))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

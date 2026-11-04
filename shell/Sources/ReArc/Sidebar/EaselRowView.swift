@@ -4,6 +4,7 @@ import SidebarModel
 struct EaselRowView: View {
     let ref: SidebarEaselRef
     let title: String
+    var isNote = false
     let isSelected: Bool
     let onSelect: () -> Void
     let onClose: () -> Void
@@ -14,7 +15,7 @@ struct EaselRowView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "paintpalette")
+            Image(systemName: isNote ? "note.text" : "paintpalette")
                 .foregroundStyle(.secondary)
                 .frame(width: 18)
             if isEditing {
