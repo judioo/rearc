@@ -161,6 +161,8 @@ enum ShellMenus {
                 },
                 ShellMenuItem("Duplicate Tab") { model.duplicateTab() },
                 ShellMenuItem("Copy URL", "c", [.command, .shift]) { model.copyURL() },
+                ShellMenuItem("Copy URL as Markdown", "c", [.command, .shift, .option]) { model.copyURL(format: .markdown) },
+                ShellMenuItem("Copy as Quote") { model.copyURL(format: .quote) },
                 ShellMenuItem("Archive Tab") { model.archiveTab() },
             ],
             [
@@ -169,12 +171,17 @@ enum ShellMenus {
                 ShellMenuItem("Clear Unpinned Tabs") { model.clearTodayTabs() },
             ],
             [
+                ShellMenuItem("Expand Pinned Section") { model.setPinnedSectionCollapsed(false) },
+                ShellMenuItem("Collapse Pinned Section") { model.setPinnedSectionCollapsed(true) },
+            ],
+            [
                 ShellMenuItem("New Folder") { model.newFolder() },
                 ShellMenuItem("Expand All Folders") { model.store.setAllFoldersExpanded(true) },
                 ShellMenuItem("Collapse All Folders") { model.store.setAllFoldersExpanded(false) },
             ],
             [
                 ShellMenuItem("View Archive") { model.isArchivePresented = true },
+                ShellMenuItem("New Boost") { model.newBoost() },
                 ShellMenuItem("View Boosts") { model.isBoostLibraryPresented = true },
             ],
         ]

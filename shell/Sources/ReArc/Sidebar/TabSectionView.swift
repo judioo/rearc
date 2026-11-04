@@ -102,6 +102,7 @@ struct TabSectionView: View {
                 isDropTarget: isDropInto(tab.id),
                 isUnloaded: model.isTabUnloaded(tab.id),
                 isInPictureInPicture: model.isPictureInPicture(tab.id),
+                activity: model.tabActivity(tab.id),
                 onSelect: { model.selectTab(tab.id) },
                 onClose: { model.closeTab(tab.id) },
                 onMute: { model.toggleMute(tab.id) },

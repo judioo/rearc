@@ -26,6 +26,7 @@ struct FavoritesRowView: View {
                         isSelected: tab.id == selectedID,
                         isUnloaded: model.isTabUnloaded(tab.id),
                         isInPictureInPicture: model.isPictureInPicture(tab.id),
+                        activity: model.tabActivity(tab.id),
                         insertion: insertion(for: tab.id)
                     )
                     .onTapGesture { model.selectTab(tab.id) }
@@ -125,13 +126,16 @@ private struct FavoriteIconView: View {
     let isSelected: Bool
     var isUnloaded = false
     var isInPictureInPicture = false
+    var activity: TabActivity = .idle
     let insertion: SidebarDropPosition?
     @State private var isHovering = false
 
     var body: some View {
-        SiteIconView(image: favicon, token: tab.faviconToken, size: favicon == nil ? 22 : 18)
-            .saturation(isUnloaded ? 0 : 1)
-            .opacity(isUnloaded ? 0.4 : 1)
+        TabActivityIcon(activity: activity) {
+            SiteIconView(image: favicon, token: tab.faviconToken, size: favicon == nil ? 22 : 18)
+                .saturation(isUnloaded ? 0 : 1)
+                .opacity(isUnloaded ? 0.4 : 1)
+        }
             .frame(width: 34, height: 34)
             .background(
                 isSelected

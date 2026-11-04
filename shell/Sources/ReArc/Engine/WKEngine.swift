@@ -203,6 +203,8 @@ final class WKEngine: NSObject, WebEngine {
     private(set) var currentURL: URL?
     private(set) var pageTitle: String?
     private(set) var isLoading = false
+    private(set) var loadProgress: Double = 0
+    private(set) var isCrashed = false
     private(set) var canGoBack = false
     private(set) var canGoForward = false
     private(set) var securityState: WebSecurityState = .unknown
@@ -312,6 +314,7 @@ final class WKEngine: NSObject, WebEngine {
             webView.observe(\.canGoBack, options: [.initial, .new]) { webView, _ in refresh(webView) },
             webView.observe(\.canGoForward, options: [.new]) { webView, _ in refresh(webView) },
             webView.observe(\.isLoading, options: [.new]) { webView, _ in refresh(webView) },
+            webView.observe(\.estimatedProgress, options: [.new]) { webView, _ in refresh(webView) },
             webView.observe(\.hasOnlySecureContent, options: [.new]) { webView, _ in refresh(webView) },
             webView.observe(\.url, options: [.new]) { webView, _ in refresh(webView) },
         ]
@@ -321,6 +324,7 @@ final class WKEngine: NSObject, WebEngine {
         if canGoBack != webView.canGoBack { canGoBack = webView.canGoBack }
         if canGoForward != webView.canGoForward { canGoForward = webView.canGoForward }
         if isLoading != webView.isLoading { isLoading = webView.isLoading }
+        if loadProgress != webView.estimatedProgress { loadProgress = webView.estimatedProgress }
         let security = WebSecurityState.webKit(url: webView.url ?? currentURL, hasOnlySecureContent: webView.hasOnlySecureContent)
         if securityState != security { securityState = security }
     }
@@ -666,6 +670,15 @@ private enum CaptureSnapshotError: Error {
 extension WKEngine: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         isLoading = true
+        isCrashed = false
+    }
+
+    /// The web content process died (crash, jetsam): keep the tab and show
+    /// the crashed page until Reload starts a new process.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        isCrashed = true
+        isLoading = false
+        syncNavigationState(from: webView)
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
@@ -828,4 +841,10 @@ private struct WebViewRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView { webView }
     func updateNSView(_ nsView: WKWebView, context: Context) {}
+}
+
+extension WKEngine: PageSelectionReading {
+    func selectedText() async -> String? {
+        try? await webView.evaluateJavaScript("String(window.getSelection ? window.getSelection() : '')") as? String
+    }
 }

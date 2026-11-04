@@ -1174,6 +1174,7 @@ final class ChromiumSelfTest {
         } else {
             log("ABI-GAP html_fullscreen not advertised: page fullscreen requests are refused")
         }
+        try await wave26SidebarChecks(model: model, store: store, tab: tabA, engine: engineA, base: base)
         if runtime.capabilities.pictureInPicture {
             try await pictureInPictureChecks(model: model, tab: tabA, engine: engineA, other: tabB)
         } else {
@@ -1623,6 +1624,85 @@ final class ChromiumSelfTest {
         try await wait("tab A restored after navigation checks", timeout: 15) {
             engine.currentURL?.path == "/a" && engine.pageTitle == Self.titleA && !engine.isLoading
         }
+    }
+
+    // MARK: Wave 26 sidebar activity
+
+    /// Pinned collapse, Copy URL formats, the loading ring, a crashed page's
+    /// recovery and the unread dot, on the shell's own model and tab A.
+    @MainActor
+    private func wave26SidebarChecks(model: BrowserViewModel, store: SidebarStore, tab: Tab, engine: ChromiumEngine, base: String) async throws {
+        model.selectTab(tab.id)
+        let space = store.activeSpaceID
+        let pinned = store.addTab(kind: .pinned, title: "Pinned P", url: URL(string: "\(base)/a")!)
+        ShellMenus.sidebarItems(model).flatMap { $0 }.first { $0.title == "Collapse Pinned Section" }?.action()
+        let window = store.keyWindowID
+        try check(model.isPinnedSectionCollapsed(spaceID: space, in: window), "Collapse Pinned Section left it expanded")
+        let collapsedRows = PinnedSectionCollapseState.visibleEntries(
+            store.content(for: space).pinned, isCollapsed: true, selectedID: store.selectedItemID(inSpace: space))
+        try check(collapsedRows.isEmpty, "a collapsed section with a Today selection shows \(collapsedRows.count) rows")
+        _ = model.executeCommand(.expandPinnedSection, commandID: nil)
+        try check(!model.isPinnedSectionCollapsed(spaceID: space, in: window), "Expand Pinned Section left it collapsed")
+        log("PASS pinned section: Collapse (menu) hides the pinned rows in the key window, Expand (command) shows them")
+
+        // Copy URL formats, on a private pasteboard; Quote reads the page's selection.
+        let realPasteboard = model.linkPasteboard
+        model.linkPasteboard = NSPasteboard(name: NSPasteboard.Name("rearc-selftest-\(UUID().uuidString)"))
+        defer { model.linkPasteboard = realPasteboard }
+        model.copyURL(format: .markdown)
+        let markdown = "[\(Self.titleA)](\(base)/a)"
+        try check(model.linkPasteboard.string(forType: .string) == markdown && model.toast?.message == "Copied URL as Markdown",
+                  "Copy URL as Markdown wrote '\(model.linkPasteboard.string(forType: .string) ?? "")'")
+        _ = try await engine.evaluate("(getSelection().selectAllChildren(document.body), String(getSelection()))", in: .page)
+        model.copyURL(format: .quote)
+        try await wait("Copy as Quote with the page selection") { model.lastCopiedLinkText?.hasPrefix("> ") == true && model.lastCopiedLinkText != "> \(markdown)" }
+        let quote = model.lastCopiedLinkText ?? ""
+        try check(quote.hasSuffix("> — \(markdown)"), "quote '\(quote)' has no source link")
+        _ = try await engine.evaluate("(getSelection().removeAllRanges(), true)", in: .page)
+        log("PASS Copy URL as Markdown '\(markdown)' and Copy as Quote (\(quote.split(separator: "\n").count) lines, page selection "
+            + "read in the editor world) with the toast")
+
+        // The loading ring: a held-back load is in flight, then stopped.
+        engine.load(URL(string: "\(base)/slow")!)
+        try await wait("tab A row shows loading", timeout: 10) { model.tabActivity(tab.id).isLoading }
+        let progress = engine.loadProgress
+        model.stopLoading()
+        try await wait("tab A row idle after Stop") { model.tabActivity(tab.id) == .idle }
+        log(String(format: "PASS loading indicator: row and content bar loading (load_progress %.2f) while /slow is held, idle after Stop", progress))
+
+        // A crashed renderer (engine `is_crashed`, as PrimaryMainFrameRenderProcessGone reports it).
+        var raw = ReArcTabEvent()
+        raw.kind = ChromiumTabEvent.Kind.updated.rawValue
+        raw.profile_id = engine.engineProfileID
+        raw.tab_id = engine.tabID
+        raw.content_generation = engine.contentGeneration
+        raw.changes = ChromiumTabEvent.Changes.crashed.rawValue
+        raw.is_crashed = true
+        guard let crashed = withUnsafePointer(to: &raw, { ChromiumTabEvent($0) }) else { throw Failure(description: "crash event") }
+        engine.handle(crashed)
+        try check(model.tabActivity(tab.id) == .crashed, "an is_crashed event left the tab \(model.tabActivity(tab.id))")
+        engine.load(URL(string: "\(base)/a")!)
+        model.reloadCrashedTab(tab.id)
+        try await wait("crashed tab recovered by Reload", timeout: 15) {
+            model.tabActivity(tab.id) == .idle && engine.pageTitle == Self.titleA && engine.currentURL?.path == "/a"
+        }
+        log("PASS crashed tab: is_crashed shows the sad tab with Reload; the next commit clears it")
+
+        // Unread: a background pinned tab's title changes after its load settled.
+        model.selectTab(pinned.id)
+        let pinnedEngine = try shellEngine(model, pinned)
+        try await wait("pinned tab P loaded", timeout: 20) { pinnedEngine.pageTitle == Self.titleA && !pinnedEngine.isLoading }
+        model.selectTab(tab.id)
+        model.lastNavigationAt[pinned.id] = Date(timeIntervalSinceNow: -UnreadActivityPolicy.settleInterval - 1)
+        try check(store.tab(withID: pinned.id)?.isUnread == false, "P is unread before any activity")
+        _ = try await pinnedEngine.evaluate("(document.title = '(1) ' + document.title, document.title)", in: .page)
+        try await wait("background title change marks P unread") { store.tab(withID: pinned.id)?.isUnread == true }
+        try check(store.tab(withID: pinned.id)?.title == "(1) \(Self.titleA)", "P's row title did not follow the page")
+        model.selectTab(pinned.id)
+        try check(store.tab(withID: pinned.id)?.isUnread == false, "selecting P left it unread")
+        model.selectTab(tab.id)
+        model.deleteTab(pinned.id)
+        log("PASS unread dot: a background title change on pinned P set isUnread (row title follows); selecting P cleared it")
     }
 
     // MARK: Trusted navigation

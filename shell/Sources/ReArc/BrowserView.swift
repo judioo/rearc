@@ -114,7 +114,10 @@ struct BrowserView: View {
         .background(
             WindowKeyObserver(
                 onBecameKey: { model.windowBecameKey(windowID) },
-                onClose: { model.store.unregisterWindow(windowID) }
+                onClose: {
+                    model.store.unregisterWindow(windowID)
+                    model.pinnedSectionCollapse.forgetWindow(windowID)
+                }
             )
             .frame(width: 0, height: 0)
         )
@@ -329,6 +332,7 @@ struct BrowserView: View {
         let radius: CGFloat = fullscreen ? 0 : 8
         let inset: CGFloat = fullscreen ? 0 : 8
         return contentArea
+            .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil)
             .overlay {
                 if let dragged = draggedItemID, model.canDropToSplit(dragged, in: windowID) {
                     ContentSplitDropZone(draggedItemID: dragged, accent: model.themeColor(in: windowID)) { id, edge in
@@ -364,6 +368,7 @@ struct BrowserView: View {
             engine.makeView()
                 .id(tab.id)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .pageStatus(engine.activity) { engine.reload() }
                 .findBar(model.findBar, for: engine)
         } else {
             EmptyStateView(theme: model.themeColor(in: windowID))

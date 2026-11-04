@@ -35,6 +35,10 @@ struct TabContextMenu: View {
         Button("Rename…") { model.beginRename(.tab(tab.id)) }
         Button("Duplicate") { model.duplicateTab(tab.id) }
         Button("Copy Link") { model.copyURL(of: tab.id) }
+        Button("Copy Link as Markdown") { model.copyURL(of: tab.id, format: .markdown) }
+        if model.tabActivity(tab.id) == .crashed {
+            Button("Reload Crashed Page") { model.reloadCrashedTab(tab.id) }
+        }
         if isSpaceTab {
             Menu("Move to Folder") {
                 let outline = store.folderOutline(in: store.spaceContaining(tabID: tab.id))

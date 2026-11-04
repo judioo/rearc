@@ -47,6 +47,12 @@ protocol WebEngine: AnyObject {
     var currentURL: URL? { get }
     var pageTitle: String? { get }
     var isLoading: Bool { get }
+    /// Main-frame load progress 0…1 while loading (Chromium `load_progress`,
+    /// WebKit `estimatedProgress`).
+    var loadProgress: Double { get }
+    /// The page's renderer is gone (Chromium `is_crashed`, WebKit web content
+    /// process terminated). The tab stays; Reload brings the page back.
+    var isCrashed: Bool { get }
     var canGoBack: Bool { get }
     var canGoForward: Bool { get }
     var securityState: WebSecurityState { get }
@@ -103,6 +109,16 @@ protocol WebEngine: AnyObject {
 
 extension WebEngine {
     func reload() { reload(ignoringCache: false) }
+
+    /// Loading or crashed, for the sidebar row and the content bar.
+    var activity: TabActivity {
+        TabActivity(
+            isLoading: isLoading,
+            progress: loadProgress,
+            isCrashed: isCrashed,
+            isDiscarded: (self as? TabDiscarding)?.isDiscarded ?? false
+        )
+    }
     func pictureInPicture() { setPictureInPicture(true) }
 }
 

@@ -71,20 +71,24 @@ struct BottomBarView: View {
             .buttonStyle(.plain)
             .help("View Archive")
 
+            // Arc's + menu (`ARC_SidebarPlusButton` icons: add-tab, folder,
+            // space, note, easel, boost, split-add-right, split-add-bottom).
             Menu {
-                Button("New Tab") { model.newTab() }
-                Button("New Folder") { model.newFolder() }
-                Button("New Space…") { model.beginSpaceCreation(profileID: current.profileID) }
-                Divider()
-                Button("New Easel") { _ = model.createEasel() }
-                Button("New Note") { _ = model.createEasel(title: "Note", note: true) }
-                Button("View Boosts") { model.isBoostLibraryPresented = true }
-                Divider()
-                Button("Add Split View (Right)") {
-                    model.addSplitView(orientation: .horizontal)
+                Button { model.newTab() } label: { Label("New Tab", systemImage: "plus.square") }
+                Button { model.newFolder() } label: { Label("New Folder", systemImage: "folder.badge.plus") }
+                Button { model.beginSpaceCreation(profileID: current.profileID) } label: {
+                    Label("New Space…", systemImage: "plus.rectangle.portrait")
                 }
-                Button("Add Split View (Bottom)") {
-                    model.addSplitView(orientation: .vertical)
+                Divider()
+                Button { _ = model.createEasel(title: "Note", note: true) } label: { Label("New Note", systemImage: "note.text") }
+                Button { _ = model.createEasel() } label: { Label("New Easel", systemImage: "scribble.variable") }
+                Button { model.newBoost() } label: { Label("New Boost", systemImage: "paintbrush.pointed") }
+                Divider()
+                Button { model.addSplitView(orientation: .horizontal) } label: {
+                    Label("Add Split View (Right)", systemImage: "rectangle.split.2x1")
+                }
+                Button { model.addSplitView(orientation: .vertical) } label: {
+                    Label("Add Split View (Bottom)", systemImage: "rectangle.split.1x2")
                 }
             } label: {
                 Image(systemName: "plus")
@@ -92,7 +96,7 @@ struct BottomBarView: View {
                     .foregroundStyle(.secondary)
             }
             .menuStyle(.borderlessButton)
-            .help("New Tab, Folder, Space, Easel or Split View")
+            .help("New Tab, Folder, Space, Note, Easel, Boost or Split View")
 
             Button(action: { showingProfileList.toggle() }) {
                 ProfileAvatarView(profile: profile, diameter: 24)

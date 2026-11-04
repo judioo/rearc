@@ -65,10 +65,7 @@ extension BrowserViewModel {
 
     /// Shift+Cmd+C, and Copy Link in context menus.
     func copyURL(of tabID: Tab.ID? = nil) {
-        guard let id = tabID ?? store.selectedTabID, let tab = store.tab(withID: id) else { return }
-        let url = engineHost.engine(forTabID: id, profileID: profileID(for: tab))?.currentURL ?? tab.url
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(url.absoluteString, forType: .string)
+        copyURL(of: tabID, format: .plain)
     }
 
     // MARK: - Favicons

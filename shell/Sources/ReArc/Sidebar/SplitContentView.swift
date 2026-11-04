@@ -58,6 +58,7 @@ struct SplitContentView: View {
         let engine = model.engineHost.engine(for: tab, profileID: model.profileID(for: tab))
         engine.makeView()
             .id(tab.id)
+            .pageStatus(engine.activity) { engine.reload() }
             .findBar(model.findBar, for: engine)
             .overlay(
                 RoundedRectangle(cornerRadius: 0)

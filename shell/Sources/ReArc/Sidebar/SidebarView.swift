@@ -81,14 +81,27 @@ struct SidebarView: View {
     private func spacePage(_ spaceID: Space.ID) -> some View {
         let space = model.store.space(withID: spaceID) ?? focusedSpace
         let content = model.store.content(for: space.id)
+        let collapsed = model.isPinnedSectionCollapsed(spaceID: space.id, in: window)
+        let pinned = PinnedSectionCollapseState.visibleEntries(
+            content.pinned,
+            isCollapsed: collapsed,
+            selectedID: model.store.selectedItemID(inSpace: space.id)
+        )
         return ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                SpaceHeaderView(model: model, space: space, theme: Color(space.theme))
+                SpaceHeaderView(
+                    model: model,
+                    space: space,
+                    theme: Color(space.theme),
+                    hasPinned: !content.pinned.isEmpty,
+                    isPinnedCollapsed: collapsed,
+                    onTogglePinned: { model.togglePinnedSection(spaceID: space.id, in: window) }
+                )
                 TabSectionView(
                     title: nil,
                     section: .pinned,
                     spaceID: space.id,
-                    entries: content.pinned,
+                    entries: pinned,
                     model: model,
                     draggedItemID: $draggedItemID,
                     dropState: $dropState
@@ -144,6 +157,10 @@ private struct SpaceHeaderView: View {
     let model: BrowserViewModel
     let space: Space
     let theme: Color
+    var hasPinned = false
+    var isPinnedCollapsed = false
+    var onTogglePinned: () -> Void = {}
+    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -153,6 +170,20 @@ private struct SpaceHeaderView: View {
             Text(space.name)
                 .font(.callout.weight(.semibold))
                 .lineLimit(1)
+            // Arc's pinned-section toggle: shown on hover, and always while collapsed.
+            if hasPinned, isHovering || isPinnedCollapsed {
+                Button(action: onTogglePinned) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isPinnedCollapsed ? 0 : 90))
+                        .frame(width: 14, height: 14)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(isPinnedCollapsed ? "Expand Pinned Section" : "Collapse Pinned Section")
+                .accessibilityLabel(isPinnedCollapsed ? "Expand Pinned Section" : "Collapse Pinned Section")
+            }
             Spacer(minLength: 0)
             Menu {
                 SpaceContextMenu(model: model, space: space)
@@ -170,7 +201,14 @@ private struct SpaceHeaderView: View {
         .padding(.top, 2)
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { model.beginRename(.space(space.id)) }
-        .contextMenu { SpaceContextMenu(model: model, space: space) }
+        .onHover { isHovering = $0 }
+        .contextMenu {
+            if hasPinned {
+                Button(isPinnedCollapsed ? "Expand Pinned Section" : "Collapse Pinned Section", action: onTogglePinned)
+                Divider()
+            }
+            SpaceContextMenu(model: model, space: space)
+        }
     }
 }
 

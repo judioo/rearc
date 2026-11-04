@@ -271,7 +271,10 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
             if changes.contains(.url), let url = event.url.flatMap(URL.init(string:)) { currentURL = url }
             if changes.contains(.title) { pageTitle = event.title }
             if changes.contains(.progress) { loadProgress = event.loadProgress }
-            if changes.contains(.crashed) { isCrashed = event.isCrashed }
+            if changes.contains(.crashed) {
+                isCrashed = event.isCrashed
+                if isCrashed { isLoading = false }
+            }
             if changes.contains(.canGoBack) { canGoBack = event.canGoBack }
             if changes.contains(.canGoForward) { canGoForward = event.canGoForward }
             if changes.contains(.loading) {
@@ -287,6 +290,9 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
             }
             lastError = nil
             if !event.isSameDocument {
+                // A new document means a live renderer: the crash is over
+                // (the engine reports the crash, not the recovery).
+                isCrashed = false
                 resumeCommitWaiters(throwing: nil)
                 applyPendingZoom()
                 pagePrompts.documentChanged()
@@ -305,6 +311,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
         case .closed:
             ChromiumLog.info("tab \(tabID) closed by engine (reason \(event.closedReason))")
             isDiscarded = false
+            isCrashed = false
             isPageFullscreen = false
             isPictureInPicture = false
             tabID = 0
@@ -1295,4 +1302,13 @@ extension ChromiumEngine: PageClosing {
         return true
     }
 }
+
+extension ChromiumEngine: PageSelectionReading {
+    /// The DOM selection is shared by every world, so the editor world reads it.
+    func selectedText() async -> String? {
+        guard supportsScriptEvaluation else { return nil }
+        return try? await evaluate("String(window.getSelection ? window.getSelection() : '')", in: .editor) as? String
+    }
+}
+
 #endif

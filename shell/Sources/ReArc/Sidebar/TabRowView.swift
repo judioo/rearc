@@ -15,6 +15,8 @@ struct TabRowView<Menu: View>: View {
     var isUnloaded = false
     /// Its video plays in the Picture in Picture window; the badge brings it back.
     var isInPictureInPicture = false
+    /// Loading (a progress ring on the icon) or crashed (a warning glyph).
+    var activity: TabActivity = .idle
     let onSelect: () -> Void
     let onClose: () -> Void
     var onMute: (() -> Void)? = nil
@@ -28,11 +30,13 @@ struct TabRowView<Menu: View>: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            SiteIconView(image: favicon, token: tab.faviconToken, size: 16)
-                .frame(width: 18, height: 18)
-                .saturation(isUnloaded ? 0 : 1)
-                .opacity(isUnloaded ? 0.4 : 1)
-                .help(isUnloaded ? "Unloaded — reloads when you open it" : "")
+            TabActivityIcon(activity: activity) {
+                SiteIconView(image: favicon, token: tab.faviconToken, size: 16)
+                    .saturation(isUnloaded ? 0 : 1)
+                    .opacity(isUnloaded ? 0.4 : 1)
+                    .help(isUnloaded ? "Unloaded — reloads when you open it" : "")
+            }
+            .frame(width: 18, height: 18)
 
             Text(tab.displayTitle)
                 .font(.callout)
@@ -43,6 +47,8 @@ struct TabRowView<Menu: View>: View {
                 Circle()
                     .fill(Color.accentColor)
                     .frame(width: 6, height: 6)
+                    .help("New activity since you last looked")
+                    .accessibilityLabel("Unread")
             }
 
             Spacer(minLength: 0)

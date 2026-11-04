@@ -80,6 +80,18 @@ final class BrowserViewModel {
     @ObservationIgnored var autoArchiveTimer: Timer?
     /// Engine whose favicon is being tracked, per tab.
     @ObservationIgnored var faviconObservedEngines: [Tab.ID: ObjectIdentifier] = [:]
+    /// Engine whose page title is tracked for unread activity, per tab.
+    @ObservationIgnored var titleObservedEngines: [Tab.ID: ObjectIdentifier] = [:]
+    @ObservationIgnored var observedPageTitles: [Tab.ID: String] = [:]
+    /// Last navigation commit or load finish per tab (titles settle after it).
+    @ObservationIgnored var lastNavigationAt: [Tab.ID: Date] = [:]
+    /// Collapsed Pinned sections, per window and space.
+    var pinnedSectionCollapse = PinnedSectionCollapseState()
+    /// The confirmation toast over the page ("Copied URL"), cleared after a moment.
+    var toast: ShellToast?
+    @ObservationIgnored var lastCopiedLinkText: String?
+    /// Copy URL's pasteboard (tests use a private one).
+    @ObservationIgnored var linkPasteboard: NSPasteboard = .general
     var isCommandBarPresented = false
     var commandBarText = "" {
         didSet {
@@ -283,7 +295,7 @@ final class BrowserViewModel {
         return store.activeProfileID
     }
 
-    private func profileID(forTabID id: Tab.ID) -> Profile.ID? {
+    func profileID(forTabID id: Tab.ID) -> Profile.ID? {
         store.tab(withID: id).map { profileID(for: $0) }
     }
 
@@ -410,6 +422,8 @@ final class BrowserViewModel {
 
     func releaseEngine(for id: Tab.ID) {
         faviconObservedEngines[id] = nil
+        titleObservedEngines[id] = nil
+        observedPageTitles[id] = nil
         mediaSubscriptions[id] = nil
         mediaStateByTab[id] = nil
         tabMuteModel.markUserUnmuted(id)
@@ -597,6 +611,7 @@ final class BrowserViewModel {
 
     private func wireNavigationCommit(for tab: Tab, profileID: Profile.ID) {
         observeFavicon(of: engineHost.engine(for: tab, profileID: profileID), tabID: tab.id)
+        observePageTitle(of: engineHost.engine(for: tab, profileID: profileID), tabID: tab.id)
         guard let wk = engineHost.engine(for: tab, profileID: profileID) as? NavigationCommitReporting else { return }
         wk.onNavigationCommit = { [weak self] url, title in
             self?.handleTabNavigationCommit(tabID: tab.id, url: url, title: title)
@@ -605,6 +620,7 @@ final class BrowserViewModel {
 
     func handleTabNavigationCommit(tabID: Tab.ID, url: URL?, title: String?) {
         boostSessionApplyByTab[tabID] = BoostSessionApplyMap()
+        lastNavigationAt[tabID] = Date()
         guard let url else { return }
         recordVisit(tabID: tabID, url: url, title: title)
         let resolvedTitle = (title?.isEmpty == false) ? title : nil
@@ -708,6 +724,7 @@ final class BrowserViewModel {
 
         let liveTabIDs = Set(tabKeys.map(\.tabID))
         faviconObservedEngines = faviconObservedEngines.filter { liveTabIDs.contains($0.key) }
+        titleObservedEngines = titleObservedEngines.filter { liveTabIDs.contains($0.key) }
         for id in mediaSubscriptions.keys where !liveTabIDs.contains(id) {
             mediaSubscriptions[id] = nil
             mediaStateByTab[id] = nil
@@ -1424,6 +1441,14 @@ final class BrowserViewModel {
             stopLoading()
         case .copyURL:
             copyURL()
+        case .copyURLAsMarkdown:
+            copyURL(format: .markdown)
+        case .copyAsQuote:
+            copyURL(format: .quote)
+        case .expandPinnedSection:
+            setPinnedSectionCollapsed(false)
+        case .collapsePinnedSection:
+            setPinnedSectionCollapsed(true)
         case .nextSpace:
             cycleSpace(forward: true)
         case .previousSpace:
