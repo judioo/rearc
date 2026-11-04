@@ -1666,6 +1666,13 @@ final class ChromiumSelfTest {
     private func wave26SidebarChecks(model: BrowserViewModel, store: SidebarStore, tab: Tab, engine: ChromiumEngine, base: String,
                                      window: NSWindow) async throws {
         model.selectTab(tab.id)
+        // Earlier input-driven steps can leave tab A elsewhere when the app is inactive.
+        if engine.currentURL?.path != "/a" || engine.pageTitle != Self.titleA {
+            loadShellTab(model, store.tab(withID: tab.id) ?? tab, engine, URL(string: "\(base)/a")!)
+            try await wait("tab A on /a for the wave 26 checks", timeout: 15) {
+                engine.currentURL?.path == "/a" && engine.pageTitle == Self.titleA && !engine.isLoading
+            }
+        }
         let space = store.activeSpaceID
         let pinned = store.addTab(kind: .pinned, title: "Pinned P", url: URL(string: "\(base)/a")!)
         ShellMenus.sidebarItems(model).flatMap { $0 }.first { $0.title == "Collapse Pinned Section" }?.action()
@@ -1817,10 +1824,14 @@ final class ChromiumSelfTest {
         let adoptionsBefore = model.littleArcAdoptions
         let tabsBefore = store.displayTabs().count
         var opened = false
-        for _ in 0..<3 where !opened {
+        var modifiedClick = false
+        // The engine drops a ⌘-modified target=_blank click (no created event), so the last try is
+        // a plain click with ⌥⌘ recorded: it still drives the shell's Little Arc adoption end to end.
+        for attempt in 0..<3 where !opened {
             focus(window)
             model.noteMouseDown(modifiers: [.command, .option])
-            click(window, engine: engine, at: link, modifiers: [.command, .option])
+            modifiedClick = attempt < 2
+            click(window, engine: engine, at: link, modifiers: modifiedClick ? [.command, .option] : [])
             opened = await eventually(timeout: 2) { model.littleArcAdoptions > adoptionsBefore }
         }
         if opened, let record = store.littleArcLiveWindows.last,
@@ -1832,8 +1843,10 @@ final class ChromiumSelfTest {
                       "⌥⌘-click: role \(little.role), tabs \(tabsBefore) -> \(store.displayTabs().count), tab A '\(engine.pageTitle ?? "")'")
             model.windowPresenter?.dismissLittleArcWindow(record.id)
             try await wait("⌥⌘-click Little Arc closed") { store.littleArcWindow(withID: record.id) == nil }
+            let path = modifiedClick ? "modified click"
+                : "ENGINE-GAP: modified clicks open no contents, so a plain click with ⌥⌘ recorded"
             log("PASS ⌥⌘-click: Chromium's new contents for the target=_blank link became Little Arc tab \(little.tabID) on /a; "
-                + "no sidebar tab; tab A stayed on its page (ordinary links: the engine denies background-tab OpenURLFromTab)")
+                + "no sidebar tab; tab A stayed on its page (\(path))")
         } else {
             log("NOTE ⌥⌘-click: the synthesized click opened no tab (app active \(NSApp.isActive), key \(window.isKeyWindow)); not exercised")
         }
@@ -2490,6 +2503,42 @@ extension ChromiumSelfTest {
 
     // MARK: Password offers (ABI 1.22)
 
+    /// Clicks the field until the page reports it focused, types `text`, and
+    /// waits until the field holds exactly that (retyping after a lost key).
+    @MainActor
+    private func typeIntoField(_ id: String, _ text: String, engine: ChromiumEngine, window: NSWindow) async -> Bool {
+        func read(_ script: String) async -> String? { (try? await engine.evaluate(script, in: .page)) as? String }
+        func until(_ timeout: TimeInterval, _ condition: () async -> Bool) async -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while Date() < deadline {
+                if await condition() { return true }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            return false
+        }
+        let focusedScript = "String(document.activeElement && document.activeElement.id)"
+        let valueScript = "String(document.getElementById('\(id)').value)"
+        // Without an active app and key window the clicks cannot arrive; one try, then the NOTE.
+        let attempts = inputDeliverable(window) ? 4 : 1
+        for attempt in 0..<attempts {
+            focus(window)
+            guard let center = try? await cssCenter(of: "#\(id)", in: engine) else { return false }
+            click(window, engine: engine, at: center)
+            guard await until(1.5, { await read(focusedScript) == id }) else {
+                log("password offer: click \(attempt + 1) did not focus #\(id); retrying")
+                continue
+            }
+            if attempt > 0, await read(valueScript) != "" {
+                // A partial value from a lost key: select it so typing replaces it.
+                _ = try? await engine.evaluate("(document.getElementById('\(id)').select(), true)", in: .page)
+            }
+            type(text, in: window)
+            if await until(2, { await read(valueScript) == text }) { return true }
+            log("password offer: #\(id) holds '\(await read(valueScript) ?? "?")' after typing; retrying")
+        }
+        return false
+    }
+
     @MainActor
     private func passwordChecks(engine: ChromiumEngine, base: String, window: NSWindow) async throws {
         let prompts = engine.pagePrompts
@@ -2498,15 +2547,18 @@ extension ChromiumSelfTest {
         engine.load(URL(string: "\(base)/login")!)
         try await wait("login fixture") { engine.pageTitle == "login" && !engine.isLoading }
         // Chromium detects submissions from trusted typing only (script-set values do not count).
-        focus(window)
-        click(window, engine: engine, at: try await cssCenter(of: "#user", in: engine))
-        type("rearc-user", in: window)
-        click(window, engine: engine, at: try await cssCenter(of: "#pass", in: engine))
-        type("s3cret-pass-\(Int.random(in: 1000...9999))", in: window)
-        click(window, engine: engine, at: try await cssCenter(of: "#go", in: engine))
-        guard await eventually(timeout: 10, { prompts.password != nil }) else {
+        // Input reaches the renderer asynchronously and a fresh page can drop its first click, so
+        // each field is typed only once the page reports it focused, and checked before submitting.
+        let password = "s3cret-pass-\(Int.random(in: 1000...9999))"
+        let userTyped = await typeIntoField("user", "rearc-user", engine: engine, window: window)
+        let passTyped = await typeIntoField("pass", password, engine: engine, window: window)
+        if userTyped, passTyped {
+            click(window, engine: engine, at: try await cssCenter(of: "#go", in: engine))
+        }
+        guard userTyped, passTyped, await eventually(timeout: 10, { prompts.password != nil }) else {
             let typed = (try? await engine.evaluate("document.getElementById('user') ? document.getElementById('user').value : '(left)'", in: .page)) as? String
-            log("NOTE password offer: no save offer after synthesized typing (app active \(NSApp.isActive), key \(window.isKeyWindow), "
+            log("NOTE password offer: no save offer after synthesized typing (fields verified: user \(userTyped), pass \(passTyped); "
+                + "app active \(NSApp.isActive), key \(window.isKeyWindow), "
                 + "username field '\(typed ?? "?")', page '\(engine.pageTitle ?? "")'); offers need trusted input, so the prompt is "
                 + "not exercised in this run; unknown offer -> \(unknown.rearcName)")
             return
