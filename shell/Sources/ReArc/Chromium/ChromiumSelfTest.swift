@@ -32,6 +32,8 @@ final class ChromiumSelfTest {
     private var server: SelfTestFixtureServer?
     /// The loopback fixture's origin ("http://127.0.0.1:<port>").
     private var serverBase = ""
+    /// Wave 32: the live video's compositor and page frame counters both advanced.
+    private(set) var liveFramesAdvancing = false
     private var engine: ChromiumEngine?
     private var window: NSWindow?
     private var shutdownStatus: ReArcStatus?
@@ -1218,6 +1220,11 @@ final class ChromiumSelfTest {
         try await wave26SidebarChecks(model: model, store: store, tab: tabA, engine: engineA, base: base, window: first)
         if runtime.capabilities.pictureInPicture {
             try await pictureInPictureChecks(model: model, tab: tabA, engine: engineA, other: tabB)
+            if runtime.capabilities.pipEmbedded {
+                try await liveVideoChecks(model: model, store: store, home: tabA, homeEngine: engineA, other: tabB, window: first)
+            } else {
+                log("ABI-GAP pip_embedded not advertised (ABI minor < 43): PiP uses Chromium's window and strips have no track state")
+            }
         } else {
             log("ABI-GAP picture_in_picture not advertised (ABI minor \(runtime.capabilities.abiMinorVersion.map(String.init) ?? "absent") < 30): Picture in Picture is WebKit-only")
         }
@@ -2904,6 +2911,11 @@ extension ChromiumSelfTest {
     /// coming back leaves it, and the overlay's back-to-tab shows the tab.
     @MainActor
     private func pictureInPictureChecks(model: BrowserViewModel, tab: Tab, engine: ChromiumEngine, other: Tab) async throws {
+        // Off until step 2: the locked test session counts as fully occluded, and
+        // the occlusion trigger would put the video in PiP as soon as it plays.
+        let automatic = model.automaticPictureInPicture
+        model.automaticPictureInPicture = false
+        defer { model.automaticPictureInPicture = automatic }
         model.selectTab(tab.id)
         engine.load(URL(string: "\(serverBase)/pip")!)
         try await wait("PiP fixture playing", timeout: 25) {
@@ -2919,17 +2931,25 @@ extension ChromiumSelfTest {
         try await wait("PiP entered through the command", timeout: 10) {
             model.isPictureInPicture(tab.id) && engine.isPictureInPicture && engine.pageTitle == "pip-in"
         }
-        let overlay = pictureInPictureOverlay()
-        try check(overlay != nil, "no Chromium PiP overlay window")
+        // Wave 32 (pip_embedded): the video renders into ReArc's view, not Chromium's window.
+        let embedded = runtime.capabilities.pipEmbedded
+        let overlayName: String
+        if embedded {
+            try await wait("embedded PiP overlay shown", timeout: 10) { engine.videoOverlay != nil }
+            try check(pictureInPictureOverlay() == nil, "Chromium's PiP window opened although the shell hosts the video")
+            overlayName = NSStringFromClass(Swift.type(of: engine.videoOverlay!.view))
+        } else {
+            let overlay = pictureInPictureOverlay()
+            try check(overlay != nil, "no Chromium PiP overlay window")
+            overlayName = NSStringFromClass(Swift.type(of: overlay!))
+        }
         model.togglePictureInPicture()
         try await wait("PiP left through the command", timeout: 10) {
             !model.isPictureInPicture(tab.id) && !engine.isPictureInPicture && engine.pageTitle == "pip-out"
         }
 
         // 2. Automatic PiP: switching to another tab puts the playing video in PiP; coming back ends it.
-        let automatic = model.automaticPictureInPicture
-        if !automatic { model.automaticPictureInPicture = true }
-        defer { if !automatic { model.automaticPictureInPicture = false } }
+        model.automaticPictureInPicture = true
         model.selectTab(other.id)
         try await wait("automatic PiP on switching away", timeout: 10) {
             model.isPictureInPicture(tab.id) && model.autoPiPEnteredTabIDs.contains(tab.id) && engine.pageTitle == "pip-in"
@@ -2943,7 +2963,15 @@ extension ChromiumSelfTest {
         // 3. Back to tab (phase 2) from the overlay's button shows the tab again.
         model.selectTab(other.id)
         try await wait("automatic PiP for back-to-tab", timeout: 10) { model.isPictureInPicture(tab.id) }
-        if let overlay = pictureInPictureOverlay() {
+        if embedded, let video = engine.videoOverlay {
+            // The live player's back-to-tab is the engine action, so no synthesized input is needed.
+            video.perform(.backToTab)
+            try await wait("embedded back to tab: phase 2 and the tab shown", timeout: 10) {
+                runtime.pictureInPictureEvents.contains { $0.tabID == engine.tabID && $0.phase == .backToTab }
+                    && model.store.selectedTabID == tab.id && !model.isPictureInPicture(tab.id)
+            }
+            paths.append("back to tab (embedded overlay action) selects the tab")
+        } else if let overlay = pictureInPictureOverlay() {
             await clickBackToTab(in: overlay)
             if await eventually(timeout: 4, { runtime.pictureInPictureEvents.contains { $0.tabID == engine.tabID && $0.phase == .backToTab } }) {
                 try await wait("back to tab shows the tab", timeout: 10) {
@@ -2961,7 +2989,120 @@ extension ChromiumSelfTest {
         loadShellTab(model, tab, engine, URL(string: "\(serverBase)/a")!)
         try await wait("tab A back on /a after PiP", timeout: 15) { engine.pageTitle == Self.titleA && !engine.isLoading }
         log("PASS Picture in Picture (ABI 1.30): MediaRecorder WebM with audio -> pip_available; \(paths.joined(separator: "; ")); "
-            + "sidebar badge followed pip_active; overlay \(NSStringFromClass(Swift.type(of: overlay!))); events \(phases.joined(separator: ","))")
+            + "sidebar badge followed pip_active; overlay \(overlayName); events \(phases.joined(separator: ","))")
+    }
+
+    /// Wave 32 (ABI 1.43): switching away from a playing video shows its strip
+    /// and the live video in the sidebar, the video keeps presenting frames
+    /// while its tab is hidden, pause and play work through the strip, the
+    /// same view moves to the floating panel, minimizes into the strip and
+    /// comes back, and closing the tab removes both. No synthesized input.
+    @MainActor
+    private func liveVideoChecks(model: BrowserViewModel, store: SidebarStore, home: Tab, homeEngine: ChromiumEngine, other: Tab, window: NSWindow) async throws {
+        let embeds = model.embedsVideoInSidebar, automatic = model.automaticPictureInPicture
+        model.embedsVideoInSidebar = true
+        // Video in Sidebar alone enters PiP on the switch away; no occlusion trigger.
+        model.automaticPictureInPicture = false
+        defer {
+            model.embedsVideoInSidebar = embeds
+            model.automaticPictureInPicture = automatic
+        }
+        let tab = store.addTab(kind: .today, title: "Live video", url: URL(string: "\(serverBase)/pip")!)
+        model.selectTab(tab.id)
+        let engine = try shellEngine(model, tab)
+        loadShellTab(model, tab, engine, URL(string: "\(serverBase)/pip")!)
+        try await wait("live video fixture playing", timeout: 25) {
+            engine.pageTitle == "pip-playing" || engine.pageTitle?.hasPrefix("pip-err") == true
+        }
+        try check(engine.pageTitle == "pip-playing", "live video fixture: '\(engine.pageTitle ?? "")'")
+        try await wait("pip_available for the live video tab", timeout: 15) { model.mediaState(for: tab.id).canPictureInPicture }
+        try check(!model.mediaStrips(in: nil).contains(tab.id), "a strip showed while its tab is on screen")
+
+        // 1. Switch away: the strip and the live video in the sidebar.
+        model.selectTab(other.id)
+        try await wait("live video in the sidebar after switching away", timeout: 10) {
+            model.sidebarLiveVideoTabID(in: nil) == tab.id && engine.videoOverlay?.view.window === window
+        }
+        guard let video = engine.videoOverlay else { throw Failure(description: "no overlay for the live video tab") }
+        try check(model.mediaStrips(in: nil).contains(tab.id), "no strip for the hidden playing tab")
+        let info = model.mediaStripInfo(for: tab.id)
+        try check(info?.isPlaying == true && info?.canPreviousTrack == false && info?.canNextTrack == false,
+                  "strip state: playing \(String(describing: info?.isPlaying)), previous \(String(describing: info?.canPreviousTrack)), next \(String(describing: info?.canNextTrack))")
+        let size = video.view.bounds.size
+        try check(abs(size.width - (model.sidebarWidth - 16)) < 1.5, "the live video is \(size.width) pt wide, not the sidebar's width less 16")
+        let firstFrame = await eventually(timeout: 5) { video.hasFirstFrame }
+
+        // 2. Frames keep coming at the video's rate while the tab is hidden: the page's
+        // requestVideoFrameCallback count, and pixels read back from the view's own
+        // composited output (the fixture's colour changes every 50 ms).
+        func rvfc() async -> Double { ((try? await engine.evaluate("window.rvfc", in: .page)) as? NSNumber)?.doubleValue ?? -1 }
+        func pixel() async -> UInt32? {
+            await withCheckedContinuation { continuation in video.readPixel { continuation.resume(returning: $0) } }
+        }
+        let rvfc1 = await rvfc(), start = Date()
+        var pixels: [UInt32?] = []
+        for _ in 0 ..< 4 {
+            pixels.append(await pixel())
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+        let rvfc2 = await rvfc(), seconds = Date().timeIntervalSince(start)
+        let videoRate = (rvfc2 - rvfc1) / seconds
+        let read = pixels.compactMap { $0 }
+        let pixelsChanged = Set(read).count > 1
+        // Not black: the video, not the letterbox or an empty surface.
+        let showsVideo = read.contains { ($0 >> 8) & 0xFFFFFF > 0x101010 }
+        liveFramesAdvancing = rvfc2 > rvfc1 && pixelsChanged && showsVideo
+        let hex = pixels.map { $0.map { String(format: "%08X", $0) } ?? "none" }.joined(separator: ",")
+        log(String(format: "live video frames: requestVideoFrameCallback %.0f -> %.0f (%.1f fps), view pixels %@, first CALayer update %@",
+                   rvfc1, rvfc2, videoRate, hex, firstFrame ? "yes" : "no"))
+        try check(rvfc2 > rvfc1, "the hidden tab's video presented no frames (requestVideoFrameCallback \(rvfc1) -> \(rvfc2))")
+        try check(read.count == pixels.count, "the view's output could not be read back: \(hex)")
+        try check(showsVideo && pixelsChanged, "the view's pixels did not advance with the video: \(hex)")
+
+        // 3. Pause and play through the strip; the paused strip stays.
+        model.mediaTogglePlayPause(tab.id)
+        try await wait("paused from the strip", timeout: 10) { !video.isPlaying && model.mediaState(for: tab.id).isPaused }
+        try check(model.mediaStrips(in: nil).contains(tab.id) && model.sidebarLiveVideoTabID(in: nil) == tab.id,
+                  "pausing removed the strip or the live video")
+        model.mediaTogglePlayPause(tab.id)
+        try await wait("playing again from the strip", timeout: 10) { video.isPlaying && model.mediaState(for: tab.id).isPlaying }
+
+        // 4. Pop out to the panel, minimize into the strip, Open Picture in Picture, dock.
+        let overlayID = video.overlayID, eventsBefore = runtime.videoOverlayEvents.count
+        model.popOutLiveVideo(tab.id)
+        try await wait("popped out to the floating panel", timeout: 5) {
+            model.livePanel.isShowing && video.view.window === model.livePanel.window
+        }
+        try check(!model.mediaStrips(in: nil).contains(tab.id), "the strip showed beside the floating panel")
+        model.minimizeLiveVideo(tab.id)
+        try await wait("minimized into the strip", timeout: 5) {
+            !model.livePanel.isShowing && model.mediaStrips(in: nil).contains(tab.id)
+        }
+        try check(model.mediaStripInfo(for: tab.id)?.offersPictureInPicture == true, "the minimized strip offers no Open Picture in Picture")
+        model.openPictureInPicture(tab.id)
+        try await wait("Open Picture in Picture brought the panel back", timeout: 5) { model.livePanel.isShowing }
+        model.dockLiveVideo(tab.id)
+        try await wait("docked back in the sidebar", timeout: 5) { video.view.window === window && !model.livePanel.isShowing }
+        let moves = runtime.videoOverlayEvents.dropFirst(eventsBefore).filter { $0.overlayID == overlayID }
+        try check(engine.videoOverlay?.overlayID == overlayID && !moves.contains { $0.kind == .hidden || $0.kind == .closed },
+                  "moving the video ended its session: \(moves.map { "\($0.kind)" })")
+
+        // 5. Closing the tab removes the live video and the strip.
+        let engineTabID = engine.tabID
+        model.closeTab(tab.id)
+        try await wait("closing the tab removed the live video", timeout: 10) {
+            !runtime.videoOverlays.values.contains { $0.tabID == engineTabID }
+                && model.sidebarLiveVideoTabID(in: nil) == nil && !model.mediaStrips(in: nil).contains(tab.id)
+        }
+        // Closing selected a neighbour; the later checks expect tab A.
+        model.selectTab(home.id)
+        try await wait("tab A shown after the live video checks") {
+            homeEngine.leaseHolder?.window === window && homeEngine.attachmentID != nil
+        }
+        log("PASS live video and media strip (ABI 1.43): switch away -> strip + sidebar video \(Int(size.width))x\(Int(size.height)); "
+            + String(format: "hidden tab at %.1f fps (rVFC) with the view's pixels changing (%@); ", videoRate, hex)
+            + "strip pause/play kept the strip; pop-out, minimize, Open Picture in Picture and dock kept overlay \(overlayID); "
+            + "tab close removed it; frames_advancing=\(liveFramesAdvancing ? "yes" : "no")")
     }
 }
 
@@ -3747,6 +3888,12 @@ final class SelfTestFixtureServer {
           v.src = URL.createObjectURL(new Blob(parts, { type: 'video/webm' }));
           v.play().then(function () { document.title = 'pip-playing'; }, function (e) { document.title = 'pip-err:' + e.name; });
         };
+        // Frames presented to the video's compositor (PiP surface included), for wave 32.
+        window.rvfc = 0;
+        if (v.requestVideoFrameCallback) {
+          var counted = function () { window.rvfc++; v.requestVideoFrameCallback(counted); };
+          v.requestVideoFrameCallback(counted);
+        }
         v.addEventListener('enterpictureinpicture', function () { document.title = 'pip-in'; });
         v.addEventListener('leavepictureinpicture', function () { document.title = 'pip-out'; });
         rec.start(); setTimeout(function () { rec.stop(); }, 2500);
