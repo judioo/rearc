@@ -474,4 +474,72 @@ final class Wave28ModelTests: XCTestCase {
         note.toggleChecklist(at: 0)
         XCTAssertEqual(note.blocks[0].style, .heading(1), "only checklist rows check")
     }
+
+    // MARK: Browser import
+
+    static let bookmarksHTML = """
+    <!DOCTYPE NETSCAPE-Bookmark-file-1>
+    <META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+    <TITLE>Bookmarks</TITLE>
+    <H1>Bookmarks</H1>
+    <DL><p>
+        <DT><H3 ADD_DATE="1" PERSONAL_TOOLBAR_FOLDER="true">Bookmarks bar</H3>
+        <DL><p>
+            <DT><A HREF="https://news.test/" ADD_DATE="1">News &amp; Views</A>
+            <DT><H3>Work</H3>
+            <DL><p>
+                <DT><A HREF="https://docs.test/a?b=1&amp;c=2">Docs</A>
+                <DT><A HREF="javascript:alert(1)">Bookmarklet</A>
+                <DT><H3>Empty</H3>
+                <DL><p>
+                </DL><p>
+            </DL><p>
+            <DT><A HREF="https://caf&#233;.test/">Caf&#xE9;</A>
+            <DT><A HREF="place:sort=8">Recent</A>
+        </DL><p>
+    </DL><p>
+    """
+
+    func testBookmarkFilesParseIntoFoldersAndWebLinksOnly() {
+        XCTAssertTrue(BookmarkHTMLImport.isBookmarkFile(Self.bookmarksHTML))
+        XCTAssertFalse(BookmarkHTMLImport.isBookmarkFile("<html><body>hi</body></html>"))
+        let nodes = BookmarkHTMLImport.parse(Self.bookmarksHTML)
+        XCTAssertEqual(nodes, [
+            .link(title: "News & Views", url: URL(string: "https://news.test/")!),
+            .folder(title: "Work", children: [.link(title: "Docs", url: URL(string: "https://docs.test/a?b=1&c=2")!)]),
+            .link(title: "Café", url: URL(string: "https://café.test/")!),
+        ], "the bookmarks bar unwraps; scripts, places and empty folders go")
+        XCTAssertEqual(nodes.reduce(0) { $0 + $1.linkCount }, 3)
+    }
+
+    func testDeepAndHugeFilesAreBounded() {
+        var html = "<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><p>"
+        for level in 0 ..< 10 { html += "<DT><H3>L\(level)</H3><DL><p>" }
+        html += "<DT><A HREF=\"https://deep.test/\">Deep</A>"
+        for _ in 0 ..< 10 { html += "</DL><p>" }
+        html += "</DL>"
+        var depth = 0
+        var node = BookmarkHTMLImport.parse(html).first
+        while case .folder(_, let children)? = node { depth += 1; node = children.first }
+        XCTAssertLessThanOrEqual(depth, BookmarkHTMLImport.maxDepth)
+        XCTAssertEqual(node, .link(title: "Deep", url: URL(string: "https://deep.test/")!), "the link survives flattening")
+
+        let many = "<DL>" + (0 ..< 2100).map { "<DT><A HREF=\"https://s\($0).test/\">\($0)</A>" }.joined() + "</DL>"
+        XCTAssertEqual(BookmarkHTMLImport.parse(many).count, BookmarkHTMLImport.maxLinks)
+    }
+
+    func testImportMakesASpaceOfPinnedTabsAndClosedFolders() throws {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        let result = try XCTUnwrap(store.importBookmarks(BookmarkHTMLImport.parse(Self.bookmarksHTML), spaceName: "Safari"))
+        XCTAssertEqual(result.tabs, 3)
+        XCTAssertEqual(result.space.name, "Safari")
+        let pinned = store.content(for: result.space.id).pinned
+        XCTAssertEqual(pinned.count, 3)
+        guard case .folder(let folder) = pinned[1] else { return XCTFail("folder second") }
+        XCTAssertEqual(folder.title, "Work")
+        XCTAssertFalse(store.isFolderExpanded(folder.id))
+        XCTAssertEqual(SidebarTree.leaves(pinned).count, 3)
+        XCTAssertNil(store.importBookmarks([], spaceName: "Nothing"))
+        XCTAssertEqual(store.spaces.count, 2, "an empty file makes no space")
+    }
 }

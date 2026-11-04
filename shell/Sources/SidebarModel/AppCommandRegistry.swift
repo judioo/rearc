@@ -40,6 +40,8 @@ public enum AppCommandAction: Equatable, Hashable {
     /// Arc `newLegacyBoost`: a CSS and JavaScript boost for the page.
     case newLegacyBoost
     case importBoosts
+    /// Bookmarks exported from another browser, as a new space.
+    case importBookmarksFile
     case manageBoosts
     case toggleBoost(UUID)
     case editBoost(UUID)
@@ -234,7 +236,7 @@ public struct AppCommand: Equatable, Identifiable {
         case .newBoostForSite:
             guard let tab = store.selectedTab else { return false }
             return BoostScopeMatcher.urlIsEligibleForBoosts(tab.url)
-        case .manageBoosts, .importBoosts:
+        case .manageBoosts, .importBoosts, .importBookmarksFile:
             return true
         case .newLegacyBoost:
             guard let tab = store.selectedTab else { return false }
@@ -623,6 +625,13 @@ public enum AppCommandRegistry {
                 action: .newLegacyBoost
             ),
             AppCommand(
+                id: "import-bookmarks-file",
+                title: "Import Bookmarks from HTML File…",
+                keywords: ["import", "bookmarks", "html", "file", "safari", "chrome", "firefox", "export"],
+                minQueryLength: 3,
+                action: .importBookmarksFile
+            ),
+            AppCommand(
                 id: "import-boosts",
                 title: "Import Boosts…",
                 keywords: ["boost", "import", "file", "share", "install"],
@@ -713,6 +722,13 @@ public enum AppCommandRegistry {
                 keywords: ["clear", "history", "cache", "cookies", "browsing", "data"],
                 minQueryLength: 2,
                 action: .openBrowserPage(.clearBrowsingData)
+            ),
+            AppCommand(
+                id: "import-browser-data",
+                title: "Import from Another Browser…",
+                keywords: ["import", "browser", "safari", "chrome", "firefox", "bookmarks", "passwords", "history"],
+                minQueryLength: 3,
+                action: .openBrowserPage(.importData)
             ),
             AppCommand(
                 id: "engine-version",

@@ -9,6 +9,8 @@ public enum BrowserInternalPage: String, CaseIterable, Hashable, Sendable {
     case privacy
     case siteSettings
     case clearBrowsingData
+    /// Chromium's Import Bookmarks and Settings dialog (Arc ARC_ImportFeature).
+    case importData
     case version
     case history
     case downloads
@@ -21,6 +23,7 @@ public enum BrowserInternalPage: String, CaseIterable, Hashable, Sendable {
         case .privacy: return URL(string: "chrome://settings/privacy")!
         case .siteSettings: return URL(string: "chrome://settings/content")!
         case .clearBrowsingData: return URL(string: "chrome://settings/clearBrowserData")!
+        case .importData: return URL(string: "chrome://settings/importData")!
         case .version: return URL(string: "chrome://version")!
         case .history: return URL(string: "chrome://history/")!
         case .downloads: return URL(string: "chrome://downloads/")!
@@ -35,6 +38,7 @@ public enum BrowserInternalPage: String, CaseIterable, Hashable, Sendable {
         case .privacy: return "Privacy and Security"
         case .siteSettings: return "Site Settings"
         case .clearBrowsingData: return "Clear Browsing Data"
+        case .importData: return "Import Browser Data"
         case .version: return "About Chromium Engine"
         case .history: return "History"
         case .downloads: return "Downloads"
