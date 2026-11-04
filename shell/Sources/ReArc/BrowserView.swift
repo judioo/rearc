@@ -117,6 +117,7 @@ struct BrowserView: View {
                 onClose: {
                     model.store.unregisterWindow(windowID)
                     model.pinnedSectionCollapse.forgetWindow(windowID)
+                    model.splitMaximize.forgetWindow(windowID)
                 }
             )
             .frame(width: 0, height: 0)

@@ -46,6 +46,32 @@ extension BrowserViewModel {
         window ?? store.keyWindowID
     }
 
+    // MARK: - Split View
+
+    /// The split a menu command acts on: the key window's selection.
+    private var commandSplit: SplitViewItem? { activeSplit(in: store.keyWindowID) }
+
+    /// Arc `convertToHorizontalSplitView` / `convertToVerticalSplitView`.
+    func flipSplitOrientation(_ splitID: SplitViewItem.ID? = nil) {
+        guard let id = splitID ?? commandSplit?.id else { return }
+        withAnimation(.easeInOut(duration: 0.2)) { _ = store.flipSplitOrientation(splitID: id) }
+    }
+
+    /// Expand Current Split: the focused pane alone, or back to the split.
+    func toggleExpandedSplitPane(_ splitID: SplitViewItem.ID? = nil, in window: SidebarWindowID? = nil) {
+        let target = window ?? store.keyWindowID
+        guard let split = splitID.flatMap({ store.split(withID: $0) }) ?? activeSplit(in: target) else { return }
+        withAnimation(.easeInOut(duration: 0.2)) { _ = splitMaximize.toggle(split, window: target) }
+    }
+
+    func expandedSplitPane(_ split: SplitViewItem, in window: SidebarWindowID?) -> Tab.ID? {
+        splitMaximize.maximizedTab(in: split, window: window ?? store.keyWindowID)
+    }
+
+    func visibleSplitPanes(_ split: SplitViewItem, in window: SidebarWindowID?) -> [Tab] {
+        splitMaximize.visibleTabs(in: split, window: window ?? store.keyWindowID)
+    }
+
     // MARK: - + menu
 
     /// New Boost: a boost for the page on screen, in the editor with the

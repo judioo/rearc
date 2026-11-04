@@ -1,11 +1,13 @@
 import SwiftUI
 import SidebarModel
 
-/// Renders 2–4 web panes with draggable dividers for an active split selection.
+/// Renders 2–4 web panes with draggable dividers for an active split
+/// selection, or the expanded pane alone (Expand Current Split).
 struct SplitContentView: View {
     let split: SplitViewItem
     let model: BrowserViewModel
     let accent: Color
+    @Environment(\.sidebarWindow) private var window
 
     @State private var liveFactors: [Tab.ID: Double] = [:]
     @State private var dragStartFactors: [Tab.ID: Double] = [:]
@@ -15,7 +17,12 @@ struct SplitContentView: View {
         GeometryReader { proxy in
             let ordered = split.tabs
             let factors = normalizedFactors(for: ordered)
-            if split.orientation == .horizontal {
+            if let expanded = model.expandedSplitPane(split, in: window),
+               let tab = ordered.first(where: { $0.id == expanded }) {
+                pane(for: tab, focused: false)
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .overlay(alignment: .top) { restorePill }
+            } else if split.orientation == .horizontal {
                 horizontalLayout(size: proxy.size, tabs: ordered, factors: factors)
             } else {
                 verticalLayout(size: proxy.size, tabs: ordered, factors: factors)
@@ -25,6 +32,23 @@ struct SplitContentView: View {
         .onChange(of: split.widthFactors) { _, new in
             if !isDraggingDivider { liveFactors = new }
         }
+    }
+
+    /// The other panes stay open behind the expanded one.
+    private var restorePill: some View {
+        Button {
+            model.toggleExpandedSplitPane(split.id, in: window)
+        } label: {
+            Label("Show Split View (\(split.tabs.count) panes)", systemImage: split.orientation == .horizontal
+                  ? "rectangle.split.2x1" : "rectangle.split.1x2")
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.regularMaterial, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 8)
+        .help("Expand Current Split is on — click to show every pane again")
     }
 
     @ViewBuilder

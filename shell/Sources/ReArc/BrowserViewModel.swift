@@ -87,6 +87,8 @@ final class BrowserViewModel {
     @ObservationIgnored var lastNavigationAt: [Tab.ID: Date] = [:]
     /// Collapsed Pinned sections, per window and space.
     var pinnedSectionCollapse = PinnedSectionCollapseState()
+    /// Expand Current Split: the pane a window shows alone, per split.
+    var splitMaximize = SplitPaneMaximizeState()
     /// The confirmation toast over the page ("Copied URL"), cleared after a moment.
     var toast: ShellToast?
     @ObservationIgnored var lastCopiedLinkText: String?
@@ -1445,6 +1447,10 @@ final class BrowserViewModel {
             copyURL(format: .markdown)
         case .copyAsQuote:
             copyURL(format: .quote)
+        case .flipSplitOrientation:
+            flipSplitOrientation()
+        case .expandSplitPane:
+            toggleExpandedSplitPane()
         case .expandPinnedSection:
             setPinnedSectionCollapsed(false)
         case .collapsePinnedSection:

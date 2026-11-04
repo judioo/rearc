@@ -19,6 +19,9 @@ public enum AppCommandAction: Equatable, Hashable {
     case addSplitRight
     case addSplitBottom
     case separateFromSplit
+    /// SPLIT-VIEW §3: flip orientation, Expand Current Split.
+    case flipSplitOrientation
+    case expandSplitPane
     case nextTab
     case previousTab
     case peekAtURL
@@ -180,7 +183,7 @@ public struct AppCommand: Equatable, Identifiable {
         case .addSplitRight, .addSplitBottom:
             guard let tab = store.selectedTab else { return false }
             return store.splitContaining(tabID: tab.id) == nil
-        case .separateFromSplit:
+        case .separateFromSplit, .flipSplitOrientation, .expandSplitPane:
             guard let tab = store.selectedTab else { return false }
             return store.splitContaining(tabID: tab.id) != nil
         case .nextTab, .previousTab:
@@ -698,6 +701,20 @@ public enum AppCommandRegistry {
             keywords: ["copy", "quote", "selection", "markdown", "cite"],
             minQueryLength: 2,
             action: .copyAsQuote
+        ),
+        AppCommand(
+            id: "flip-split",
+            title: "Flip Split Orientation",
+            keywords: ["split", "flip", "rotate", "horizontal", "vertical", "orientation"],
+            minQueryLength: 2,
+            action: .flipSplitOrientation
+        ),
+        AppCommand(
+            id: "expand-split-pane",
+            title: "Expand Current Split",
+            keywords: ["split", "expand", "maximize", "pane", "focus"],
+            minQueryLength: 2,
+            action: .expandSplitPane
         ),
         AppCommand(
             id: "expand-pinned",

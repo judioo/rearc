@@ -137,4 +137,38 @@ final class Wave26ShellTests: XCTestCase {
         engine.webView(engine.webView, didStartProvisionalNavigation: nil)
         XCTAssertEqual(model.tabActivity(tab.id), .loading(progress: engine.loadProgress), "Reload starts a new page")
     }
+
+    // MARK: Split View
+
+    func testFlipAndExpandCurrentSplitFromMenuAndCommandBar() throws {
+        let model = makeModel()
+        let window = SidebarWindowID()
+        model.store.registerWindow(window)
+        model.windowBecameKey(window)
+        let a = model.store.addTab(kind: .today, title: "A", url: URL(string: "https://a.test")!)
+        model.store.selectTab(a.id)
+        model.addSplitView(orientation: .horizontal)
+        let split = try XCTUnwrap(model.activeSplit(in: window))
+        XCTAssertEqual(split.orientation, .horizontal)
+
+        let items = ShellMenus.sidebarItems(model).flatMap { $0 }
+        items.first { $0.title == "Flip Split Orientation" }!.action()
+        XCTAssertEqual(model.store.split(withID: split.id)?.orientation, .vertical)
+        _ = model.executeCommand(.flipSplitOrientation, commandID: nil)
+        XCTAssertEqual(model.store.split(withID: split.id)?.orientation, .horizontal)
+
+        items.first { $0.title == "Expand Current Split" }!.action()
+        let current = try XCTUnwrap(model.store.split(withID: split.id))
+        XCTAssertEqual(model.expandedSplitPane(current, in: window), current.focusTabID)
+        XCTAssertEqual(model.visibleSplitPanes(current, in: window).map(\.id), [current.focusTabID])
+        XCTAssertEqual(model.visibleSplitPanes(current, in: SidebarWindowID()).count, 2, "another window keeps the split")
+        _ = model.executeCommand(.expandSplitPane, commandID: nil)
+        XCTAssertNil(model.expandedSplitPane(current, in: window))
+
+        let context = CommandBarContext(store: model.store, isSidebarVisible: true, closedTabStack: ClosedTabStack())
+        let commands = AppCommandRegistry.all(in: context)
+        XCTAssertTrue(commands.first { $0.action == .expandSplitPane }!.isEnabled(in: context))
+        model.unsplit(split.id)
+        XCTAssertFalse(commands.first { $0.action == .flipSplitOrientation }!.isEnabled(in: context), "no split, no flip")
+    }
 }

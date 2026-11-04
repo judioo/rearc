@@ -109,3 +109,57 @@ final class Wave26ModelTests: XCTestCase {
         XCTAssertFalse(TabActivity.crashed.isLoading)
     }
 }
+
+/// Wave 26: Split View flip and Expand Current Split.
+final class Wave26SplitModelTests: XCTestCase {
+
+    private func makeSplit() -> (SidebarStore, SplitViewItem) {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        let a = store.addTab(kind: .today, title: "A", url: URL(string: "https://a.test")!)
+        let b = store.addTab(kind: .today, title: "B", url: URL(string: "https://b.test")!)
+        let split = store.splitTab(b.id, with: a.id)!
+        return (store, split)
+    }
+
+    func testFlipKeepsPaneSizes() {
+        let (store, split) = makeSplit()
+        store.resizeSplitPanes(splitID: split.id, widthFactors: [split.tabs[0].id: 0.7, split.tabs[1].id: 0.3])
+        let before = store.split(withID: split.id)!
+        XCTAssertEqual(store.flipSplitOrientation(splitID: split.id), before.orientation.flipped)
+        let after = store.split(withID: split.id)!
+        XCTAssertEqual(after.orientation, before.orientation.flipped)
+        XCTAssertEqual(after.widthFactors, before.widthFactors)
+        store.flipSplitOrientation(splitID: split.id)
+        XCTAssertEqual(store.split(withID: split.id)?.orientation, before.orientation)
+        XCTAssertNil(store.flipSplitOrientation(splitID: UUID()))
+        XCTAssertEqual(SplitLayoutOrientation.horizontal.flipped, .vertical)
+    }
+
+    func testExpandCurrentSplitIsPerWindowAndFollowsFocus() {
+        let (store, created) = makeSplit()
+        var split = store.split(withID: created.id)!
+        let window = SidebarWindowID(), other = SidebarWindowID()
+        var state = SplitPaneMaximizeState()
+        XCTAssertEqual(state.visibleTabs(in: split, window: window).count, 2)
+
+        XCTAssertTrue(state.toggle(split, window: window))
+        XCTAssertEqual(state.visibleTabs(in: split, window: window).map(\.id), [split.focusTabID])
+        XCTAssertEqual(state.visibleTabs(in: split, window: other).count, 2, "other windows keep the split")
+
+        let sibling = split.tabs.first { $0.id != split.focusTabID }!.id
+        store.setSplitFocus(splitID: split.id, tabID: sibling)
+        split = store.split(withID: split.id)!
+        XCTAssertNil(state.maximizedTab(in: split, window: window), "focusing another pane restores the split")
+        XCTAssertTrue(state.toggle(split, window: window), "and toggling expands the new focus")
+        XCTAssertEqual(state.maximizedTab(in: split, window: window), sibling)
+        XCTAssertFalse(state.toggle(split, window: window))
+        XCTAssertEqual(state.visibleTabs(in: split, window: window).count, 2)
+
+        state.toggle(split, window: window)
+        state.forgetWindow(window)
+        XCTAssertNil(state.maximizedTab(in: split, window: window))
+        state.toggle(split, window: other)
+        state.restore(split.id, window: other)
+        XCTAssertTrue(state.maximized.isEmpty)
+    }
+}

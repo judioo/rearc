@@ -129,6 +129,13 @@ struct SectionItemContextMenu: View {
         switch entry {
         case .split(let split):
             Button("Separate Split View") { model.unsplit(split.id) }
+            Button(split.orientation == .horizontal ? "Arrange Top and Bottom" : "Arrange Side by Side") {
+                model.flipSplitOrientation(split.id)
+            }
+            Button("Expand Current Split") {
+                model.selectSplit(split.id, focusTabID: split.focusTabID)
+                model.toggleExpandedSplitPane(split.id)
+            }
             Button("Copy Links") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(split.tabs.map(\.url.absoluteString).joined(separator: "\n"), forType: .string)

@@ -1101,6 +1101,27 @@ final class ChromiumSelfTest {
         try checkOneLease(companion, "split companion")
         log("PASS Split View: tab \(engineA.tabID) lease \(engineA.attachmentID ?? 0) and companion tab \(companion.tabID) "
             + "lease \(companion.attachmentID ?? 0) attached side by side in window 1")
+        // Wave 26: flip the split, then Expand Current Split keeps the sibling open behind the focused pane.
+        model.flipSplitOrientation()
+        try await wait("split flipped, both panes attached", timeout: 20) {
+            store.split(withID: split.id)?.orientation == split.orientation.flipped
+                && engineA.attachmentID != nil && companion.attachmentID != nil
+        }
+        model.selectSplit(split.id, focusTabID: tabA.id)
+        model.toggleExpandedSplitPane()
+        let expanded = try XUnwrap(store.split(withID: split.id))
+        try check(model.visibleSplitPanes(expanded, in: store.keyWindowID).map(\.id) == [tabA.id], "Expand Current Split shows "
+                  + "\(model.visibleSplitPanes(expanded, in: store.keyWindowID).count) panes")
+        try await wait("expanded pane attached, sibling still open", timeout: 20) {
+            engineA.attachmentID != nil && engineA.leaseHolder?.window === first && companion.tabID != 0
+        }
+        model.toggleExpandedSplitPane()
+        try await wait("split restored, both panes attached", timeout: 20) {
+            engineA.attachmentID != nil && companion.attachmentID != nil
+        }
+        model.flipSplitOrientation()
+        log("PASS Split View flip (\(split.orientation) -> \(split.orientation.flipped), panes re-attached) and Expand Current Split "
+            + "(tab A alone, companion tab \(companion.tabID) kept open, restored)")
         model.closeTab(companionTab.id)
         model.selectTab(tabA.id)
         try await wait("tab A alone after closing the split companion") {

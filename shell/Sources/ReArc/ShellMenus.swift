@@ -171,6 +171,10 @@ enum ShellMenus {
                 ShellMenuItem("Clear Unpinned Tabs") { model.clearTodayTabs() },
             ],
             [
+                ShellMenuItem("Flip Split Orientation") { model.flipSplitOrientation() },
+                ShellMenuItem("Expand Current Split") { model.toggleExpandedSplitPane() },
+            ],
+            [
                 ShellMenuItem("Expand Pinned Section") { model.setPinnedSectionCollapsed(false) },
                 ShellMenuItem("Collapse Pinned Section") { model.setPinnedSectionCollapsed(true) },
             ],
