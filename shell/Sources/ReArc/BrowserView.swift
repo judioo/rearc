@@ -81,6 +81,10 @@ struct BrowserView: View {
                     results: model.commandBarResults,
                     highlightedIndex: model.commandBarHighlightedIndex,
                     errorMessage: model.commandBarError,
+                    siteSearch: model.commandBarSiteSearch,
+                    siteSearchSuggestion: model.commandBarSiteSearchSuggestion,
+                    onTab: { model.enterCommandBarSiteSearch() },
+                    onDeleteBackward: { model.exitCommandBarSiteSearch() },
                     onMoveHighlight: { model.moveCommandBarHighlight(by: $0) },
                     onSelectIndex: { index in
                         model.commandBarHighlightedIndex = index

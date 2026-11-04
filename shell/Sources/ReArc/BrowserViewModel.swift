@@ -66,8 +66,17 @@ final class BrowserViewModel {
     /// The tab the command bar will navigate on submit.
     private var commandBarTargetID: Tab.ID?
 
+    /// The site a Tab-triggered scoped search is aimed at (Arc site search pill).
+    var commandBarSiteSearch: SiteSearchEngine?
+    /// What was typed before Tab, restored when the pill is removed
+    /// (Arc `queryBeforeEnteringScopedSearch`).
+    @ObservationIgnored var commandBarTextBeforeSiteSearch = ""
+
     var commandBarResults: [CommandBarSearch.Result] {
-        CommandBarSearch.results(
+        if let engine = commandBarSiteSearch {
+            return CommandBarSearch.siteSearchResults(engine, query: commandBarText)
+        }
+        return CommandBarSearch.results(
             for: commandBarText,
             in: store,
             isSidebarVisible: isSidebarVisible,
@@ -896,8 +905,38 @@ final class BrowserViewModel {
         openCommandBar(target: selected.id, text: text)
     }
 
+    /// The site Tab would search for the typed word, shown as a hint.
+    var commandBarSiteSearchSuggestion: SiteSearchEngine? {
+        guard commandBarSiteSearch == nil, commandBarURLIntent == nil, !commandBarText.hasPrefix(">") else { return nil }
+        return SiteSearchCatalog.match(commandBarText)
+    }
+
+    /// Tab in the command bar: the typed site name becomes a search pill.
+    /// Returns false (Tab keeps its usual meaning) when nothing matches.
+    @discardableResult
+    func enterCommandBarSiteSearch() -> Bool {
+        guard let engine = commandBarSiteSearchSuggestion else { return false }
+        commandBarTextBeforeSiteSearch = commandBarText
+        commandBarSiteSearch = engine
+        commandBarText = ""
+        commandBarError = nil
+        return true
+    }
+
+    /// Delete on an empty query removes the pill and restores the text.
+    @discardableResult
+    func exitCommandBarSiteSearch() -> Bool {
+        guard commandBarSiteSearch != nil, commandBarText.isEmpty else { return false }
+        commandBarSiteSearch = nil
+        commandBarText = commandBarTextBeforeSiteSearch
+        commandBarTextBeforeSiteSearch = ""
+        return true
+    }
+
     func dismissCommandBar() {
         isCommandBarPresented = false
+        commandBarSiteSearch = nil
+        commandBarTextBeforeSiteSearch = ""
         commandBarTargetID = nil
         commandBarText = ""
         commandBarHighlightedIndex = 0
@@ -1022,6 +1061,7 @@ final class BrowserViewModel {
     }
 
     private func openCommandBar(target: Tab.ID?, text: String) {
+        commandBarSiteSearch = nil
         commandBarTargetID = target
         commandBarText = text
         commandBarError = nil

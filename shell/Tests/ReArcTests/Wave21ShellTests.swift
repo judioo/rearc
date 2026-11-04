@@ -175,4 +175,46 @@ final class Wave21ShellTests: XCTestCase {
         XCTAssertEqual(ContentSplitDropZone.frame(for: .trailing, in: CGSize(width: 800, height: 600)),
                        CGRect(x: 406, y: 6, width: 388, height: 588))
     }
+
+    // MARK: Site search
+
+    func testTabToSearchScopesTheCommandBarAndDeleteRestoresTheText() {
+        let model = makeModel()
+        model.newTab()
+        model.commandBarText = "youtube cats"
+        XCTAssertNil(model.commandBarSiteSearchSuggestion)
+        XCTAssertFalse(model.enterCommandBarSiteSearch(), "Tab does nothing without a site name")
+
+        model.commandBarText = "yout"
+        XCTAssertEqual(model.commandBarSiteSearchSuggestion?.id, "youtube")
+        XCTAssertTrue(model.enterCommandBarSiteSearch())
+        XCTAssertEqual(model.commandBarSiteSearch?.id, "youtube")
+        XCTAssertEqual(model.commandBarText, "")
+        XCTAssertNil(model.commandBarSiteSearchSuggestion, "no second hint inside the pill")
+
+        XCTAssertTrue(model.exitCommandBarSiteSearch())
+        XCTAssertNil(model.commandBarSiteSearch)
+        XCTAssertEqual(model.commandBarText, "yout", "the typed text comes back")
+
+        model.enterCommandBarSiteSearch()
+        model.commandBarText = "lofi beats"
+        XCTAssertFalse(model.exitCommandBarSiteSearch(), "Delete edits the query while it has text")
+        XCTAssertEqual(model.commandBarResults.first?.destinationURL?.absoluteString,
+                       "https://www.youtube.com/results?search_query=lofi%20beats")
+        let tabID = model.store.selectedTabID!
+        model.submitCommandBar()
+        XCTAssertFalse(model.isCommandBarPresented)
+        XCTAssertNil(model.commandBarSiteSearch, "dismissing clears the pill")
+        XCTAssertEqual(model.store.tab(withID: tabID)?.url.host(), "www.youtube.com")
+    }
+
+    func testCommandModeAndURLIntentsNeverOfferSiteSearch() {
+        let model = makeModel()
+        model.newTab()
+        model.commandBarText = ">yo"
+        XCTAssertNil(model.commandBarSiteSearchSuggestion)
+        model.commandBarURLIntent = .peek
+        model.commandBarText = "youtube"
+        XCTAssertNil(model.commandBarSiteSearchSuggestion)
+    }
 }

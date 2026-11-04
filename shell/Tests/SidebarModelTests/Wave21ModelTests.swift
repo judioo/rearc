@@ -268,4 +268,33 @@ final class Wave21ModelTests: XCTestCase {
         XCTAssertFalse(store.canSplit(elsewhere.id, onto: anchor.id), "tabs of another space do not split")
         XCTAssertFalse(store.canSplit(UUID(), onto: anchor.id))
     }
+
+    // MARK: Site search
+
+    func testSiteNamesMatchByPrefixAliasOrDomain() {
+        XCTAssertEqual(SiteSearchCatalog.match("you")?.id, "youtube")
+        XCTAssertEqual(SiteSearchCatalog.match("YT")?.id, "youtube", "aliases match, case-insensitively")
+        XCTAssertEqual(SiteSearchCatalog.match("github.com")?.id, "github")
+        XCTAssertEqual(SiteSearchCatalog.match("www.wiki")?.id, "wikipedia")
+        XCTAssertEqual(SiteSearchCatalog.match("maps")?.id, "maps", "an exact alias beats a longer prefix match")
+        XCTAssertEqual(SiteSearchCatalog.match("go")?.id, "google", "the shortest name wins a shared prefix")
+        XCTAssertNil(SiteSearchCatalog.match("y"), "one letter is too little")
+        XCTAssertNil(SiteSearchCatalog.match("youtube cats"), "a query with spaces is a search, not a trigger")
+        XCTAssertNil(SiteSearchCatalog.match("https://youtube.com"))
+        XCTAssertNil(SiteSearchCatalog.match("zzqx"))
+    }
+
+    func testSiteSearchURLsEncodeTheQuery() throws {
+        let youtube = try XCTUnwrap(SiteSearchCatalog.match("youtube"))
+        XCTAssertEqual(youtube.url(for: "cats & dogs")?.absoluteString,
+                       "https://www.youtube.com/results?search_query=cats%20%26%20dogs")
+        XCTAssertEqual(youtube.url(for: "  ")?.absoluteString, "https://youtube.com/", "no query opens the site")
+        let maps = try XCTUnwrap(SiteSearchCatalog.match("maps"))
+        XCTAssertEqual(maps.url(for: "a/b")?.absoluteString, "https://www.google.com/maps/search/a%2Fb")
+
+        let rows = CommandBarSearch.siteSearchResults(youtube, query: "cats")
+        XCTAssertEqual(rows.map(\.title), ["Search YouTube for “cats”"])
+        XCTAssertEqual(rows.first?.kind, .search)
+        XCTAssertEqual(CommandBarSearch.siteSearchResults(youtube, query: "").first?.title, "Open YouTube")
+    }
 }
