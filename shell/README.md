@@ -76,7 +76,8 @@ looked up with `dlsym` first and an engine that predates the export counts as
 minor 0. `ChromiumCapabilities` enables a feature only when the minor version
 is at least the one that introduced it (5 for the three below, 6–10 for the
 ABI 1.10 features, 11–14 for the ABI 1.14 ones, 15–17 for the wave 20 ones,
-18–22 for the wave 22 prompt channels)
+18–22 for the wave 22 prompt channels, 23–27 for wave 23, 28–30 for
+wave 24)
 **and** `ReArcEngineHasFeature`
 advertises it, and logs
 `capabilities: ABI minor 14: navigation_extended=1 script_evaluation=1 …`.
@@ -485,8 +486,79 @@ context at once (the self-test checks that none is left).
   `ChromiumCapabilities.canInspect` is always false and Inspect stays
   listed disabled (the engine answers `unsupported`).
 
-Not adopted: `printing` (1.28), `page_drops` (1.29) and the 1.30 additions,
-which arrived during this wave.
+### ABI 1.28–1.30 adoption (wave 24)
+
+Follows `engine/docs/C-ABI.md` (sections 1.28–1.30) and
+`engine/docs/WAVE-18E-REPORT.md`. Each feature is gated on its minor and
+flag (`printing` 28, `page_drops` 29, `picture_in_picture` 30). Configure
+still takes 1. `ChromiumRuntime` registers the print and PiP callbacks
+and sets the drop policy at `ready`, before any tab. Without them the
+engine completes print requests silently, aborts every drop and refuses
+PiP.
+
+- **Printing.** File > Print… (⌘P), the command bar's "Print…" and a
+  page's `window.print()` go through one `PagePrinter`
+  (`Printing/PagePrinter.swift`). It allows one job per page: a request
+  while that page's panel is open is dropped. On Chromium the page's
+  request has already completed for the page (beforeprint and afterprint
+  fire) when the print event arrives. The shell asks
+  `ReArcTabPrintToPDF` for a PDF laid out on the paper the print panel
+  starts with (`NSPrintInfo.shared`; Chromium's default margins). It
+  prints that PDF through PDFKit's `NSPrintOperation`, shrinking it only
+  when the chosen paper is smaller, with the native print panel as a
+  sheet on the tab's window. File > Export as PDF… asks with a save
+  panel sheet and writes the same paginated PDF. On WebKit, printing is
+  `WKWebView.printOperation` and Export as PDF is `createPDF`: one page
+  as tall as the document, like Safari's Export as PDF. WebKit has no
+  public print delegate, so a page script forwards `window.print()` to
+  the shell, and beforeprint and afterprint do not fire there.
+- **Drops into pages.** The policy (`PageDropPolicy.shell`) accepts files,
+  text, links and images, and blocks `com.rearc.sidebar-item`. Every
+  sidebar drag (tabs, folders, splits, easels, favorites, space icons)
+  now carries that type next to its UUID text (`SidebarDragPayload`).
+  Chromium therefore never offers it to a page: no events, no
+  operation. `ReArcWebView` declines it the same way on WebKit. The
+  wave 21 drag-to-split target registers the private type and reads
+  the ID from it first, and it still sits above the page only during a
+  sidebar drag.
+
+  **Unhandled drops: Chrome's and Arc's behaviour.** A page that
+  takes a drop (a `dragover` it cancels) gets it. A file or link
+  dropped where the page does not take it opens in that tab, as in
+  Chrome and Arc (both Chromium, which navigates the frame) and in
+  Safari. Back returns, and a page with unsaved work still asks "Leave
+  site?" first. Plain text and raw image bytes dropped outside an
+  editable field or drop target do nothing. The engine gives the host no
+  veto over that navigation. A shell-side undo (going back after the
+  fact) would reload the page and lose its state, so the shell does not
+  try one. For a drop that leaves the page alone, use the sidebar, as in
+  Arc: links and files dropped on a sidebar row or a section's end open
+  as Today tabs at that position, and the first is shown
+  (`SidebarURLDrop`: http, https and file URLs, once each, at most 20).
+- **Picture in Picture.** View > Picture in Picture and the command bar's
+  "Picture in Picture" put the selected tab's video in PiP, or bring it
+  back. Chromium enters through the tab's media session
+  (`ReArcTabSetPictureInPicture`) and shows its own floating overlay
+  (play/pause, back to tab, close). Media events carry `pip_available`
+  and `pip_active`, which map to `WebMediaState.canPictureInPicture` and
+  `isPictureInPicture`. Chromium offers host-started PiP only for one
+  normal player with unmuted audio: never WebRTC or canvas streams, or
+  a video without sound. Document PiP is unsupported. The overlay's back
+  to tab (phase 2) selects the tab, in its space, and brings its window
+  forward. WebKit uses the standard PiP API (with
+  `webkitSetPresentationMode` as fallback), which may want a recent user
+  gesture. A sidebar row (and a favorite) in PiP shows a PiP badge.
+  Clicking the row's badge brings the video back.
+- **Automatic PiP.** Arc's automatic Picture in Picture, on by default
+  (ReArc > Automatic Picture in Picture), saved in user defaults
+  (`AutoPiPPolicy.tabSwitchPlan`). Switching away from a tab whose video
+  plays puts it in PiP. Showing that tab again brings the video back. A
+  PiP started by hand stays when you switch. Only one PiP window
+  exists, so an audible video wins and a video already in PiP keeps the
+  window. Snoozed and disabled sites are skipped. The wave 17 occlusion
+  trigger follows the same setting. Chromium's own auto-PiP is not wired
+  for registry tabs (WAVE-18E-REPORT), so the shell drives it. WebKit
+  follows the same rules within its gesture limit.
 
 ### Self-test
 
@@ -500,7 +572,8 @@ The self-test:
    with `ReArcFaviconGet` (a PNG), and a stale ref is `not_found`.
 4. Attaches the SwiftUI-hosted view to a window and captures a viewport PNG.
 5. Installs one boost and checks its CSS and isolated-world JS.
-6. Goes back and forward, and checks mute and PiP.
+6. Goes back and forward, and checks mute and PiP (a page without video:
+   `invalid_state` from ABI 1.30, `unsupported` before it).
 7. Checks script evaluation:
    - each world sees only its own globals (boost, main and editor);
    - JSON results, including `undefined` and awaited Promises;
@@ -603,13 +676,46 @@ The self-test:
       sidebar. The page's `exitFullscreen()`, Escape and leaving native
       fullscreen each restore the window. Without input (app inactive)
       it logs a NOTE.
-19. Verifies every evaluation, profile request and command-bar call
+19. Wave 24, each gated on its minor and flag:
+    - Printing (1.28): `ReArcTabPrintToPDF` gives a 3-page `%PDF` for the
+      fixture, page range 2 on A4 landscape gives one landscape page, and
+      range 9 is `invalid_argument`. The page's `window.print()` sends a
+      print request, its title shows beforeprint+afterprint, and
+      `PagePrinter` builds the print operation from the PDF for the tab's
+      window. A recorder stands in for the panel, so no real print panel
+      opens. A second print while it is open is dropped, then ⌘P prints
+      again. Export as PDF writes a valid PDF to a temporary file in
+      place of the save panel.
+    - Drops (1.29): a synthetic `NSDraggingInfo` over private pasteboards
+      drives Chromium's real `WebContentsViewCocoa`. Dropped text and a
+      Finder file (name, size and contents) reach the fixture's drop
+      handler. A sidebar drag (private type plus UUID text) gets no
+      operation and no page event, and the tab stays on its page.
+    - PiP (1.30), in the real shell: the fixture plays a MediaRecorder
+      WebM of a canvas and a silent oscillator (a normal player with
+      audio; a self-test-only `--autoplay-policy` switch lets it play).
+      The command enters and leaves PiP (sidebar badge, the page's PiP
+      events, Chromium's overlay window). Switching to tab B puts it in
+      PiP automatically and switching back ends it. The overlay's back to
+      tab (synthesized click) selects the tab again. Without the click a
+      NOTE is logged.
+
+    Before the input-driven steps (prompt channels, fullscreen) the
+    self-test brings ReArc to the front: `NSApp.activate`, then one
+    retry. If it still cannot (a terminal launch under cooperative
+    activation, a locked screen), it logs a NOTE with the reason, and
+    the steps keep their NOTE fallbacks.
+20. Verifies every evaluation, profile request and command-bar call
     context was released (`live script contexts: 0, profile contexts: 0`),
     then shuts down cleanly.
 
 With the mock keychain the run reaches `RESULT PASS`
 (`selftest-chromium-mockkeychain.log`). The real-Keychain run is covered
-below.
+below. In both wave 24 runs the app was active for the input-driven steps.
+For the first time, HTML fullscreen was exercised end to end: enter,
+the page's exit, Escape, and leaving native fullscreen as the green
+button and ⌃⌘F do (`toggleFullScreen`). So were the file input, password
+offer, beforeunload and PiP back to tab.
 
 The self-test (only the self-test) passes
 `--disable-backgrounding-occluded-windows`,
@@ -679,7 +785,14 @@ Production needs:
 
 ### Chromium limits
 
-- **Picture in Picture** is reported unsupported (`canPictureInPicture` is false).
+- **Picture in Picture** is video only (no Document PiP). Host-started PiP
+  needs a normal player with unmuted audio (no WebRTC or canvas streams).
+- **Unhandled drops navigate.** A file or link dropped outside a page's drop
+  target opens in that tab, as in Chrome; the engine gives the host no veto.
+- **No print preview.** Printing shows the native print panel over the
+  engine's PDF. Chromium's preview, its page-range field and its
+  header/footer options are not shown. NSPrintOperation's panel has its
+  own range and scale.
 - **No script evaluation on `file:` or WebUI pages** (the engine returns
   `unsupported`), so the boost editor does nothing there.
 - **No SwiftUI scenes.** The Chromium path owns its NSWindows (`ChromiumShell`)
@@ -943,6 +1056,7 @@ space can change profile.
 | ⌘1 … ⌘8 / ⌘9 | Select that sidebar row / the last one |
 | ⌘Y / ⌥⌘L | History / Downloads (Chromium with `webui_daily_pages`) |
 | ⇧⌘C | Copy the page URL |
+| ⌘P | Print the page (native print panel as a sheet; File > Export as PDF… saves it) |
 | ⌃1 … ⌃9 | Switch to space 1–9 of the active profile |
 | ⌥⌘→ / ⌥⌘← | Next / previous space |
 | Two-finger swipe on the sidebar | Previous / next space |
