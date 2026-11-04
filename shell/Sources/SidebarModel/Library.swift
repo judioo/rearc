@@ -218,6 +218,9 @@ public enum LibraryDocuments {
     }
 
     static func summary(of document: EaselDocument) -> String {
+        if let note = document.note {
+            return note.blocks.map(\.text).first { !$0.isEmpty } ?? ""
+        }
         if document.kind == .note {
             for block in document.blocks {
                 if case .text(let runs) = block.payload {

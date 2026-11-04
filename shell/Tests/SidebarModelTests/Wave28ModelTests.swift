@@ -385,4 +385,93 @@ final class Wave28ModelTests: XCTestCase {
         XCTAssertTrue(titles.contains("Capture"))
         XCTAssertTrue(titles.contains("Capture in Portrait Mode"))
     }
+
+    // MARK: Notes
+
+    private var sampleNote: NoteContent {
+        NoteContent(blocks: [
+            NoteBlock(.heading(1), text: "Trip"),
+            NoteBlock(runs: [NoteRun("Pack "), NoteRun("light", bold: true), NoteRun(" and "), NoteRun("early", italic: true)]),
+            NoteBlock(.numbered, text: "Passport"),
+            NoteBlock(.numbered, text: "Tickets"),
+            NoteBlock(.checklist(checked: true), text: "Book hotel"),
+            NoteBlock(.checklist(checked: false), text: "Pack"),
+            NoteBlock(.bullet, runs: [NoteRun("Map", link: URL(string: "https://maps.test/x"))]),
+            NoteBlock(.numbered, text: "Again"),
+            NoteBlock(.quote, runs: [NoteRun("Go", code: true), NoteRun(" gone", strikethrough: true)]),
+        ])
+    }
+
+    func testMarkersNumberEachListAndMarkdownExports() {
+        XCTAssertEqual(sampleNote.markers(), [nil, nil, "1.", "2.", "☑", "☐", "•", "1.", nil], "numbering restarts after another kind")
+        XCTAssertEqual(sampleNote.markdown(), """
+        # Trip
+        Pack **light** and *early*
+        1. Passport
+        2. Tickets
+        - [x] Book hotel
+        - [ ] Pack
+        - [Map](https://maps.test/x)
+        1. Again
+        > `Go`~~ gone~~
+        """)
+        XCTAssertEqual(sampleNote.plainText.split(separator: "\n").first, "Trip")
+    }
+
+    func testNotesRoundTripAndMirrorTheirTextForOlderBuilds() throws {
+        var document = EaselDocumentOps.noteDocument()
+        document.setNoteContent(sampleNote, now: Date(timeIntervalSince1970: 5))
+        let decoded = try JSONDecoder().decode(EaselDocument.self, from: JSONEncoder().encode(document))
+        XCTAssertEqual(decoded.noteContent, sampleNote)
+        guard case .text(let runs) = decoded.blocks[0].payload else { return XCTFail("no mirror") }
+        XCTAssertEqual(runs.map(\.text).joined(), sampleNote.plainText, "a wave 27 build shows the text")
+        XCTAssertEqual(decoded.updatedAt, Date(timeIntervalSince1970: 5))
+
+        let json = String(decoding: try JSONEncoder().encode(NoteRun("plain")), as: UTF8.self)
+        XCTAssertEqual(json, #"{"text":"plain"}"#, "unset styles are not written")
+        let rows = LibraryDocuments.rows(refs: [(ref: SidebarEaselRef(easelDocumentID: document.id), spaceName: "S")],
+                                         document: { _ in decoded })
+        XCTAssertEqual(rows.first?.summary, "Trip")
+    }
+
+    func testLegacyNoteTextBecomesBlocks() {
+        let content = NoteContent(legacyRuns: [
+            EaselRichTextRun(text: "Title", isBold: true, headingLevel: 2),
+            EaselRichTextRun(text: "\nbody "),
+            EaselRichTextRun(text: "bold\nnext", isBold: true),
+        ])
+        XCTAssertEqual(content.blocks.map(\.style), [.heading(2), .paragraph, .paragraph])
+        XCTAssertEqual(content.blocks.map(\.text), ["Title", "body bold", "next"])
+        XCTAssertEqual(content.blocks[1].runs, [NoteRun("body "), NoteRun("bold", bold: true)])
+        var document = EaselDocumentOps.noteDocument()
+        document.blocks[0].payload = .text(runs: [EaselRichTextRun(text: "old note")])
+        XCTAssertEqual(document.noteContent.plainText, "old note", "an unsaved legacy note reads its text block")
+        XCTAssertEqual(NoteContent(blocks: []).blocks.count, 1, "a note always has a line to type in")
+    }
+
+    func testTypingRules() {
+        XCTAssertEqual(NoteEditing.styleAfterReturn(in: .bullet, blockIsEmpty: false).next, .bullet)
+        XCTAssertEqual(NoteEditing.styleAfterReturn(in: .checklist(checked: true), blockIsEmpty: false).next, .checklist(checked: false))
+        XCTAssertEqual(NoteEditing.styleAfterReturn(in: .heading(1), blockIsEmpty: false).next, .paragraph)
+        XCTAssertEqual(NoteEditing.styleAfterReturn(in: .numbered, blockIsEmpty: true).current, .paragraph, "an empty item ends the list")
+        XCTAssertEqual(NoteEditing.styleAfterDeleteAtStart(.quote), .paragraph)
+        XCTAssertNil(NoteEditing.styleAfterDeleteAtStart(.paragraph))
+        XCTAssertEqual(NoteEditing.shortcutStyle(forPrefix: "##"), .heading(2))
+        XCTAssertEqual(NoteEditing.shortcutStyle(forPrefix: "[x]"), .checklist(checked: true))
+        XCTAssertNil(NoteEditing.shortcutStyle(forPrefix: "####"))
+        XCTAssertEqual(NoteEditing.linkURL(from: "arc.net/x"), URL(string: "https://arc.net/x"))
+        XCTAssertEqual(NoteEditing.linkURL(from: "mailto:a@b.test"), URL(string: "mailto:a@b.test"))
+        XCTAssertNil(NoteEditing.linkURL(from: "javascript:alert(1)"))
+        XCTAssertNil(NoteEditing.linkURL(from: "file:///etc/passwd"))
+
+        var note = sampleNote
+        note.setStyle(.bullet, blocks: [2, 3])
+        XCTAssertEqual(note.blocks[2].style, .bullet)
+        note.setStyle(.bullet, blocks: [2, 3])
+        XCTAssertEqual(note.blocks[3].style, .paragraph, "applying the style they all have turns it off")
+        note.toggleChecklist(at: 5)
+        XCTAssertEqual(note.blocks[5].style, .checklist(checked: true))
+        note.toggleChecklist(at: 0)
+        XCTAssertEqual(note.blocks[0].style, .heading(1), "only checklist rows check")
+    }
 }

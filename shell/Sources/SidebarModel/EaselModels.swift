@@ -30,6 +30,8 @@ public struct EaselDocument: Identifiable, Equatable, Codable {
     public var viewport: EaselViewport
     /// Canvas objects in back-to-front (z) order.
     public var blocks: [EaselBlock]
+    /// A note's rich text (wave 28); see `noteContent`.
+    public var note: NoteContent?
 
     public init(
         id: UUID = UUID(),
@@ -50,7 +52,7 @@ public struct EaselDocument: Identifiable, Equatable, Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, kind, createdAt, updatedAt, viewport, blocks
+        case id, title, kind, createdAt, updatedAt, viewport, blocks, note
     }
 
     public init(from decoder: Decoder) throws {
@@ -61,6 +63,7 @@ public struct EaselDocument: Identifiable, Equatable, Codable {
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
         viewport = try c.decode(EaselViewport.self, forKey: .viewport)
         blocks = try c.decode([EaselBlock].self, forKey: .blocks)
+        note = try? c.decodeIfPresent(NoteContent.self, forKey: .note)
         kind = try c.decodeIfPresent(EaselDocumentKind.self, forKey: .kind)
             ?? Self.inferredKind(title: title, blocks: blocks)
     }
