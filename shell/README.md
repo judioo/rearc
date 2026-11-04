@@ -653,10 +653,29 @@ extensions or autofill, so those stay hidden there.
   explicit choice is applied to profiles as they open. A managed (policy)
   profile keeps its policy; off-the-record profiles never check.
 
-Not adopted yet: ABI 1.39 `link_open_requests` (modified link clicks routed
-to host tab creation, which would replace the wave 26 ⌥⌘-click and
-background-tab paths) and engine wave 18h's DevTools, both committed while
-this wave ran.
+- **Modified link clicks (ABI 1.39 `link_open_requests`, which also needs
+  `extension_windows`).** Chromium hands every gestured HTTP(S) open that
+  is not a plain click to the shell (`ReArcEngineSetLinkOpenCallback`).
+  The shell makes a blank tab in the link's profile, places it, reports it
+  in the logical window and answers with `ReArcLinkOpenRespond`; Chromium
+  then runs the original navigation (referrer, initiator, body), and the
+  page itself stays put. `LinkOpenPlacement` maps the disposition:
+  ⌘-click and middle-click (background) give a today tab under the
+  source's space, left unselected; ⇧⌘-click (foreground) gives a selected
+  one; ⇧-click (new window) opens Little Arc, Arc's one-page window, in
+  pages without link peek (sidebar tabs peek on ⇧-click, which takes the
+  click first); a
+  split disposition puts a new pane next to the source tab (a new tab when
+  the source is not a sidebar tab). ⌥⌘ held at the click keeps wave 26's
+  rule, Little Arc, as on WebKit and for `target=_blank` links. At this
+  pin Chromium reports ⌥⌘-click as the split disposition, so splits from a
+  click come only from a future mapping or the page menu's Open Link in
+  New Split. Chromium-created contents (`target=_blank`, `window.open`)
+  still arrive through tab adoption.
+
+Security interstitials need no shell work: Chromium renders them inside
+the tab, with their own proceed and back controls. DevTools (engine wave
+18h) and client certificates are not adopted.
 
 ### Self-test
 
@@ -825,7 +844,10 @@ The self-test:
     popup loads without running its script, seen once); a shell dismiss; the
     click fixture's `tabs.create` answered with a today tab in the current
     space, where the extension saw tab A active in the space's window; its
-    `management.uninstallSelf` confirmation as a host prompt, cancelled. A
+    `management.uninstallSelf` confirmation as a host prompt, cancelled.
+    On an ordinary link (ABI 1.39): ⌘-click opens a background tab on the
+    link, ⇧⌘-click a selected one, ⌥⌘-click a Little Arc, and the page
+    stays where it was. A
     datalist field shows the suggestion panel under it without taking the
     keyboard; Down moves the selection, a click fills the value, Manage…
     opens chrome://settings/autofill. A typed address form gives a save
@@ -1208,9 +1230,10 @@ space can change profile.
   because the spec does not give Arc's combination. ⌥⌘-click on a link
   opens it in Little Arc: WebKit sees the modifiers on the navigation
   action. On Chromium the shell notes the keys at mouse-down and adopts
-  the engine's new contents as a Little Arc. The engine creates contents
-  only for `target=_blank` links: it denies background-tab
-  `OpenURLFromTab`, so ⌘- and ⌥⌘-clicks on ordinary links open nothing.
+  the engine's new contents as a Little Arc. Since ABI 1.39 (wave 27)
+  ordinary links reach the shell too, so ⌘-, ⇧⌘-, ⌥⌘- and middle-clicks
+  work on Chromium (see "Modified link clicks" under the wave 27
+  adoption).
 - **Air Traffic Control.** ReArc > Air Traffic Control… (or the command)
   edits ordered rules: Domain is (subdomains too), URL contains, or URL
   matches a `*` pattern over the URL without its scheme. Each rule sends
@@ -1271,6 +1294,8 @@ space can change profile.
 | ⇧⌘C / ⌥⇧⌘C | Copy the page URL / as Markdown (Copy as Quote in the Tabs menu) |
 | ⌥⌘N | New Little Arc window (also system-wide once turned on in the ReArc menu) |
 | ⌥⌘-click a link | Open it in Little Arc |
+| ⌘-click or middle-click a link / ⇧⌘-click | Open it in a background tab / a new selected tab (Chromium needs ABI 1.39) |
+| ⇧-click a link | Peek in sidebar tabs; elsewhere on Chromium (ABI 1.39) Little Arc |
 | → in the command bar | Take the grey domain completion |
 | ⌘↩ / ⌥↩ / ⇧↩ in the command bar | Open the result in a new tab / a split / Little Arc |
 | ⌘P | Print the page (native print panel as a sheet; File > Export as PDF… saves it) |
