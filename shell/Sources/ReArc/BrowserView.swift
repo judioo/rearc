@@ -98,6 +98,10 @@ struct BrowserView: View {
         .animation(.easeInOut(duration: 0.15), value: model.isCommandBarPresented)
         .frame(minWidth: 760, minHeight: 520)
         .background(
+            DragSessionEndMonitor(isActive: draggedItemID != nil) { draggedItemID = nil }
+                .frame(width: 0, height: 0)
+        )
+        .background(
             WindowOcclusionReader { model.handleWindowOcclusion($0) }
                 .frame(width: 0, height: 0)
         )
@@ -294,6 +298,14 @@ struct BrowserView: View {
     /// content frame); with the sidebar hidden it is inset on every side.
     private var contentCard: some View {
         contentArea
+            .overlay {
+                if let dragged = draggedItemID, model.canDropToSplit(dragged, in: windowID) {
+                    ContentSplitDropZone(draggedItemID: dragged, accent: model.themeColor(in: windowID)) { id, edge in
+                        draggedItemID = nil
+                        return model.dropToSplit(id, edge: edge, in: windowID)
+                    }
+                }
+            }
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)

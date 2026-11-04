@@ -154,4 +154,25 @@ final class Wave21ShellTests: XCTestCase {
         XCTAssertNil(model.pendingSpaceProfileChange, "nothing to confirm when the move is refused")
         XCTAssertEqual(model.changeSpaceProfile(model.store.activeSpaceID, to: work.id), .lastSpaceInProfile)
     }
+
+    // MARK: Drag to split
+
+    func testDropToSplitUsesTheWindowsSelectionAsAnchor() {
+        let model = makeModel()
+        let window = SidebarWindowID()
+        model.store.registerWindow(window)
+        model.windowBecameKey(window)
+        let anchor = model.store.addTab(kind: .today, title: "Anchor", url: URL(string: "https://a.test")!)
+        let dropped = model.store.addTab(kind: .today, title: "Dropped", url: URL(string: "https://b.test")!)
+        model.selectTab(anchor.id)
+        XCTAssertEqual(model.splitDropAnchor(in: window), anchor.id)
+        XCTAssertTrue(model.canDropToSplit(dropped.id, in: window))
+        XCTAssertTrue(model.dropToSplit(dropped.id, edge: .trailing, in: window))
+        let split = model.activeSplit(in: window)
+        XCTAssertEqual(split?.tabs.map(\.id), [anchor.id, dropped.id])
+        XCTAssertEqual(model.splitDropAnchor(in: window), dropped.id, "the new pane is focused")
+        XCTAssertNotNil(model.engineHost.engine(forTabID: dropped.id, profileID: model.store.activeProfileID))
+        XCTAssertEqual(ContentSplitDropZone.frame(for: .trailing, in: CGSize(width: 800, height: 600)),
+                       CGRect(x: 406, y: 6, width: 388, height: 588))
+    }
 }

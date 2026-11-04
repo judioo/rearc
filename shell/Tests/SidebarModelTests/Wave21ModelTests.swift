@@ -204,4 +204,68 @@ final class Wave21ModelTests: XCTestCase {
         XCTAssertTrue(commands.contains { $0.action == .moveSpaceToProfile(work.id) && $0.title == "Move Space to Work" })
         XCTAssertFalse(commands.contains { $0.action == .moveSpaceToProfile(store.activeProfileID) })
     }
+
+    // MARK: Drag to split
+
+    func testDropEdgeIsTheNearestSideAsAFraction() {
+        XCTAssertEqual(SplitDropEdge.nearest(x: 10, y: 300, width: 1000, height: 600), .leading)
+        XCTAssertEqual(SplitDropEdge.nearest(x: 990, y: 300, width: 1000, height: 600), .trailing)
+        XCTAssertEqual(SplitDropEdge.nearest(x: 500, y: 20, width: 1000, height: 600), .top)
+        XCTAssertEqual(SplitDropEdge.nearest(x: 500, y: 590, width: 1000, height: 600), .bottom)
+        XCTAssertEqual(SplitDropEdge.nearest(x: 300, y: 250, width: 1000, height: 600), .leading,
+                       "30% across beats 42% down: sides are compared as fractions")
+        XCTAssertNil(SplitDropEdge.nearest(x: 1, y: 1, width: 0, height: 10))
+        XCTAssertEqual(SplitDropEdge.top.orientation, .vertical)
+        XCTAssertEqual(SplitDropEdge.trailing.orientation, .horizontal)
+    }
+
+    private func url(_ s: String) -> URL { URL(string: s)! }
+
+    func testDroppingATabOnAnEdgeMakesASplitOnThatSide() throws {
+        let store = SidebarStore(spaces: [Space(name: "A", sortRank: "a")])
+        let anchor = store.addTab(kind: .today, title: "Anchor", url: url("https://a.test"))
+        let dropped = store.addTab(kind: .pinned, title: "Dropped", url: url("https://b.test"))
+        store.selectTab(anchor.id)
+        XCTAssertTrue(store.canSplit(dropped.id, onto: anchor.id))
+
+        let split = try XCTUnwrap(store.splitTab(dropped.id, onto: anchor.id, edge: .leading))
+        XCTAssertEqual(split.tabs.map(\.id), [dropped.id, anchor.id], "a left drop puts the tab first")
+        XCTAssertEqual(split.orientation, .horizontal)
+        XCTAssertEqual(store.selectedItemID, split.id)
+        XCTAssertEqual(store.split(withID: split.id)?.focusTabID, dropped.id, "the dropped pane has focus")
+        XCTAssertEqual(store.locateSplit(split.id)?.section, .unpinned, "the pinned tab joined the anchor's section")
+    }
+
+    func testDroppingOnAnExistingSplitAddsAPaneAndTurnsToTheEdgeAxis() throws {
+        let store = SidebarStore(spaces: [Space(name: "A", sortRank: "a")])
+        let a = store.addTab(kind: .today, title: "A", url: url("https://a.test"))
+        let b = store.addTab(kind: .today, title: "B", url: url("https://b.test"))
+        let c = store.addTab(kind: .today, title: "C", url: url("https://c.test"))
+        let split = try XCTUnwrap(store.createSplit(tabIDs: [a.id, b.id], orientation: .horizontal))
+        let grown = try XCTUnwrap(store.splitTab(c.id, onto: b.id, edge: .bottom))
+        XCTAssertEqual(grown.id, split.id)
+        XCTAssertEqual(grown.tabs.map(\.id), [a.id, b.id, c.id])
+        XCTAssertEqual(grown.orientation, .vertical)
+
+        let d = store.addTab(kind: .today, title: "D", url: url("https://d.test"))
+        let top = try XCTUnwrap(store.splitTab(d.id, onto: a.id, edge: .top))
+        XCTAssertEqual(top.tabs.first?.id, d.id)
+        let e = store.addTab(kind: .today, title: "E", url: url("https://e.test"))
+        XCTAssertFalse(store.canSplit(e.id, onto: a.id), "four panes is the limit")
+        XCTAssertNil(store.splitTab(e.id, onto: a.id, edge: .trailing))
+    }
+
+    func testDragToSplitRefusals() {
+        let store = SidebarStore(spaces: [Space(name: "A", sortRank: "a"), Space(name: "B", sortRank: "b")])
+        let spaces = store.spaces(in: store.activeProfileID)
+        let anchor = store.addTab(kind: .today, title: "Anchor", url: url("https://a.test"))
+        let favorite = store.addTab(kind: .favorite, title: "Fav", url: url("https://f.test"))
+        XCTAssertFalse(store.canSplit(anchor.id, onto: anchor.id))
+        XCTAssertFalse(store.canSplit(favorite.id, onto: anchor.id), "favorites do not split")
+        XCTAssertFalse(store.canSplit(anchor.id, onto: favorite.id))
+        store.selectSpace(spaces[1].id)
+        let elsewhere = store.addTab(kind: .today, title: "Other", url: url("https://o.test"))
+        XCTAssertFalse(store.canSplit(elsewhere.id, onto: anchor.id), "tabs of another space do not split")
+        XCTAssertFalse(store.canSplit(UUID(), onto: anchor.id))
+    }
 }

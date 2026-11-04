@@ -151,6 +151,30 @@ extension BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
+    // MARK: - Drag to split (wave 21)
+
+    /// The tab a content drop splits with: the focused pane of a split, or
+    /// the selected tab. Easels and favorites do not split.
+    func splitDropAnchor(in window: SidebarWindowID?) -> Tab.ID? {
+        guard selectedEaselRef(in: window) == nil else { return nil }
+        if let split = activeSplit(in: window) { return split.focusTabID }
+        return selectedTab(in: window)?.id
+    }
+
+    func canDropToSplit(_ itemID: UUID, in window: SidebarWindowID?) -> Bool {
+        guard let anchor = splitDropAnchor(in: window) else { return false }
+        return store.canSplit(itemID, onto: anchor)
+    }
+
+    /// A sidebar tab dropped on an edge of the page becomes a pane there.
+    @discardableResult
+    func dropToSplit(_ tabID: Tab.ID, edge: SplitDropEdge, in window: SidebarWindowID?) -> Bool {
+        guard let anchor = splitDropAnchor(in: window),
+              store.splitTab(tabID, onto: anchor, edge: edge) != nil else { return false }
+        loadSelectedIfNeeded()
+        return true
+    }
+
     // MARK: - Split with a chosen tab
 
     /// Split with Current Tab (row context menu): the row's tab joins the
