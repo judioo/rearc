@@ -1,0 +1,278 @@
+{
+ "metrics": {
+  "launch.exec_to_main": {
+   "p50": 80,
+   "p95": 120,
+   "source": "P"
+  },
+  "launch.first_page_frame": {
+   "p50": 1000,
+   "p95": 1500,
+   "source": "P/R"
+  },
+  "launch.first_usable": {
+   "p50": 700,
+   "p95": 1000,
+   "source": "P/A"
+  },
+  "launch.main_to_engine_ready": {
+   "p50": 400,
+   "p95": 600,
+   "source": "P/R"
+  },
+  "launch.window_visible": {
+   "p50": 600,
+   "p95": 900,
+   "source": "P/A"
+  },
+  "ui.cmdbar_key.echo": {
+   "p50": 8.3,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.cmdbar_key.engine_history": {
+   "p50": 33,
+   "p95": 50,
+   "source": "P"
+  },
+  "ui.cmdbar_key.local_results": {
+   "p50": 16.7,
+   "p95": 16.7,
+   "source": "F/R"
+  },
+  "ui.cmdbar_key.suggestions.d0": {
+   "p50": 33,
+   "p95": 50,
+   "source": "P/R"
+  },
+  "ui.cmdbar_key.suggestions.d100": {
+   "p50": 133,
+   "p95": 150,
+   "source": "P/R"
+  },
+  "ui.little_arc_open.content_fcp": {
+   "note": "reference FCP + 30 ms",
+   "p50": null,
+   "p95": null,
+   "source": "R"
+  },
+  "ui.little_arc_open.window": {
+   "p50": 50,
+   "p95": 100,
+   "source": "P"
+  },
+  "ui.little_arc_open.window.shortcut": {
+   "p50": 50,
+   "p95": 100,
+   "source": "P"
+  },
+  "ui.new_tab.ack": {
+   "p50": 8.3,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.new_tab.lost_keys": {
+   "p50": 0,
+   "p95": 0,
+   "source": "F"
+  },
+  "ui.new_tab.type_ready": {
+   "p50": 33,
+   "p95": 33,
+   "source": "F"
+  },
+  "ui.open_location.ack": {
+   "p50": 8.3,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.peek_close.ack": {
+   "p50": 16.7,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.peek_open.ack": {
+   "p50": 16.7,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.peek_open.content_fcp": {
+   "note": "reference new-tab FCP + 30 ms",
+   "p50": null,
+   "p95": null,
+   "source": "R"
+  },
+  "ui.profile_switch.cold.content": {
+   "p50": 500,
+   "p95": 800,
+   "source": "P/R"
+  },
+  "ui.profile_switch.cold.engine_profile": {
+   "p50": 250,
+   "p95": 400,
+   "source": "P/R"
+  },
+  "ui.profile_switch.cold.sidebar": {
+   "p50": 16.7,
+   "p95": 33,
+   "source": "P"
+  },
+  "ui.profile_switch.warm.content": {
+   "p50": 60,
+   "p95": 100,
+   "source": "P"
+  },
+  "ui.profile_switch.warm.sidebar": {
+   "p50": 16.7,
+   "p95": 33,
+   "source": "F/P"
+  },
+  "ui.sidebar_peek.ack": {
+   "p50": 8.3,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.sidebar_peek.complete": {
+   "note": "easeOut 0.16 s + 1 frame",
+   "p50": 168.3,
+   "p95": 176.7,
+   "source": "F"
+  },
+  "ui.sidebar_peek.dropped": {
+   "p50": 0,
+   "p95": 1,
+   "source": "F"
+  },
+  "ui.sidebar_peek.hitch_ratio": {
+   "p50": 5,
+   "p95": 5,
+   "source": "F"
+  },
+  "ui.sidebar_scroll.items500.dropped": {
+   "p50": 0,
+   "p95": 1,
+   "source": "F"
+  },
+  "ui.sidebar_scroll.items500.hitch_ratio": {
+   "p50": 5,
+   "p95": 5,
+   "source": "F"
+  },
+  "ui.sidebar_toggle.ack.hide": {
+   "p50": 8.3,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.sidebar_toggle.ack.show": {
+   "p50": 8.3,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.sidebar_toggle.complete.hide": {
+   "note": "animation (spring response 0.35 s, logically complete) + 1 frame; Arc's spring is unobserved",
+   "p50": 358.3,
+   "p95": 366.7,
+   "source": "F/P"
+  },
+  "ui.sidebar_toggle.complete.show": {
+   "note": "animation (spring response 0.35 s, logically complete) + 1 frame; Arc's spring is unobserved",
+   "p50": 358.3,
+   "p95": 366.7,
+   "source": "F/P"
+  },
+  "ui.sidebar_toggle.content_lag.hide": {
+   "note": "one frame",
+   "p50": 8.3,
+   "p95": 8.3,
+   "source": "F"
+  },
+  "ui.sidebar_toggle.content_lag.show": {
+   "note": "one frame",
+   "p50": 8.3,
+   "p95": 8.3,
+   "source": "F"
+  },
+  "ui.sidebar_toggle.dropped": {
+   "p50": 0,
+   "p95": 1,
+   "source": "F"
+  },
+  "ui.sidebar_toggle.hitch_ratio": {
+   "note": "ms/s; Apple: < 5 good",
+   "p50": 5,
+   "p95": 5,
+   "source": "F"
+  },
+  "ui.sidebar_unpeek.ack": {
+   "p50": 8.3,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.sidebar_unpeek.complete": {
+   "p50": 168.3,
+   "p95": 176.7,
+   "source": "F"
+  },
+  "ui.space_switch.ack.ctrl_n": {
+   "p50": 8.3,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.space_switch.content.ctrl_n": {
+   "p50": 60,
+   "p95": 100,
+   "source": "P/A"
+  },
+  "ui.space_switch.dropped": {
+   "p50": 0,
+   "p95": 1,
+   "source": "F"
+  },
+  "ui.space_switch.hitch_ratio": {
+   "p50": 5,
+   "p95": 5,
+   "source": "F"
+  },
+  "ui.space_switch.settled.ctrl_n": {
+   "note": "spring + 1 frame; the pager spring's length is not fixed",
+   "p50": null,
+   "p95": null,
+   "source": "F/A"
+  },
+  "ui.tab_switch.ack.click": {
+   "p50": 8.3,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.tab_switch.ack.cmd_n": {
+   "p50": 8.3,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.tab_switch.content.click": {
+   "note": "stock Chromium Browser.Tabs.TotalSwitchDuration3",
+   "p50": 50,
+   "p95": 100,
+   "source": "R/A"
+  },
+  "ui.tab_switch.content.cmd_n": {
+   "note": "stock Chromium Browser.Tabs.TotalSwitchDuration3",
+   "p50": 50,
+   "p95": 100,
+   "source": "R/A"
+  },
+  "ui.tab_switcher.ack": {
+   "p50": 8.3,
+   "p95": 16.7,
+   "source": "F"
+  },
+  "ui.tab_switcher.release": {
+   "p50": 50,
+   "p95": 100,
+   "source": "R/A"
+  }
+ },
+ "page": "page.<page>.warm.{ttfb,fcp,lcp,dcl,load}: <= Chrome (R2) p50 + 5%, p95 + 10% on the same page set",
+ "schema": "rearc.bench-budgets/1",
+ "source": "docs/PERFORMANCE-PLAN.md \u00a71.2-1.4 (F frame rule, R reference, A Arc capture pending, P provisional)"
+}
