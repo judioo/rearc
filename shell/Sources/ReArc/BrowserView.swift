@@ -17,6 +17,8 @@ struct BrowserView: View {
     @State private var pager = SpacePagerController()
     /// The sidebar item being dragged, if any (content edges then offer split drop zones).
     @State private var draggedItemID: UUID?
+    @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         ZStack {
@@ -27,6 +29,9 @@ struct BrowserView: View {
                 }
                 contentCard
             }
+            // The sidebar and card run up under the title bar: the traffic
+            // lights sit on the theme like the rest of the sidebar (§4.5).
+            .ignoresSafeArea(.container, edges: .top)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .topTrailing) { if !isPageFullscreen { zoomBadge } }
             .background(SpaceThemeBackground(model: model, window: windowID, pager: pager).ignoresSafeArea())
@@ -111,6 +116,7 @@ struct BrowserView: View {
             }
         }
         .tint(model.themeColor(in: windowID))
+        .environment(\.themeChrome, themeChrome)
         .environment(\.sidebarWindow, windowID)
         .environment(\.spacePager, pager)
         .animation(.easeInOut(duration: 0.15), value: model.isCommandBarPresented)
@@ -123,6 +129,7 @@ struct BrowserView: View {
             WindowOcclusionReader { model.handleWindowOcclusion($0) }
                 .frame(width: 0, height: 0)
         )
+        .background(TrafficLightPositioner().frame(width: 0, height: 0))
         // The shown space's Appearance (Automatic, Light, Dark) sets the
         // window's, which its pages, easels and notes follow.
         .background(
@@ -278,6 +285,12 @@ struct BrowserView: View {
         }
     }
 
+    /// The focused space's chrome colours in its resolved appearance.
+    private var themeChrome: ThemeChromeColors {
+        let theme = model.space(in: windowID).theme
+        return ThemeChromeColors(theme: theme, dark: theme.appearance.isDark(systemDark: SystemAppearance.isDark(colorScheme)))
+    }
+
     /// This window shows a page in HTML fullscreen: only the page, edge to edge.
     private var isPageFullscreen: Bool {
         model.isHTMLFullscreen(in: windowID)
@@ -355,39 +368,62 @@ struct BrowserView: View {
     }
 
     /// The page as a rounded card inset on the theme background (Arc's
-    /// content frame); with the sidebar hidden it is inset on every side.
-    /// In HTML fullscreen the same view loses its inset and corners: a
-    /// different view tree would detach the page, which ends fullscreen.
+    /// content frame, THEMES.md §4.3): 10 pt from the top, right and bottom,
+    /// flush with the sidebar, 8 pt corners and a soft shadow. Its own fill
+    /// is 70 % white over the theme, so an empty card is tinted by it. With
+    /// "URL in toolbar" on, the toolbar strip sits at its top (§4.4). With
+    /// the sidebar hidden it is inset on every side. In HTML fullscreen the
+    /// same view loses its inset and corners: a different view tree would
+    /// detach the page, which ends fullscreen.
     private var contentCard: some View {
         let fullscreen = isPageFullscreen
-        let radius: CGFloat = fullscreen ? 0 : 8
-        let inset: CGFloat = fullscreen ? 0 : 8
-        return contentArea
-            .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil)
-            .overlay {
-                if let session = model.pageCaptureSession,
-                   session.window == nil ? isKeyWindowSheetOwner : session.window == windowID {
-                    PageCaptureOverlay(model: model)
-                }
+        let radius: CGFloat = fullscreen ? 0 : Self.cardRadius
+        let inset: CGFloat = fullscreen ? 0 : Self.cardInset
+        let showsToolbar = urlInToolbar && !fullscreen
+            && model.librarySection(in: windowID) == nil && model.selectedEaselRef(in: windowID) == nil
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        return VStack(spacing: 0) {
+            if showsToolbar {
+                CardToolbarView(model: model)
+                    .zIndex(1)
             }
-            .overlay {
-                if let dragged = draggedItemID, model.canDropToSplit(dragged, in: windowID) {
-                    ContentSplitDropZone(draggedItemID: dragged, accent: model.themeColor(in: windowID)) { id, edge in
-                        draggedItemID = nil
-                        return model.dropToSplit(id, edge: edge, in: windowID)
+            contentArea
+                .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil)
+                .overlay {
+                    if let session = model.pageCaptureSession,
+                       session.window == nil ? isKeyWindowSheetOwner : session.window == windowID {
+                        PageCaptureOverlay(model: model)
                     }
                 }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
-            .background(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(Color(nsColor: .windowBackgroundColor))
-                    .shadow(color: .black.opacity(fullscreen ? 0 : 0.18), radius: 2, y: 1)
-            )
-            .padding(.vertical, inset)
-            .padding(.trailing, inset)
-            .padding(.leading, model.isSidebarVisible && !fullscreen ? 0 : inset)
-            .ignoresSafeArea(edges: fullscreen ? .all : [])
+                .overlay {
+                    if let dragged = draggedItemID, model.canDropToSplit(dragged, in: windowID) {
+                        ContentSplitDropZone(draggedItemID: dragged, accent: model.themeColor(in: windowID)) { id, edge in
+                            draggedItemID = nil
+                            return model.dropToSplit(id, edge: edge, in: windowID)
+                        }
+                    }
+                }
+        }
+        .clipShape(shape)
+        .background(shape.fill(cardFill))
+        .background(CardShadow(radius: radius).opacity(fullscreen ? 0 : 1))
+        .padding(.vertical, inset)
+        .padding(.trailing, inset)
+        .padding(.leading, model.isSidebarVisible && !fullscreen ? 0 : inset)
+        .ignoresSafeArea(edges: fullscreen ? .all : [])
+    }
+
+    static let cardInset: CGFloat = 10
+    static let cardRadius: CGFloat = 8
+
+    /// About 70 % white over the theme in light (`#F6F4FA` → `#FAF7F7` on the
+    /// default); the dark background role, mostly opaque, in dark.
+    private var cardFill: Color {
+        let theme = model.space(in: windowID).theme
+        if themeChrome.isDark {
+            return Color(SpaceThemeRoles(theme: theme).dark.backgroundExtra).opacity(0.88)
+        }
+        return Color.white.opacity(0.7)
     }
 
     @ViewBuilder
@@ -426,27 +462,32 @@ struct BrowserView: View {
                     .findBar(model.findBar, for: engine)
             }
         } else {
-            EmptyStateView(theme: model.themeColor(in: windowID))
+            // Arc's empty card is blank: only the card fill shows.
+            Color.clear
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityLabel("No tab selected. Press ⌘T to open one.")
         }
     }
 }
 
-private struct EmptyStateView: View {
-    let theme: Color
+/// The card's shadow without its shape: black 22 %, σ ≈ 3.5, 2.5 pt down
+/// (§4.3). The shape itself is cut out, so the card's translucent fill is
+/// not darkened by the shadow underneath it.
+private struct CardShadow: View {
+    let radius: CGFloat
 
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "globe")
-                .font(.system(size: 44))
-                .foregroundStyle(theme.opacity(0.7))
-            Text("No tabs open")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-            Text("Press ⌘T to open one")
-                .font(.callout)
-                .foregroundStyle(.tertiary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        shape
+            .fill(Color.black)
+            .shadow(color: .black.opacity(0.22), radius: 3.5, x: 0, y: 2.5)
+            .mask {
+                Rectangle()
+                    .padding(-24)
+                    .overlay { shape.blendMode(.destinationOut) }
+                    .compositingGroup()
+            }
+            .allowsHitTesting(false)
     }
 }
 
