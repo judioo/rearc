@@ -1231,6 +1231,7 @@ final class ChromiumSelfTest {
         try await wait("tab A selected after the certificate checks") {
             engineA.leaseHolder?.window === first && engineA.attachmentID != nil
         }
+        try await shortcutChecks(model: model, store: store, tab: tabA, engine: engineA, base: base, window: first)
 
         // Private window: PrivateWindowModel on an off-the-record profile under the
         // active profile; its end closes that profile, and a new one starts empty.
@@ -1710,7 +1711,7 @@ final class ChromiumSelfTest {
         defer { model.linkPasteboard = realPasteboard }
         model.copyURL(format: .markdown)
         let markdown = "[\(Self.titleA)](\(base)/a)"
-        try check(model.linkPasteboard.string(forType: .string) == markdown && model.toast?.message == "Copied URL as Markdown",
+        try check(model.linkPasteboard.string(forType: .string) == markdown && model.toast?.message == "Copied Current URL",
                   "Copy URL as Markdown wrote '\(model.linkPasteboard.string(forType: .string) ?? "")'")
         _ = try await engine.evaluate("(getSelection().selectAllChildren(document.body), String(getSelection()))", in: .page)
         model.copyURL(format: .quote)
@@ -3773,6 +3774,17 @@ final class SelfTestFixtureServer {
         <a id="link" href="/a" style="display:block;padding:40px">context menu link</a>
         <p id="plain" style="padding:40px;height:300px">plain page text</p></body></html>
         """,
+        // Wave 30: records every keydown; ?block=1 calls preventDefault on each (a page that takes every shortcut).
+        "/keys": """
+        <!doctype html><html><head><title>keys</title><script>
+        window.rearcKeys = [];
+        document.addEventListener('keydown', function (e) {
+          window.rearcKeys.push((e.metaKey ? 'M' : '') + (e.ctrlKey ? 'C' : '') + (e.altKey ? 'A' : '') + (e.shiftKey ? 'S' : '')
+            + ':' + e.key.toLowerCase());
+          if (location.search.indexOf('block=1') >= 0) e.preventDefault();
+        }, true);
+        </script></head><body style="margin:0;height:100vh;font:28px -apple-system"><p style="padding:40px">keys page</p></body></html>
+        """,
         // Wave 26: a target=_blank link for ⌥⌘-click to Little Arc.
         "/links": """
         <!doctype html><html><head><title>links</title></head><body style="margin:0;font:28px -apple-system">
@@ -4005,6 +4017,419 @@ final class SelfTestFixtureServer {
             })
         }
         sendChunk(0)
+    }
+}
+// MARK: Wave 30 shortcuts
+
+extension ChromiumSelfTest {
+    /// How the shortcut step's key events travel. `appKit` posts them to the
+    /// app's queue, so they take AppKit's whole path (local monitors, the key
+    /// window's views, then the main menu). Without a key window (a locked
+    /// screen) AppKit drops posted keys, so `direct` makes the same calls in the
+    /// same order: the app's monitor, then Chromium's own
+    /// `keyEvent:wasKeyEquivalent:YES` on the page's view (what its
+    /// performKeyEquivalent: does once its key-window check passes), or the
+    /// menu and then the first responder for a native view (Esc in a field as
+    /// its key binding, cancelOperation:).
+    enum KeyDelivery { case appKit, direct }
+
+    @MainActor
+    private func keyEvent(_ type: NSEvent.EventType, _ characters: String, keyCode: UInt16, _ flags: NSEvent.ModifierFlags,
+                          in window: NSWindow) -> NSEvent? {
+        NSEvent.keyEvent(with: type, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                         windowNumber: window.windowNumber, context: nil, characters: characters,
+                         charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode)
+    }
+
+    @MainActor
+    private func press(_ characters: String, keyCode: UInt16, _ flags: NSEvent.ModifierFlags, in window: NSWindow,
+                       model: BrowserViewModel, delivery: KeyDelivery) {
+        guard let down = keyEvent(.keyDown, characters, keyCode: keyCode, flags, in: window),
+              let up = keyEvent(.keyUp, characters, keyCode: keyCode, flags, in: window) else { return }
+        switch delivery {
+        case .appKit:
+            NSApp.postEvent(down, atStart: false)
+            NSApp.postEvent(up, atStart: false)
+        case .direct:
+            if model.handleTabSwitcherEvent(down) || model.shortcutRouter.handleKeyDown(down) { return }
+            if let view = window.firstResponder as? NSView, ShortcutRouter.isWebContent(view) {
+                let selector = NSSelectorFromString("keyEvent:wasKeyEquivalent:")
+                guard view.responds(to: selector) else { return view.keyDown(with: down) }
+                typealias KeyEvent = @convention(c) (AnyObject, Selector, NSEvent, Bool) -> Void
+                let send = unsafeBitCast(view.method(for: selector), to: KeyEvent.self)
+                send(view, selector, down, !flags.intersection([.command, .control]).isEmpty)
+                send(view, selector, up, false)
+            } else if NSApp.mainMenu?.performKeyEquivalent(with: down) ?? false {
+                return
+            } else if keyCode == 53, let field = window.firstResponder as? NSTextView {
+                // Esc's key binding, as interpretKeyEvents: sends it (the input
+                // context is inactive without a key window).
+                field.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+            } else {
+                window.firstResponder?.keyDown(with: down)
+            }
+        }
+    }
+
+    @MainActor
+    private func eventuallyAsync(timeout: TimeInterval, _ condition: () async -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !(await condition()) {
+            if Date() > deadline { return false }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return true
+    }
+
+    @MainActor
+    private func releaseModifiers(in window: NSWindow, model: BrowserViewModel, delivery: KeyDelivery) {
+        guard let event = NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                           windowNumber: window.windowNumber, context: nil, characters: "", charactersIgnoringModifiers: "",
+                                           isARepeat: false, keyCode: 59) else { return }
+        switch delivery {
+        case .appKit: NSApp.postEvent(event, atStart: false)
+        case .direct: _ = model.handleTabSwitcherEvent(event)
+        }
+    }
+
+    @MainActor
+    private func moveMouse(to point: NSPoint, in window: NSWindow) {
+        if let event = NSEvent.mouseEvent(with: .mouseMoved, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                          windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0) {
+            NSApp.postEvent(event, atStart: false)
+        }
+    }
+
+    /// Wave 30: Arc's shortcuts with page content focused, as real key events
+    /// through AppKit's dispatch. First the bug (routing off: ⌘S reaches the
+    /// page and is dropped), then ⌘S (must pass), ⌘L, ⇧⌘C / ⌥⇧⌘C on the
+    /// pasteboard, ⌘T, ⌘W, ⌃Tab, ⌘1, ⌃1/⌃2, ⌘D and ⌘R, then a page that calls
+    /// preventDefault on every keydown.
+    @MainActor
+    private func shortcutChecks(model: BrowserViewModel, store: SidebarStore, tab: Tab, engine: ChromiumEngine, base: String,
+                                window: NSWindow) async throws {
+        guard runtime.capabilities.keyEquivalentEvents else {
+            log("ABI-GAP key_equivalent_events not advertised (ABI minor \(runtime.capabilities.abiMinorVersion.map(String.init) ?? "absent") < 42): "
+                + "only Arc-wins shortcuts work while a page has focus")
+            return
+        }
+        let delivery: KeyDelivery = await bringToFront(window, for: "shortcuts") ? .appKit : .direct
+        let mode = delivery == .appKit ? "posted to the event queue" : "direct dispatch"
+        if delivery == .direct {
+            log("NOTE shortcuts: no key window (app active \(NSApp.isActive), screen locked "
+                + "\((CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool ?? false)), so AppKit "
+                + "would drop posted keys: each key goes through the app's key monitor, then the page view's own "
+                + "keyEvent:wasKeyEquivalent:YES (performKeyEquivalent: past its key-window check), as AppKit orders them; the "
+                + "Esc key, Control's release and the field's selection are checked the same way")
+        }
+        let router = model.shortcutRouter
+        func press(_ characters: String, keyCode: UInt16, _ flags: NSEvent.ModifierFlags, in window: NSWindow) {
+            self.press(characters, keyCode: keyCode, flags, in: window, model: model, delivery: delivery)
+        }
+        func releaseModifiers(in window: NSWindow) {
+            self.releaseModifiers(in: window, model: model, delivery: delivery)
+        }
+        let realPasteboard = model.linkPasteboard
+        model.linkPasteboard = NSPasteboard(name: NSPasteboard.Name("rearc-selftest-keys-\(UUID().uuidString)"))
+        defer {
+            model.linkPasteboard = realPasteboard
+            router.isEnabled = true
+        }
+        func pageKeys(_ page: ChromiumEngine = engine) async -> [String] {
+            let joined = (try? await page.evaluate("window.rearcKeys ? window.rearcKeys.join(',') : ''", in: .page)) as? String ?? ""
+            return joined.split(separator: ",").map(String.init)
+        }
+        func pageFocused() -> Bool { ShortcutRouter.isWebContent(window.firstResponder) }
+        func focusPage(_ page: ChromiumEngine = engine) async throws {
+            if delivery == .appKit { window.makeKeyAndOrderFront(nil) }
+            try check(page.focusPage(), "tab \(page.tabID) took no keyboard focus")
+            try await wait("page focused") { pageFocused() }
+            // First responder reaches the renderer asynchronously, and keys before
+            // it never reach the page: a plain x (no shortcut) until the page sees one.
+            let deadline = Date().addingTimeInterval(6)
+            while !(await pageKeys(page).contains(":x")) {
+                guard Date() < deadline else {
+                    var widgets: [String] = []
+                    var queue = page.leaseHolder.map { [$0 as NSView] } ?? []
+                    while !queue.isEmpty {
+                        let view = queue.removeFirst()
+                        if NSStringFromClass(Swift.type(of: view)).contains("RenderWidgetHostViewCocoa") {
+                            widgets.append("\(ObjectIdentifier(view).hashValue % 10000)\(view.isHidden ? " hidden" : "")"
+                                + "\(view === window.firstResponder ? " first-responder" : "")\(view.isHiddenOrHasHiddenAncestor ? " (hidden ancestor)" : "")")
+                        }
+                        queue.append(contentsOf: view.subviews)
+                    }
+                    throw Failure(description: "tab \(page.tabID)'s page took no key: widgets [\(widgets.joined(separator: ", "))], "
+                        + "keys \(await pageKeys(page)), url \(page.currentURL?.absoluteString ?? "")")
+                }
+                press("x", keyCode: 7, [], in: window)
+                try? await Task.sleep(nanoseconds: 150_000_000)
+            }
+        }
+        func show(_ url: String, on page: ChromiumEngine = engine, tab shown: Tab = tab) async throws {
+            loadShellTab(model, store.tab(withID: shown.id) ?? shown, page, URL(string: url)!)
+            try await wait("\(url) loaded", timeout: 20) {
+                page.currentURL?.absoluteString == url && page.pageTitle == "keys" && !page.isLoading
+                    && page.attachmentID != nil && page.leaseHolder?.window === window
+            }
+            // A tab switch just before (⌘W's) still detaches views, and a detaching
+            // view that held focus hands it to the window: let it settle first.
+            try await Task.sleep(nanoseconds: 500_000_000)
+            try await focusPage(page)
+        }
+        func commandBarFieldFocused() -> Bool { (window.firstResponder as? NSTextView)?.isFieldEditor == true }
+        func waitForCommandBarField(_ label: String) async throws {
+            guard await eventually(timeout: 5, { commandBarFieldFocused() }) else {
+                throw Failure(description: "\(label): the command bar's field has no focus; first responder "
+                    + "\(window.firstResponder.map { String(describing: Swift.type(of: $0)) } ?? "none"), bar shown \(model.isCommandBarPresented)")
+            }
+        }
+        var escapeRetries: [String] = []
+        /// Esc in the bar's field, after the field settles; a second Esc is
+        /// reported, never hidden.
+        func pressEscape(_ label: String) async throws {
+            try await Task.sleep(nanoseconds: 300_000_000)
+            press("\u{1b}", keyCode: 53, [], in: window)
+            if await eventually(timeout: 2, { !model.isCommandBarPresented }) { return }
+            escapeRetries.append(label)
+            press("\u{1b}", keyCode: 53, [], in: window)
+        }
+        func escapeCommandBar(_ label: String) async throws {
+            try await waitForCommandBarField(label)
+            try await pressEscape(label)
+            try await wait("Esc closed the command bar after \(label)") { !model.isCommandBarPresented }
+            try await wait("the page has focus again after \(label)'s command bar") { pageFocused() }
+        }
+        var results: [String] = []
+
+        // Before the fix: with routing off, ⌘S reaches the focused page, which
+        // does not take it, and RenderWidgetHostViewCocoa never hands it to the menu.
+        try await show("\(base)/keys?utm_source=selftest")
+        let sidebarShown = model.isSidebarVisible
+        router.isEnabled = false
+        press("s", keyCode: 1, .command, in: window)
+        try await waitAsync("⌘S reached the page with routing off", timeout: 5) { await pageKeys().contains("M:s") }
+        try await Task.sleep(nanoseconds: 600_000_000)
+        try check(model.isSidebarVisible == sidebarShown, "with routing off ⌘S still toggled the sidebar: the diagnosis does not hold")
+        router.isEnabled = true
+        log("PASS shortcut diagnosis (\(mode)): routing off, ⌘S on a focused page reached it (keydown M:s) and was dropped (sidebar "
+            + "unchanged): RenderWidgetHostViewCocoa takes every key equivalent before the main menu")
+
+        // ⌘S (must pass): hides and shows the sidebar; the page keeps focus; the content takes the width.
+        try check(model.isSidebarVisible, "the sidebar is hidden before ⌘S")
+        let shownWidth = engine.leaseHolder?.bounds.width ?? 0
+        press("s", keyCode: 1, .command, in: window)
+        try await wait("⌘S hid the sidebar", timeout: 5) { !model.isSidebarVisible }
+        try await Task.sleep(nanoseconds: 700_000_000)
+        try check(pageFocused(), "⌘S moved keyboard focus to \(String(describing: window.firstResponder))")
+        let hiddenWidth = engine.leaseHolder?.bounds.width ?? 0
+        try check(hiddenWidth > shownWidth + model.sidebarWidth * 0.8, "the page did not take the sidebar's width (\(shownWidth) -> \(hiddenWidth))")
+        moveMouse(to: NSPoint(x: 2, y: window.frame.height / 2), in: window)
+        try await wait("the window edge floats the hidden sidebar") { model.isSidebarPeeking }
+        moveMouse(to: NSPoint(x: model.sidebarWidth + 120, y: window.frame.height / 2), in: window)
+        try await wait("leaving the floating sidebar hides it") { !model.isSidebarPeeking }
+        try check(abs((engine.leaseHolder?.bounds.width ?? 0) - hiddenWidth) < 1, "the floating sidebar resized the page")
+        try await focusPage()
+        press("s", keyCode: 1, .command, in: window)
+        try await wait("⌘S showed the sidebar", timeout: 5) { model.isSidebarVisible }
+        try await Task.sleep(nanoseconds: 700_000_000)
+        try check(pageFocused(), "showing the sidebar moved keyboard focus")
+        try check(abs((engine.leaseHolder?.bounds.width ?? 0) - shownWidth) < 1, "the page did not give the width back")
+        let sKeys = await pageKeys().filter { $0 == "M:s" }.count
+        try check(sKeys == 3, "the page saw ⌘S \(sKeys) times, not 3 (website-first keys reach it first)")
+        results.append("⌘S hid (page \(Int(shownWidth)) -> \(Int(hiddenWidth)) pt, edge hover floats it over the page) and showed the "
+            + "sidebar, focus stayed on the page")
+
+        // ⌘L: the command bar with the URL selected; the page never sees ⌘L; Esc gives the page focus back.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        press("l", keyCode: 37, .command, in: window)
+        try await wait("⌘L opened the command bar") { model.isCommandBarPresented }
+        let url = store.tab(withID: tab.id)?.url.absoluteString ?? ""
+        try check(model.commandBarText == url, "⌘L filled '\(model.commandBarText)', not '\(url)'")
+        try await wait("the command bar's URL is selected") {
+            guard let field = window.firstResponder as? NSTextView else { return false }
+            return field.string == url && field.selectedRange() == NSRange(location: 0, length: (url as NSString).length)
+        }
+        try await escapeCommandBar("⌘L")
+        results.append("⌘L opened the command bar on '\(url)' fully selected; Esc returned focus to the page")
+
+        // ⇧⌘C / ⌥⇧⌘C: the pasteboard gets the link without trackers, with Arc's toast.
+        press("C", keyCode: 8, [.command, .shift], in: window)
+        try await wait("⇧⌘C copied the URL") { model.linkPasteboard.string(forType: .string) == "\(base)/keys" }
+        try check(model.toast?.message == PageLinkCopyFormat.cleanConfirmation, "⇧⌘C toast '\(model.toast?.message ?? "")'")
+        press("C", keyCode: 8, [.command, .shift, .option], in: window)
+        try await wait("⌥⇧⌘C copied the Markdown link") { model.linkPasteboard.string(forType: .string) == "[keys](\(base)/keys)" }
+        try check(pageFocused(), "copying moved focus")
+        results.append("⇧⌘C put '\(base)/keys' on the pasteboard (utm_source stripped, toast '\(PageLinkCopyFormat.cleanConfirmation)'), "
+            + "⌥⇧⌘C '[keys](\(base)/keys)'")
+
+        // ⌘T: the command bar on a new tab; Esc leaves no tab behind.
+        let rows = store.displayTabs().count
+        press("t", keyCode: 17, .command, in: window)
+        try await wait("⌘T opened the command bar on a new tab") {
+            model.isCommandBarPresented && store.selectedTab?.url.absoluteString == "about:blank"
+        }
+        try await waitForCommandBarField("⌘T")
+        try await pressEscape("⌘T")
+        try await wait("Esc after ⌘T left no tab and reselected tab A") {
+            !model.isCommandBarPresented && store.displayTabs().count == rows && store.selectedTabID == tab.id
+        }
+        try await wait("tab A shown again after ⌘T") { engine.leaseHolder?.window === window && engine.attachmentID != nil }
+        try await wait("the page has focus again after ⌘T") { pageFocused() }
+        results.append("⌘T opened the command bar (field focused) on a new tab; Esc removed it and refocused tab A")
+
+        // ⌘D: pin and unpin with Arc's toasts.
+        press("d", keyCode: 2, .command, in: window)
+        try await wait("⌘D pinned tab A") { store.kind(of: tab.id) == .pinned }
+        try check(model.toast?.message.hasPrefix("Pinned Tab to “") == true, "⌘D toast '\(model.toast?.message ?? "")'")
+        try await wait("tab A shown after pinning") { engine.leaseHolder?.window === window && engine.attachmentID != nil }
+        if !pageFocused() { try await focusPage() }
+        press("d", keyCode: 2, .command, in: window)
+        try await wait("⌘D unpinned tab A") { store.kind(of: tab.id) == .today }
+        try await wait("tab A shown after unpinning") { engine.leaseHolder?.window === window && engine.attachmentID != nil }
+        results.append("⌘D pinned then unpinned tab A ('Pinned Tab to …' / 'Un-Pinned Tab from …')")
+
+        // ⌘R: the page does not take it, so the menu reloads.
+        try await focusPage()
+        _ = try await engine.evaluate("(window.rearcMarker = 1, 1)", in: .page)
+        press("r", keyCode: 15, .command, in: window)
+        try await waitAsync("⌘R reloaded the page", timeout: 10) {
+            let marker = try? await engine.evaluate("window.rearcMarker === 1", in: .page) as? Bool
+            return marker == false && !engine.isLoading
+        }
+        try await focusPage()
+        results.append("⌘R (page first, not taken) reloaded")
+
+        // ⌘1: the sidebar's first row.
+        if let first = store.displayEntries().first, first.id != tab.id, !(first.isFolder) {
+            press("1", keyCode: 18, .command, in: window)
+            try await wait("⌘1 selected the first row") { store.selectedItemID == first.id }
+            model.selectTab(tab.id)
+            try await wait("tab A shown after ⌘1") { engine.leaseHolder?.window === window && engine.attachmentID != nil }
+            try await focusPage()
+            results.append("⌘1 selected the first sidebar row")
+        } else {
+            press("9", keyCode: 25, .command, in: window)
+            let last = store.displayEntries().last?.id
+            try await wait("⌘9 selected the last row") { store.selectedItemID == last }
+            model.selectTab(tab.id)
+            try await wait("tab A shown after ⌘9") { engine.leaseHolder?.window === window && engine.attachmentID != nil }
+            try await focusPage()
+            results.append("⌘9 selected the last sidebar row (tab A is the first)")
+        }
+
+        // ⌃2 / ⌃1: Space switching from a focused page.
+        var addedSpace: Space.ID?
+        if store.spacesInActiveProfile.count < 2 { addedSpace = store.addSpace(name: "Shortcuts", profileID: store.activeProfileID).id }
+        let firstSpace = store.activeSpaceID
+        let secondSpace = store.spacesInActiveProfile.first { $0.id != firstSpace }?.id
+        let secondIndex = store.spacesInActiveProfile.firstIndex { $0.id == secondSpace } ?? 1
+        let firstIndex = store.spacesInActiveProfile.firstIndex { $0.id == firstSpace } ?? 0
+        let digits: [UInt16] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
+        press("\(secondIndex + 1)", keyCode: digits[secondIndex], .control, in: window)
+        try await wait("⌃\(secondIndex + 1) switched to the other space") { store.activeSpaceID == secondSpace }
+        press("\(firstIndex + 1)", keyCode: digits[firstIndex], .control, in: window)
+        try await wait("⌃\(firstIndex + 1) switched back") { store.activeSpaceID == firstSpace }
+        if let addedSpace { _ = store.removeSpace(addedSpace) }
+        model.selectTab(tab.id)
+        try await wait("tab A shown after the space switch") { engine.leaseHolder?.window === window && engine.attachmentID != nil }
+        try await focusPage()
+        results.append("⌃\(secondIndex + 1) and ⌃\(firstIndex + 1) switched spaces from the focused page")
+
+        // ⌃Tab: the switcher from a focused page; releasing Control shows the most recent other tab.
+        if store.recentTabSwitcherItems().count > 1 {
+            let expected = store.recentTabSwitcherItems()[1].id
+            press("\t", keyCode: 48, .control, in: window)
+            try await wait("⌃Tab opened the switcher") { model.tabSwitcher != nil }
+            releaseModifiers(in: window)
+            try await wait("releasing ⌃ selected the recent tab") { model.tabSwitcher == nil && store.selectedTabID == expected }
+            model.selectTab(tab.id)
+            try await wait("tab A shown after ⌃Tab") { engine.leaseHolder?.window === window && engine.attachmentID != nil }
+            try await focusPage()
+            results.append("⌃Tab switched to the most recent other tab")
+        }
+
+        // ⌘W: closes the focused tab.
+        let doomed = store.addTab(kind: .today, title: "Keys W", url: URL(string: "\(base)/keys")!)
+        model.selectTab(doomed.id)
+        let doomedEngine = try shellEngine(model, doomed)
+        try await show("\(base)/keys?w=1", on: doomedEngine, tab: doomed)
+        press("w", keyCode: 13, .command, in: window)
+        try await wait("⌘W closed the focused tab") { store.tab(withID: doomed.id) == nil }
+        model.selectTab(tab.id)
+        try await wait("tab A shown after ⌘W") { engine.leaseHolder?.window === window && engine.attachmentID != nil }
+        results.append("⌘W closed the focused tab")
+        let plainKeys = await pageKeys()
+        for arcWins in ["M:l", "MS:c", "MAS:c", "M:t", "M:w", "C:tab"] {
+            try check(!plainKeys.contains(arcWins), "the page saw the Arc-wins key \(arcWins): \(plainKeys)")
+        }
+        log("PASS shortcuts with the page focused (real key events, \(mode)): " + results.joined(separator: "; ")
+            + "; the page saw none of ⌘L, ⇧⌘C, ⌥⇧⌘C, ⌘T, ⌘W, ⌃Tab")
+
+        // A page that calls preventDefault on every keydown.
+        try await show("\(base)/keys?block=1&utm_source=selftest")
+        var blocked: [String] = []
+        _ = try await engine.evaluate("(window.rearcMarker = 1, 1)", in: .page)
+        try check(pageFocused(), "the blocking page lost focus before ⌘R")
+        press("r", keyCode: 15, .command, in: window)
+        if !(await eventuallyAsync(timeout: 5, { await pageKeys().contains("M:r") })) {
+            throw Failure(description: "the blocking page never saw ⌘R: keys \(await pageKeys()), first responder "
+                + "\(window.firstResponder.map { String(describing: Swift.type(of: $0)) } ?? "none") (page view "
+                + "\(window.firstResponder === engine.leaseHolder?.pageKeyView)), router \(router.history.suffix(4)), "
+                + "verdicts \(runtime.keyEquivalentEvents.suffix(4).map { "\($0.characters)/\($0.consumed)" })")
+        }
+        try await Task.sleep(nanoseconds: 800_000_000)
+        let kept = try await engine.evaluate("window.rearcMarker === 1", in: .page) as? Bool
+        try check(kept == true, "⌘R reloaded a page that took it (the website wins)")
+        blocked.append("⌘R stayed with the page (website wins)")
+
+        let visible = model.isSidebarVisible
+        press("s", keyCode: 1, .command, in: window)
+        try await wait("the page took ⌘S: Arc's prompt") { model.toast?.message == "Press ⌘S again to Show/Hide Sidebar" }
+        try check(model.isSidebarVisible == visible, "the first ⌘S toggled the sidebar although the page took it")
+        press("s", keyCode: 1, .command, in: window)
+        try await wait("the second ⌘S toggled the sidebar") { model.isSidebarVisible != visible }
+        let blockedS = await pageKeys().filter { $0 == "M:s" }.count
+        try check(blockedS == 1, "the page saw ⌘S \(blockedS) times, not once")
+        model.toggleSidebar()
+        try await wait("sidebar restored") { model.isSidebarVisible == visible }
+        if !pageFocused() { try await focusPage() }
+        blocked.append("⌘S once: the page took it and 'Press ⌘S again to Show/Hide Sidebar' showed; twice: the sidebar toggled")
+
+        press("l", keyCode: 37, .command, in: window)
+        try await wait("⌘L opened the command bar over a blocking page") { model.isCommandBarPresented }
+        try await escapeCommandBar("⌘L on the blocking page")
+        press("C", keyCode: 8, [.command, .shift], in: window)
+        try await wait("⇧⌘C copied over a blocking page") { model.linkPasteboard.string(forType: .string) == "\(base)/keys?block=1" }
+        let tabsBefore = store.displayTabs().count
+        press("t", keyCode: 17, .command, in: window)
+        try await wait("⌘T over a blocking page") { model.isCommandBarPresented }
+        try await waitForCommandBarField("⌘T over a blocking page")
+        try await pressEscape("⌘T on the blocking page")
+        try await wait("Esc after ⌘T on the blocking page") { !model.isCommandBarPresented && store.displayTabs().count == tabsBefore }
+        model.selectTab(tab.id)
+        try await wait("tab A shown again") { engine.leaseHolder?.window === window && engine.attachmentID != nil }
+        try await focusPage()
+        if store.recentTabSwitcherItems().count > 1 {
+            let expected = store.recentTabSwitcherItems()[1].id
+            press("\t", keyCode: 48, .control, in: window)
+            try await wait("⌃Tab over a blocking page") { model.tabSwitcher != nil }
+            releaseModifiers(in: window)
+            try await wait("⌃Tab release over a blocking page") { model.tabSwitcher == nil && store.selectedTabID == expected }
+            model.selectTab(tab.id)
+            try await wait("tab A shown after ⌃Tab") { engine.leaseHolder?.window === window && engine.attachmentID != nil }
+        }
+        let blockedKeys = await pageKeys()
+        for arcWins in ["M:l", "MS:c", "M:t", "C:tab"] {
+            try check(!blockedKeys.contains(arcWins), "the blocking page saw the Arc-wins key \(arcWins): \(blockedKeys)")
+        }
+        blocked.append("⌘L, ⇧⌘C ('\(base)/keys?block=1'), ⌘T and ⌃Tab never reached it")
+        log("PASS shortcuts over a page that calls preventDefault on every keydown (\(mode)): " + blocked.joined(separator: "; ")
+            + " [router: \(router.history.suffix(6).joined(separator: " | "))]"
+            + (escapeRetries.isEmpty ? "" : "; NOTE Esc needed a second press after \(escapeRetries.joined(separator: ", "))"))
+
+        loadShellTab(model, store.tab(withID: tab.id) ?? tab, engine, URL(string: "\(base)/a")!)
+        try await wait("tab A back on /a", timeout: 20) { engine.pageTitle == Self.titleA && !engine.isLoading }
     }
 }
 #endif
