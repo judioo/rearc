@@ -163,3 +163,98 @@ final class Wave26SplitModelTests: XCTestCase {
         XCTAssertTrue(state.maximized.isEmpty)
     }
 }
+
+/// Wave 26: inline domain completion, routing modifiers and the Ctrl+Tab switcher.
+final class Wave26CommandBarModelTests: XCTestCase {
+
+    func testInlineDomainCompletion() {
+        let hosts = ["www.github.com", "gitlab.com", "google.com"]
+        XCTAssertEqual(InlineDomainCompletion.complete("git", candidates: hosts), "github.com")
+        XCTAssertEqual(InlineDomainCompletion.complete("GitL", candidates: hosts), "gitlab.com")
+        XCTAssertEqual(InlineDomainCompletion.complete("https://www.goo", candidates: hosts), "google.com")
+        XCTAssertNil(InlineDomainCompletion.complete("github.com", candidates: hosts), "nothing left to complete")
+        XCTAssertNil(InlineDomainCompletion.complete("git hub", candidates: hosts), "a search, not a domain")
+        XCTAssertNil(InlineDomainCompletion.complete("github.com/rearc", candidates: hosts), "a path is typed")
+        XCTAssertNil(InlineDomainCompletion.complete(">git", candidates: hosts), "command mode")
+        XCTAssertNil(InlineDomainCompletion.complete("", candidates: hosts))
+        XCTAssertNil(InlineDomainCompletion.complete("zz", candidates: hosts))
+
+        XCTAssertEqual(InlineDomainCompletion.suffix(typed: "Git", completion: "github.com"), "hub.com")
+        XCTAssertEqual(InlineDomainCompletion.suffix(typed: "https://www.goo", completion: "google.com"), "gle.com")
+        XCTAssertEqual(InlineDomainCompletion.suffix(typed: "www.git", completion: "github.com"), "hub.com")
+        XCTAssertNil(InlineDomainCompletion.suffix(typed: "github.com", completion: "github.com"))
+    }
+
+    func testVisitedHostsRankAheadOfTheBundledList() {
+        let now = Date()
+        func visit(_ url: String, _ count: Int) -> VisitRecord {
+            VisitRecord(url: URL(string: url)!, title: "", visitCount: count, firstVisit: now, lastVisit: now)
+        }
+        let history = VisitHistory(records: [visit("https://gitea.example.org/x", 3), visit("https://www.gamma.test/", 9)])
+        let candidates = InlineDomainCompletion.candidates(history: history)
+        XCTAssertEqual(Array(candidates.prefix(2)), ["gamma.test", "gitea.example.org"], "most visits first")
+        XCTAssertEqual(InlineDomainCompletion.complete("git", candidates: candidates), "gitea.example.org")
+        XCTAssertEqual(InlineDomainCompletion.complete("git", candidates: InlineDomainCompletion.candidates(history: VisitHistory())), "github.com")
+        XCTAssertEqual(Set(candidates).count, candidates.count, "no duplicates")
+        XCTAssertGreaterThan(TopDomains.bundled.count, 150)
+    }
+
+    func testInlineCompletionIsTheFirstResult() {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        let results = CommandBarSearch.results(for: "git", in: store, inlineCompletion: "github.com")
+        XCTAssertEqual(results.first?.destinationURL, URL(string: "https://github.com/"))
+        XCTAssertEqual(results.first?.kind, .openURL)
+        let typed = CommandBarSearch.results(for: "github.com", in: store, inlineCompletion: nil)
+        XCTAssertEqual(typed.filter { $0.destinationURL?.host() == "github.com" && $0.kind == .openURL }.count, 1)
+    }
+
+    func testRoutingModifiers() {
+        XCTAssertEqual(CommandBarRoute(command: false, option: false, shift: false), .current)
+        XCTAssertEqual(CommandBarRoute(command: true, option: false, shift: false), .newTab)
+        XCTAssertEqual(CommandBarRoute(command: false, option: true, shift: false), .splitView)
+        XCTAssertEqual(CommandBarRoute(command: false, option: false, shift: true), .littleArc)
+        XCTAssertEqual(CommandBarRoute(command: true, option: true, shift: false), .current, "combinations keep the default")
+        XCTAssertEqual(Set(CommandBarRoute.allCases.map(\.hint)).count, 4)
+    }
+
+    func testRecentTabsAndSwitcherSession() {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a"), Space(name: "Work", sortRank: "b")])
+        var clock = Date(timeIntervalSince1970: 1_000)
+        store.now = { clock }
+        let work = store.spaces[1].id
+        let a = store.addTab(kind: .today, title: "A", url: URL(string: "https://a.test")!)
+        let b = store.addTab(kind: .pinned, title: "B", url: URL(string: "https://b.test")!)
+        let c = store.addTab(kind: .today, title: "C", url: URL(string: "https://c.test")!, in: work)
+        let fav = store.addTab(kind: .favorite, title: "F", url: URL(string: "https://f.test")!)
+        for id in [fav.id, a.id, c.id, b.id] {
+            clock += 10
+            _ = store.focusTab(id)
+        }
+        let items = store.recentTabSwitcherItems()
+        XCTAssertEqual(items.map(\.id), [b.id, c.id, a.id, fav.id], "selected first, then most recent, across spaces")
+        XCTAssertEqual(items[1].spaceName, "Work")
+        XCTAssertNil(items[3].spaceName, "favorites have no space")
+
+        var forward = TabSwitcherSession(items: items, forward: true)!
+        XCTAssertEqual(forward.highlighted.id, c.id, "one Ctrl+Tab: the previous tab")
+        forward.step(forward: true)
+        forward.step(forward: true)
+        forward.step(forward: true)
+        XCTAssertEqual(forward.highlighted.id, b.id, "wraps around")
+        let backward = TabSwitcherSession(items: items, forward: false)!
+        XCTAssertEqual(backward.highlighted.id, fav.id, "Ctrl+Shift+Tab: the least recent")
+        XCTAssertNil(TabSwitcherSession(items: [], forward: true))
+        XCTAssertEqual(TabSwitcherSession(items: [items[0]], forward: true)?.index, 0)
+    }
+
+    func testSplitCountsOnceInRecentTabs() {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        let a = store.addTab(kind: .today, title: "A", url: URL(string: "https://a.test")!)
+        let b = store.addTab(kind: .today, title: "B", url: URL(string: "https://b.test")!)
+        let split = store.splitTab(b.id, with: a.id)!
+        let items = store.recentTabSwitcherItems()
+        XCTAssertEqual(items.count, 1)
+        XCTAssertTrue(split.tabs.map(\.id).contains(items[0].id))
+        XCTAssertEqual(items[0].title, "A | B")
+    }
+}

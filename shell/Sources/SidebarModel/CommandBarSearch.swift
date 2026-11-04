@@ -84,6 +84,7 @@ public enum CommandBarSearch {
         externalLinkDestination: ExternalLinkDestination = .littleArc,
         live: CommandBarLiveResults? = nil,
         searchProvider: SearchProvider = .duckDuckGo,
+        inlineCompletion: String? = nil,
         now: Date = Date()
     ) -> [Result] {
         let (mode, needle) = parseMode(query)
@@ -105,7 +106,19 @@ public enum CommandBarSearch {
         case .blended:
             guard !needle.isEmpty else { return [] }
             let tabs = tabResults(for: needle, in: store)
-            var output = tabs
+            var output: [Result] = []
+            // The inline-completed domain is the first row, so Return goes where the field shows.
+            let completed = inlineCompletion.flatMap { URL(string: "https://\($0)/") }
+            if let completed, let inlineCompletion {
+                output.append(Result(
+                    id: "inline-\(inlineCompletion)",
+                    kind: .openURL,
+                    title: inlineCompletion,
+                    subtitle: completed.absoluteString,
+                    destinationURL: completed
+                ))
+            }
+            output.append(contentsOf: tabs)
             let current = live.flatMap { $0.applies(to: query) ? $0 : nil }
             let resolved: URL?
             let direct: URL?
@@ -120,7 +133,7 @@ public enum CommandBarSearch {
                 resolved = URLEntry.resolve(query, engine: navigationSchemes, provider: searchProvider)
                 direct = resolved.flatMap { looksLikeDirectNavigation(query) ? $0 : nil }
             }
-            if let url = direct {
+            if let url = direct, url.host() != completed?.host() {
                 output.append(Result(
                     id: "url-\(url.absoluteString)",
                     kind: .openURL,
@@ -131,6 +144,7 @@ public enum CommandBarSearch {
             }
             // Pages already open as tabs (or typed exactly) are not repeated as history.
             var shown = Set(tabs.compactMap { $0.destinationURL.flatMap(VisitHistory.key(for:)) })
+            if let completed, let key = VisitHistory.key(for: completed) { shown.insert(key) }
             if let url = direct, let key = VisitHistory.key(for: url) { shown.insert(key) }
             let historySource = current?.history.map { VisitHistory(records: $0) } ?? history
             let historyRows = historyResults(for: needle, in: historySource, now: now, excluding: shown)
