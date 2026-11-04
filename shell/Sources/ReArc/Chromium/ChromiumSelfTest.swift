@@ -3112,13 +3112,25 @@ extension ChromiumSelfTest {
 
         // Popup: a registry tab in the popup panel, sized by the renderer, closed by window.close().
         let tabsBefore = store.displayTabs().count
-        controller.run(popupAction.id, for: engine, anchor: nil)
-        try await wait("the extension popup adopted", timeout: 10) { host.popups.engine != nil }
-        let popupEngine = host.popups.engine!
+        var popupEngine: ChromiumEngine!
+        for attempt in 1...2 {
+            controller.run(popupAction.id, for: engine, anchor: nil)
+            try await wait("the extension popup adopted", timeout: 10) { host.popups.engine != nil }
+            popupEngine = host.popups.engine!
+            try await wait("the popup attached in its panel") { popupEngine.attachmentID != nil && popupEngine.leaseHolder?.window === host.popups.window }
+            let ready = await eventually(timeout: 10) {
+                host.popups.size == SelfTestExtensionFixture.popupSize && popupEngine.pageTitle?.hasPrefix("popup:") == true
+            }
+            if ready { break }
+            // Seen once in a real-Keychain run: the popup committed but its script never ran (no title, no resize).
+            try check(attempt == 1, "the popup never resized to its content or set its title (size \(host.popups.size), "
+                      + "title \(popupEngine.pageTitle ?? "-"), resizes \(host.popups.resizes)) after a retry")
+            log("NOTE extension popup: tab \(popupEngine.tabID) loaded without running its script within 10 s "
+                + "(size \(host.popups.size), title '\(popupEngine.pageTitle ?? "")'); closing it and clicking again")
+            host.popups.dismiss()
+            try await wait("the popup closed before the retry") { host.popups.engine == nil }
+        }
         let popupTab = popupEngine.tabID
-        try await wait("the popup attached in its panel") { popupEngine.attachmentID != nil && popupEngine.leaseHolder?.window === host.popups.window }
-        try await wait("the popup resized to its content", timeout: 10) { host.popups.size == SelfTestExtensionFixture.popupSize }
-        try await wait("the popup page title") { popupEngine.pageTitle?.hasPrefix("popup:") == true }
         let panelSize = host.popups.window?.frame.size
         try check(popupEngine.pageTitle == "popup:1", "popup title \(popupEngine.pageTitle ?? "-") (getViews popup count)")
         try check(panelSize == SelfTestExtensionFixture.popupSize, "popup panel size \(String(describing: panelSize))")
