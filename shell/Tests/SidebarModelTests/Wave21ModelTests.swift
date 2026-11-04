@@ -119,7 +119,7 @@ final class Wave21ModelTests: XCTestCase {
     // MARK: Theme palette
 
     func testPaletteBlendsTheThemeForEachAppearance() {
-        let indigo = SpaceTheme.default
+        let indigo = SpaceTheme.legacyDefault
         let light = SpaceThemePalette(theme: indigo, darkAppearance: false)
         let dark = SpaceThemePalette(theme: indigo, darkAppearance: true)
         XCTAssertGreaterThan(light.top.relativeLuminance, indigo.relativeLuminance)

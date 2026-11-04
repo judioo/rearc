@@ -214,7 +214,7 @@ final class Wave28ModelTests: XCTestCase {
         XCTAssertEqual(palette.noise, 0.3)
         XCTAssertEqual(palette.accent, theme.baseColor)
 
-        let plain = SpaceThemePalette(theme: .default, darkAppearance: false)
+        let plain = SpaceThemePalette(theme: .legacyDefault, darkAppearance: false)
         XCTAssertFalse(plain.isDiagonal)
         let three = SpaceThemePalette(theme: SpaceTheme.gradientPresets[4], darkAppearance: true)
         XCTAssertEqual(three.colors.count, 3)
