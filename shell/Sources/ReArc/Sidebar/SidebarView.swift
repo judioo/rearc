@@ -20,7 +20,10 @@ struct SidebarView: View {
 
     var body: some View {
         let spaceIDs = model.store.spaces(in: focusedSpace.profileID).map(\.id)
-        let palette = SpaceThemePalette(theme: focusedSpace.theme, darkAppearance: colorScheme == .dark)
+        let palette = SpaceThemePalette(
+            theme: focusedSpace.theme,
+            darkAppearance: focusedSpace.theme.appearance.isDark(systemDark: SystemAppearance.isDark(colorScheme))
+        )
         VStack(spacing: 0) {
             SidebarToolbarView(model: model)
                 .padding(.bottom, 8)

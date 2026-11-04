@@ -86,4 +86,18 @@ final class Wave28ShellTests: XCTestCase {
         XCTAssertEqual(model.store.activeSpaceID, space.id)
         XCTAssertNil(model.librarySection(in: nil))
     }
+
+    // MARK: Gradient themes
+
+    func testSpacesMenuAppearanceKeepsTheGradientAndGrain() {
+        let model = makeModel()
+        let space = model.store.activeSpaceID
+        model.store.setSpaceTheme(space, theme: SpaceTheme.gradientPresets[0].addingStop())
+        ShellMenus.spaces(model).flatMap { $0 }.first { $0.title == "Appearance: Dark" }!.action()
+        let theme = model.store.activeSpace.theme
+        XCTAssertEqual(theme.appearance, .dark)
+        XCTAssertEqual(theme.stops.count, 3)
+        XCTAssertNil(model.executeCommand(.setSpaceAppearance(.light), commandID: nil))
+        XCTAssertEqual(model.store.activeSpace.theme.appearance, .light)
+    }
 }

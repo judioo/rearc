@@ -1519,6 +1519,8 @@ final class BrowserViewModel {
             beginRename(.space(store.activeSpaceID))
         case .editSpaceTheme:
             spaceEditorID = store.activeSpaceID
+        case .setSpaceAppearance(let appearance):
+            setSpaceAppearance(appearance)
         case .deleteSpace:
             guard canDeleteSpaces else { return "The last space cannot be deleted" }
             pendingDeletion = .space(store.activeSpaceID)

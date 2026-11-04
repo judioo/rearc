@@ -123,6 +123,12 @@ struct BrowserView: View {
             WindowOcclusionReader { model.handleWindowOcclusion($0) }
                 .frame(width: 0, height: 0)
         )
+        // The shown space's Appearance (Automatic, Light, Dark) sets the
+        // window's, which its pages, easels and notes follow.
+        .background(
+            WindowAppearanceSetter(appearance: model.space(in: windowID).theme.appearance)
+                .frame(width: 0, height: 0)
+        )
         .background(
             WindowKeyObserver(
                 onBecameKey: { model.windowBecameKey(windowID) },

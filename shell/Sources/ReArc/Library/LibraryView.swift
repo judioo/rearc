@@ -118,7 +118,10 @@ private struct LibrarySpacesPage: View {
     }
 
     private func card(_ row: LibrarySpaceRow, isCurrent: Bool) -> some View {
-        let palette = SpaceThemePalette(theme: row.space.theme, darkAppearance: colorScheme == .dark)
+        let palette = SpaceThemePalette(
+            theme: row.space.theme,
+            darkAppearance: row.space.theme.appearance.isDark(systemDark: SystemAppearance.isDark(colorScheme))
+        )
         let foreground: Color = palette.prefersLightForeground ? .white : .black.opacity(0.8)
         return Button { model.openLibrarySpace(row.id) } label: {
             VStack(alignment: .leading, spacing: 6) {
@@ -133,10 +136,7 @@ private struct LibrarySpacesPage: View {
             .foregroundStyle(foreground)
             .padding(12)
             .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
-            .background(
-                LinearGradient(colors: [Color(palette.top), Color(palette.bottom)], startPoint: .topLeading, endPoint: .bottomTrailing),
-                in: RoundedRectangle(cornerRadius: 12)
-            )
+            .background(SpaceThemeFill(palette: palette).clipShape(RoundedRectangle(cornerRadius: 12)))
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(isCurrent ? Color(palette.accent) : .clear, lineWidth: 2))
             .contentShape(RoundedRectangle(cornerRadius: 12))
         }

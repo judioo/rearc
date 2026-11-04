@@ -34,28 +34,7 @@ struct SpaceCreationView: View {
                 .help("The space's tabs use this profile's cookies, history and favorites")
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Theme").font(.headline)
-                ForEach(SpaceTheme.editorPalette.indices, id: \.self) { row in
-                    HStack(spacing: 6) {
-                        ForEach(SpaceTheme.editorPalette[row], id: \.self) { theme in
-                            swatch(theme)
-                        }
-                    }
-                }
-                ColorPicker("Custom color", selection: Binding(
-                    get: { color(draft.theme) },
-                    set: { newValue in
-                        guard let rgb = NSColor(newValue).usingColorSpace(.sRGB) else { return }
-                        draft.theme = SpaceTheme(
-                            red: Double(rgb.redComponent),
-                            green: Double(rgb.greenComponent),
-                            blue: Double(rgb.blueComponent)
-                        )
-                    }
-                ), supportsOpacity: false)
-                .padding(.top, 4)
-            }
+            SpaceStyleEditor(theme: $draft.theme)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Icon").font(.headline)
@@ -107,17 +86,6 @@ struct SpaceCreationView: View {
 
     private func color(_ theme: SpaceTheme) -> Color {
         Color(red: theme.red, green: theme.green, blue: theme.blue)
-    }
-
-    private func swatch(_ theme: SpaceTheme) -> some View {
-        let selected = draft.theme == theme
-        return Button { draft.theme = theme } label: {
-            Circle()
-                .fill(color(theme))
-                .frame(width: 26, height: 26)
-                .overlay(Circle().strokeBorder(Color.primary.opacity(selected ? 0.9 : 0.12), lineWidth: selected ? 2 : 1))
-        }
-        .buttonStyle(.plain)
     }
 
     /// Lowercase words would be read as an SF Symbol name; take them only if one exists.

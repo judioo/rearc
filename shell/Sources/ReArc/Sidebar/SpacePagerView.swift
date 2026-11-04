@@ -93,13 +93,15 @@ final class SpacePagerController {
         return Array(Set([pages.from, pages.to])).sorted().map { (spaceIDs[$0], Double($0) - position) }
     }
 
-    /// The window palette part-way between the two visible spaces.
-    func palette(at time: TimeInterval, theme: (Space.ID) -> SpaceTheme?, darkAppearance: Bool) -> SpaceThemePalette? {
+    /// The window palette part-way between the two visible spaces, each in
+    /// its own appearance (`systemDark` is the Mac's).
+    func palette(at time: TimeInterval, theme: (Space.ID) -> SpaceTheme?, darkAppearance systemDark: Bool) -> SpaceThemePalette? {
         guard isSwipeDriven, isAnimating, !reduceMotion, spaceIDs.count == paging.pageCount else { return nil }
         let pages = paging.visiblePages(at: time)
         guard let from = theme(spaceIDs[pages.from]), let to = theme(spaceIDs[pages.to]) else { return nil }
-        return SpaceThemePalette(theme: from, darkAppearance: darkAppearance)
-            .mixed(with: SpaceThemePalette(theme: to, darkAppearance: darkAppearance), fraction: pages.fraction)
+        return SpaceThemePalette(theme: from, darkAppearance: from.appearance.isDark(systemDark: systemDark))
+            .mixed(with: SpaceThemePalette(theme: to, darkAppearance: to.appearance.isDark(systemDark: systemDark)),
+                   fraction: pages.fraction)
     }
 
     private func startFrames() {
@@ -165,17 +167,107 @@ struct SpaceThemeBackground: View {
 
     var body: some View {
         let space = model.space(in: window)
-        let dark = colorScheme == .dark
+        let systemDark = SystemAppearance.isDark(colorScheme)
         TimelineView(.animation(paused: !(pager?.isSwipeDriven ?? false))) { context in
             let palette = pager?.palette(
                 at: context.date.timeIntervalSinceReferenceDate,
                 theme: { model.store.space(withID: $0)?.theme },
-                darkAppearance: dark
-            ) ?? SpaceThemePalette(theme: space.theme, darkAppearance: dark)
-            LinearGradient(colors: [Color(palette.top), Color(palette.bottom)], startPoint: .top, endPoint: .bottom)
+                darkAppearance: systemDark
+            ) ?? SpaceThemePalette(theme: space.theme, darkAppearance: space.theme.appearance.isDark(systemDark: systemDark))
+            SpaceThemeFill(palette: palette)
         }
         .animation((pager?.isSwipeDriven ?? false) ? nil : .easeInOut(duration: 0.3), value: space.theme)
         .animation((pager?.isSwipeDriven ?? false) ? nil : .easeInOut(duration: 0.3), value: space.id)
+    }
+}
+
+/// A theme palette drawn: its stops (top to bottom for one colour, corner
+/// to corner for a gradient) under procedural grain (Arc draws its
+/// `grain` texture with Metal, DESIGN-TOKENS §2.2; this tile is generated).
+struct SpaceThemeFill: View {
+    let palette: SpaceThemePalette
+    var diagonalStart: UnitPoint = .topLeading
+    var diagonalEnd: UnitPoint = .bottomTrailing
+
+    var body: some View {
+        let colors = palette.colors.map { Color($0) }
+        LinearGradient(colors: colors,
+                       startPoint: palette.isDiagonal ? diagonalStart : .top,
+                       endPoint: palette.isDiagonal ? diagonalEnd : .bottom)
+            .overlay {
+                if palette.noise > 0 {
+                    Image(nsImage: GrainTexture.tile)
+                        .resizable(resizingMode: .tile)
+                        .blendMode(.overlay)
+                        .opacity(min(palette.noise, 1) * 0.9)
+                        .allowsHitTesting(false)
+                }
+            }
+    }
+}
+
+/// A 128-point tile of monochrome noise, the same on every launch.
+enum GrainTexture {
+    static let tile: NSImage = {
+        let side = 128
+        var generator = SplitMix64(seed: 0x5EED_A7C0)
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        for index in 0 ..< side * side {
+            let value = UInt8(truncatingIfNeeded: generator.next() >> 56)
+            pixels[index * 4] = value
+            pixels[index * 4 + 1] = value
+            pixels[index * 4 + 2] = value
+            pixels[index * 4 + 3] = 255
+        }
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8,
+                                   samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                   bytesPerRow: side * 4, bitsPerPixel: 32)!
+        pixels.withUnsafeBufferPointer { buffer in
+            rep.bitmapData!.update(from: buffer.baseAddress!, count: buffer.count)
+        }
+        let image = NSImage(size: NSSize(width: side, height: side))
+        image.addRepresentation(rep)
+        return image
+    }()
+
+    struct SplitMix64 {
+        var state: UInt64
+        init(seed: UInt64) { state = seed }
+        mutating func next() -> UInt64 {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return z ^ (z >> 31)
+        }
+    }
+}
+
+/// The Mac's own appearance, whatever a window was set to. `colorScheme`
+/// is passed so SwiftUI redraws when it changes.
+enum SystemAppearance {
+    static func isDark(_ colorScheme: ColorScheme) -> Bool {
+        _ = colorScheme
+        return NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+}
+
+/// Sets its window's appearance from the shown space (nil follows the Mac).
+struct WindowAppearanceSetter: NSViewRepresentable {
+    let appearance: SpaceAppearance
+
+    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        let target: NSAppearance? = switch appearance {
+        case .automatic: nil
+        case .light: NSAppearance(named: .aqua)
+        case .dark: NSAppearance(named: .darkAqua)
+        }
+        DispatchQueue.main.async {
+            guard let window = nsView.window, window.appearance?.name != target?.name else { return }
+            window.appearance = target
+        }
     }
 }
 

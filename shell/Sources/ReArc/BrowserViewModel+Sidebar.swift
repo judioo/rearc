@@ -526,3 +526,14 @@ extension BrowserViewModel {
         }
     }
 }
+
+extension BrowserViewModel {
+    /// Spaces > Appearance: the active space's light or dark look (synced
+    /// with its style).
+    func setSpaceAppearance(_ appearance: SpaceAppearance, spaceID: Space.ID? = nil) {
+        let id = spaceID ?? store.activeSpaceID
+        guard var theme = store.space(withID: id)?.theme else { return }
+        theme.appearance = appearance
+        store.setSpaceTheme(id, theme: theme)
+    }
+}

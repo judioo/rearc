@@ -149,6 +149,11 @@ enum ShellMenus {
                 ShellMenuItem("New Space…") { model.beginSpaceCreation() },
                 ShellMenuItem("Rename Space…") { model.beginRename(.space(model.store.activeSpaceID)) },
                 ShellMenuItem("Edit Theme and Icon…") { model.spaceEditorID = model.store.activeSpaceID },
+            ],
+            SpaceAppearance.allCases.map { appearance in
+                ShellMenuItem("Appearance: \(appearance.title)") { model.setSpaceAppearance(appearance) }
+            },
+            [
                 ShellMenuItem("Move Space Left") { model.moveActiveSpace(by: -1) },
                 ShellMenuItem("Move Space Right") { model.moveActiveSpace(by: 1) },
                 ShellMenuItem("Delete Space…") {

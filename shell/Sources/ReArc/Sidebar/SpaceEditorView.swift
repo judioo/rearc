@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 import SidebarModel
 
-/// Edit Space sheet: name, theme color (Arc style editor swatch pads plus a
-/// custom color well, SIDEBAR-SPEC §4.6), icon (SF Symbols or an emoji) and
+/// Edit Space sheet: name, theme (Arc's style editor: colours or a
+/// gradient, grain and appearance, SIDEBAR-SPEC §4.6), icon (SF Symbols or an emoji) and
 /// profile. Changes apply live, like Arc's editor, except a profile change,
 /// which asks first; Done closes the sheet.
 struct SpaceEditorView: View {
@@ -34,28 +34,10 @@ struct SpaceEditorView: View {
                 profileRow(space)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Theme").font(.headline)
-                ForEach(SpaceTheme.editorPalette.indices, id: \.self) { row in
-                    HStack(spacing: 6) {
-                        ForEach(SpaceTheme.editorPalette[row], id: \.self) { theme in
-                            swatch(theme, selected: space?.theme == theme)
-                        }
-                    }
-                }
-                ColorPicker("Custom color", selection: Binding(
-                    get: { color(space?.theme ?? .default) },
-                    set: { newValue in
-                        guard let rgb = NSColor(newValue).usingColorSpace(.sRGB) else { return }
-                        store.setSpaceTheme(spaceID, theme: SpaceTheme(
-                            red: Double(rgb.redComponent),
-                            green: Double(rgb.greenComponent),
-                            blue: Double(rgb.blueComponent)
-                        ))
-                    }
-                ), supportsOpacity: false)
-                .padding(.top, 4)
-            }
+            SpaceStyleEditor(theme: Binding(
+                get: { model.store.space(withID: spaceID)?.theme ?? .default },
+                set: { model.store.setSpaceTheme(spaceID, theme: $0) }
+            ))
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Icon").font(.headline)
@@ -140,16 +122,6 @@ struct SpaceEditorView: View {
 
     private func color(_ theme: SpaceTheme) -> Color {
         Color(red: theme.red, green: theme.green, blue: theme.blue)
-    }
-
-    private func swatch(_ theme: SpaceTheme, selected: Bool) -> some View {
-        Button { model.store.setSpaceTheme(spaceID, theme: theme) } label: {
-            Circle()
-                .fill(color(theme))
-                .frame(width: 26, height: 26)
-                .overlay(Circle().strokeBorder(Color.primary.opacity(selected ? 0.9 : 0.12), lineWidth: selected ? 2 : 1))
-        }
-        .buttonStyle(.plain)
     }
 
     private func commitName() {
