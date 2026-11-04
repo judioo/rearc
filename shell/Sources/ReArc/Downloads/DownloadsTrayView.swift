@@ -71,6 +71,12 @@ struct DownloadsTrayView: View {
                 Menu {
                     Button("Show Download Folder") { downloads.revealDirectory() }
                     Button("Change Download Folder…") { downloads.chooseDirectory() }
+                    Divider()
+                    Toggle("Ask Where to Save Each File", isOn: Binding(
+                        get: { downloads.askWhereToSave },
+                        set: { downloads.askWhereToSave = $0 }
+                    ))
+                    .disabled(!downloads.canAskWhereToSave)
                 } label: {
                     Label(downloads.directory.lastPathComponent, systemImage: "folder")
                         .font(.caption)

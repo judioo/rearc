@@ -14,6 +14,12 @@ protocol DownloadBackend: AnyObject {
     func perform(_ action: DownloadAction, id: String) -> Bool
     /// The default download directory changed.
     func directoryChanged(_ directory: URL)
+    /// "Ask where to save each file" changed.
+    func askWhereToSaveChanged(_ ask: Bool)
+}
+
+extension DownloadBackend {
+    func askWhereToSaveChanged(_ ask: Bool) {}
 }
 
 /// The downloads tray's model, shared by every window: the recent list
@@ -25,6 +31,17 @@ protocol DownloadBackend: AnyObject {
 final class DownloadsController {
     private(set) var list: DownloadList
     private(set) var directory: URL
+    /// Each download asks for its location in a save panel (sheet on the
+    /// page's window) instead of going to `directory`.
+    var askWhereToSave: Bool {
+        didSet {
+            guard askWhereToSave != oldValue else { return }
+            chromium?.askWhereToSaveChanged(askWhereToSave)
+            scheduleSave(immediately: true)
+        }
+    }
+    /// False when the running engine cannot ask (Chromium before ABI 1.19).
+    var canAskWhereToSave = true
     /// Shown in the key browser window's sidebar.
     var isTrayPresented = false
     /// Bumped when a new download starts (the tray button pulses).
@@ -33,7 +50,10 @@ final class DownloadsController {
     @ObservationIgnored let webKit = WebKitDownloadCenter()
     /// Chromium's backend when the engine has `downloads` (ABI 1.17).
     @ObservationIgnored weak var chromium: DownloadBackend? {
-        didSet { chromium?.directoryChanged(directory) }
+        didSet {
+            chromium?.directoryChanged(directory)
+            chromium?.askWhereToSaveChanged(askWhereToSave)
+        }
     }
     /// Shows chrome://downloads (keep-dangerous flow); nil when unavailable.
     @ObservationIgnored var reviewDangerousPage: (() -> Void)?
@@ -57,6 +77,7 @@ final class DownloadsController {
         list.trim()
         self.list = list
         directory = contents.directory.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? Self.defaultDirectory
+        askWhereToSave = contents.askWhereToSave ?? false
         webKit.controller = self
     }
 
@@ -166,7 +187,7 @@ final class DownloadsController {
         var trimmed = list
         trimmed.trim()
         do {
-            try DownloadListFile.save(.init(directory: directory.path, list: trimmed), to: fileURL)
+            try DownloadListFile.save(.init(directory: directory.path, askWhereToSave: askWhereToSave, list: trimmed), to: fileURL)
         } catch {
             FileHandle.standardError.write(Data("[ReArc] could not save \(fileURL.lastPathComponent): \(error.localizedDescription)\n".utf8))
         }

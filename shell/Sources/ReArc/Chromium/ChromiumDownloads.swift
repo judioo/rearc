@@ -1,5 +1,5 @@
 #if REARC_CHROMIUM
-import Foundation
+import AppKit
 import ReArcEngine
 import SidebarModel
 
@@ -21,11 +21,42 @@ final class ChromiumDownloadBackend: DownloadBackend {
         self.controller = controller
     }
 
+    /// Save panels for "Ask where to save" requests with no live tab to show them.
+    private var savePanels: [UInt64: FilePanelHandle] = [:]
+    private var savesPending: Set<UInt64> = []
+    var filePanels: FilePanelPresenting = SystemFilePanelPresenter()
+
     /// Connects the runtime's download events and directory to `controller`.
     func install() {
         guard runtime.capabilities.downloads, let controller else { return }
         runtime.onDownloadEvent = { [weak self] in self?.handle($0) }
+        controller.canAskWhereToSave = runtime.capabilities.downloadSavePrompt
+        if runtime.capabilities.downloadSavePrompt {
+            runtime.onDownloadSaveRequest = { [weak self] in self?.presentSavePanel($0) }
+            runtime.onDownloadSaveCancelled = { [weak self] id in
+                guard let self, self.savesPending.remove(id) != nil else { return }
+                self.savePanels.removeValue(forKey: id)?.close()
+            }
+        }
         controller.chromium = self
+    }
+
+    /// Policy prompt 1 (ABI 1.19): Chromium asks for the path through the
+    /// file chooser channel; the panel confirms replacing an existing file.
+    func askWhereToSaveChanged(_ ask: Bool) {
+        runtime.asksWhereToSaveDownloads = ask
+    }
+
+    private func presentSavePanel(_ event: ChromiumFileChooserEvent) {
+        let id = event.identity.requestID
+        savesPending.insert(id)
+        let handle = filePanels.present(event.request, in: NSApp.keyWindow) { [weak self] urls in
+            guard let self, self.savesPending.remove(id) != nil else { return }
+            self.savePanels[id] = nil
+            let paths = urls.flatMap { FileChooserReply.validPaths($0.map(\.path), mode: .save) }
+            self.runtime.respondFileChooser(id, paths: paths)
+        }
+        if savesPending.contains(id), let handle { savePanels[id] = handle }
     }
 
     func handle(_ download: ChromiumDownloadEvent) {

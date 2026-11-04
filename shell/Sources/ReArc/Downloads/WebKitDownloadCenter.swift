@@ -11,6 +11,8 @@ import WebKit
 /// carry a danger state. Finished files get the quarantine attribute.
 final class WebKitDownloadCenter: NSObject, DownloadBackend {
     weak var controller: DownloadsController?
+    /// "Ask where to save": the save panel, as a sheet on the downloading page's window.
+    var filePanels: FilePanelPresenting = SystemFilePanelPresenter()
 
     private struct Item {
         var download: WKDownload?
@@ -174,13 +176,36 @@ extension WebKitDownloadCenter: WKDownloadDelegate {
         suggestedFilename: String,
         completionHandler: @escaping (URL?) -> Void
     ) {
-        guard let id = id(for: download), var item = items[id], let directory = controller?.directory else {
+        guard let id = id(for: download), let controller, items[id] != nil else {
             return completionHandler(nil)
         }
+        let directory = controller.directory
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let destination = DownloadFormat.uniqueDestination(for: suggestedFilename, in: directory) {
-            FileManager.default.fileExists(atPath: $0.path)
+        guard controller.askWhereToSave else {
+            let destination = DownloadFormat.uniqueDestination(for: suggestedFilename, in: directory) {
+                FileManager.default.fileExists(atPath: $0.path)
+            }
+            return start(id, at: destination, response: response, completionHandler: completionHandler)
         }
+        let request = FileChooserRequest(id: 0, mode: .save, defaultPath: directory.appendingPathComponent(suggestedFilename).path)
+        _ = filePanels.present(request, in: download.webView?.window) { [weak self] urls in
+            guard let self else { return completionHandler(nil) }
+            guard let destination = urls?.first else {
+                // Cancelled in the panel: the download never starts and leaves the tray.
+                completionHandler(nil)
+                self.suppressedFailures.insert(id)
+                self.items[id]?.download = nil
+                self.controller?.perform(.remove, on: id)
+                return
+            }
+            // The panel already confirmed replacing an existing file.
+            try? FileManager.default.removeItem(at: destination)
+            self.start(id, at: destination, response: response, completionHandler: completionHandler)
+        }
+    }
+
+    private func start(_ id: String, at destination: URL, response: URLResponse, completionHandler: @escaping (URL?) -> Void) {
+        guard var item = items[id] else { return completionHandler(nil) }
         item.targetPath = destination.path
         item.mimeType = response.mimeType ?? ""
         if response.expectedContentLength > 0 { item.total = response.expectedContentLength }
