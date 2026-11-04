@@ -200,6 +200,8 @@ final class BrowserViewModel {
     private var didRestoreLittleArcWindows = false
 
     var boostEditorDraftByTab: [Tab.ID: BoostEditorDraft] = [:]
+    /// The legacy (CSS and JavaScript) boost open in its editor sheet.
+    var legacyBoostEditorID: UUID?
     var boostSessionApplyByTab: [Tab.ID: BoostSessionApplyMap] = [:]
     var lastPickedSnapshotByTab: [Tab.ID: PickedElementSnapshot] = [:]
     var boostSelectorFingerprintByTab: [Tab.ID: BoostSelectorFingerprint] = [:]
@@ -1433,7 +1435,11 @@ final class BrowserViewModel {
             syncAllTabBoosts()
             openBoostEditor(packageID: created.manifest.id, startPicker: true)
         case .editBoost(let packageID):
-            openBoostEditor(packageID: packageID, startPicker: false)
+            editBoost(packageID)
+        case .newLegacyBoost:
+            return newLegacyBoost()
+        case .importBoosts:
+            BoostFilePanels.importBoosts(model: self)
         case .pickElementToEdit:
             if boostEditorDraft != nil {
                 startBoostPicker()

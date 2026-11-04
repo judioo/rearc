@@ -210,6 +210,14 @@ struct BrowserView: View {
             model.prepareForQuit()
         }
         .sheet(isPresented: Binding(
+            get: { model.legacyBoostEditorID != nil && isKeyWindowSheetOwner },
+            set: { if !$0 { model.legacyBoostEditorID = nil } }
+        )) {
+            if let id = model.legacyBoostEditorID {
+                LegacyBoostEditorView(model: model, packageID: id)
+            }
+        }
+        .sheet(isPresented: Binding(
             get: { model.spaceEditorID != nil },
             set: { if !$0 { model.spaceEditorID = nil } }
         )) {

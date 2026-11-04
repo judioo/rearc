@@ -91,3 +91,78 @@ extension BrowserViewModel {
         openInNewTab(url)
     }
 }
+
+// MARK: - Legacy boosts and boost files
+
+/// New Legacy Boost (Advanced) and its CSS and JavaScript editor, and
+/// boost files (Export…, Import…). Arc shares boosts as links to its own
+/// server (BOOSTS §5); ReArc has no server, so a boost travels as a file.
+extension BrowserViewModel {
+
+    /// A legacy boost for the page on screen, open in its editor.
+    @discardableResult
+    func newLegacyBoost() -> String? {
+        guard let tab = store.selectedTab, BoostScopeMatcher.urlIsEligibleForBoosts(tab.url) else {
+            return "Open a website to boost first"
+        }
+        let host = tab.url.host() ?? "site"
+        guard let created = store.createLegacyBoost(name: "Legacy Boost for \(host)", pageURL: tab.url) else {
+            return "Could not create the boost"
+        }
+        syncAllTabBoosts()
+        closeLibrary()
+        legacyBoostEditorID = created.manifest.id
+        return nil
+    }
+
+    /// Edit opens the visual editor for a style boost and the code editor
+    /// for a legacy one.
+    func editBoost(_ packageID: UUID) {
+        if store.boostLibrary().package(id: packageID)?.scriptBoost != nil {
+            legacyBoostEditorID = packageID
+        } else {
+            editBoostFromLibrary(packageID)
+        }
+    }
+
+    /// Saves the code editor; returns a message when the code is refused.
+    func saveLegacyBoost(_ packageID: UUID, css: String, js: String) -> String? {
+        let errors = store.updateBoostScript(packageID: packageID, css: css, js: js)
+        guard errors.isEmpty else {
+            if errors.contains(.remoteImportInCSS) || errors.contains(.remoteScriptSourceInJS) {
+                return "Boosts cannot load files from the web."
+            }
+            if errors.contains(.cssTooLarge) || errors.contains(.jsTooLarge) { return "The boost is too large." }
+            return "The boost could not be saved."
+        }
+        syncAllTabBoosts()
+        return nil
+    }
+
+    func boostFileData(_ packageID: UUID) -> Data? {
+        store.boostLibrary().package(id: packageID).flatMap { try? BoostInterchange.exportJSON($0) }
+    }
+
+    /// Adds the boosts in `urls`; a script boost arrives turned off with its
+    /// script not allowed. Returns one message per file that was refused.
+    @discardableResult
+    func importBoostFiles(_ urls: [URL]) -> [String] {
+        var problems: [String] = []
+        for url in urls {
+            guard let data = try? Data(contentsOf: url) else {
+                problems.append("\(url.lastPathComponent): could not be read.")
+                continue
+            }
+            switch BoostInterchange.importJSON(data) {
+            case .success(let package):
+                if store.importBoostPackage(package) != nil {
+                    problems.append("\(url.lastPathComponent): could not be added.")
+                }
+            case .failure(let error):
+                problems.append("\(url.lastPathComponent): \(BoostInterchange.describe(error))")
+            }
+        }
+        syncAllTabBoosts()
+        return problems
+    }
+}

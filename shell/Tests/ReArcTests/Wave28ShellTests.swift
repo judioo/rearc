@@ -100,4 +100,57 @@ final class Wave28ShellTests: XCTestCase {
         XCTAssertNil(model.executeCommand(.setSpaceAppearance(.light), commandID: nil))
         XCTAssertEqual(model.store.activeSpace.theme.appearance, .light)
     }
+
+    // MARK: Boosts v2
+
+    func testVisualEditorZapsOnPickAndSavesIntoTheStylesheet() throws {
+        let model = makeModel()
+        let tab = model.store.addTab(kind: .today, title: "Site", url: URL(string: "https://boost.test/page")!)
+        model.store.selectTab(tab.id)
+        model.newBoost()
+        let draft = try XCTUnwrap(model.boostEditorDraft)
+        model.startBoostPicker(zap: true)
+        XCTAssertTrue(model.boostEditorDraft?.zapOnPick == true)
+        let descriptor = ElementDescriptor(tag: "div", id: "promo", classes: [], attrs: [:], structuralPath: ["body"])
+        model.handleBoostPick(PickedElementSnapshot(descriptor: descriptor, bounds: ElementBounds(x: 0, y: 0, width: 10, height: 10),
+                                                    viewportWidth: 100, viewportHeight: 100))
+        XCTAssertEqual(model.boostEditorDraft?.visual.zaps.count, 1, "the pick zapped the element")
+        XCTAssertFalse(model.boostEditorDraft?.zapOnPick ?? true)
+        model.updateBoostVisual { $0.tint = BoostTint(hue: 0.3) }
+        model.boostEditorCSSChanged("h1 { color: red; }")
+        model.saveBoostEditor()
+        let css = try XCTUnwrap(model.store.boostLibrary().package(id: draft.packageID)?.styleBoost?.css)
+        let parsed = BoostVisualStyle.parse(css)
+        XCTAssertEqual(parsed.style.tint?.hue ?? 0, 0.3, accuracy: 1e-9)
+        XCTAssertEqual(parsed.style.zaps.count, 1)
+        XCTAssertEqual(parsed.customCSS, "h1 { color: red; }")
+    }
+
+    func testLegacyBoostAndBoostFiles() throws {
+        let model = makeModel()
+        XCTAssertEqual(model.newLegacyBoost(), "Open a website to boost first")
+        let tab = model.store.addTab(kind: .today, title: "Site", url: URL(string: "https://legacy.test/")!)
+        model.store.selectTab(tab.id)
+        XCTAssertNil(model.executeCommand(.newLegacyBoost, commandID: nil))
+        let id = try XCTUnwrap(model.legacyBoostEditorID)
+        XCTAssertNil(model.saveLegacyBoost(id, css: "body { margin: 0 }", js: "document.body.dataset.boosted = '1'"))
+        XCTAssertEqual(model.saveLegacyBoost(id, css: "@import url(https://x.test/a.css);", js: "1"), "Boosts cannot load files from the web.")
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-w28-boosts-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let good = directory.appendingPathComponent("good.rearcboost"), bad = directory.appendingPathComponent("bad.rearcboost")
+        try XCTUnwrap(model.boostFileData(id)).write(to: good)
+        try Data("{}".utf8).write(to: bad)
+        let before = model.store.boostLibrary().packages.count
+        let problems = model.importBoostFiles([good, bad])
+        XCTAssertEqual(problems, ["bad.rearcboost: This file could not be read as a boost."])
+        XCTAssertEqual(model.store.boostLibrary().packages.count, before + 1)
+        let imported = try XCTUnwrap(model.store.boostLibrary().packages.last)
+        XCTAssertEqual(model.store.boostLibrary().installation(for: imported.manifest.id)?.enabled, false, "script boosts arrive off")
+
+        model.legacyBoostEditorID = nil
+        model.editBoost(imported.manifest.id)
+        XCTAssertEqual(model.legacyBoostEditorID, imported.manifest.id, "Edit opens the code editor for a script boost")
+    }
 }

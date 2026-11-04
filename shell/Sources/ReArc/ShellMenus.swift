@@ -199,6 +199,8 @@ enum ShellMenus {
             ],
             [
                 ShellMenuItem("New Boost") { model.newBoost() },
+                ShellMenuItem("New Legacy Boost (Advanced)") { model.newLegacyBoost() },
+                ShellMenuItem("Import Boosts…") { BoostFilePanels.importBoosts(model: model) },
             ],
         ]
     }

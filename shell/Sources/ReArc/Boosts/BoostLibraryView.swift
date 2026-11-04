@@ -28,6 +28,18 @@ struct BoostLibraryView: View {
                 ))
                 .toggleStyle(.switch)
                 .help("Turn every boost in this profile on or off")
+                Menu {
+                    Button("Import Boosts…") { BoostFilePanels.importBoosts(model: model) }
+                    Button("New Legacy Boost (Advanced)") {
+                        if let error = model.newLegacyBoost() { createError = error; isCreating = true }
+                    }
+                    .disabled(model.store.selectedTab.map { !BoostScopeMatcher.urlIsEligibleForBoosts($0.url) } ?? true)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Import boost files, or a CSS and JavaScript boost for this page")
                 Button {
                     newName = ""
                     newSite = model.store.selectedTab.flatMap { BoostScopeMatcher.defaultRule(forPage: $0.url)?.host } ?? ""
@@ -62,7 +74,7 @@ struct BoostLibraryView: View {
                         masterEnabled: model.boostsMasterEnabled,
                         onToggle: { model.setBoostEnabled(row.id, enabled: $0) },
                         onAllowScript: { model.setBoostScriptAllowed(row.id, allowed: $0) },
-                        onEdit: { model.editBoostFromLibrary(row.id) },
+                        onEdit: { model.editBoost(row.id) },
                         onOpenSite: { model.openBoostSite(row.id) }
                     )
                     .contextMenu { menu(for: row) }
@@ -111,8 +123,8 @@ struct BoostLibraryView: View {
 
     @ViewBuilder
     private func menu(for row: BoostLibraryRow) -> some View {
-        Button("Edit on This Page") { model.editBoostFromLibrary(row.id) }
-            .disabled(!row.matchesCurrentPage || !row.hasStyle)
+        Button(row.hasStyle ? "Edit on This Page" : "Edit Code…") { model.editBoost(row.id) }
+            .disabled(row.hasStyle && !row.matchesCurrentPage)
         Button("Open Site") { model.openBoostSite(row.id) }
             .disabled(row.siteURL == nil)
         Divider()
@@ -121,6 +133,7 @@ struct BoostLibraryView: View {
             renamingID = row.id
         }
         Button("Duplicate") { model.duplicateBoost(row.id) }
+        Button("Export…") { BoostFilePanels.export(row.id, model: model) }
         Divider()
         Button("Delete…", role: .destructive) { deletingID = row.id }
     }
@@ -183,7 +196,7 @@ private struct BoostLibraryRowView: View {
             }
             Spacer(minLength: 8)
             if isHovering {
-                if row.matchesCurrentPage, row.hasStyle {
+                if (row.matchesCurrentPage && row.hasStyle) || !row.hasStyle {
                     Button("Edit", action: onEdit).controlSize(.small)
                 } else if row.siteURL != nil {
                     Button("Open Site", action: onOpenSite).controlSize(.small)

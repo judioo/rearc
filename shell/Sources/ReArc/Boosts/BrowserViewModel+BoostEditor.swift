@@ -33,10 +33,11 @@ extension BrowserViewModel {
         boostEditorEngine(for: tab)?.setBoostPickerMode(draft.pickerActive)
     }
 
-    func startBoostPicker() {
+    func startBoostPicker(zap: Bool = false) {
         guard let tab = store.selectedTab else { return }
         guard var draft = boostEditorDraftByTab[tab.id] else { return }
         draft.pickerActive = true
+        draft.zapOnPick = zap
         boostEditorDraftByTab[tab.id] = draft
         boostEditorEngine(for: tab)?.setBoostPickerMode(true)
     }
@@ -49,7 +50,12 @@ extension BrowserViewModel {
         draft.selectedSelector = choices.first?.candidate.css
         draft.pickerActive = false
         draft.selectorDead = false
+        // Zap mode (Arc `appendZap`): the element is hidden at once, previewed live.
+        let zapped = draft.zapOnPick ? draft.selectedSelector : nil
+        if let zapped { draft.updateVisual { $0.appendZap(zapped) } }
+        draft.zapOnPick = false
         boostEditorDraftByTab[tab.id] = draft
+        if zapped != nil { pushBoostEditorLivePreview(for: tab) }
         lastPickedSnapshotByTab[tab.id] = snapshot
         boostSelectorFingerprintByTab[tab.id] = BoostSelectorFingerprint.from(snapshot: snapshot)
         boostEditorEngine(for: tab)?.setBoostPickerMode(false)
@@ -69,11 +75,25 @@ extension BrowserViewModel {
         }
     }
 
+    /// The drawer's CSS field: the hand-written CSS after the visual block.
     func boostEditorCSSChanged(_ text: String) {
         guard let tab = store.selectedTab else { return }
-        guard var draft = boostEditorDraftByTab[tab.id] else { return }
-        draft.draftCSS = text
+        guard var draft = boostEditorDraftByTab[tab.id], draft.customCSS != text else { return }
+        draft.setCustomCSS(text)
         boostEditorDraftByTab[tab.id] = draft
+        schedulePreview(for: tab)
+    }
+
+    /// Colour, dark mode, font, text size or a zap changed (Boosts v2).
+    func updateBoostVisual(_ change: (inout BoostVisualStyle) -> Void) {
+        guard let tab = store.selectedTab else { return }
+        guard var draft = boostEditorDraftByTab[tab.id] else { return }
+        draft.updateVisual(change)
+        boostEditorDraftByTab[tab.id] = draft
+        schedulePreview(for: tab)
+    }
+
+    private func schedulePreview(for tab: Tab) {
         boostLiveDebounceWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             self?.pushBoostEditorLivePreview(for: tab)
@@ -82,12 +102,16 @@ extension BrowserViewModel {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: item)
     }
 
+    /// Zaps the selected element (listed under Zaps, removable).
     func boostQuickHide() {
-        appendBoostQuickRule { sel in BoostQuickActions.hideElementRule(selector: sel) }
+        guard let selector = boostEditorDraft?.selectedSelector else { return }
+        updateBoostVisual { $0.appendZap(selector) }
     }
 
+    /// Zaps every element like the selected one.
     func boostQuickZapSimilar() {
-        appendBoostQuickRule { sel in BoostQuickActions.zapSimilarRule(selector: sel) }
+        guard let selector = boostEditorDraft?.selectedSelector else { return }
+        updateBoostVisual { $0.appendZap(BoostQuickActions.zapSimilarSelector(selector)) }
     }
 
     func boostQuickEditStyles() {
@@ -99,7 +123,7 @@ extension BrowserViewModel {
             selector: sel,
             styles: snap.computedStyles
         )
-        draft.draftCSS = BoostQuickActions.appendRule(to: draft.draftCSS, rule: rule)
+        draft.setCustomCSS(BoostQuickActions.appendRule(to: draft.customCSS, rule: rule))
         boostEditorDraftByTab[tab.id] = draft
         pushBoostEditorLivePreview(for: tab)
     }
@@ -175,16 +199,6 @@ extension BrowserViewModel {
         }
     }
 
-    private func appendBoostQuickRule(_ maker: (String) -> String) {
-        guard let tab = store.selectedTab else { return }
-        guard var draft = boostEditorDraftByTab[tab.id] else { return }
-        guard let sel = draft.selectedSelector else { return }
-        let rule = maker(sel)
-        draft.draftCSS = BoostQuickActions.appendRule(to: draft.draftCSS, rule: rule)
-        boostEditorDraftByTab[tab.id] = draft
-        pushBoostEditorLivePreview(for: tab)
-    }
-
     private func closeBoostEditor(revert: Bool) {
         guard let tab = store.selectedTab else { return }
         if revert {
@@ -226,6 +240,7 @@ extension BrowserViewModel {
         editor.onBoostEditorCancel = { [weak self, weak editor] in
             guard let self, var draft = self.boostEditorDraftByTab[tab.id] else { return }
             draft.pickerActive = false
+            draft.zapOnPick = false
             self.boostEditorDraftByTab[tab.id] = draft
             editor?.setBoostPickerMode(false)
         }
