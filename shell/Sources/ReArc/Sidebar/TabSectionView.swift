@@ -318,7 +318,8 @@ struct SectionEndDropZone: View {
             }
         }
         // Takes no room until a drag is under way, so the rows keep Arc's pitch.
-        .frame(maxWidth: .infinity, minHeight: placeholder == nil ? (draggedItemID == nil ? 0 : 10) : nil)
+        .frame(maxWidth: .infinity, minHeight: placeholder == nil ? (draggedItemID == nil ? 0 : 10) : nil,
+               maxHeight: placeholder == nil && draggedItemID == nil ? 0 : nil)
         .contentShape(Rectangle())
         .onDrop(of: SidebarURLDropLoader.acceptedTypes, delegate: EndDropDelegate(zone: self, isTargeted: $isTargeted))
     }

@@ -116,7 +116,7 @@ struct BottomBarView: View {
                 Button("Profiles…") { showingProfileList = true }
             } label: {
                 Image(systemName: "plus")
-                    .font(.system(size: 14))
+                    .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(chrome.glyph)
                     .frame(width: 18, height: 24)
                     .contentShape(Rectangle())

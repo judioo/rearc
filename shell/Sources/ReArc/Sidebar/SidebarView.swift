@@ -275,32 +275,42 @@ private struct TodayHeaderView: View {
     @Environment(\.themeChrome) private var chrome
 
     var body: some View {
-        // 8.5 pt under the last pinned row, 9.5 pt above New Tab (§4.6).
-        HStack(spacing: 6) {
+        // Arc (§4.6): the line is 7.5 pt under the last pinned row's
+        // highlight pitch and 8.5 pt above New Tab's, so the row centres sit
+        // 29 and 30 pt from it.
+        ZStack(alignment: .top) {
             SidebarDivider()
-            if !model.lastClearedTabIDs.isEmpty, !hasTabs {
-                Button("Undo Clear") { model.undoClearTodayTabs() }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                    .foregroundStyle(chrome.secondaryText)
-                    .help("Put the cleared tabs back")
-            } else if hasTabs, isHovering {
-                Button {
-                    if model.store.activeSpaceID != spaceID { model.selectSpace(spaceID) }
-                    model.clearTodayTabs()
-                } label: {
-                    Label("Clear", systemImage: "arrow.down")
-                        .labelStyle(.titleAndIcon)
+                .padding(.top, 7.5)
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
+                if !model.lastClearedTabIDs.isEmpty, !hasTabs {
+                    Button("Undo Clear") { model.undoClearTodayTabs() }
+                        .buttonStyle(.plain)
                         .font(.caption)
-                        .foregroundStyle(isHoveringClear ? chrome.title : chrome.secondaryText)
+                        .foregroundStyle(chrome.secondaryText)
+                        .padding(.horizontal, 6)
+                        .background(Color.clear)
+                        .help("Put the cleared tabs back")
+                } else if hasTabs, isHovering {
+                    Button {
+                        if model.store.activeSpaceID != spaceID { model.selectSpace(spaceID) }
+                        model.clearTodayTabs()
+                    } label: {
+                        Label("Clear", systemImage: "arrow.down")
+                            .labelStyle(.titleAndIcon)
+                            .font(.caption)
+                            .foregroundStyle(isHoveringClear ? chrome.title : chrome.secondaryText)
+                            .padding(.horizontal, 6)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 4)
+                    .help("Clear Unpinned Tabs: archive every Today tab in this space")
+                    .onHover { isHoveringClear = $0 }
                 }
-                .buttonStyle(.plain)
-                .padding(.trailing, 10)
-                .help("Clear Unpinned Tabs: archive every Today tab in this space")
-                .onHover { isHoveringClear = $0 }
             }
+            .frame(height: 17)
         }
-        .frame(height: 19)
+        .frame(height: 17)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
     }

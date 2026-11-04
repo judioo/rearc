@@ -57,7 +57,7 @@ struct FolderRowView<Menu: View>: View {
     var body: some View {
         HStack(spacing: SidebarMetrics.iconToText - 1.5) {
             Image(systemName: "folder")
-                .font(.system(size: 15))
+                .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(chrome.accent)
                 .frame(width: SidebarMetrics.iconSize + 3, height: SidebarMetrics.iconSize + 3)
                 .padding(.leading, -1.5)

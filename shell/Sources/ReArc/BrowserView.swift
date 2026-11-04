@@ -467,8 +467,9 @@ struct BrowserView: View {
     }
 }
 
-/// The card's shadow without its shape: black 22 %, σ ≈ 3.5, 2.5 pt down
-/// (§4.3). The shape itself is cut out, so the card's translucent fill is
+/// The card's shadow without its shape: black 22 %, radius 3, 1.25 pt down,
+/// fitted pixel by pixel to the capture (THEMES.md §4.3 estimated σ 3.5,
+/// y 2.5). The shape itself is cut out, so the card's translucent fill is
 /// not darkened by the shadow underneath it.
 private struct CardShadow: View {
     let radius: CGFloat
@@ -477,7 +478,7 @@ private struct CardShadow: View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         shape
             .fill(Color.black)
-            .shadow(color: .black.opacity(0.22), radius: 3.5, x: 0, y: 2.5)
+            .shadow(color: .black.opacity(0.22), radius: 3, x: 0, y: 1.25)
             .mask {
                 Rectangle()
                     .padding(-24)
