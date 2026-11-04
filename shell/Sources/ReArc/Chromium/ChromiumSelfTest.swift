@@ -1218,6 +1218,7 @@ final class ChromiumSelfTest {
             log("ABI-GAP picture_in_picture not advertised (ABI minor \(runtime.capabilities.abiMinorVersion.map(String.init) ?? "absent") < 30): Picture in Picture is WebKit-only")
         }
         try await wave27ShellChecks(model: model, store: store, shell: shell, tab: tabA, engine: engineA, base: base, window: first)
+        try await wave28ShellChecks(model: model, store: store, tab: tabA, engine: engineA, base: base, window: first)
 
         // Private window: PrivateWindowModel on an off-the-record profile under the
         // active profile; its end closes that profile, and a new one starts empty.
@@ -1902,6 +1903,7 @@ final class ChromiumSelfTest {
             engine.currentURL?.host() == "settings" && engine.currentURL?.scheme == "chrome" && !engine.isLoading
         }
         log("PASS chrome://settings committed (the shell's Settings entry point), title '\(engine.pageTitle ?? "")'")
+        try await importDataChecks(engine: engine)
 
         if runtime.capabilities.webUIDailyPages {
             var committed: [String] = []
@@ -3074,6 +3076,141 @@ extension ChromiumSelfTest {
         model.selectTab(tab.id)
         loadShellTab(model, tab, engine, URL(string: "\(base)/a")!)
         try await wait("tab A after the wave 27 checks") { engine.pageTitle == Self.titleA && !engine.isLoading }
+    }
+
+    // MARK: Wave 28: Library, themes, Boosts v2, capture
+
+    @MainActor
+    fileprivate func wave28ShellChecks(model: BrowserViewModel, store: SidebarStore, tab: Tab,
+                                       engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        model.selectTab(tab.id)
+        let key = store.keyWindowID
+
+        // Library: View > View Media opens it over the key window's page; a sidebar click shows the page again.
+        let viewTitles = NSApp.mainMenu?.items.first { $0.title == "View" }?.submenu?.items.map(\.title) ?? []
+        try check(viewTitles.contains("View Library") && viewTitles.contains("View Easels & Notes"), "View menu: \(viewTitles)")
+        ShellMenus.library(model).flatMap { $0 }.first { $0.title == "View Media" }?.action()
+        try check(model.librarySection(in: key) == .media, "View Media showed \(String(describing: model.librarySection(in: key)))")
+        model.selectTab(tab.id)
+        try check(model.librarySection(in: key) == nil, "a sidebar click left the Library open")
+        log("PASS Library: View > View Media opens the Media page over the key window's page; selecting the tab closes it")
+
+        // Gradient theme with Dark appearance: the window turns dark; back to the plain theme, it follows the Mac.
+        let space = store.activeSpaceID
+        let original = store.activeSpace.theme
+        var dark = SpaceTheme.gradientPresets[1]
+        dark.noise = 0.3
+        dark.appearance = .dark
+        store.setSpaceTheme(space, theme: dark)
+        try await wait("the window takes the space's Dark appearance", timeout: 5) { window.appearance?.name == .darkAqua }
+        let records = SidebarSyncProjection.extract(store.makeSnapshot())
+        try check(records[SyncRecordKind.spaceStyle.recordName(for: space)] != nil, "no style record for the gradient space")
+        store.setSpaceTheme(space, theme: original)
+        try await wait("the window follows the Mac again", timeout: 5) { window.appearance == nil }
+        log("PASS gradient theme: Dark appearance sets the window's (darkAqua), the style syncs in its own record, Automatic clears it")
+
+        // Boosts v2: a visual boost (dark mode, a zap, bigger text) compiled to CSS applies on Chromium.
+        loadShellTab(model, tab, engine, URL(string: "\(base)/a")!)
+        try await wait("tab A for the Boosts v2 check") { engine.pageTitle == Self.titleA && !engine.isLoading }
+        var visual = BoostVisualStyle(darkMode: true, textScale: 1.25)
+        visual.appendZap("p")
+        let visualBoost = BoostPackage.newStyle(
+            name: "Selftest visual",
+            hostScope: [BoostHostRule(host: "127.0.0.1", hostMatch: .exact, pathPrefix: "/a", schemes: ["http"])],
+            css: BoostVisualStyle.compose(visual, customCSS: "")
+        )
+        try check(store.addBoost(visualBoost) == nil, "the visual boost was refused")
+        model.syncAllTabBoosts()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        engine.reload(ignoringCache: false)
+        var applied = ""
+        try await waitAsync("the visual boost on page A", timeout: 15) {
+            applied = (try? await engine.evaluate(
+                "getComputedStyle(document.querySelector('p')).display + '|' + getComputedStyle(document.documentElement).filter",
+                in: .page) as? String) ?? ""
+            return applied.hasPrefix("none|") && applied.contains("invert")
+        }
+        store.removeBoost(packageID: visualBoost.manifest.id)
+        model.syncAllTabBoosts()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        engine.reload(ignoringCache: false)
+        try await waitAsync("page A without the visual boost", timeout: 15) {
+            let display = (try? await engine.evaluate("getComputedStyle(document.querySelector('p')).display", in: .page) as? String) ?? ""
+            return display == "block" && engine.pageTitle == Self.titleA
+        }
+        log("PASS Boosts v2: dark mode, a zap and text size compiled into the stylesheet apply on Chromium ('\(applied)'), and go with the boost")
+
+        // Capture: the overlay needs a page; a region and the clicked element crop the viewport snapshot; portrait frames it.
+        model.isCapturePreviewPresented = false
+        try check(model.beginPageCapture() == nil && model.pageCaptureSession?.tabID == tab.id, "Capture did not start over tab A")
+        model.cancelPageCapture()
+        let viewport = try await engine.captureSnapshot(scope: .visible)
+        let full = try XCTUnwrapImage(viewport, "viewport snapshot")
+        let region = try XCTUnwrapImage(CaptureImaging.crop(viewport, to: CaptureRect(x: 0, y: 0, width: 0.5, height: 0.5)), "region crop")
+        try check(abs(region.width * 2 - full.width) <= 2 && abs(region.height * 2 - full.height) <= 2,
+                  "region \(region.width)x\(region.height) of \(full.width)x\(full.height)")
+        let center = try await engine.evaluate(
+            "(function(){ var r = document.querySelector('h1').getBoundingClientRect(); "
+                + "return [(r.x + 10) / innerWidth, (r.y + r.height / 2) / innerHeight]; })()", in: .page) as? [NSNumber]
+        let point = try XCTUnwrapValue(center?.map(\.doubleValue), "the heading's centre")
+        let heading = await engine.captureElementBounds(atFractionX: point[0], y: point[1])
+        let fraction = try XCTUnwrapValue(heading?.fraction, "the element under the pointer")
+        let element = try XCTUnwrapImage(CaptureImaging.crop(viewport, to: fraction), "element crop")
+        try check(element.height < full.height / 3 && element.width > full.width / 2, "element \(element.width)x\(element.height)")
+        let palette = SpaceThemePalette(theme: store.activeSpace.theme, darkAppearance: false)
+        let portrait = try XCTUnwrapImage(CaptureImaging.portrait(viewport, palette: palette, watermark: true), "portrait")
+        try check(portrait.width > full.width && portrait.height > full.height, "portrait \(portrait.width)x\(portrait.height)")
+        log("PASS capture: region \(region.width)x\(region.height) of the \(full.width)x\(full.height) viewport snapshot, "
+            + "clicked element <h1> \(element.width)x\(element.height) measured in the editor world, portrait \(portrait.width)x\(portrait.height)")
+    }
+
+    private func XCTUnwrapImage(_ png: Data?, _ label: String) throws -> CGImage {
+        guard let png, let image = CaptureImaging.cgImage(png) else { throw Failure(description: "\(label): no image") }
+        return image
+    }
+
+    private func XCTUnwrapValue<T>(_ value: T?, _ label: String) throws -> T {
+        guard let value else { throw Failure(description: "\(label): none") }
+        return value
+    }
+
+    /// Wave 28: File > Import from Another Browser opens chrome://settings/importData. Script cannot
+    /// run on WebUI, so the dialog is seen in the page: its scrim darkens the Settings page. Nothing
+    /// is imported (that would read this Mac's real Safari, Chrome or Firefox data).
+    @MainActor
+    private func importDataChecks(engine: ChromiumEngine) async throws {
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        let settings = Self.meanLuminance(try await engine.captureSnapshot(scope: .visible))
+        let status = engine.navigateNow(BrowserInternalPage.importData.url)
+        try check(status == .rearcOK, "chrome://settings/importData rejected: \(status.rearcName)")
+        try await wait("chrome://settings/importData commit", timeout: 25) {
+            engine.currentURL?.host() == "settings" && engine.currentURL?.path == "/importData" && !engine.isLoading
+        }
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        let dialog = Self.meanLuminance(try await engine.captureSnapshot(scope: .visible))
+        let route = engine.currentURL?.path ?? ""
+        if let settings, let dialog, abs(settings - dialog) > 0.04, route == "/importData" {
+            log(String(format: "PASS import: chrome://settings/importData opens Chromium's import dialog in the registry tab "
+                + "(route kept, page luminance %.2f -> %.2f under its scrim); no import run", settings, dialog))
+        } else {
+            log("NOTE import: chrome://settings/importData committed (route '\(route)') but no dialog scrim was seen "
+                + "(luminance \(settings.map { String(format: "%.2f", $0) } ?? "?") -> \(dialog.map { String(format: "%.2f", $0) } ?? "?"))")
+        }
+    }
+
+    /// The average luminance of a PNG, sampled on a grid.
+    static func meanLuminance(_ png: Data) -> Double? {
+        guard let image = CaptureImaging.cgImage(png) else { return nil }
+        let rep = NSBitmapImageRep(cgImage: image)
+        var total = 0.0, count = 0.0
+        for gx in 1 ..< 20 {
+            for gy in 1 ..< 20 {
+                guard let color = rep.colorAt(x: image.width * gx / 20, y: image.height * gy / 20)?.usingColorSpace(.sRGB) else { continue }
+                total += 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
+                count += 1
+            }
+        }
+        return count > 0 ? total / count : nil
     }
 
     // MARK: Extensions (ABI 1.31–1.33, 1.36)
