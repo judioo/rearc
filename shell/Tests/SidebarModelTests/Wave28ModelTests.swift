@@ -237,4 +237,100 @@ final class Wave28ModelTests: XCTestCase {
         store.setSpaceTheme(store.activeSpaceID, theme: theme)
         XCTAssertTrue(AppCommandRegistry.all(in: context).contains { $0.action == .setSpaceAppearance(.automatic) })
     }
+
+    // MARK: Boosts v2
+
+    func testVisualBoostCompilesToSafeCSSAndParsesBack() {
+        var style = BoostVisualStyle(tint: BoostTint(hue: 0.6, intensity: 0.4, harmony: .complementary),
+                                     darkMode: true, font: .family("Avenir Next"), textScale: 1.25)
+        style.appendZap(".cookie-banner")
+        style.appendZap("#promo > div:nth-of-type(2)")
+        style.appendZap(".cookie-banner")
+        style.appendZap("a { color: red }")
+        XCTAssertEqual(style.zaps, [".cookie-banner", "#promo > div:nth-of-type(2)"], "a selector zaps once; braces are refused")
+
+        let custom = "h1 { letter-spacing: 2px; }\n  /* mine */ "
+        let css = BoostVisualStyle.compose(style, customCSS: custom)
+        XCTAssertTrue(BoostSecurity.validateCSS(css, allowInStyle: true).isEmpty)
+        XCTAssertNotNil(BoostStyleCompiler.compileStylesheet(css), "every block parses")
+        XCTAssertTrue(css.contains("hsl(216, 85%, 50%)"), "hue 0.6 is 216°")
+        XCTAssertTrue(css.contains("hsl(36, 85%, 50%)"), "complementary adds 216 + 180")
+        XCTAssertTrue(css.contains("invert(1) hue-rotate(180deg)"))
+        XCTAssertTrue(css.contains("\"Avenir Next\", sans-serif"))
+        XCTAssertTrue(css.contains("font-size: 125% !important"))
+        XCTAssertTrue(css.contains(".cookie-banner {\n  display: none !important;\n}"))
+        let comment = css.split(separator: "\n")[0]
+        XCTAssertFalse(comment.contains("{") || comment.contains("}"), "the settings line holds no braces")
+
+        let parsed = BoostVisualStyle.parse(css)
+        XCTAssertEqual(parsed.style, style)
+        XCTAssertEqual(parsed.customCSS, custom, "hand-written CSS comes back exactly as typed")
+        XCTAssertEqual(BoostVisualStyle.compose(parsed.style, customCSS: parsed.customCSS), css)
+    }
+
+    func testStylesheetsWithoutTheBlockAreAllHandWritten() {
+        let legacy = "/* ReArc boost */\n.ad { display: none !important; }\n"
+        let parsed = BoostVisualStyle.parse(legacy)
+        XCTAssertTrue(parsed.style.isEmpty)
+        XCTAssertEqual(parsed.customCSS, legacy)
+        XCTAssertEqual(BoostVisualStyle.compose(BoostVisualStyle(), customCSS: legacy), legacy, "no settings, no block")
+        XCTAssertEqual(BoostVisualStyle().compiled(), "")
+    }
+
+    func testDraftEditsVisualAndCustomCSSIndependently() {
+        var draft = BoostEditorDraft(packageID: UUID(), baselineCSS: "p { color: blue; }\n")
+        draft.updateVisual { $0.darkMode = true }
+        XCTAssertTrue(draft.visual.darkMode)
+        XCTAssertEqual(draft.customCSS, "p { color: blue; }\n")
+        draft.setCustomCSS("p { color: green; }")
+        XCTAssertTrue(draft.visual.darkMode, "typing CSS keeps the settings")
+        XCTAssertTrue(draft.isDirty)
+        draft.updateVisual { $0.darkMode = false }
+        XCTAssertEqual(draft.draftCSS, "p { color: green; }")
+    }
+
+    func testTintHarmoniesFontNamesAndRanges() {
+        XCTAssertEqual(BoostTint(hue: 0.5).degrees, [180])
+        XCTAssertEqual(BoostTint(hue: 0.95, harmony: .analogous).degrees, [342, 22])
+        XCTAssertEqual(BoostTint(hue: -0.25).hue, 0.75, accuracy: 1e-9)
+        XCTAssertEqual(BoostTint(hue: 0, intensity: 7).intensity, 1)
+        XCTAssertEqual(BoostTint.namedHues.count, 8, "Arc's eight Boost colours")
+        XCTAssertEqual(BoostFontChoice.safeFamilyName(" Helvetica Neue "), "Helvetica Neue")
+        XCTAssertNil(BoostFontChoice.safeFamilyName("Evil\"; } body { x"))
+        XCTAssertNil(BoostFontChoice.safeFamilyName(""))
+        XCTAssertEqual(BoostVisualStyle(textScale: 9).textScale, 2)
+        let parsed = BoostVisualStyle.parse("/* rearc-visual-boost v1 font=family:Bad\"Name zaps=0 */\n/* /rearc-visual-boost */\n")
+        XCTAssertNil(parsed.style.font, "an unsafe family in the comment is dropped")
+    }
+
+    func testLegacyBoostsStartWithTheirScriptNotAllowedAndValidateEdits() throws {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        XCTAssertNil(store.createLegacyBoost(name: "X", pageURL: URL(string: "about:blank")!))
+        let boost = try XCTUnwrap(store.createLegacyBoost(name: "Legacy", pageURL: URL(string: "https://news.test/a")!))
+        let library = store.boostLibrary()
+        XCTAssertEqual(library.installation(for: boost.manifest.id)?.enabled, true)
+        XCTAssertEqual(library.package(id: boost.manifest.id)?.scriptBoost?.userScriptEnabled, false)
+        XCTAssertNil(library.package(id: boost.manifest.id)?.styleBoost)
+
+        XCTAssertEqual(store.updateBoostScript(packageID: boost.manifest.id, css: "", js: "s.src='https://evil.test/x.js'"),
+                       [.remoteScriptSourceInJS])
+        XCTAssertEqual(store.updateBoostScript(packageID: boost.manifest.id, css: "body { color: red }", js: "document.title = 'x'"), [])
+        let saved = try XCTUnwrap(store.boostLibrary().package(id: boost.manifest.id))
+        XCTAssertEqual(saved.scriptBoost?.js, "document.title = 'x'")
+        XCTAssertEqual(saved.manifest.version, 2)
+        XCTAssertEqual(store.updateBoostScript(packageID: UUID(), css: "", js: ""), [.emptyScriptPayload])
+    }
+
+    func testBoostFilesRoundTripAndNeverGrantScriptPermission() throws {
+        var package = BoostPackage.newScript(name: "Shared: a/b", hostScope: [BoostHostRule(host: "news.test")], js: "1")
+        package.scriptBoost?.userScriptEnabled = true
+        let data = try BoostInterchange.exportJSON(package)
+        guard case .success(let imported) = BoostInterchange.importJSON(data) else { return XCTFail("import failed") }
+        XCTAssertNotEqual(imported.manifest.id, package.manifest.id, "an import forks")
+        XCTAssertEqual(imported.scriptBoost?.userScriptEnabled, false, "the user allows the script, not the file")
+        XCTAssertFalse(BoostInterchange.defaultEnabledOnImport(imported))
+        XCTAssertEqual(BoostInterchange.suggestedFileName(for: package), "Shared- a-b.rearcboost")
+        XCTAssertEqual(BoostInterchange.describe(.unsupportedVersion), "This boost was made by a newer ReArc.")
+        guard case .failure(.decodeFailed) = BoostInterchange.importJSON(Data("nope".utf8)) else { return XCTFail() }
+    }
 }

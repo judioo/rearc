@@ -297,6 +297,8 @@ public struct BoostEditorDraft: Equatable, Sendable {
     public var candidateChoices: [RankedSelectorChoice]
     public var pickerActive: Bool
     public var selectorDead: Bool
+    /// The next pick zaps (hides) the element instead of selecting it.
+    public var zapOnPick: Bool = false
 
     public init(
         packageID: UUID,

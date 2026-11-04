@@ -37,6 +37,9 @@ public enum AppCommandAction: Equatable, Hashable {
     case printPage
     case exportPageAsPDF
     case newBoostForSite
+    /// Arc `newLegacyBoost`: a CSS and JavaScript boost for the page.
+    case newLegacyBoost
+    case importBoosts
     case manageBoosts
     case toggleBoost(UUID)
     case editBoost(UUID)
@@ -227,8 +230,11 @@ public struct AppCommand: Equatable, Identifiable {
         case .newBoostForSite:
             guard let tab = store.selectedTab else { return false }
             return BoostScopeMatcher.urlIsEligibleForBoosts(tab.url)
-        case .manageBoosts:
+        case .manageBoosts, .importBoosts:
             return true
+        case .newLegacyBoost:
+            guard let tab = store.selectedTab else { return false }
+            return BoostScopeMatcher.urlIsEligibleForBoosts(tab.url)
         case .toggleBoost, .editBoost, .pickElementToEdit:
             return store.selectedTab != nil
         case .newEasel, .newNote, .openCapturesGallery, .openLibrary:
@@ -590,6 +596,20 @@ public enum AppCommandRegistry {
                 keywords: ["captures", "screenshots", "gallery", "media", "videos", "library"],
                 minQueryLength: 2,
                 action: .openCapturesGallery
+            ),
+            AppCommand(
+                id: "new-legacy-boost",
+                title: "New Legacy Boost (Advanced)",
+                keywords: ["boost", "legacy", "advanced", "javascript", "script", "css", "code"],
+                minQueryLength: 3,
+                action: .newLegacyBoost
+            ),
+            AppCommand(
+                id: "import-boosts",
+                title: "Import Boosts…",
+                keywords: ["boost", "import", "file", "share", "install"],
+                minQueryLength: 3,
+                action: .importBoosts
             ),
             AppCommand(
                 id: "open-library",

@@ -1056,6 +1056,36 @@ public final class SidebarStore {
         return true
     }
 
+    /// New Legacy Boost (Advanced) (Arc `newLegacyBoost`, BOOSTS §1): a CSS
+    /// and JavaScript boost for the page's site. It is installed on, but its
+    /// script runs only after the user allows it.
+    @discardableResult
+    public func createLegacyBoost(name: String, pageURL: URL) -> BoostPackage? {
+        guard let rule = BoostScopeMatcher.defaultRule(forPage: pageURL) else { return nil }
+        let package = BoostPackage.newScript(name: name, hostScope: [rule], js: BoostPackage.legacyScriptTemplate, css: "")
+        guard addBoost(package, enabled: true) == nil else { return nil }
+        return package
+    }
+
+    /// Saves a legacy boost's CSS and script. Returns the validation errors,
+    /// empty on success; the user's permission to run the script stays as it was.
+    @discardableResult
+    public func updateBoostScript(packageID: UUID, css: String, js: String) -> [BoostSecurityError] {
+        var library = boostLibrary(for: activeProfileID)
+        guard var package = library.package(id: packageID), package.scriptBoost != nil,
+              let install = library.installation(for: packageID) else { return [.emptyScriptPayload] }
+        let errors = BoostSecurity.validateCSS(css, allowInStyle: false) + BoostSecurity.validateJS(js)
+        guard errors.isEmpty else { return errors }
+        guard package.scriptBoost?.css != css || package.scriptBoost?.js != js else { return [] }
+        package.scriptBoost?.css = css
+        package.scriptBoost?.js = js
+        package.manifest.updatedAt = now()
+        package.manifest.version += 1
+        library.upsertPackage(package, installation: install)
+        updateBoostLibrary(library)
+        return []
+    }
+
     @discardableResult
     public func createBoostForCurrentSite(name: String, css: String, pageURL: URL) -> BoostPackage? {
         guard let rule = BoostScopeMatcher.defaultRule(forPage: pageURL) else { return nil }

@@ -78,7 +78,33 @@ public enum BoostInterchange {
         package.manifest.createdAt = Date()
         package.manifest.updatedAt = Date()
         package.provenance = BoostProvenance(imported: true, sourceURL: sourceURL)
+        // A file cannot grant itself permission to run: the user allows it here.
+        package.scriptBoost?.userScriptEnabled = false
         return .success(package)
+    }
+
+    /// Boost files: `<name>.rearcboost`, JSON in this format.
+    public static let fileExtension = "rearcboost"
+
+    /// A file name for an exported boost: its name without path or control characters.
+    public static func suggestedFileName(for package: BoostPackage) -> String {
+        let unsafe = CharacterSet(charactersIn: "/\\:?%*|\"<>").union(.controlCharacters)
+        let name = package.manifest.name.unicodeScalars.map { unsafe.contains($0) ? "-" : String($0) }.joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
+        return (name.isEmpty ? "Boost" : name) + "." + fileExtension
+    }
+
+    public static func describe(_ error: BoostInterchangeError) -> String {
+        switch error {
+        case .invalidFormat: return "This file is not a ReArc boost."
+        case .unsupportedVersion: return "This boost was made by a newer ReArc."
+        case .decodeFailed: return "This file could not be read as a boost."
+        case .validationFailed(let errors):
+            if errors.contains(.remoteImportInCSS) || errors.contains(.remoteScriptSourceInJS) {
+                return "The boost loads files from the web, which ReArc does not allow."
+            }
+            return "The boost did not pass ReArc's checks."
+        }
     }
 
     public static func defaultEnabledOnImport(_ package: BoostPackage) -> Bool {

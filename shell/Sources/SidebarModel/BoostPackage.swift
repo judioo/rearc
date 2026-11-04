@@ -110,6 +110,9 @@ public struct BoostPackage: Codable, Equatable, Hashable, Sendable {
         )
     }
 
+    /// The script a new legacy boost starts with.
+    public static let legacyScriptTemplate = "// Runs on matching pages once you allow this boost's script.\n"
+
     public static func newScript(name: String, hostScope: [BoostHostRule], js: String, css: String? = nil) -> BoostPackage {
         BoostPackage(
             manifest: BoostManifest(
