@@ -639,6 +639,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         file.addItem(target.item("Close Window", "w", [.command, .shift]) { [weak self] in
             if let window = NSApp.keyWindow { self?.closeWindow(window) }
         })
+        file.addItem(.separator())
+        target.add(ShellMenus.importing(model, chromiumImporter: runtime.capabilities.navigationExtended), to: file)
         // snapshot_viewport and snapshot_full_page are ABI 1.0 features.
         file.addItem(.separator())
         target.add(ShellMenus.capture(model), to: file)

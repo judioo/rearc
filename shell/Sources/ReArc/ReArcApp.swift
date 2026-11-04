@@ -72,6 +72,9 @@ struct ReArcApp: App {
                 }
                 .keyboardShortcut("s")
             }
+            CommandGroup(replacing: .importExport) {
+                ShellMenuButtons(groups: ShellMenus.importing(model, chromiumImporter: false))
+            }
             CommandGroup(replacing: .printItem) {
                 ShellMenuButtons(groups: ShellMenus.capture(model))
                 Divider()

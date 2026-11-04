@@ -259,4 +259,23 @@ final class Wave28ShellTests: XCTestCase {
         XCTAssertTrue(coordinator.textView(view, doCommandBy: #selector(NSResponder.deleteBackward(_:))))
         XCTAssertEqual(latest()?.blocks.last?.style, .paragraph, "delete at the start clears the list style first")
     }
+
+    // MARK: Browser import
+
+    func testImportMenuOffersChromiumsImporterOnlyWithTheEngine() {
+        let model = makeModel()
+        XCTAssertEqual(titles(ShellMenus.importing(model, chromiumImporter: false)), ["Import Bookmarks from HTML File…"])
+        XCTAssertEqual(titles(ShellMenus.importing(model, chromiumImporter: true)),
+                       ["Import from Another Browser…", "Import Bookmarks from HTML File…"])
+        XCTAssertEqual(BrowserInternalPage.importData.url.absoluteString, "chrome://settings/importData")
+        XCTAssertFalse(BrowserInternalPage.importData.isAvailable(engine: model.engineHost.navigationSchemes), "WebKit has no Chromium WebUI")
+        XCTAssertTrue(BrowserInternalPage.importData.isAvailable(engine: .chromium))
+        XCTAssertNotNil(model.executeCommand(.openBrowserPage(.importData), commandID: nil), "explains it needs the Chromium engine")
+
+        XCTAssertEqual(model.importBookmarks(fromHTML: "plain text", spaceName: "X"), "That file is not a bookmarks export")
+        let html = "<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><DT><A HREF=\"https://one.test/\">One</A></DL>"
+        XCTAssertNil(model.importBookmarks(fromHTML: html, spaceName: "Chrome"))
+        XCTAssertEqual(model.store.activeSpace.name, "Chrome", "the imported space is shown")
+        XCTAssertEqual(model.toast?.message, "Imported 1 bookmark into Chrome")
+    }
 }

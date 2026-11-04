@@ -1442,6 +1442,8 @@ final class BrowserViewModel {
             return newLegacyBoost()
         case .importBoosts:
             BoostFilePanels.importBoosts(model: self)
+        case .importBookmarksFile:
+            importBookmarksFile()
         case .pickElementToEdit:
             if boostEditorDraft != nil {
                 startBoostPicker()

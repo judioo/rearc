@@ -537,3 +537,34 @@ extension BrowserViewModel {
         store.setSpaceTheme(id, theme: theme)
     }
 }
+
+extension BrowserViewModel {
+    /// File > Import Bookmarks from HTML File…: the file every browser
+    /// exports, as a new space of pinned tabs and folders.
+    func importBookmarksFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.html]
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a bookmarks file exported from Safari, Chrome, Firefox or another browser."
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            let html = (try? String(contentsOf: url, encoding: .utf8)) ?? (try? String(contentsOf: url, encoding: .isoLatin1)) ?? ""
+            let name = url.deletingPathExtension().lastPathComponent
+            if let problem = self.importBookmarks(fromHTML: html, spaceName: name) {
+                self.showToast(problem, systemImage: "exclamationmark.triangle")
+            }
+        }
+    }
+
+    /// Imports into a new space and shows it; returns why nothing was imported.
+    @discardableResult
+    func importBookmarks(fromHTML html: String, spaceName: String) -> String? {
+        guard BookmarkHTMLImport.isBookmarkFile(html) else { return "That file is not a bookmarks export" }
+        guard let result = store.importBookmarks(BookmarkHTMLImport.parse(html), spaceName: spaceName) else {
+            return "The file has no web bookmarks"
+        }
+        selectSpace(result.space.id)
+        showToast("Imported \(result.tabs) bookmark\(result.tabs == 1 ? "" : "s") into \(result.space.name)", systemImage: "square.and.arrow.down")
+        return nil
+    }
+}
