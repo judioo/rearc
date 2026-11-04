@@ -74,8 +74,6 @@ private struct JavaScriptDialogSheet: View {
     @Bindable var prompts: PagePromptCenter
     let dialog: PagePromptCenter.Dialog
     @FocusState private var fieldFocused: Bool
-    /// The page's view, which gets the keyboard back when the dialog closes.
-    @State private var pageResponder = WeakResponder()
 
     private var request: JavaScriptDialogRequest { dialog.request }
 
@@ -140,7 +138,10 @@ private struct JavaScriptDialogSheet: View {
         }
         .onAppear {
             let window = prompts.anchorView?.window
-            pageResponder.value = window?.firstResponder
+            // The first of a run of dialogs remembers who had the keyboard (the page).
+            if prompts.keyboardOwnerBeforeDialog == nil, let owner = window?.firstResponder, owner !== window {
+                prompts.keyboardOwnerBeforeDialog = owner
+            }
             if request.showsTextField {
                 fieldFocused = true
             } else {
@@ -149,16 +150,15 @@ private struct JavaScriptDialogSheet: View {
             }
         }
         .onDisappear {
-            guard let window = prompts.anchorView?.window, let page = pageResponder.value else { return }
+            // The last dialog gives the keyboard back to the page.
+            guard prompts.dialog == nil, let window = prompts.anchorView?.window,
+                  let page = prompts.keyboardOwnerBeforeDialog else { return }
+            prompts.keyboardOwnerBeforeDialog = nil
             DispatchQueue.main.async { window.makeFirstResponder(page) }
         }
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
     }
-}
-
-private final class WeakResponder {
-    weak var value: NSResponder?
 }
 
 // MARK: - Permission prompt

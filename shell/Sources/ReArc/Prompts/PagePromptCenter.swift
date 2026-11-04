@@ -84,6 +84,8 @@ final class PagePromptCenter {
     @ObservationIgnored private var fileChooser: (id: UInt64, request: FileChooserRequest, handle: FilePanelHandle?, reply: ([String]?) -> Void)?
     /// The view under the page (the overlay's anchor): window for sheets, coordinates for menus.
     @ObservationIgnored weak var anchorView: NSView?
+    /// Who had the keyboard when a run of dialogs began; it gets it back after the last one.
+    @ObservationIgnored weak var keyboardOwnerBeforeDialog: NSResponder?
 
     init() {}
 
