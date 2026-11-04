@@ -314,8 +314,12 @@ final class ChromiumCommandBarServices: CommandBarServices {
                     self.autocompleteQueryID = nil
                 }
                 guard update.status == .rearcOK else { return }
+                // Chromium can carry the previous query's cached suggestions
+                // in a partial update. Keep history/classification responsive,
+                // but publish suggestions only when this query has finished.
+                guard update.done else { return }
                 accumulated.results.suggestions = ChromiumSearchMapping.suggestions(update.matches)
-                send(update.done ? "autocomplete" : "autocomplete-partial")
+                send("autocomplete")
             }
         }
     }

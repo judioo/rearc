@@ -6,6 +6,8 @@ protocol DevToolsOpening: AnyObject {
     /// Asks for a frontend on `engine`'s page; it arrives through
     /// `BrowserViewModel.attachDevTools`. Returns why it cannot, or nil.
     func openDevTools(for tab: Tab, engine: any WebEngine) -> String?
+    /// Closes the registry tab even while a view or caller retains its engine.
+    func closeDevTools(frontendTabID: UInt64)
 }
 
 /// DevTools (Arc: View > Developer > Developer Tools, ⌥⌘I; the page menu's
@@ -56,15 +58,22 @@ extension BrowserViewModel {
     /// The engine closed a frontend (its page closed, or the frontend itself).
     func devToolsFrontendClosed(_ frontendTabID: UInt64) {
         guard let tabID = devTools.tab(forFrontend: frontendTabID) else { return }
-        closeDevTools(for: tabID)
+        removeDevTools(for: tabID)
     }
 
-    /// Closes a tab's DevTools: dropping the engine closes the frontend tab.
+    /// Closes the frontend explicitly; engine lifetime is independent of the UI.
     func closeDevTools(for tabID: Tab.ID) {
+        guard let session = removeDevTools(for: tabID) else { return }
+        devToolsOpener?.closeDevTools(frontendTabID: session.frontendTabID)
+    }
+
+    @discardableResult
+    private func removeDevTools(for tabID: Tab.ID) -> DevToolsSession? {
         devToolsPending.remove(tabID)
-        guard let session = devTools.close(for: tabID) else { return }
+        guard let session = devTools.close(for: tabID) else { return nil }
         if session.placement == .window { windowPresenter?.dismissDevToolsWindow(for: tabID) }
         devToolsEngines[tabID] = nil
+        return session
     }
 
     /// Pops the selected tab's DevTools out to a window, or docks them back.

@@ -1225,6 +1225,12 @@ final class ChromiumSelfTest {
         try await wave28ShellChecks(model: model, store: store, tab: tabA, engine: engineA, base: base, window: first)
         try await devToolsChecks(model: model, store: store, shell: shell, tab: tabA, engine: engineA, base: base, window: first)
         try await clientCertificateChecks(model: model, store: store)
+        // Closing the certificate tab selects its neighbor, which need not be
+        // tab A. Restore the page used by the private-window and reopen checks.
+        model.selectTab(tabA.id)
+        try await wait("tab A selected after the certificate checks") {
+            engineA.leaseHolder?.window === first && engineA.attachmentID != nil
+        }
 
         // Private window: PrivateWindowModel on an off-the-record profile under the
         // active profile; its end closes that profile, and a new one starts empty.

@@ -129,6 +129,11 @@ final class ChromiumDevToolsHost: DevToolsOpening {
 
     private var pendingTarget: (engineTab: UInt64, tab: Tab.ID)?
 
+    func closeDevTools(frontendTabID: UInt64) {
+        guard runtime.isReady, !runtime.isStopping, runtime.devToolsFrontends.contains(frontendTabID) else { return }
+        runtime.forceCloseTab(frontendTabID)
+    }
+
     private func adopt(_ event: ChromiumTabEvent) -> Bool {
         let tabID = targets.removeValue(forKey: event.tabID)
             ?? (pendingTarget?.engineTab == event.openerTabID ? pendingTarget?.tab : nil)

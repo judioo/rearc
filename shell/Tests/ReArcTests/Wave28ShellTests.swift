@@ -283,10 +283,12 @@ final class Wave28ShellTests: XCTestCase {
 
     private final class FakeDevToolsOpener: DevToolsOpening {
         var opened: [Tab.ID] = []
+        var closed: [UInt64] = []
         func openDevTools(for tab: Tab, engine: any WebEngine) -> String? {
             opened.append(tab.id)
             return nil
         }
+        func closeDevTools(frontendTabID: UInt64) { closed.append(frontendTabID) }
     }
 
     func testCapabilitiesGateDevToolsAndClientCertificatesOnTheirMinors() {
@@ -325,13 +327,21 @@ final class Wave28ShellTests: XCTestCase {
         XCTAssertEqual(model.devTools.session(for: tab.id)?.placement, .window)
         model.devToolsWindowClosed(for: tab.id)
         XCTAssertNil(model.devTools.session(for: tab.id), "closing the window closes them")
+        XCTAssertEqual(opener.closed, [77], "the frontend closes while this test still retains its engine")
+        model.closeDevTools(for: tab.id)
+        XCTAssertEqual(opener.closed, [77], "a repeated close does nothing")
 
         model.attachDevTools(frontend, frontendTabID: 78, for: tab.id)
         model.devToolsFrontendClosed(78)
         XCTAssertNil(model.devToolsEngine(for: tab.id), "the engine closed the frontend with its page")
+        XCTAssertEqual(opener.closed, [77], "an engine close only removes the UI")
         model.attachDevTools(frontend, frontendTabID: 79, for: tab.id)
+        XCTAssertNil(model.toggleDevTools())
+        XCTAssertEqual(opener.closed, [77, 79], "⌥⌘I explicitly closes the retained frontend too")
+        model.attachDevTools(frontend, frontendTabID: 80, for: tab.id)
         model.releaseEngine(for: tab.id)
         XCTAssertNil(model.devTools.session(for: tab.id), "closing the page closes its DevTools")
+        XCTAssertEqual(opener.closed, [77, 79, 80])
         XCTAssertEqual(titles(ShellMenus.developer(model)).first, "Developer Tools")
         XCTAssertEqual(ShellMenus.developer(model).first?.first?.menuKeyEquivalent, "i")
     }
