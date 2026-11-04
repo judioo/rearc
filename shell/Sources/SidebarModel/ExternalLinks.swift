@@ -47,15 +47,28 @@ public enum ExternalLinkRouting {
         case rejected
     }
 
+    /// Air Traffic Control rules come first: the first enabled rule whose
+    /// space or profile exists decides (a page already open in that space is
+    /// focused). Otherwise an open page is focused, else `destination`.
     public static func route(
         _ url: URL,
         destination: ExternalLinkDestination,
         in store: SidebarStore,
-        engine: NavigationURLPolicy.EngineSchemes = []
+        engine: NavigationURLPolicy.EngineSchemes = [],
+        rules: LinkRoutingState = LinkRoutingState()
     ) -> Route {
         let scheme = url.scheme?.lowercased() ?? ""
         guard ["http", "https", "file"].contains(scheme),
               NavigationURLPolicy.allows(url, engine: engine) else { return .rejected }
+        if let rule = rules.firstMatch(for: url, in: store) {
+            switch rule.destination {
+            case .space(let spaceID):
+                let open = store.displayTabs(in: spaceID).first { $0.url.absoluteString == url.absoluteString }
+                return open.map { .focusTab($0.id) } ?? .newTab(url, spaceID: spaceID)
+            case .littleArc(let profileID):
+                return .littleArc(url, profileID: profileID)
+            }
+        }
         if let open = openTab(matching: url, in: store) { return .focusTab(open) }
         switch destination {
         case .littleArc:

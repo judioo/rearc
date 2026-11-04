@@ -84,6 +84,8 @@ public enum AppCommandAction: Equatable, Hashable {
     /// Arc `setAsDefaultBrowser` (COMMAND-BAR §6.6).
     case setAsDefaultBrowser
     case setExternalLinkDestination(ExternalLinkDestination)
+    /// Air Traffic Control settings (Arc `LinkRouting`).
+    case showAirTrafficControl
 }
 
 /// Read-only command-bar context for enablement and dynamic commands.
@@ -261,7 +263,7 @@ public struct AppCommand: Equatable, Identifiable {
             }
         case .findInPage:
             return store.selectedTab != nil
-        case .showDownloads, .clearCommandBarHistory, .setAsDefaultBrowser:
+        case .showDownloads, .clearCommandBarHistory, .setAsDefaultBrowser, .showAirTrafficControl:
             return true
         case .setExternalLinkDestination(let destination):
             return context.externalLinkDestination != destination
@@ -701,6 +703,13 @@ public enum AppCommandRegistry {
             keywords: ["copy", "quote", "selection", "markdown", "cite"],
             minQueryLength: 2,
             action: .copyAsQuote
+        ),
+        AppCommand(
+            id: "air-traffic-control",
+            title: "Air Traffic Control",
+            keywords: ["air", "traffic", "control", "route", "links", "external", "rules", "default", "browser"],
+            minQueryLength: 3,
+            action: .showAirTrafficControl
         ),
         AppCommand(
             id: "flip-split",

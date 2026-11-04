@@ -300,3 +300,82 @@ final class Wave26LittleArcModelTests: XCTestCase {
         XCTAssertFalse(store.setLittleArcProfile(UUID(), to: work.id))
     }
 }
+
+/// Wave 26: Air Traffic Control rules.
+final class Wave26AirTrafficModelTests: XCTestCase {
+
+    private let space = UUID()
+
+    func testMatchTypes() {
+        let domain = LinkRoutingRule(matchType: .domain, pattern: " https://www.GitHub.com/rearc ", destination: .space(space))
+        XCTAssertEqual(domain.normalizedPattern, "github.com")
+        XCTAssertTrue(domain.matches(URL(string: "https://github.com/a")!))
+        XCTAssertTrue(domain.matches(URL(string: "https://gist.github.com/b")!), "subdomains match")
+        XCTAssertFalse(domain.matches(URL(string: "https://notgithub.com/")!))
+        XCTAssertFalse(domain.matches(URL(string: "https://github.com.evil.test/")!))
+
+        let contains = LinkRoutingRule(matchType: .contains, pattern: "Meet.Google", destination: .space(space))
+        XCTAssertTrue(contains.matches(URL(string: "https://meet.google.com/abc-defg-hij")!))
+        XCTAssertFalse(contains.matches(URL(string: "https://google.com/")!))
+
+        let pattern = LinkRoutingRule(matchType: .pattern, pattern: "*.atlassian.net/*", destination: .space(space))
+        XCTAssertTrue(pattern.matches(URL(string: "https://acme.atlassian.net/browse/ARC-1")!))
+        XCTAssertFalse(pattern.matches(URL(string: "https://atlassian.net/")!), "the dot is literal")
+        let path = LinkRoutingRule(matchType: .pattern, pattern: "github.com/rearc/*", destination: .space(space))
+        XCTAssertTrue(path.matches(URL(string: "https://github.com/rearc/shell/pull/1")!))
+        XCTAssertFalse(path.matches(URL(string: "https://github.com/other/repo")!))
+        let exact = LinkRoutingRule(matchType: .pattern, pattern: "example.com/", destination: .space(space))
+        XCTAssertTrue(exact.matches(URL(string: "http://example.com/")!))
+        XCTAssertFalse(exact.matches(URL(string: "http://example.com/x")!))
+
+        XCTAssertTrue(LinkRoutingRule.glob("a*b*c", matches: "axxbyyc"))
+        XCTAssertFalse(LinkRoutingRule.glob("a*a", matches: "a"))
+        XCTAssertTrue(LinkRoutingRule.glob("*", matches: ""))
+    }
+
+    func testInvalidAndDisabledRulesMatchNothing() {
+        let url = URL(string: "https://github.com/")!
+        XCTAssertFalse(LinkRoutingRule(matchType: .domain, pattern: "", destination: .space(space)).matches(url))
+        XCTAssertFalse(LinkRoutingRule(matchType: .pattern, pattern: "**", destination: .space(space)).isValid)
+        XCTAssertFalse(LinkRoutingRule(matchType: .domain, pattern: "git hub.com", destination: .space(space)).isValid)
+        XCTAssertFalse(LinkRoutingRule(matchType: .domain, pattern: "github.com", destination: .space(space), isEnabled: false).matches(url))
+    }
+
+    func testRoutingUsesTheFirstRuleWithALiveDestination() {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a"), Space(name: "Work", sortRank: "b")])
+        let work = store.spaces[1].id
+        let other = store.addProfile(name: "Other")
+        let url = URL(string: "https://github.com/rearc")!
+        var state = LinkRoutingState(rules: [
+            LinkRoutingRule(matchType: .domain, pattern: "github.com", destination: .space(UUID())),
+            LinkRoutingRule(matchType: .contains, pattern: "rearc", destination: .littleArc(other.id)),
+            LinkRoutingRule(matchType: .domain, pattern: "github.com", destination: .space(work)),
+        ])
+        XCTAssertEqual(ExternalLinkRouting.route(url, destination: .activeSpace, in: store, rules: state),
+                       .littleArc(url, profileID: other.id), "a deleted space is skipped; the first live match wins")
+        state.move(state.rules[2].id, by: -2)
+        XCTAssertEqual(ExternalLinkRouting.route(url, destination: .littleArc, in: store, rules: state), .newTab(url, spaceID: work))
+
+        let open = store.addTab(kind: .today, title: "Repo", url: url, in: work)
+        XCTAssertEqual(ExternalLinkRouting.route(url, destination: .littleArc, in: store, rules: state), .focusTab(open.id),
+                       "already open in the rule's space")
+        XCTAssertEqual(ExternalLinkRouting.route(URL(string: "https://example.com/")!, destination: .activeSpace, in: store, rules: state),
+                       .newTab(URL(string: "https://example.com/")!, spaceID: store.activeSpaceID), "no rule: the default")
+        XCTAssertEqual(ExternalLinkRouting.route(URL(string: "javascript:alert(1)")!, destination: .activeSpace, in: store, rules: state),
+                       .rejected)
+
+        XCTAssertEqual(ExternalLinkRouting.describe(.newTab(url, spaceID: work), in: store), "New tab in Work")
+        XCTAssertEqual(ExternalLinkRouting.describe(.littleArc(url, profileID: other.id), in: store), "Little Arc (Other)")
+        XCTAssertEqual(ExternalLinkRouting.describe(.space(UUID()), in: store), "Deleted space")
+    }
+
+    func testRulesPersist() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "rearc-w26-atc-\(UUID().uuidString)"))
+        XCTAssertTrue(LinkRoutingState.load(from: defaults).rules.isEmpty)
+        let state = LinkRoutingState(rules: [
+            LinkRoutingRule(matchType: .pattern, pattern: "*.test/*", destination: .littleArc(UUID()), isEnabled: false),
+        ])
+        state.save(to: defaults)
+        XCTAssertEqual(LinkRoutingState.load(from: defaults), state)
+    }
+}
