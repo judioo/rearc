@@ -47,6 +47,11 @@ final class Wave31LookFixture: XCTestCase {
         ] {
             tab(title, url, .today)
         }
+        // The capture's bottom bar shows 14 spaces; Imara is the second.
+        for index in 0 ..< 13 {
+            let other = store.addSpace(name: "Space \(index + 2)", theme: .arcDefault, iconName: "circle.fill")
+            if index == 0 { _ = store.moveSpace(other.id, toIndex: 0) }
+        }
         store.selectedItemID = nil
         var snapshot = store.makeSnapshot()
         snapshot.selectedItemID = nil
