@@ -41,7 +41,9 @@ struct SpaceIconView: View {
     }
 }
 
-/// A folder row: disclosure chevron, folder glyph, title. Click toggles.
+/// A folder row as Arc draws it (THEMES.md §4.6): an outline `folder` glyph
+/// in the theme accent and a 14 pt semibold title, with no disclosure
+/// chevron and no child count. Click toggles.
 struct FolderRowView<Menu: View>: View {
     let folder: SidebarFolder
     let isExpanded: Bool
@@ -50,34 +52,30 @@ struct FolderRowView<Menu: View>: View {
     @ViewBuilder let menu: () -> Menu
 
     @State private var isHovering = false
+    @Environment(\.themeChrome) private var chrome
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "chevron.right")
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.secondary)
-                .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                .frame(width: 10)
-            Image(systemName: isExpanded ? "folder" : "folder.fill")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+        HStack(spacing: SidebarMetrics.iconToText - 1.5) {
+            Image(systemName: "folder")
+                .font(.system(size: 15))
+                .foregroundStyle(chrome.accent)
+                .frame(width: SidebarMetrics.iconSize + 3, height: SidebarMetrics.iconSize + 3)
+                .padding(.leading, -1.5)
             Text(folder.title)
-                .font(.callout)
+                .font(.system(size: SidebarMetrics.titleSize, weight: .semibold))
+                .foregroundStyle(chrome.title)
                 .lineLimit(1)
             Spacer(minLength: 0)
-            if !isExpanded, !folder.children.isEmpty {
-                Text("\(SidebarTree.tabs(folder.children).count)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .padding(.leading, SidebarMetrics.iconLeading)
+        .padding(.trailing, 8)
+        .frame(height: SidebarMetrics.rowHeight)
         .background(
-            isDropTarget ? Color.accentColor.opacity(0.22) : Color.primary.opacity(isHovering ? 0.07 : 0),
-            in: RoundedRectangle(cornerRadius: 8)
+            isDropTarget ? Color.accentColor.opacity(0.22) : chrome.rowHover.opacity(isHovering ? 1 : 0),
+            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: 8))
+        .padding(.vertical, (SidebarMetrics.rowPitch - SidebarMetrics.rowHeight) / 2)
         .onTapGesture {
             withAnimation(.easeInOut(duration: 0.15)) { onToggle() }
         }

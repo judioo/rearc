@@ -1,56 +1,81 @@
 import SwiftUI
 import SidebarModel
 
-/// Arc has no toolbar: back, forward and reload sit at the top of the
-/// sidebar beside the traffic lights, above a URL field that shows the
-/// page's domain and lock state and opens the command bar when clicked
-/// (COMMAND-BAR §2 placeholder). State follows the selected tab's engine.
+/// The top of the sidebar: the traffic lights' row with Arc's
+/// `sidebar.left` toggle 12 pt after the zoom button (THEMES.md §4.5). With
+/// "URL in toolbar" off, back, forward and reload follow it and a URL field
+/// that shows the page's domain and lock state sits below, opening the
+/// command bar when clicked (COMMAND-BAR §2 placeholder). With it on (the
+/// default), those live in the page card's toolbar strip instead.
 struct SidebarToolbarView: View {
     let model: BrowserViewModel
+    var urlInToolbar = ToolbarURLPreference.defaultValue
     @Environment(\.sidebarWindow) private var window
+    @Environment(\.themeChrome) private var chrome
+
+    /// The traffic lights' row: their centre is 23.5 pt from the top.
+    static let rowHeight: CGFloat = 47
 
     var body: some View {
         let engine = model.focusedEngine(in: window)
         let profile = model.profile(in: window)
-        VStack(spacing: 8) {
+        VStack(spacing: 0) {
             HStack(spacing: 2) {
-                Spacer(minLength: 72) // traffic lights
-                navButton("chevron.left", help: "Back (⌘[)", enabled: engine?.canGoBack == true) {
-                    model.goBack()
+                Spacer().frame(width: 84) // traffic lights, up to 12 pt past the zoom button
+                Button { model.toggleSidebar() } label: {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 14))
+                        .foregroundStyle(chrome.glyph)
+                        .frame(width: 19, height: 22)
+                        .contentShape(Rectangle())
                 }
-                navButton("chevron.right", help: "Forward (⌘])", enabled: engine?.canGoForward == true) {
-                    model.goForward()
-                }
-                if engine?.isLoading == true {
-                    navButton("xmark", help: "Stop Loading (⌘.)", enabled: true) { model.stopLoading() }
-                } else {
-                    navButton("arrow.clockwise", help: "Reload (⌘R, ⇧⌘R ignores the cache)", enabled: engine != nil) {
-                        model.reload(ignoringCache: NSEvent.modifierFlags.contains(.shift))
+                .buttonStyle(.plain)
+                .help("Hide Sidebar (⌘S)")
+                .accessibilityLabel("Hide Sidebar")
+                if !urlInToolbar {
+                    Spacer(minLength: 4)
+                    navButton("arrow.left", help: "Back (⌘[)", enabled: engine?.canGoBack == true) {
+                        model.goBack()
                     }
+                    navButton("arrow.right", help: "Forward (⌘])", enabled: engine?.canGoForward == true) {
+                        model.goForward()
+                    }
+                    if engine?.isLoading == true {
+                        navButton("xmark", help: "Stop Loading (⌘.)", enabled: true) { model.stopLoading() }
+                    } else {
+                        navButton("arrow.clockwise", help: "Reload (⌘R, ⇧⌘R ignores the cache)", enabled: engine != nil) {
+                            model.reload(ignoringCache: NSEvent.modifierFlags.contains(.shift))
+                        }
+                    }
+                    ExtensionToolbarView(model: model, engine: engine)
                 }
-                ExtensionToolbarView(model: model, engine: engine)
-                ProfileAvatarView(profile: profile, diameter: 18)
-                    .opacity(0.85)
-                    .padding(.leading, 4)
-                    .help(profile.name)
+                Spacer(minLength: 0)
+                if model.store.profiles.count > 1 {
+                    ProfileAvatarView(profile: profile, diameter: 18)
+                        .opacity(0.85)
+                        .padding(.trailing, 10)
+                        .help(profile.name)
+                }
             }
-            .frame(height: 22)
+            .frame(height: Self.rowHeight)
 
-            SidebarURLField(model: model, engine: engine, tab: model.selectedTab(in: window))
+            if !urlInToolbar {
+                SidebarURLField(model: model, engine: engine, tab: model.selectedTab(in: window))
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+            }
         }
-        .padding(.horizontal, 10)
-        .padding(.top, 7)
     }
 
     private func navButton(_ symbol: String, help: String, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 12, weight: .semibold))
-                .frame(width: 24, height: 22)
+                .font(.system(size: 13))
+                .frame(width: 26, height: 22)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(enabled ? .primary : .tertiary)
+        .foregroundStyle(enabled ? chrome.glyph : chrome.tertiaryText)
         .disabled(!enabled)
         .help(help)
         .accessibilityLabel(help)
@@ -87,7 +112,7 @@ struct SidebarURLField: View {
                 securityIcon(engine?.securityState ?? .unknown, hasHost: host != nil)
             }
             Text(host ?? "Search or Enter URL…")
-                .font(.callout)
+                .font(.system(size: 13))
                 .foregroundStyle(host == nil ? .secondary : .primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -118,6 +143,8 @@ struct SidebarURLField: View {
         .contextMenu {
             Button("Copy URL") { model.copyURL() }
                 .disabled(tab == nil)
+            Divider()
+            Button("Show URL in Toolbar") { UserDefaults.standard.set(true, forKey: ToolbarURLPreference.key) }
         }
         .help(url?.absoluteString ?? "Open the command bar (⌘L)")
     }

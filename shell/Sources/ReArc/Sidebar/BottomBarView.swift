@@ -2,16 +2,20 @@ import SwiftUI
 import UniformTypeIdentifiers
 import SidebarModel
 
-/// The sidebar's bottom bar: one icon per space of this window's profile
-/// (click to switch, right-click for the space menu, drag to reorder, drop a
-/// sidebar item on one to move it there; hovering a drag over an icon
-/// switches to that space), a chevron listing the spaces by name, the Library
-/// (Home) button, the "+" menu, and the profile avatar (SIDEBAR-SPEC §3.1.6,
-/// §4.3, §4.7).
+/// The sidebar's bottom bar as Arc draws it (THEMES.md §4.7): the Library
+/// (archive) button at the left, one 4 pt dot per space of this window's
+/// profile on a 9 pt pitch with the current space's icon in place of its
+/// dot, and the "+" menu at the right, 17 pt in from each side and centred
+/// 24.5 pt above the window's bottom. Click a dot to switch, right-click
+/// for the space menu, drag to reorder, drop a sidebar item on one to move
+/// it there (hovering a drag over one switches to it). Downloads and the
+/// sync dot show only while they have something to say; the space and
+/// profile lists open from the "+" menu (SIDEBAR-SPEC §3.1.6, §4.3, §4.7).
 struct BottomBarView: View {
     let model: BrowserViewModel
     @Binding var draggedItemID: UUID?
     @Environment(\.sidebarWindow) private var window
+    @Environment(\.themeChrome) private var chrome
     @State private var draggedSpaceID: Space.ID?
     @State private var showingSpaceList = false
     @State private var showingProfileList = false
@@ -19,12 +23,38 @@ struct BottomBarView: View {
     @State private var renameDraft = ""
     @State private var profileActionError: String?
 
+    static let height: CGFloat = 49
+
     var body: some View {
         let current = model.space(in: window)
         let profile = model.profile(in: window)
-        HStack(spacing: 8) {
+        HStack(spacing: 0) {
+            // Arc's Home button (`SidebarHomeButton`): opens the Library on
+            // its last page, or closes it.
+            let libraryOpen = model.librarySection(in: window) != nil
+            Button { model.toggleLibrary(in: window) } label: {
+                Image(systemName: "archivebox.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(libraryOpen ? chrome.accent : chrome.glyph)
+                    .frame(width: 18, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Library: Spaces, Downloads, Media, Easels & Notes, Archive and Boosts")
+            .accessibilityLabel("Library")
+            .popover(isPresented: $showingProfileList, arrowEdge: .top) {
+                ProfileListView(
+                    model: model,
+                    isPresented: $showingProfileList,
+                    onRename: beginRename,
+                    onDelete: attemptDelete
+                )
+            }
+
+            Spacer(minLength: 6)
+
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 2) {
+                HStack(spacing: 0) {
                     let spaces = model.store.spaces(in: current.profileID)
                     ForEach(Array(spaces.enumerated()), id: \.element.id) { index, space in
                         SpaceIconButton(
@@ -38,43 +68,29 @@ struct BottomBarView: View {
                     }
                 }
             }
-            .frame(maxWidth: 150)
+            .frame(maxWidth: 140)
             .fixedSize(horizontal: true, vertical: false)
-
-            Button(action: { showingSpaceList.toggle() }) {
-                Image(systemName: "chevron.up")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Spaces in \(profile.name)")
             .popover(isPresented: $showingSpaceList, arrowEdge: .top) {
                 SpaceListView(model: model, isPresented: $showingSpaceList)
             }
 
-            Spacer(minLength: 0)
+            Spacer(minLength: 6)
 
-            Circle()
-                .fill(model.syncStatusColor)
-                .frame(width: 8, height: 8)
-                .help(model.syncStatusHelp)
-
-            DownloadsButton(downloads: model.downloads, isPresented: Binding(
-                get: { model.downloads.isTrayPresented && model.isKeyBrowserWindow(window) },
-                set: { model.downloads.isTrayPresented = $0 }
-            ))
-
-            // Arc's Home button (`SidebarHomeButton`): opens the Library on
-            // its last page, or closes it.
-            let libraryOpen = model.librarySection(in: window) != nil
-            Button { model.toggleLibrary(in: window) } label: {
-                Image(systemName: libraryOpen ? "archivebox.fill" : "archivebox")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(libraryOpen ? Color.accentColor : .secondary)
+            if SyncStatusPresentation(model.syncStatus).indicator == .red {
+                Circle()
+                    .fill(model.syncStatusColor)
+                    .frame(width: 6, height: 6)
+                    .help(model.syncStatusHelp)
+                    .padding(.trailing, 8)
             }
-            .buttonStyle(.plain)
-            .help("Library: Spaces, Downloads, Media, Easels & Notes, Archive and Boosts")
-            .accessibilityLabel("Library")
+
+            if model.downloads.activeCount > 0 || model.downloads.hasDangerous || model.downloads.isTrayPresented {
+                DownloadsButton(downloads: model.downloads, isPresented: Binding(
+                    get: { model.downloads.isTrayPresented && model.isKeyBrowserWindow(window) },
+                    set: { model.downloads.isTrayPresented = $0 }
+                ))
+                .padding(.trailing, 8)
+            }
 
             // Arc's + menu (`ARC_SidebarPlusButton` icons: add-tab, folder,
             // space, note, easel, boost, split-add-right, split-add-bottom).
@@ -95,30 +111,24 @@ struct BottomBarView: View {
                 Button { model.addSplitView(orientation: .vertical) } label: {
                     Label("Add Split View (Bottom)", systemImage: "rectangle.split.1x2")
                 }
+                Divider()
+                Button("Spaces in \(profile.name)…") { showingSpaceList = true }
+                Button("Profiles…") { showingProfileList = true }
             } label: {
                 Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 14))
+                    .foregroundStyle(chrome.glyph)
+                    .frame(width: 18, height: 24)
+                    .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
-            .help("New Tab, Folder, Space, Note, Easel, Boost or Split View")
-
-            Button(action: { showingProfileList.toggle() }) {
-                ProfileAvatarView(profile: profile, diameter: 24)
-            }
+            .menuStyle(.button)
             .buttonStyle(.plain)
-            .help(profile.name)
-            .popover(isPresented: $showingProfileList, arrowEdge: .top) {
-                ProfileListView(
-                    model: model,
-                    isPresented: $showingProfileList,
-                    onRename: beginRename,
-                    onDelete: attemptDelete
-                )
-            }
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("New Tab, Folder, Space, Note, Easel, Boost or Split View")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 17)
+        .frame(height: Self.height)
         .alert("Rename Profile", isPresented: Binding(
             get: { renamingProfileID != nil },
             set: { if !$0 { renamingProfileID = nil } }
@@ -190,17 +200,25 @@ private struct SpaceIconButton: View {
     @Binding var draggedSpaceID: Space.ID?
     @State private var isTargeted = false
 
+    @Environment(\.themeChrome) private var chrome
+
     var body: some View {
-        let theme = Color(red: space.theme.red, green: space.theme.green, blue: space.theme.blue)
         Button { model.selectSpace(space.id) } label: {
-            SpaceIconView(iconName: space.iconName, size: 12)
-                .frame(width: 24, height: 24)
-                .foregroundStyle(isCurrent ? theme : .secondary)
-                .background(
-                    isTargeted ? Color.accentColor.opacity(0.35) : theme.opacity(isCurrent ? 0.25 : 0),
-                    in: RoundedRectangle(cornerRadius: 7)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 7))
+            Group {
+                if isCurrent {
+                    // The current space shows its icon in place of its dot.
+                    SpaceIconView(iconName: space.iconName, size: 11)
+                        .foregroundStyle(chrome.accent)
+                        .frame(width: 22, height: 24)
+                } else {
+                    Circle()
+                        .fill(chrome.tertiaryText)
+                        .frame(width: 4, height: 4)
+                        .frame(width: 9, height: 24)
+                }
+            }
+            .background(isTargeted ? Color.accentColor.opacity(0.35) : .clear, in: RoundedRectangle(cornerRadius: 5))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help("\(space.name) (⌃\(index + 1)) — drop a tab here to move it to this space")

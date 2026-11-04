@@ -24,24 +24,39 @@ struct TabRowView<Menu: View>: View {
     var onCloseOption: (() -> Void)? = nil
     /// Set for a pinned tab away from its saved URL: shows "Back to pinned URL".
     var onReset: (() -> Void)? = nil
+    /// A second line under the title (Arc's "3 Recent"), 11 pt grey.
+    var subtitle: String? = nil
     @ViewBuilder let menu: () -> Menu
 
     @State private var isHovering = false
+    @Environment(\.themeChrome) private var chrome
 
     var body: some View {
-        HStack(spacing: 8) {
+        // Arc (THEMES.md §4.6): 16 pt favicon at x 18, 14 pt title at x 45,
+        // on a 41 pt pitch; selected and hovered rows use the theme's
+        // near-white roles.
+        HStack(spacing: SidebarMetrics.iconToText) {
             TabActivityIcon(activity: activity) {
-                SiteIconView(image: favicon, token: tab.faviconToken, size: 16)
+                SiteIconView(image: favicon, token: tab.faviconToken, size: SidebarMetrics.iconSize)
                     .saturation(isUnloaded ? 0 : 1)
                     .opacity(isUnloaded ? 0.4 : 1)
                     .help(isUnloaded ? "Unloaded — reloads when you open it" : "")
             }
-            .frame(width: 18, height: 18)
+            .frame(width: SidebarMetrics.iconSize, height: SidebarMetrics.iconSize)
 
-            Text(tab.displayTitle)
-                .font(.callout)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(tab.displayTitle)
+                    .font(.system(size: SidebarMetrics.titleSize))
+                    .foregroundStyle(chrome.title)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: SidebarMetrics.subtitleSize))
+                        .foregroundStyle(chrome.secondaryText)
+                        .lineLimit(1)
+                }
+            }
 
             if tab.isUnread {
                 Circle()
@@ -108,17 +123,22 @@ struct TabRowView<Menu: View>: View {
                     : "Close Tab (⌥-click to unsplit when in a split)")
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(
-            isDropTarget
-                ? Color.accentColor.opacity(0.22)
-                : isSelected
-                ? Color.primary.opacity(0.14)
-                : Color.primary.opacity(isHovering ? 0.07 : 0),
-            in: RoundedRectangle(cornerRadius: 8)
-        )
+        .padding(.leading, SidebarMetrics.iconLeading)
+        .padding(.trailing, 8)
+        .frame(height: SidebarMetrics.rowHeight)
+        .background {
+            let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+            if isDropTarget {
+                shape.fill(Color.accentColor.opacity(0.22))
+            } else if isSelected {
+                shape.fill(chrome.rowSelected)
+                    .shadow(color: .black.opacity(chrome.isDark ? 0.3 : 0.08), radius: 1.5, y: 0.5)
+            } else if isHovering {
+                shape.fill(chrome.rowHover)
+            }
+        }
         .contentShape(RoundedRectangle(cornerRadius: 8))
+        .padding(.vertical, (SidebarMetrics.rowPitch - SidebarMetrics.rowHeight) / 2)
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
         .contextMenu { menu() }
