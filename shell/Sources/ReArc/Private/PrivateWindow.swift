@@ -30,8 +30,9 @@ final class PrivateWindowModel: Identifiable {
         return engine.currentURL?.host() ?? "Private Window"
     }
 
-    func submitAddress(schemes: NavigationURLPolicy.EngineSchemes) {
-        guard let url = URLEntry.resolve(addressText, engine: schemes) else {
+    /// `provider` is the parent profile's default search; nothing typed here is sent for suggestions.
+    func submitAddress(schemes: NavigationURLPolicy.EngineSchemes, provider: SearchProvider = .duckDuckGo) {
+        guard let url = URLEntry.resolve(addressText, engine: schemes, provider: provider) else {
             addressError = "Enter a valid URL or search"
             return
         }
@@ -135,7 +136,12 @@ struct PrivateWindowView: View {
             Button { window.engine.reload() } label: { Image(systemName: "arrow.clockwise") }
             TextField("Search or enter address", text: Bindable(window).addressText)
                 .textFieldStyle(.roundedBorder)
-                .onSubmit { window.submitAddress(schemes: model.engineHost.navigationSchemes) }
+                .onSubmit {
+                    window.submitAddress(
+                        schemes: model.engineHost.navigationSchemes,
+                        provider: model.commandBarServices.searchProvider(for: window.parentProfileID)
+                    )
+                }
             if let error = window.addressError {
                 Text(error)
                     .font(.caption)

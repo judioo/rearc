@@ -38,6 +38,20 @@ struct ReArcApp: App {
                         Text(destination.menuTitle).tag(destination)
                     }
                 }
+                if let preference = model.webKitSearchPreference {
+                    Picker("Search Engine", selection: Binding(
+                        get: { preference.providerID },
+                        set: { model.webKitSearchPreference?.providerID = $0 }
+                    )) {
+                        ForEach(SearchProvider.builtIn, id: \.id) { provider in
+                            Text(provider.name).tag(provider.id)
+                        }
+                    }
+                    Toggle("Search Suggestions", isOn: Binding(
+                        get: { preference.suggestionsEnabled },
+                        set: { model.webKitSearchPreference?.suggestionsEnabled = $0 }
+                    ))
+                }
             }
             // Cmd+T — new tab, replacing File > New (window).
             CommandGroup(replacing: .newItem) {

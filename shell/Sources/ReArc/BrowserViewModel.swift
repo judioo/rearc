@@ -71,7 +71,10 @@ final class BrowserViewModel {
     @ObservationIgnored var faviconObservedEngines: [Tab.ID: ObjectIdentifier] = [:]
     var isCommandBarPresented = false
     var commandBarText = "" {
-        didSet { commandBarHighlightedIndex = 0 }
+        didSet {
+            commandBarHighlightedIndex = 0
+            if commandBarText != oldValue { refreshCommandBarLive() }
+        }
     }
     var commandBarHighlightedIndex = 0
     /// The tab the command bar will navigate on submit.
@@ -97,8 +100,27 @@ final class BrowserViewModel {
             tabMuteModel: tabMuteModel,
             navigationSchemes: engineHost.navigationSchemes,
             history: visitHistory,
-            externalLinkDestination: externalLinkDestination
+            externalLinkDestination: externalLinkDestination,
+            live: commandBarLive,
+            searchProvider: searchProvider
         )
+    }
+
+    /// Engine history, suggestions and URL-vs-search for the typed text
+    /// (`CommandBarServices`); nil until a source answers.
+    var commandBarLive: CommandBarLiveResults?
+    @ObservationIgnored var commandBarGate = CommandBarQueryGate()
+    /// The engine's command-bar sources; the Chromium shell installs its own.
+    @ObservationIgnored var commandBarServices: CommandBarServices = WebKitCommandBarServices() {
+        didSet { observeSearchProvider() }
+    }
+    /// Bumped when a default search changes, so rows and menus re-read it.
+    var searchProviderRevision = 0
+
+    /// The active profile's default search (Chromium's, or the WebKit preference).
+    var searchProvider: SearchProvider {
+        _ = searchProviderRevision
+        return commandBarServices.searchProvider(for: store.activeProfileID)
     }
 
     var peekURL: URL? { peekSession?.url }
@@ -192,6 +214,7 @@ final class BrowserViewModel {
                 self.store.selectEasel(easel.id)
             }
         }
+        observeSearchProvider()
         wireMediaKeyHandlers()
         runAutoArchive()
         startAutoArchiveTimer()
@@ -968,6 +991,7 @@ final class BrowserViewModel {
 
     func dismissCommandBar() {
         isCommandBarPresented = false
+        cancelCommandBarLive()
         commandBarSiteSearch = nil
         commandBarTextBeforeSiteSearch = ""
         commandBarTargetID = nil
@@ -989,7 +1013,7 @@ final class BrowserViewModel {
 
     func submitCommandBar() {
         if let intent = commandBarURLIntent {
-            guard let url = URLEntry.resolve(commandBarText, engine: engineHost.navigationSchemes) else {
+            guard let url = URLEntry.resolve(commandBarText, engine: engineHost.navigationSchemes, provider: searchProvider) else {
                 commandBarError = "Enter a valid URL"
                 return
             }
@@ -1029,7 +1053,7 @@ final class BrowserViewModel {
                     }
                     return
                 }
-            case .openURL, .history, .search:
+            case .openURL, .history, .suggestion, .search:
                 if let url = choice.destinationURL {
                     navigateCommandBar(to: url)
                     dismissCommandBar()
@@ -1038,7 +1062,7 @@ final class BrowserViewModel {
             }
         }
 
-        guard let url = URLEntry.resolve(commandBarText, engine: engineHost.navigationSchemes) else {
+        guard let url = URLEntry.resolve(commandBarText, engine: engineHost.navigationSchemes, provider: searchProvider) else {
             dismissCommandBar()
             return
         }
@@ -1099,6 +1123,89 @@ final class BrowserViewModel {
         commandBarText = text
         commandBarError = nil
         isCommandBarPresented = true
+        commandBarServices.commandBarWillOpen(profileID: store.activeProfileID)
+    }
+
+    // MARK: - Command bar live results
+
+    /// Every edit starts new lookups and cancels the last; only web input
+    /// in an open bar asks (not commands, site-search pills or URL prompts).
+    func refreshCommandBarLive() {
+        let text = commandBarText
+        guard isCommandBarPresented, commandBarSiteSearch == nil, commandBarURLIntent == nil, !text.hasPrefix(">"),
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            cancelCommandBarLive()
+            return
+        }
+        if let live = commandBarLive, !live.applies(to: text) { commandBarLive = nil }
+        let generation = commandBarGate.begin(text)
+        commandBarServices.query(text, profileID: store.activeProfileID, isPrivate: false) { [weak self] live in
+            guard let self, self.commandBarGate.isCurrent(generation) else { return }
+            self.commandBarLive = live
+        }
+    }
+
+    func cancelCommandBarLive() {
+        commandBarGate.cancel()
+        commandBarServices.cancel()
+        commandBarLive = nil
+    }
+
+    /// The WebKit search preference (provider and suggestions); nil on
+    /// Chromium, whose default search lives in chrome://settings/search.
+    var webKitSearchPreference: SearchProviderPreference? {
+        get {
+            _ = searchProviderRevision
+            return (commandBarServices as? WebKitCommandBarServices)?.preference
+        }
+        set {
+            guard let newValue, let services = commandBarServices as? WebKitCommandBarServices else { return }
+            services.preference = newValue
+        }
+    }
+
+    private func observeSearchProvider() {
+        commandBarServices.onSearchProviderChange = { [weak self] in self?.searchProviderRevision += 1 }
+        searchProviderRevision += 1
+    }
+
+    /// Copy URL / Remove from History on a command-bar row.
+    func performCommandBarRowAction(_ action: CommandBarRowAction, on result: CommandBarSearch.Result) {
+        guard let url = result.destinationURL else { return }
+        switch action {
+        case .copyURL:
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(url.absoluteString, forType: .string)
+        case .deleteFromHistory:
+            deleteFromHistory(url)
+        }
+    }
+
+    /// Removes a page from the shell's visit store and from the engine's
+    /// history (Chromium HistoryService), then asks again for the typed text.
+    func deleteFromHistory(_ url: URL) {
+        removeFromVisitHistory(url)
+        if var live = commandBarLive, let history = live.history {
+            let key = VisitHistory.key(for: url)
+            live.history = history.filter { VisitHistory.key(for: $0.url) != key }
+            commandBarLive = live
+        }
+        let profileID = store.activeProfileID
+        _ = commandBarServices.deleteFromHistory(url, profileID: profileID) { [weak self] _ in
+            self?.refreshCommandBarLive()
+        }
+    }
+
+    /// Shift+Delete on the highlighted row: remove it from history.
+    @discardableResult
+    func deleteHighlightedCommandBarHistoryRow() -> Bool {
+        let results = commandBarResults
+        guard results.indices.contains(commandBarHighlightedIndex) else { return false }
+        let result = results[commandBarHighlightedIndex]
+        guard CommandBarSearch.rowActions(for: result).contains(.deleteFromHistory) else { return false }
+        performCommandBarRowAction(.deleteFromHistory, on: result)
+        return true
     }
 
     func reopenClosedTab() {

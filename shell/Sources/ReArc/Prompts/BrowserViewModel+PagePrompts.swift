@@ -33,7 +33,8 @@ extension BrowserViewModel: PageLinkRouting {
     }
 
     func searchWeb(for text: String, from prompts: PagePromptCenter) {
-        guard let url = URLEntry.searchURL(for: text) else { return }
+        let provider = commandBarServices.searchProvider(for: prompts.profileID ?? store.activeProfileID)
+        guard let url = URLEntry.searchURL(for: text, provider: provider) else { return }
         openLinkTab(url, from: prompts, select: true)
     }
 

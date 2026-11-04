@@ -5,6 +5,9 @@ import SidebarModel
 /// Escape dismisses, arrow keys move through live results. Typing a site's
 /// name offers "Tab to search" it; Tab turns it into a pill and Delete on
 /// an empty query removes it again (Arc site search, COMMAND-BAR §4.2).
+/// Rows offer Copy URL and, for history, Remove from History on hover or
+/// highlight and in their context menu; Shift+Delete removes the
+/// highlighted history row (COMMAND-BAR §6.4).
 struct CommandBarOverlay: View {
     @Binding var text: String
     let results: [CommandBarSearch.Result]
@@ -16,6 +19,9 @@ struct CommandBarOverlay: View {
     var onTab: () -> Bool = { false }
     /// Delete on an empty field: returns true when it removed the pill.
     var onDeleteBackward: () -> Bool = { false }
+    /// Shift+Delete: returns true when it removed the highlighted history row.
+    var onDeleteHighlighted: () -> Bool = { false }
+    var onRowAction: (CommandBarRowAction, CommandBarSearch.Result) -> Void = { _, _ in }
     let onMoveHighlight: (Int) -> Void
     let onSelectIndex: (Int) -> Void
     let onSubmit: () -> Void
@@ -40,7 +46,10 @@ struct CommandBarOverlay: View {
                     .focused($isFieldFocused)
                     .onSubmit(onSubmit)
                     .onKeyPress(.tab) { onTab() ? .handled : .ignored }
-                    .onKeyPress(.delete) { text.isEmpty && onDeleteBackward() ? .handled : .ignored }
+                    .onKeyPress(.delete) {
+                        if NSEvent.modifierFlags.contains(.shift), onDeleteHighlighted() { return .handled }
+                        return text.isEmpty && onDeleteBackward() ? .handled : .ignored
+                    }
                 if let siteSearchSuggestion {
                     TabToSearchHint(engine: siteSearchSuggestion)
                         .transition(.opacity)
@@ -64,9 +73,13 @@ struct CommandBarOverlay: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
-                            resultRow(result, isHighlighted: index == highlightedIndex)
-                                .contentShape(Rectangle())
-                                .onTapGesture { onSelectIndex(index) }
+                            CommandBarResultRow(
+                                result: result,
+                                isHighlighted: index == highlightedIndex,
+                                onAction: { onRowAction($0, result) }
+                            )
+                            .contentShape(Rectangle())
+                            .onTapGesture { onSelectIndex(index) }
                         }
                     }
                 }
@@ -96,11 +109,20 @@ struct CommandBarOverlay: View {
         if let siteSearch { return "Search \(siteSearch.name)" }
         return isCommandMode ? "Type a command…" : "Search or enter URL"
     }
+}
 
-    @ViewBuilder
-    private func resultRow(_ result: CommandBarSearch.Result, isHighlighted: Bool) -> some View {
+/// One result: icon, title and subtitle, and its row actions while hovered
+/// or highlighted.
+private struct CommandBarResultRow: View {
+    let result: CommandBarSearch.Result
+    let isHighlighted: Bool
+    let onAction: (CommandBarRowAction) -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        let actions = CommandBarSearch.rowActions(for: result)
         HStack(spacing: 10) {
-            Image(systemName: icon(for: result.kind))
+            Image(systemName: Self.icon(for: result.kind))
                 .foregroundStyle(.secondary)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
@@ -114,17 +136,37 @@ struct CommandBarOverlay: View {
                 }
             }
             Spacer(minLength: 0)
+            if isHovering || isHighlighted {
+                ForEach(actions, id: \.title) { action in
+                    Button { onAction(action) } label: {
+                        Image(systemName: action.systemImage)
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 22, height: 22)
+                            .background(Circle().fill(Color.primary.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help(action == .deleteFromHistory ? "\(action.title) (⇧⌫)" : action.title)
+                }
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(isHighlighted ? Color.accentColor.opacity(0.18) : Color.clear)
+        .onHover { isHovering = $0 }
+        .contextMenu {
+            ForEach(actions, id: \.title) { action in
+                Button(action.title) { onAction(action) }
+            }
+        }
     }
 
-    private func icon(for kind: CommandBarSearch.ResultKind) -> String {
+    static func icon(for kind: CommandBarSearch.ResultKind) -> String {
         switch kind {
         case .openTab: return "square.stack"
         case .openURL: return "link"
         case .history: return "clock.arrow.circlepath"
+        case .suggestion: return "magnifyingglass"
         case .search: return "magnifyingglass"
         case .command: return "command"
         }
