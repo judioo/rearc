@@ -258,3 +258,45 @@ final class Wave26CommandBarModelTests: XCTestCase {
         XCTAssertEqual(items[0].title, "A | B")
     }
 }
+
+/// Wave 26: Little Arc chrome and entry points.
+final class Wave26LittleArcModelTests: XCTestCase {
+
+    func testAddressPlaceholderAndEditingText() {
+        XCTAssertEqual(LittleArcChrome.addressText(for: URL(string: "https://www.example.com/a/b?c=1")), "example.com")
+        XCTAssertEqual(LittleArcChrome.addressText(for: URL(string: "http://docs.test:8080/x")), "docs.test")
+        XCTAssertEqual(LittleArcChrome.addressText(for: URL(string: "file:///tmp/a.html")), "file:///tmp/a.html")
+        XCTAssertEqual(LittleArcChrome.addressText(for: URL(string: "about:blank")), "")
+        XCTAssertEqual(LittleArcChrome.addressText(for: nil), "")
+        XCTAssertEqual(LittleArcChrome.editingText(for: URL(string: "https://www.example.com/a")), "https://www.example.com/a")
+        XCTAssertEqual(LittleArcChrome.editingText(for: URL(string: "about:blank")), "")
+    }
+
+    func testOptionCommandClickOnly() {
+        XCTAssertTrue(LittleArcChrome.clickOpensLittleArc(command: true, option: true, shift: false, control: false))
+        XCTAssertFalse(LittleArcChrome.clickOpensLittleArc(command: true, option: false, shift: false, control: false), "⌘-click is a background tab")
+        XCTAssertFalse(LittleArcChrome.clickOpensLittleArc(command: false, option: true, shift: false, control: false), "⌥-click downloads")
+        XCTAssertFalse(LittleArcChrome.clickOpensLittleArc(command: true, option: true, shift: true, control: false))
+        XCTAssertFalse(LittleArcChrome.clickOpensLittleArc(command: true, option: true, shift: false, control: true))
+    }
+
+    func testHotkeyPreferenceIsOffUntilTurnedOn() {
+        let defaults = UserDefaults(suiteName: "rearc-w26-hotkey-\(UUID().uuidString)")!
+        XCTAssertFalse(LittleArcHotkeyPreference.load(from: defaults).isEnabled)
+        LittleArcHotkeyPreference(isEnabled: true).save(to: defaults)
+        XCTAssertTrue(LittleArcHotkeyPreference.load(from: defaults).isEnabled)
+        XCTAssertEqual(LittleArcHotkeyPreference.display, "⌥⌘N")
+    }
+
+    func testLittleArcProfileChange() {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        let work = store.addProfile(name: "Work")
+        let record = store.createLittleArcWindow(url: URL(string: "https://a.test")!)
+        XCTAssertNotEqual(record.profileID, work.id)
+        XCTAssertTrue(store.setLittleArcProfile(record.id, to: work.id))
+        XCTAssertEqual(store.littleArcWindow(withID: record.id)?.profileID, work.id)
+        XCTAssertFalse(store.setLittleArcProfile(record.id, to: work.id), "already there")
+        XCTAssertFalse(store.setLittleArcProfile(record.id, to: UUID()), "no such profile")
+        XCTAssertFalse(store.setLittleArcProfile(UUID(), to: work.id))
+    }
+}
