@@ -1,11 +1,11 @@
 import SwiftUI
 import SidebarModel
 
-/// View Archive: closed and auto-archived tabs by time bucket, searchable,
-/// with restore and Clear Archive (SIDEBAR-SPEC §2.9, DATA-SCHEMA §3).
+/// The Library's Archive page (View Archive): closed and auto-archived tabs
+/// by time bucket, searchable, with restore and Clear Archive
+/// (SIDEBAR-SPEC §2.9, DATA-SCHEMA §3).
 struct ArchiveView: View {
     let model: BrowserViewModel
-    @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var confirmingClear = false
 
@@ -14,7 +14,6 @@ struct ArchiveView: View {
         let groups = TabArchivePolicy.grouped(store.archivedTabs, matching: query, now: Date())
         VStack(spacing: 0) {
             HStack {
-                Text("Archive").font(.title2.weight(.semibold))
                 Spacer()
                 Menu("Archive Today Tabs After: \(store.autoArchiveThreshold().title)") {
                     ForEach(AutoArchiveThreshold.allCases, id: \.self) { threshold in
@@ -64,12 +63,9 @@ struct ArchiveView: View {
                 Text("\(store.archivedTabs.count) tab\(store.archivedTabs.count == 1 ? "" : "s")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
             }
             .padding(16)
         }
-        .frame(width: 520, height: 560)
         .confirmationDialog("Clear the archive?", isPresented: $confirmingClear) {
             Button("Clear Archive", role: .destructive) { store.clearArchive() }
         } message: {

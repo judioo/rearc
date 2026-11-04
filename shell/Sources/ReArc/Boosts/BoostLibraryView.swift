@@ -1,12 +1,11 @@
 import SwiftUI
 import SidebarModel
 
-/// View Boosts (Arc Library `BoostsPage`, BOOSTS §2, §5): the active
+/// The Library's Boosts page (View Boosts; Arc `BoostsPage`, BOOSTS §2, §5): the active
 /// profile's boosts with a master switch, per-boost on/off, script consent,
 /// and New, Edit, Rename, Duplicate, Open Site and Delete.
 struct BoostLibraryView: View {
     let model: BrowserViewModel
-    @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var isCreating = false
     @State private var newName = ""
@@ -21,10 +20,7 @@ struct BoostLibraryView: View {
         let total = model.store.boostLibrary().packages.count
         VStack(spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Boosts").font(.title2.weight(.semibold))
-                    Text(model.store.activeProfile.name).font(.caption).foregroundStyle(.secondary)
-                }
+                Text(model.store.activeProfile.name).font(.callout).foregroundStyle(.secondary)
                 Spacer()
                 Toggle("Boosts On", isOn: Binding(
                     get: { model.boostsMasterEnabled },
@@ -80,12 +76,9 @@ struct BoostLibraryView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.defaultAction)
             }
             .padding(16)
         }
-        .frame(width: 520, height: 460)
         .alert("Rename Boost", isPresented: Binding(
             get: { renamingID != nil },
             set: { if !$0 { renamingID = nil } }

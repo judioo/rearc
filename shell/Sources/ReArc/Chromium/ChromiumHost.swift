@@ -667,6 +667,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             view.addItem(.separator())
             target.add(ShellMenus.downloads(model), to: view)
         }
+        view.addItem(.separator())
+        target.add(ShellMenus.library(model), to: view)
         if runtime.capabilities.pictureInPicture {
             view.addItem(.separator())
             target.add(ShellMenus.pictureInPicture(model), to: view)

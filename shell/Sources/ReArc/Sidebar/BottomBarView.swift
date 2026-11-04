@@ -5,8 +5,9 @@ import SidebarModel
 /// The sidebar's bottom bar: one icon per space of this window's profile
 /// (click to switch, right-click for the space menu, drag to reorder, drop a
 /// sidebar item on one to move it there; hovering a drag over an icon
-/// switches to that space), a chevron listing the spaces by name, archive,
-/// the "+" menu, and the profile avatar (SIDEBAR-SPEC §4.3, §4.7).
+/// switches to that space), a chevron listing the spaces by name, the Library
+/// (Home) button, the "+" menu, and the profile avatar (SIDEBAR-SPEC §3.1.6,
+/// §4.3, §4.7).
 struct BottomBarView: View {
     let model: BrowserViewModel
     @Binding var draggedItemID: UUID?
@@ -63,13 +64,17 @@ struct BottomBarView: View {
                 set: { model.downloads.isTrayPresented = $0 }
             ))
 
-            Button { model.isArchivePresented = true } label: {
-                Image(systemName: "archivebox")
+            // Arc's Home button (`SidebarHomeButton`): opens the Library on
+            // its last page, or closes it.
+            let libraryOpen = model.librarySection(in: window) != nil
+            Button { model.toggleLibrary(in: window) } label: {
+                Image(systemName: libraryOpen ? "archivebox.fill" : "archivebox")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(libraryOpen ? Color.accentColor : .secondary)
             }
             .buttonStyle(.plain)
-            .help("View Archive")
+            .help("Library: Spaces, Downloads, Media, Easels & Notes, Archive and Boosts")
+            .accessibilityLabel("Library")
 
             // Arc's + menu (`ARC_SidebarPlusButton` icons: add-tab, folder,
             // space, note, easel, boost, split-add-right, split-add-bottom).

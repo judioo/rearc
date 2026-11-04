@@ -62,11 +62,13 @@ struct DownloadsButton: View {
 /// per-row actions; the folder downloads are saved to; Clear.
 struct DownloadsTrayView: View {
     let downloads: DownloadsController
+    /// On the Library's Downloads page: full width and height, no title.
+    var embedded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Text("Downloads").font(.headline)
+                if !embedded { Text("Downloads").font(.headline) }
                 Spacer()
                 Menu {
                     Button("Show Download Folder") { downloads.revealDirectory() }
@@ -110,10 +112,10 @@ struct DownloadsTrayView: View {
                     }
                     .padding(6)
                 }
-                .frame(maxHeight: 360)
+                .frame(maxHeight: embedded ? .infinity : 360)
             }
         }
-        .frame(width: 340)
+        .frame(width: embedded ? nil : 340)
     }
 }
 

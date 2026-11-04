@@ -34,6 +34,7 @@ extension BrowserViewModel {
     }
 
     func selectEasel(_ sidebarItemID: UUID) {
+        closeLibrary()
         store.selectEasel(sidebarItemID)
     }
 

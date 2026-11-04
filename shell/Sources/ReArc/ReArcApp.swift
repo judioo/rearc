@@ -84,6 +84,8 @@ struct ReArcApp: App {
                 Divider()
                 ShellMenuButtons(groups: ShellMenus.downloads(model))
                 Divider()
+                ShellMenuButtons(groups: ShellMenus.library(model))
+                Divider()
                 ShellMenuButtons(groups: ShellMenus.pictureInPicture(model))
                 Divider()
                 Button("Zoom In") { model.zoom(.zoomIn) }

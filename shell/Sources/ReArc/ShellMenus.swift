@@ -193,10 +193,20 @@ enum ShellMenus {
                 ShellMenuItem("Collapse All Folders") { model.store.setAllFoldersExpanded(false) },
             ],
             [
-                ShellMenuItem("View Archive") { model.isArchivePresented = true },
                 ShellMenuItem("New Boost") { model.newBoost() },
-                ShellMenuItem("View Boosts") { model.isBoostLibraryPresented = true },
             ],
+        ]
+    }
+
+    /// View menu: Arc's View Library and its pages (`openLibrary`,
+    /// `viewEaselsAndNotes`, `viewScreenshotsAndCaptures`, `openDownloads`,
+    /// `viewArchive`, `viewBoosts`; SIDEBAR-SPEC §6).
+    static func library(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [
+            [ShellMenuItem("View Library") { model.openLibrary(nil) }],
+            LibrarySection.allCases.map { section in
+                ShellMenuItem(section.menuTitle) { model.openLibrary(section) }
+            },
         ]
     }
 }

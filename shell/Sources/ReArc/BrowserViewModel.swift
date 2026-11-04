@@ -54,7 +54,8 @@ final class BrowserViewModel {
     /// The hidden sidebar shown floating while the pointer is at the window's
     /// leading edge (Arc `SidebarHovering` / floating sidebar).
     var isSidebarPeeking = false
-    var isArchivePresented = false
+    /// The Library panel per window (Home button, View Library).
+    var library = LibraryPresentation()
     /// Where links from other apps open; remembered across launches.
     var externalLinkDestination: ExternalLinkDestination = .load(from: .standard) {
         didSet { externalLinkDestination.save(to: externalLinkDefaults) }
@@ -75,8 +76,6 @@ final class BrowserViewModel {
     /// Bumped when the default-browser state may have changed (menus re-read it).
     var defaultBrowserRevision = 0
     var defaultBrowserMessage: String?
-    /// View Boosts: the Boosts library sheet.
-    var isBoostLibraryPresented = false
     /// Space being edited in the Edit Space sheet (name, theme, icon).
     var spaceEditorID: Space.ID?
     /// The New Space dialog's fields while it is open.
@@ -208,7 +207,6 @@ final class BrowserViewModel {
 
     var easelMutationRevision = 0
     var sidebarRecoveredFromCorruption = false
-    var isCapturesGalleryPresented = false
     var isCapturePreviewPresented = false
     var lastCapturePreview: CaptureRecord?
     var captureErrorMessage: String?
@@ -367,12 +365,16 @@ final class BrowserViewModel {
         return store.split(withID: id)
     }
 
+    /// A sidebar click shows the item, closing the Library even when the
+    /// item was already selected under it.
     func selectTab(_ id: Tab.ID) {
+        closeLibrary()
         store.selectTab(id)
         loadSelectedIfNeeded()
     }
 
     func selectSplit(_ splitID: SplitViewItem.ID, focusTabID: Tab.ID? = nil) {
+        closeLibrary()
         store.selectSplit(splitID, focusTabID: focusTabID)
         loadSelectedIfNeeded()
     }
@@ -602,6 +604,7 @@ final class BrowserViewModel {
     /// Loads the selected tab's URL into its engine if the engine isn't
     /// already showing it (fresh engine or URL changed in the model).
     func loadSelectedIfNeeded() {
+        library.closeStale { [unowned self] in selectedItemID(in: $0) }
         applyAutoPiPOnTabSwitch()
         noteVisibleTabsShown()
         if store.selectedEaselRef != nil { return }
@@ -1468,7 +1471,9 @@ final class BrowserViewModel {
         case .captureVisibleArea:
             Task { await performCapture(scope: .visible) }
         case .openCapturesGallery:
-            isCapturesGalleryPresented = true
+            openLibrary(.media)
+        case .openLibrary(let section):
+            openLibrary(section)
         case .openBrowserPage(let page):
             guard page.isAvailable(engine: engineHost.navigationSchemes) else {
                 return engineHost.navigationSchemes.contains(.trustedWebUI)

@@ -130,6 +130,7 @@ struct BrowserView: View {
                     model.store.unregisterWindow(windowID)
                     model.pinnedSectionCollapse.forgetWindow(windowID)
                     model.splitMaximize.forgetWindow(windowID)
+                    model.library.forgetWindow(windowID)
                 }
             )
             .frame(width: 0, height: 0)
@@ -144,9 +145,6 @@ struct BrowserView: View {
             .frame(width: 0, height: 0)
         )
         .navigationTitle(contentTitle)
-        .sheet(isPresented: $model.isCapturesGalleryPresented) {
-            CaptureGalleryView(model: model)
-        }
         .sheet(isPresented: $model.isCapturePreviewPresented) {
             if let record = model.lastCapturePreview {
                 CapturePreviewSheet(record: record, model: model)
@@ -176,6 +174,11 @@ struct BrowserView: View {
             stripCloseWindowShortcut()
             model.restoreLittleArcWindowsIfNeeded()
         }
+        // Any other item shown in this window (a shortcut, a space switch)
+        // closes its Library for good.
+        .onChange(of: model.selectedItemID(in: windowID)) { _, _ in
+            model.library.closeStale { model.selectedItemID(in: $0) }
+        }
         .onChange(of: model.littleArcOpenRequests) { _, requests in
             for id in requests {
                 openWindow(id: "littleArc", value: id)
@@ -199,15 +202,6 @@ struct BrowserView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             model.prepareForQuit()
-        }
-        .sheet(isPresented: $model.isArchivePresented) {
-            ArchiveView(model: model)
-        }
-        .sheet(isPresented: Binding(
-            get: { model.isBoostLibraryPresented && isKeyWindowSheetOwner },
-            set: { model.isBoostLibraryPresented = $0 }
-        )) {
-            BoostLibraryView(model: model)
         }
         .sheet(isPresented: Binding(
             get: { model.spaceEditorID != nil },
@@ -285,6 +279,9 @@ struct BrowserView: View {
     }
 
     private var contentTitle: String {
+        if let section = model.librarySection(in: windowID) {
+            return section.title
+        }
         if let ref = model.selectedEaselRef(in: windowID) {
             return model.easelTitle(for: ref)
         }
@@ -375,7 +372,9 @@ struct BrowserView: View {
 
     @ViewBuilder
     private var contentArea: some View {
-        if let ref = model.selectedEaselRef(in: windowID),
+        if let section = model.librarySection(in: windowID) {
+            LibraryView(model: model, window: windowID, section: section)
+        } else if let ref = model.selectedEaselRef(in: windowID),
            let document = model.easelDocument(forSidebarItem: ref.id) {
             EaselEditorView(model: model, sidebarItemID: ref.id, document: document)
                 .id(document.id)
