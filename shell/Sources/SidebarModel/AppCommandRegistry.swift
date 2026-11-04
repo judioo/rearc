@@ -66,6 +66,8 @@ public enum AppCommandAction: Equatable, Hashable {
     case previousSpace
     case renameSpace
     case editSpaceTheme
+    /// Arc's Appearance menu (`automaticMode`, `lightMode`, `darkMode`) for the active space.
+    case setSpaceAppearance(SpaceAppearance)
     case deleteSpace
     case newFolder
     case expandAllFolders
@@ -243,6 +245,8 @@ public struct AppCommand: Equatable, Identifiable {
             return store.selectedTab != nil
         case .nextSpace, .previousSpace:
             return store.spacesInActiveProfile.count > 1
+        case .setSpaceAppearance(let appearance):
+            return store.activeSpace.theme.appearance != appearance
         case .renameSpace, .editSpaceTheme, .newFolder, .viewArchive:
             return true
         case .deleteSpace:
@@ -593,6 +597,27 @@ public enum AppCommandRegistry {
                 keywords: ["library", "home", "spaces", "media", "easels", "notes", "boosts"],
                 minQueryLength: 2,
                 action: .openLibrary(nil)
+            ),
+            AppCommand(
+                id: "space-appearance-automatic",
+                title: "Appearance: Automatic",
+                keywords: ["appearance", "automatic", "system", "theme", "mode"],
+                minQueryLength: 3,
+                action: .setSpaceAppearance(.automatic)
+            ),
+            AppCommand(
+                id: "space-appearance-light",
+                title: "Appearance: Light",
+                keywords: ["appearance", "light", "mode", "theme", "day"],
+                minQueryLength: 3,
+                action: .setSpaceAppearance(.light)
+            ),
+            AppCommand(
+                id: "space-appearance-dark",
+                title: "Appearance: Dark",
+                keywords: ["appearance", "dark", "mode", "theme", "night"],
+                minQueryLength: 3,
+                action: .setSpaceAppearance(.dark)
             ),
             AppCommand(
                 id: "view-easels-and-notes",

@@ -793,3 +793,93 @@ final class Wave25SchedulerTests: XCTestCase {
         scheduler.stop()
     }
 }
+
+/// Wave 28: a space's gradient, grain and appearance sync in their own
+/// record, so the wave 25 space record (and any Mac still on it) sees only
+/// the base colour.
+@MainActor
+final class Wave28ThemeSyncTests: XCTestCase {
+    private var server: InMemorySyncServer!
+    private var clock: TestClock!
+
+    override func setUp() async throws {
+        server = InMemorySyncServer()
+        clock = TestClock()
+    }
+
+    private func styled(_ base: SpaceTheme = SpaceTheme.presets[1]) -> SpaceTheme {
+        var theme = base
+        theme.gradientColors = [SpaceColor(red: 0.9, green: 0.2, blue: 0.4), SpaceColor(red: 0.1, green: 0.8, blue: 0.5)]
+        theme.noise = 0.4
+        theme.appearance = .dark
+        return theme
+    }
+
+    func testGradientGrainAndAppearanceReachTheOtherMac() async {
+        let a = Device("A", server: server, clock: clock)
+        let home = a.store.spaces[0].id
+        _ = a.store.renameSpace(home, to: "Home")
+        a.store.setSpaceTheme(home, theme: styled())
+        await a.sync()
+
+        let spaceRecord = a.records[SyncRecordKind.space.recordName(for: home)]!
+        guard case .object(let theme)? = spaceRecord.values["theme"] else { return XCTFail("no theme field") }
+        XCTAssertEqual(Set(theme.keys), ["red", "green", "blue"], "the space record keeps the wave 25 shape")
+        let styleRecord = a.records[SyncRecordKind.spaceStyle.recordName(for: home)]
+        XCTAssertEqual(styleRecord?.kind, .spaceStyle)
+
+        let b = Device("B", server: server, clock: clock)
+        await b.sync()
+        XCTAssertEqual(b.space(named: "Home")?.theme, styled())
+        assertSameRecords(a, b)
+        let again = await a.sync()
+        XCTAssertEqual(again.pushed, 0, "quiescent")
+    }
+
+    func testGrainOnOneMacAndAppearanceOnTheOtherBothStay() async {
+        let a = Device("A", server: server, clock: clock)
+        let home = a.store.spaces[0].id
+        a.store.setSpaceTheme(home, theme: styled())
+        await a.sync()
+        let b = Device("B", server: server, clock: clock)
+        await b.sync()
+
+        var grain = a.store.spaces[0].theme
+        grain.noise = 0.9
+        a.store.setSpaceTheme(home, theme: grain)
+        a.edited()
+        var light = b.store.spaces[0].theme
+        light.appearance = .light
+        b.store.setSpaceTheme(home, theme: light)
+        b.edited()
+        await a.sync()
+        await b.sync()
+        await a.sync()
+
+        for device in [a, b] {
+            XCTAssertEqual(device.store.spaces[0].theme.noise, 0.9, accuracy: 1e-9, device.name)
+            XCTAssertEqual(device.store.spaces[0].theme.appearance, .light, device.name)
+        }
+        assertSameRecords(a, b)
+    }
+
+    func testBackToOneColourDropsTheStyleRecordEverywhere() async {
+        let a = Device("A", server: server, clock: clock)
+        let home = a.store.spaces[0].id
+        a.store.setSpaceTheme(home, theme: styled())
+        await a.sync()
+        let b = Device("B", server: server, clock: clock)
+        await b.sync()
+
+        a.store.setSpaceTheme(home, theme: SpaceTheme.presets[3])
+        a.edited()
+        await a.sync()
+        await b.sync()
+        XCTAssertNil(a.records[SyncRecordKind.spaceStyle.recordName(for: home)])
+        XCTAssertEqual(b.store.spaces[0].theme, SpaceTheme.presets[3])
+        XCTAssertTrue(SidebarSyncProjection.canMaterialize(
+            SyncRecordKind.spaceStyle.recordName(for: home),
+            SyncRecordPayload(kind: .spaceStyle, fields: ["noise": SyncField(value: .number(0.2), stamp: SyncStamp(millis: 1, device: "A"))])
+        ), "a style record with only some fields still reads")
+    }
+}

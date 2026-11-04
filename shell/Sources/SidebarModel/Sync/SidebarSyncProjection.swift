@@ -82,7 +82,15 @@ public enum SidebarSyncProjection {
         for (space, rank) in zip(snapshot.spaces, spaceRanks) {
             var values = objectFields(space, dropping: ["id"])
             values["sortRank"] = .string(rank)
+            // The space record keeps the wave 25 theme shape; the rest of the
+            // style has its own record, written only while it is set.
+            values["theme"] = (try? SyncValue.encoding(space.theme.baseColor)) ?? .null
             records[SyncRecordKind.space.recordName(for: space.id)] = SyncRecordBody(kind: .space, values: values)
+            if !space.theme.style.isDefault {
+                var style = objectFields(space.theme.style, dropping: [])
+                style["space"] = .string(space.id.uuidString.lowercased())
+                records[SyncRecordKind.spaceStyle.recordName(for: space.id)] = SyncRecordBody(kind: .spaceStyle, values: style)
+            }
             var visited = Set<UUID>()
             let pinned = (snapshot.spaceContainers[space.id]?.pinned.childIDs ?? [])
                 .compactMap { resolve($0, in: snapshot, visited: &visited) }
@@ -146,12 +154,14 @@ public enum SidebarSyncProjection {
         var spaceValues: [UUID: [String: SyncValue]] = [:]
         var items: [UUID: ItemRecord] = [:]
         var boosts: [UUID: [String: SyncValue]] = [:]
+        var styles: [UUID: SpaceThemeStyle] = [:]
         for (name, payload) in records where payload.isAlive {
             guard let (kind, id) = SyncRecordKind.parse(recordName: name) else { continue }
             switch kind {
             case .profile: profileValues[id] = payload.values
             case .space: spaceValues[id] = payload.values
             case .boost: boosts[id] = payload.values
+            case .spaceStyle: styles[id] = spaceStyle(payload.values)
             case .item:
                 guard let parentKey = payload.values["parent"]?.stringValue, let parent = Parent(key: parentKey) else { continue }
                 items[id] = ItemRecord(
@@ -185,6 +195,7 @@ public enum SidebarSyncProjection {
             let base = snapshot.spaces.first { $0.id == id }.map { objectFields($0, dropping: []) } ?? [:]
             if var space: Space = decode(base: base, overlay: values, id: id) {
                 if !profileIDs.contains(space.profileID) { space.profileID = profiles[0].id }
+                space.theme.style = styles[id] ?? SpaceThemeStyle()
                 spaces.append(space)
             }
         }
@@ -390,6 +401,8 @@ public enum SidebarSyncProjection {
             return space != nil
         case .boost:
             return (try? values["package"]?.decoded(as: BoostPackage.self)) != nil
+        case .spaceStyle:
+            return spaceStyle(values) != nil
         case .item:
             guard values["parent"]?.stringValue.flatMap(Parent.init(key:)) != nil else { return false }
             switch values["type"]?.stringValue {
@@ -627,6 +640,15 @@ public enum SidebarSyncProjection {
         case .easel(let ref): return ref.sortRank
         case .folder(let folder): return folder.sortRank
         }
+    }
+
+    /// A style record's fields; a missing field takes its default, so one
+    /// Mac's grain and another's appearance merge field by field.
+    static func spaceStyle(_ values: [String: SyncValue]) -> SpaceThemeStyle? {
+        var fields = values
+        fields["space"] = nil
+        let defaults = objectFields(SpaceThemeStyle(), dropping: [])
+        return try? SyncValue.object(defaults.merging(fields.filter { $0.value != .null }) { $1 }).decoded(as: SpaceThemeStyle.self)
     }
 
     static func objectFields<T: Encodable>(_ value: T, dropping keys: Set<String>) -> [String: SyncValue] {

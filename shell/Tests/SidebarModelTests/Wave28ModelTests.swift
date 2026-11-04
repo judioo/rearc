@@ -144,4 +144,97 @@ final class Wave28ModelTests: XCTestCase {
         XCTAssertTrue(commands.contains { $0.title == "View Easels & Notes" && $0.action == .openLibrary(.easels) })
         XCTAssertTrue(commands.contains { $0.title == "View Media" && $0.action == .openCapturesGallery })
     }
+
+    // MARK: Gradient themes
+
+    func testPlainThemesEncodeExactlyAsBeforeAndLegacyThemesDecode() throws {
+        let plain = SpaceTheme.presets[2]
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(plain)) as! [String: Any]
+        XCTAssertEqual(Set(json.keys), ["red", "green", "blue"])
+        let legacy = try JSONDecoder().decode(SpaceTheme.self, from: Data(#"{"red":0.1,"green":0.2,"blue":0.3}"#.utf8))
+        XCTAssertEqual(legacy, SpaceTheme(red: 0.1, green: 0.2, blue: 0.3))
+        XCTAssertEqual(legacy.appearance, .automatic)
+        let unknownAppearance = try JSONDecoder().decode(SpaceTheme.self, from: Data(#"{"red":0,"green":0,"blue":0,"appearance":"sepia"}"#.utf8))
+        XCTAssertEqual(unknownAppearance.appearance, .automatic, "a future appearance falls back")
+
+        var styled = plain
+        styled.gradientColors = [SpaceColor(red: 1, green: 0, blue: 0)]
+        styled.noise = 0.25
+        styled.appearance = .dark
+        XCTAssertEqual(try JSONDecoder().decode(SpaceTheme.self, from: JSONEncoder().encode(styled)), styled)
+    }
+
+    func testThemeKeepsAtMostThreeStopsAndClampsGrain() {
+        var theme = SpaceTheme(red: 1, green: 0, blue: 0, gradientColors: Array(repeating: SpaceColor(red: 0, green: 0, blue: 1), count: 5), noise: 3)
+        XCTAssertEqual(theme.stops.count, SpaceTheme.maxGradientColors)
+        XCTAssertEqual(theme.noise, 1)
+        theme.noise = -.infinity
+        XCTAssertEqual(theme.noise, 0)
+        theme.gradientColors.append(SpaceColor(red: 0, green: 1, blue: 0))
+        XCTAssertEqual(theme.gradientColors.count, 2)
+    }
+
+    func testEditorAddsSetsAndRemovesStops() {
+        let red = SpaceTheme(red: 1, green: 0, blue: 0)
+        let two = red.addingStop()
+        XCTAssertEqual(two.stops.count, 2)
+        XCTAssertEqual(two.stops[1].red, 1, accuracy: 1e-9, "60° from red is yellow")
+        XCTAssertEqual(two.stops[1].green, 1, accuracy: 1e-9)
+        let three = two.addingStop()
+        XCTAssertEqual(three.addingStop(), three, "three stops at most")
+        let blue = SpaceTheme(red: 0, green: 0, blue: 1)
+        XCTAssertEqual(three.settingStop(2, to: blue).stops[2], blue)
+        XCTAssertEqual(three.settingStop(0, to: blue).baseColor, blue)
+        XCTAssertEqual(three.settingStop(7, to: blue), three)
+        let promoted = three.removingStop(0)
+        XCTAssertEqual(promoted.stops, Array(three.stops.dropFirst()), "the next stop becomes the base")
+        XCTAssertEqual(red.removingStop(0), red, "the last colour stays")
+
+        var dark = three
+        dark.appearance = .dark
+        dark.noise = 0.5
+        XCTAssertEqual(dark.withBaseColor(blue).appearance, .dark, "a swatch keeps the style")
+        XCTAssertEqual(dark.withBaseColor(blue).noise, 0.5)
+    }
+
+    func testAppearanceResolvesAgainstTheMac() {
+        XCTAssertTrue(SpaceAppearance.automatic.isDark(systemDark: true))
+        XCTAssertFalse(SpaceAppearance.automatic.isDark(systemDark: false))
+        XCTAssertFalse(SpaceAppearance.light.isDark(systemDark: true))
+        XCTAssertTrue(SpaceAppearance.dark.isDark(systemDark: false))
+    }
+
+    func testGradientPaletteRunsThroughEveryStopAndMixesAcrossStopCounts() {
+        let theme = SpaceTheme(red: 1, green: 0, blue: 0, gradientColors: [SpaceColor(red: 0, green: 0, blue: 1)], noise: 0.3)
+        let palette = SpaceThemePalette(theme: theme, darkAppearance: false)
+        XCTAssertTrue(palette.isDiagonal)
+        XCTAssertEqual(palette.colors.count, 2)
+        XCTAssertGreaterThan(palette.top.red, palette.top.blue)
+        XCTAssertGreaterThan(palette.bottom.blue, palette.bottom.red)
+        XCTAssertEqual(palette.noise, 0.3)
+        XCTAssertEqual(palette.accent, theme.baseColor)
+
+        let plain = SpaceThemePalette(theme: .default, darkAppearance: false)
+        XCTAssertFalse(plain.isDiagonal)
+        let three = SpaceThemePalette(theme: SpaceTheme.gradientPresets[4], darkAppearance: true)
+        XCTAssertEqual(three.colors.count, 3)
+        let half = plain.mixed(with: three, fraction: 0.5)
+        XCTAssertEqual(half.colors.count, 3, "sampled at the larger stop count")
+        XCTAssertEqual(plain.mixed(with: three, fraction: 1).colors, three.colors)
+        XCTAssertEqual(palette.color(at: 0.5), palette.top.mixed(with: palette.bottom, fraction: 0.5))
+    }
+
+    func testSpacesMenuCommandsSetTheActiveSpaceAppearance() {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        let context = CommandBarContext(store: store, isSidebarVisible: true, closedTabStack: ClosedTabStack())
+        let commands = AppCommandRegistry.all(in: context).filter {
+            if case .setSpaceAppearance = $0.action { return true }
+            return false
+        }
+        XCTAssertEqual(commands.map(\.title), ["Appearance: Light", "Appearance: Dark"], "the current one is hidden")
+        var theme = store.activeSpace.theme
+        theme.appearance = .dark
+        store.setSpaceTheme(store.activeSpaceID, theme: theme)
+        XCTAssertTrue(AppCommandRegistry.all(in: context).contains { $0.action == .setSpaceAppearance(.automatic) })
+    }
 }

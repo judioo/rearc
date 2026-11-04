@@ -1,8 +1,7 @@
 import Foundation
 
-/// A space's color theme, stored as plain RGB components so the model layer
-/// has no dependency on SwiftUI/AppKit colors.
-public struct SpaceTheme: Hashable, Codable, Sendable {
+/// One colour stop of a gradient theme (plain sRGB components).
+public struct SpaceColor: Hashable, Codable, Sendable {
     public var red: Double
     public var green: Double
     public var blue: Double
@@ -11,6 +10,133 @@ public struct SpaceTheme: Hashable, Codable, Sendable {
         self.red = red
         self.green = green
         self.blue = blue
+    }
+}
+
+/// A space's light or dark look (Arc's style editor Appearance:
+/// `automaticMode`, `lightMode`, `darkMode`; DESIGN-TOKENS §2.8). The
+/// window follows it, and so do pages, easels and notes in it.
+public enum SpaceAppearance: String, Codable, CaseIterable, Sendable {
+    case automatic
+    case light
+    case dark
+
+    public var title: String {
+        switch self {
+        case .automatic: return "Automatic"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    /// Dark for `.dark`, light for `.light`, otherwise the system's choice.
+    public func isDark(systemDark: Bool) -> Bool {
+        switch self {
+        case .automatic: return systemDark
+        case .light: return false
+        case .dark: return true
+        }
+    }
+}
+
+/// A space's theme: a base colour, up to two more gradient stops (Arc
+/// `blendedGradient.baseColors`; one colour is `blendedSingleColor`), a
+/// grain amount (`modifiers.noiseFactor`) and an appearance (SIDEBAR-SPEC
+/// §4.6, DATA-SCHEMA `WindowTheme`). Stored as plain RGB so the model layer
+/// has no dependency on SwiftUI/AppKit colors.
+public struct SpaceTheme: Hashable, Codable, Sendable {
+    public var red: Double
+    public var green: Double
+    public var blue: Double
+    /// Further gradient stops after the base colour, at most `maxGradientColors - 1`.
+    public var gradientColors: [SpaceColor] {
+        didSet { gradientColors = Array(gradientColors.prefix(Self.maxGradientColors - 1)) }
+    }
+    /// Grain over the background, 0 (none) to 1.
+    public var noise: Double {
+        didSet { noise = Self.clampedNoise(noise) }
+    }
+    public var appearance: SpaceAppearance
+
+    /// Arc's dial holds three colours.
+    public static let maxGradientColors = 3
+
+    public init(
+        red: Double,
+        green: Double,
+        blue: Double,
+        gradientColors: [SpaceColor] = [],
+        noise: Double = 0,
+        appearance: SpaceAppearance = .automatic
+    ) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+        self.gradientColors = Array(gradientColors.prefix(Self.maxGradientColors - 1))
+        self.noise = Self.clampedNoise(noise)
+        self.appearance = appearance
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case red, green, blue, gradientColors, noise, appearance
+    }
+
+    /// Themes saved before wave 28 hold only `red`, `green` and `blue`.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            red: try c.decode(Double.self, forKey: .red),
+            green: try c.decode(Double.self, forKey: .green),
+            blue: try c.decode(Double.self, forKey: .blue),
+            gradientColors: try c.decodeIfPresent([SpaceColor].self, forKey: .gradientColors) ?? [],
+            noise: try c.decodeIfPresent(Double.self, forKey: .noise) ?? 0,
+            appearance: (try? c.decodeIfPresent(SpaceAppearance.self, forKey: .appearance)) ?? .automatic
+        )
+    }
+
+    /// The style keys are written only when set, so a plain colour theme
+    /// encodes exactly as before wave 28.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(red, forKey: .red)
+        try c.encode(green, forKey: .green)
+        try c.encode(blue, forKey: .blue)
+        if !gradientColors.isEmpty { try c.encode(gradientColors, forKey: .gradientColors) }
+        if noise != 0 { try c.encode(noise, forKey: .noise) }
+        if appearance != .automatic { try c.encode(appearance, forKey: .appearance) }
+    }
+
+    private static func clampedNoise(_ value: Double) -> Double {
+        value.isFinite ? min(max(value, 0), 1) : 0
+    }
+
+    /// The base colour alone, with no gradient, grain or appearance.
+    public var baseColor: SpaceTheme { SpaceTheme(red: red, green: green, blue: blue) }
+
+    /// Every stop in order, the base colour first.
+    public var stops: [SpaceTheme] {
+        [baseColor] + gradientColors.map { SpaceTheme(red: $0.red, green: $0.green, blue: $0.blue) }
+    }
+
+    public var isGradient: Bool { !gradientColors.isEmpty }
+
+    /// Same style with another base colour (a swatch or the colour well).
+    public func withBaseColor(_ color: SpaceTheme) -> SpaceTheme {
+        var theme = self
+        theme.red = color.red
+        theme.green = color.green
+        theme.blue = color.blue
+        return theme
+    }
+
+    /// The gradient, grain and appearance alone (what the style sync record carries).
+    public var style: SpaceThemeStyle {
+        get { SpaceThemeStyle(gradientColors: gradientColors, noise: noise, appearance: appearance) }
+        set {
+            gradientColors = newValue.gradientColors
+            noise = newValue.noise
+            appearance = newValue.appearance
+        }
     }
 
     public static let presets: [SpaceTheme] = [
@@ -23,6 +149,19 @@ public struct SpaceTheme: Hashable, Codable, Sendable {
     ]
 
     public static let `default`: SpaceTheme = presets[0]
+
+    /// Gradient presets for the editor (ReArc's own pairings in the spirit
+    /// of Arc's dial).
+    public static let gradientPresets: [SpaceTheme] = [
+        SpaceTheme(red: 0.45, green: 0.35, blue: 0.90, gradientColors: [SpaceColor(red: 0.90, green: 0.40, blue: 0.70)]),
+        SpaceTheme(red: 0.20, green: 0.60, blue: 0.86, gradientColors: [SpaceColor(red: 0.30, green: 0.85, blue: 0.70)]),
+        SpaceTheme(red: 0.95, green: 0.55, blue: 0.30, gradientColors: [SpaceColor(red: 0.90, green: 0.30, blue: 0.45)]),
+        SpaceTheme(red: 0.25, green: 0.72, blue: 0.55, gradientColors: [SpaceColor(red: 0.95, green: 0.85, blue: 0.35)]),
+        SpaceTheme(red: 0.65, green: 0.40, blue: 0.85, gradientColors: [
+            SpaceColor(red: 0.30, green: 0.55, blue: 0.95), SpaceColor(red: 0.40, green: 0.85, blue: 0.80),
+        ]),
+        SpaceTheme(red: 0.15, green: 0.15, blue: 0.20, gradientColors: [SpaceColor(red: 0.40, green: 0.30, blue: 0.55)]),
+    ]
 
     /// Theme editor swatches: three rows of nine, after Arc's style editor
     /// pads (`ColorPickerPastel1..9`, `ColorPickerGreyscale1..9`,
@@ -38,6 +177,23 @@ public struct SpaceTheme: Hashable, Codable, Sendable {
         [(0.95, 0.95, 0.96), (0.78, 0.78, 0.80), (0.55, 0.55, 0.60), (0.33, 0.33, 0.36), (0.15, 0.15, 0.17),
          (0.55, 0.50, 0.42), (0.45, 0.52, 0.42), (0.40, 0.47, 0.55), (0.52, 0.42, 0.48)],
     ].map { row in row.map { SpaceTheme(red: $0.0, green: $0.1, blue: $0.2) } }
+}
+
+/// The part of a theme beyond its base colour. It syncs in its own record
+/// (`SidebarSpaceStyleRecord`), so Macs on an older ReArc, which cannot
+/// read it, never see it and so never write it back without it.
+public struct SpaceThemeStyle: Hashable, Codable, Sendable {
+    public var gradientColors: [SpaceColor]
+    public var noise: Double
+    public var appearance: SpaceAppearance
+
+    public init(gradientColors: [SpaceColor] = [], noise: Double = 0, appearance: SpaceAppearance = .automatic) {
+        self.gradientColors = gradientColors
+        self.noise = noise
+        self.appearance = appearance
+    }
+
+    public var isDefault: Bool { self == SpaceThemeStyle() }
 }
 
 public extension Space {

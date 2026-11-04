@@ -149,6 +149,9 @@ public enum SyncRecordKind: String, Codable, CaseIterable, Sendable {
     case space = "SidebarSpaceRecord"
     case item = "SidebarItemRecord"
     case boost = "SidebarBoostRecord"
+    /// A space's gradient, grain and appearance (wave 28). Older builds fail
+    /// to decode its kind and drop it, so they never overwrite it.
+    case spaceStyle = "SidebarSpaceStyleRecord"
 
     var namePrefix: String {
         switch self {
@@ -156,6 +159,7 @@ public enum SyncRecordKind: String, Codable, CaseIterable, Sendable {
         case .space: return "space_"
         case .item: return "item_"
         case .boost: return "boost_"
+        case .spaceStyle: return "spacestyle_"
         }
     }
 
