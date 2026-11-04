@@ -741,7 +741,10 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         main.addSubmenu(edit, title: "Edit")
 
         let view = NSMenu(title: "View")
-        view.addItem(target.item("Toggle Sidebar", "s") { model.toggleSidebar() })
+        // Arc's title flips with the sidebar.
+        target.add([[ShellMenuItem("Hide Sidebar", "s", liveTitle: { model.isSidebarVisible ? "Hide Sidebar" : "Show Sidebar" }) {
+            model.toggleSidebar()
+        }]], to: view)
         view.addItem(.separator())
         target.add(ShellMenus.navigation(model), to: view)
         if runtime.capabilities.downloads {
@@ -817,6 +820,8 @@ final class ChromiumMenuTarget: NSObject, NSMenuItemValidation {
     private var actions: [Int: () -> Void] = [:]
     /// Checkmark state, read each time the menu opens.
     private var checks: [Int: () -> Bool] = [:]
+    /// Live titles (`ShellMenuItem.liveTitle`); nil hides the item.
+    private var titles: [Int: () -> String?] = [:]
 
     func checkItem(_ title: String, isOn: @escaping () -> Bool, action: @escaping () -> Void) -> NSMenuItem {
         let item = item(title, "", [], action: action)
@@ -826,6 +831,12 @@ final class ChromiumMenuTarget: NSObject, NSMenuItemValidation {
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if let isOn = checks[menuItem.tag] { menuItem.state = isOn() ? .on : .off }
+        if let title = titles[menuItem.tag] {
+            let current = title()
+            menuItem.isHidden = current == nil
+            if let current { menuItem.title = current }
+            return current != nil
+        }
         return true
     }
 
@@ -857,6 +868,14 @@ final class ChromiumMenuTarget: NSObject, NSMenuItemValidation {
                 // Arc's alternates (⌘← Back, F12): hidden, their keys still work.
                 menuItem.isHidden = entry.isAlternate
                 menuItem.allowsKeyEquivalentWhenHidden = entry.isAlternate
+                if let live = entry.liveTitle {
+                    titles[menuItem.tag] = live
+                    menuItem.title = live() ?? entry.title
+                    menuItem.isHidden = live() == nil
+                    // A space made later still has ⌃n before the menu next opens;
+                    // validation disables an item with nothing behind it.
+                    menuItem.allowsKeyEquivalentWhenHidden = true
+                }
                 menu.addItem(menuItem)
             }
         }

@@ -21,22 +21,26 @@ struct ShellMenuItem: Identifiable {
     /// An alternate key for the item above it, as in Arc's nib (⌘← for Back,
     /// F12 for Developer Tools): hidden, its key still works (Chromium path).
     let isAlternate: Bool
+    /// The title as the app's state has it now, nil to hide the item (Arc's
+    /// Spaces menu names its spaces; Show/Hide Sidebar flips). `title` is the fallback.
+    var liveTitle: (() -> String?)?
     let action: () -> Void
 
     var id: String { isAlternate ? "\(title) (alternate)" : title }
 
     init(_ title: String, _ key: Key? = nil, _ modifiers: NSEvent.ModifierFlags = .command, alternate: Bool = false,
-         action: @escaping () -> Void) {
+         liveTitle: (() -> String?)? = nil, action: @escaping () -> Void) {
         self.title = title
         self.key = key
         self.modifiers = modifiers
         self.isAlternate = alternate
+        self.liveTitle = liveTitle
         self.action = action
     }
 
     init(_ title: String, _ character: Character, _ modifiers: NSEvent.ModifierFlags = .command, alternate: Bool = false,
-         action: @escaping () -> Void) {
-        self.init(title, .character(character), modifiers, alternate: alternate, action: action)
+         liveTitle: (() -> String?)? = nil, action: @escaping () -> Void) {
+        self.init(title, .character(character), modifiers, alternate: alternate, liveTitle: liveTitle, action: action)
     }
 
     /// Arc's binding for this item's keys, if it has one (docs/SHORTCUTS.md).
@@ -98,6 +102,9 @@ struct ShellMenuItem: Identifiable {
         return (String(shifted), modifiers.subtracting(.shift))
     }
 
+    /// The title to show now; nil hides the item.
+    var shownTitle: String? { liveTitle.map { $0() } ?? title }
+
     var keyEquivalent: KeyEquivalent? {
         switch key {
         case .character(let character): return KeyEquivalent(character)
@@ -147,11 +154,16 @@ enum ShellMenus {
         ]]
     }
 
-    /// File menu: Arc's New Note (⌃⇧N) and New Easel (⌃⇧E).
+    /// File menu: Arc's New Note (⌃⇧N) and New Easel (⌃⇧E), and ⌘O, Arc's
+    /// "Open Little Arc or Peek in…": the key Little Arc moves to a tab in the
+    /// active space (Arc asks which space; ReArc has no chooser yet).
     static func documents(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [[
             ShellMenuItem("New Note", "n", [.control, .shift]) { _ = model.executeCommand(.newNote, commandID: nil) },
             ShellMenuItem("New Easel", "e", [.control, .shift]) { _ = model.executeCommand(.newEasel, commandID: nil) },
+            ShellMenuItem("Open Little Arc in Space", "o") {
+                if let id = model.keyLittleArcID { model.promoteLittleArcWindow(id) }
+            },
         ]]
     }
 
@@ -285,8 +297,12 @@ enum ShellMenus {
                 ShellMenuItem("Next Space", .rightArrow, [.command, .option]) { model.cycleSpace(forward: true) },
                 ShellMenuItem("Previous Space", .leftArrow, [.command, .option]) { model.cycleSpace(forward: false) },
             ],
+            // Arc's live Spaces menu lists the spaces by name, ⌃1…⌃9 on the first nine.
             (1 ... 9).map { number in
-                ShellMenuItem("Space \(number)", Character("\(number)"), .control) { model.selectSpace(atIndex: number - 1) }
+                ShellMenuItem("Space \(number)", Character("\(number)"), .control, liveTitle: {
+                    let spaces = model.store.spacesInActiveProfile
+                    return spaces.indices.contains(number - 1) ? spaces[number - 1].name : nil
+                }) { model.selectSpace(atIndex: number - 1) }
             },
             [
                 ShellMenuItem("New Space…") { model.beginSpaceCreation() },
@@ -375,12 +391,12 @@ struct ShellMenuButtons: View {
     var body: some View {
         ForEach(groups.indices, id: \.self) { index in
             if index > 0 { Divider() }
-            ForEach(groups[index].filter { !$0.isAlternate }) { item in
+            ForEach(groups[index].filter { !$0.isAlternate && $0.shownTitle != nil }) { item in
                 if let key = item.keyEquivalent {
-                    Button(item.title, action: item.action)
+                    Button(item.shownTitle ?? item.title, action: item.action)
                         .keyboardShortcut(key, modifiers: item.eventModifiers)
                 } else {
-                    Button(item.title, action: item.action)
+                    Button(item.shownTitle ?? item.title, action: item.action)
                 }
             }
         }
