@@ -53,7 +53,9 @@ extension BrowserViewModel {
         let session = session ?? UUID()
         let parent = parentProfileID ?? store.activeProfileID
         let id = UUID()
+        let adopted = engine
         let engine = engine ?? engineHost.privateEngine(session: session, parentProfileID: parent, shellID: id)
+        if let adopted { engineHost.configurePrompts(of: adopted, role: .privateWindow, profileID: parent, privateSession: session) }
         let window = PrivateWindowModel(id: id, session: session, parentProfileID: parent, engine: engine)
         engine.linkPeekHandler = nil
         if let url { engine.load(url) }
@@ -72,6 +74,7 @@ extension BrowserViewModel {
     func privateWindowClosed(_ id: UUID) {
         guard let window = privateWindows.removeValue(forKey: id) else { return }
         if !privateWindows.values.contains(where: { $0.session == window.session }) {
+            sitePermissions.dropScope(SitePermissionStore.ephemeralPrefix + window.session.uuidString)
             onPrivateSessionEnded?(window)
         }
     }

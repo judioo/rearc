@@ -202,6 +202,10 @@ final class WKEngine: NSObject, WebEngine {
     private let mediaBridge = MediaStateMessageHandler()
     private let boostPageshowBridge = BoostPageshowHandler()
     private let boostEditorBridge = BoostEditorMessageHandler()
+    private let contextMenuBridge = ContextMenuMessageHandler()
+    /// Dialogs, open panels, media permissions and the page menu (WKUIDelegate).
+    let pagePrompts = PagePromptCenter()
+    @ObservationIgnored private var lastPromptID: UInt64 = 0
     private let mediaStateSubject = CurrentValueSubject<WebMediaState, Never>(.silent)
     private var boostEntries: [BoostRuntimeEntry] = []
     private var installedScriptPackageIDs: Set<UUID> = []
@@ -240,14 +244,19 @@ final class WKEngine: NSObject, WebEngine {
         } else {
             configuration.websiteDataStore = WKWebsiteDataStore(forIdentifier: context.websiteDataStoreIdentifier)
         }
-        webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = ReArcWebView(frame: .zero, configuration: configuration)
+        self.webView = webView
         super.init()
+        webView.prompts = pagePrompts
+        webView.contextInfo = contextMenuBridge
         let controller = webView.configuration.userContentController
         controller.add(linkPeekBridge, name: LinkPeekMessageHandler.handlerName)
+        controller.add(contextMenuBridge, name: ContextMenuMessageHandler.handlerName)
         controller.add(mediaBridge, name: MediaStateMessageHandler.handlerName)
         controller.add(boostPageshowBridge, name: BoostInjectionScriptBuilder.pageshowHandler)
         reinstallBaseScripts(on: controller)
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
         mediaBridge.onState = { [weak self] state in
             self?.mediaStateSubject.send(state)
@@ -260,6 +269,13 @@ final class WKEngine: NSObject, WebEngine {
 
     deinit {
         faviconTask?.cancel()
+        // WebKit requires every delegate completion handler to be called.
+        pagePrompts.answerAllConservatively()
+    }
+
+    func nextPromptID() -> UInt64 {
+        lastPromptID += 1
+        return lastPromptID
     }
 
     private func observeNavigationState() {
@@ -293,6 +309,11 @@ final class WKEngine: NSObject, WebEngine {
         controller.addUserScript(WKUserScript(
             source: Self.mediaProbeScriptSource,
             injectionTime: .atDocumentEnd,
+            forMainFrameOnly: false
+        ))
+        controller.addUserScript(WKUserScript(
+            source: ContextMenuMessageHandler.scriptSource,
+            injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         ))
     }
@@ -354,7 +375,7 @@ final class WKEngine: NSObject, WebEngine {
     }
 
     func makeView() -> AnyView {
-        AnyView(WebViewRepresentable(webView: webView))
+        AnyView(WebViewRepresentable(webView: webView).pagePrompts(pagePrompts))
     }
 
     func installBoosts(_ entries: [BoostRuntimeEntry]) {
@@ -619,6 +640,7 @@ extension WKEngine: WKNavigationDelegate {
         }
         clearBoostSessionOnNavigation()
         endFindOnNavigation()
+        pagePrompts.documentChanged()
         refreshBoostsOnPage()
         onNavigationCommit?(currentURL, pageTitle)
     }

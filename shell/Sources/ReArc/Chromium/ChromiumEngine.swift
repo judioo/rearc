@@ -107,6 +107,15 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     /// The active find session, 0 when none (ended sessions report a terminal first).
     @ObservationIgnored private(set) var findSessionID: UInt64 = 0
 
+    /// Dialogs, file choosers, permission and password prompts and the page menu (ABI 1.18–1.22).
+    @ObservationIgnored let pagePrompts = PagePromptCenter()
+    /// A normal close (beforeunload) is in flight.
+    @ObservationIgnored private(set) var pageCloseRequested = false
+    /// The last committed main-frame URL (`currentURL` runs ahead while a navigation is pending).
+    @ObservationIgnored private(set) var committedURL: URL?
+    /// The context menu request awaiting its command; every menu ends with one (dismiss included).
+    @ObservationIgnored private(set) var contextMenuRequestID: UInt64?
+
     @ObservationIgnored private let mediaStateSubject = CurrentValueSubject<WebMediaState, Never>(.silent)
     /// The host holding this tab's single attachment lease.
     @ObservationIgnored private weak var host: ChromiumHostView?
@@ -264,11 +273,15 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
             }
         case .committed:
             guard event.isMainFrame else { return }
-            if let url = event.url.flatMap(URL.init(string:)) { currentURL = url }
+            if let url = event.url.flatMap(URL.init(string:)) {
+                currentURL = url
+                committedURL = url
+            }
             lastError = nil
             if !event.isSameDocument {
                 resumeCommitWaiters(throwing: nil)
                 applyPendingZoom()
+                pagePrompts.documentChanged()
                 onNavigationCommit?(currentURL, pageTitle)
             }
         case .failed:
@@ -287,6 +300,9 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
             appliedPlan = []
             linkPeekApplied = false
             pickerDocument = nil
+            contextMenuRequestID = nil
+            // The engine retired every request of the closed tab.
+            pagePrompts.withdrawAll()
             // tab.closed is final: no later media event will report the session ended.
             if mediaState != .silent { mediaStateSubject.send(.silent) }
         }
@@ -638,7 +654,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting {
     // MARK: View
 
     func makeView() -> AnyView {
-        AnyView(ChromiumWebView(engine: self))
+        AnyView(ChromiumWebView(engine: self).pagePrompts(pagePrompts))
     }
 
     /// The host currently holding the lease.
@@ -1041,6 +1057,108 @@ extension ChromiumBoostPlan {
             )
         }
         return scripts.withUnsafeBufferPointer { body($0.isEmpty ? nil : $0.baseAddress, $0.count) }
+    }
+}
+// MARK: - Host prompt channels (ABI 1.18–1.22)
+
+extension ChromiumEngine: PageClosing {
+    func handleDialog(_ event: ChromiumDialogEvent) {
+        let id = event.identity.requestID
+        if event.identity.isCancellation { return pagePrompts.cancelDialog(id: id) }
+        let leaving = event.request.kind == .beforeUnload
+        pagePrompts.presentDialog(event.request) { [weak self, weak runtime] reply in
+            runtime?.respondDialog(id, reply)
+            if leaving, !reply.accept { self?.navigationVetoed() }
+        }
+    }
+
+    func handleFileChooser(_ event: ChromiumFileChooserEvent) {
+        let id = event.identity.requestID
+        if event.identity.isCancellation { return pagePrompts.cancelFileChooser(id: id) }
+        pagePrompts.chooseFiles(event.request) { [weak runtime] paths in
+            runtime?.respondFileChooser(id, paths: paths)
+        }
+    }
+
+    func handlePermission(_ event: ChromiumPermissionEvent) {
+        let id = event.identity.requestID
+        if event.identity.isCancellation { return pagePrompts.cancelPermission(id: id) }
+        pagePrompts.presentPermission(event.request) { [weak runtime] decision, persist in
+            runtime?.respondPermission(id, decision, persist: persist)
+        }
+    }
+
+    func handlePassword(_ event: ChromiumPasswordEvent) {
+        let id = event.identity.requestID
+        if event.identity.isCancellation { return pagePrompts.cancelPassword(id: id) }
+        pagePrompts.presentPassword(event.prompt) { [weak runtime] action in
+            runtime?.respondPassword(id, action)
+        }
+    }
+
+    /// The menu Chromium asked for, built from the event. Engine items run as
+    /// `ReArcContextMenuCommand`; Arc items run in the shell and dismiss the
+    /// request. A refused command (disabled, unsupported Inspect) leaves the
+    /// request pending, so it is dismissed too.
+    func handleContextMenu(_ event: ChromiumContextMenuEvent) {
+        let id = event.identity.requestID
+        if event.identity.isCancellation {
+            if contextMenuRequestID == id { contextMenuRequestID = nil }
+            return
+        }
+        contextMenuRequestID = id
+        let capabilities = runtime.capabilities
+        let options = pagePrompts.contextMenuOptions(
+            canGoBack: canGoBack,
+            canGoForward: canGoForward,
+            canViewSource: capabilities.navigationExtended,
+            canInspect: capabilities.devTools
+        )
+        let plan = PageContextMenuPlan.plan(for: event.params, options: options)
+        pagePrompts.showContextMenu(plan, params: event.params, at: event.point) { [weak self] item in
+            self?.finishContextMenu(id, item: item)
+        }
+    }
+
+    @discardableResult
+    func finishContextMenu(_ id: UInt64, item: PageContextMenuItem?) -> ReArcStatus {
+        if contextMenuRequestID == id { contextMenuRequestID = nil }
+        let command = item.flatMap(ChromiumContextCommand.init) ?? .dismiss
+        let status = runtime.contextCommand(id, command)
+        if status != .rearcOK, command != .dismiss, status != ReArcStatus(REARC_NOT_FOUND) {
+            runtime.contextCommand(id, .dismiss)
+        }
+        return status
+    }
+
+    /// Stay on a navigation's "Leave site?": the page never left, so the URL
+    /// (set when the navigation was requested) and the sidebar tab go back to it.
+    private func navigationVetoed() {
+        guard let committed = committedURL, currentURL != committed else { return }
+        currentURL = committed
+        onNavigationCommit?(committed, pageTitle)
+    }
+
+    /// `ReArcTabClose(tab, false)`: Chromium runs beforeunload, which may ask
+    /// "Leave site?" through the dialog channel; Stay vetoes (OK, cancelled).
+    func requestPageClose(_ completion: @escaping (Bool) -> Void) -> Bool {
+        guard runtime.capabilities.javascriptDialogs, tabID != 0, runtime.isReady, !runtime.isStopping else { return false }
+        // A second close while one waits on the page changes nothing.
+        guard !pageCloseRequested else { return true }
+        let tab = tabID
+        pageCloseRequested = true
+        let status = runtime.callAsync({ [weak self] status, cancelled in
+            self?.pageCloseRequested = false
+            ChromiumLog.trace("tab \(tab) normal close -> \(status.rearcName) vetoed \(cancelled)")
+            // A failed close (tab already gone) still lets the shell drop the tab.
+            completion(status != .rearcOK || !cancelled)
+        }) { ReArcTabClose(tab, false, $1, $0) }
+        if status != .rearcOK {
+            pageCloseRequested = false
+            ChromiumLog.info("tab \(tab) normal close rejected: \(status.rearcName)")
+            return false
+        }
+        return true
     }
 }
 #endif

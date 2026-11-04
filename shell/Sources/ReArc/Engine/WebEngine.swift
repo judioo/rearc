@@ -82,8 +82,12 @@ protocol WebEngine: AnyObject {
     /// Requests a zoom factor; `zoomFactor` follows when the engine applies it.
     func setZoomFactor(_ factor: Double)
 
-    /// The SwiftUI view rendering this engine's web content.
+    /// The SwiftUI view rendering this engine's web content, with its page prompts over it.
     func makeView() -> AnyView
+
+    /// JavaScript dialogs, file choosers, permission and password prompts and
+    /// the page menu this page raised (shown over this page only).
+    var pagePrompts: PagePromptCenter { get }
 
     /// Replace installed boost scripts/CSS plan for this tab's web view.
     func installBoosts(_ entries: [BoostRuntimeEntry])
@@ -96,6 +100,15 @@ protocol WebEngine: AnyObject {
 
 extension WebEngine {
     func reload() { reload(ignoringCache: false) }
+}
+
+/// Engines that close a page through its beforeunload handler ("Leave
+/// site?") before the shell drops the tab.
+protocol PageClosing: AnyObject {
+    /// Starts a normal close. False when the engine cannot (the shell then
+    /// closes right away); otherwise `completion` runs once: true when the
+    /// page closed, false when the user chose to stay.
+    func requestPageClose(_ completion: @escaping (Bool) -> Void) -> Bool
 }
 
 /// Engines whose zoom can change outside the shell (Chromium shares zoom per

@@ -394,6 +394,17 @@ final class ChromiumRuntime {
     var downloadDirectory: URL? {
         didSet { if downloadDirectory != oldValue { applyDownloadPolicyToOpenProfiles() } }
     }
+    /// "Ask where to save" (ABI 1.19 policy prompt 1): Chromium asks through the file chooser.
+    var asksWhereToSaveDownloads = false {
+        didSet { if asksWhereToSaveDownloads != oldValue { applyDownloadPolicyToOpenProfiles() } }
+    }
+    /// A download save-path request with no live tab to show it (presents its own panel).
+    var onDownloadSaveRequest: ((ChromiumFileChooserEvent) -> Void)?
+    /// The engine withdrew a file chooser request (any tab), for that panel.
+    var onDownloadSaveCancelled: ((UInt64) -> Void)?
+    /// Prompt channel events received and replies sent, per channel (logs, self-test).
+    var promptEvents: [String: Int] = [:]
+    var promptReplies: [String: Int] = [:]
     /// The shell profile that may take over the startup `Default` directory
     /// (the first profile); set before any of its tabs are created.
     var legacyDefaultOwner: Profile.ID?
@@ -496,6 +507,8 @@ final class ChromiumRuntime {
         if capabilities.findInPage {
             ReArcEngineSetFindCallback(findCallback, context)
         }
+        // Prompt channels (ABI 1.18–1.22) before any tab, so no request falls to the no-host default.
+        registerPromptChannels(context: context)
         if capabilities.downloads {
             // Before any tab exists; each profile gets its policy when it opens.
             ReArcEngineSetDownloadCallback(downloadCallback, context)
@@ -842,6 +855,11 @@ final class ChromiumRuntime {
         }
     }
 
+    /// The live shell engine of an engine tab.
+    func engine(forTab tabID: UInt64) -> ChromiumEngine? {
+        engines[tabID]?.value
+    }
+
     func register(_ engine: ChromiumEngine, tabID: UInt64) {
         engines[tabID] = WeakRef(engine)
         engineTabIDs[engine.shellID] = tabID
@@ -951,6 +969,7 @@ final class ChromiumRuntime {
         engine.handle(event)
         if event.kind == .closed {
             engines[event.tabID] = nil
+            if engineTabIDs[engine.shellID] == event.tabID { engineTabIDs[engine.shellID] = nil }
         }
     }
 
@@ -987,17 +1006,19 @@ final class ChromiumRuntime {
 
     // MARK: Downloads (ABI 1.17)
 
-    /// `ReArcDownloadSetPolicy(profile, directory, 0)`: save without a picker.
+    /// `ReArcDownloadSetPolicy(profile, directory, prompt)`: prompt 0 saves without a
+    /// picker; 1 ("Ask where to save", ABI 1.19) asks through the host file chooser.
     @discardableResult
     func applyDownloadPolicy(profile: UInt64) -> ReArcStatus {
         guard capabilities.downloads, profile != 0, isReady, !isStopping, let directory = downloadDirectory else {
             return ReArcStatus(REARC_UNSUPPORTED)
         }
-        let status = directory.path.withCString { ReArcDownloadSetPolicy(profile, $0, 0) }
+        let prompt: UInt32 = asksWhereToSaveDownloads && capabilities.downloadSavePrompt ? 1 : 0
+        let status = directory.path.withCString { ReArcDownloadSetPolicy(profile, $0, prompt) }
         if status != .rearcOK {
-            ChromiumLog.info("ReArcDownloadSetPolicy(profile \(profile), \(directory.path)) rejected: \(status.rearcName)")
+            ChromiumLog.info("ReArcDownloadSetPolicy(profile \(profile), \(directory.path), \(prompt)) rejected: \(status.rearcName)")
         } else {
-            ChromiumLog.trace("download policy: profile \(profile) saves to \(directory.path) without asking")
+            ChromiumLog.trace("download policy: profile \(profile) saves to \(directory.path) \(prompt == 1 ? "asking where" : "without asking")")
         }
         return status
     }

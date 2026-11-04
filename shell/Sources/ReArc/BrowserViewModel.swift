@@ -139,6 +139,8 @@ final class BrowserViewModel {
     let findBar = FindBarModel()
     /// The sidebar's downloads tray (both engines).
     let downloads: DownloadsController
+    /// Permission answers per site (URL field indicator; WebKit's remembered answers).
+    let sitePermissions: SitePermissionsController
     /// Command-bar visit history, saved next to the sidebar file.
     var visitHistory: VisitHistory
     @ObservationIgnored let historyFileURL: URL?
@@ -164,6 +166,8 @@ final class BrowserViewModel {
         self.visitHistory = VisitHistoryFile.load(from: historyFile)
         self.downloads = DownloadsController(fileURL: Self.siblingFile(DownloadListFile.fileName, of: persistence.fileURL))
         engineHost.downloadCenter = downloads.webKit
+        self.sitePermissions = SitePermissionsController(fileURL: Self.siblingFile(SitePermissionStore.fileName, of: persistence.fileURL))
+        engineHost.sitePermissions = sitePermissions
         self.nowPlaying = nowPlaying ?? NowPlayingController()
         let engine = syncEngine ?? CloudKitSyncAvailability.makeEngine()
         self.syncEngine = engine
@@ -176,6 +180,7 @@ final class BrowserViewModel {
             self?.syncPipeline.handleJournalEntry(entry)
         }
         engine.start()
+        engineHost.linkRouter = self
         self.persistence.start(autoSave: self.store) { [weak self] in
             self?.reconcileEngineOwnership()
             self?.syncAllTabBoosts()
@@ -291,6 +296,12 @@ final class BrowserViewModel {
     /// the strip) and a pinned tab is unloaded back to its saved URL, as in
     /// Arc; anything else is closed and archived.
     func closeTab(_ id: Tab.ID) {
+        // The page may ask "Leave site?" first (Chromium beforeunload); Stay keeps the tab.
+        closeThroughPage(id) { [weak self] in self?.closeTabNow(id) }
+    }
+
+    private func closeTabNow(_ id: Tab.ID) {
+        guard store.tab(withID: id) != nil else { return }
         if store.kind(of: id) == .favorite {
             unloadFavorite(id)
             return
@@ -507,7 +518,7 @@ final class BrowserViewModel {
         }
     }
 
-    private func syncBoosts(for tab: Tab) {
+    func syncBoosts(for tab: Tab) {
         let entries = store.activeBoostEntries(for: tab)
         let pid = profileID(for: tab)
         engineHost.syncBoosts(for: tab, profileID: pid, entries: entries)
@@ -705,7 +716,7 @@ final class BrowserViewModel {
         nowPlaying.updateNowPlaying(state: state, tabTitle: tab.title)
     }
 
-    private func configureLinkPeek(on engine: any WebEngine) {
+    func configureLinkPeek(on engine: any WebEngine) {
         engine.linkPeekHandler = { [weak self] url in
             self?.showPeek(url: url)
         }

@@ -24,6 +24,10 @@ final class EngineHost {
     private var littleArcEngines: [LittleArcEngineKey: any WebEngine] = [:]
     /// WebKit engines hand their downloads to the tray (Chromium reports its own).
     @ObservationIgnored weak var downloadCenter: WebKitDownloadCenter?
+    /// Where page prompts open links (the browser view model).
+    @ObservationIgnored weak var linkRouter: PageLinkRouting?
+    /// Permission answers, for the URL field indicator and WebKit's remembered answers.
+    @ObservationIgnored weak var sitePermissions: SitePermissionsController?
 
     /// Favorites are global in the sidebar, but each favorite tab's engine uses
     /// the **active** profile's storage at load time (see `BrowserViewModel.profileID(for:)`).
@@ -50,6 +54,23 @@ final class EngineHost {
         role: EngineRole,
         shellID: UUID,
         privateSession: UUID? = nil
+    ) -> any WebEngine {
+        let engine = makeConcreteEngine(context: context, role: role, shellID: shellID, privateSession: privateSession)
+        let prompts = engine.pagePrompts
+        prompts.role = role
+        prompts.ownerTabID = role == .tab ? shellID : nil
+        prompts.profileID = context.profileID
+        prompts.privateSession = context.isEphemeral ? (privateSession ?? shellID) : nil
+        prompts.router = linkRouter
+        prompts.sitePermissions = sitePermissions
+        return engine
+    }
+
+    private func makeConcreteEngine(
+        context: EngineProfileContext,
+        role: EngineRole,
+        shellID: UUID,
+        privateSession: UUID?
     ) -> any WebEngine {
         #if REARC_CHROMIUM
         if let runtime = ChromiumRuntime.active {
@@ -81,7 +102,24 @@ final class EngineHost {
 
     /// Binds an engine the shell did not create (a Chromium-created tab) to a sidebar tab.
     func adopt(_ engine: any WebEngine, for tab: Tab, profileID: Profile.ID) {
+        let prompts = engine.pagePrompts
+        prompts.role = .tab
+        prompts.ownerTabID = tab.id
+        prompts.profileID = profileID
+        prompts.router = linkRouter
+        prompts.sitePermissions = sitePermissions
         engines[TabEngineKey(tabID: tab.id, profileID: profileID)] = engine
+    }
+
+    /// Prompt identity for an engine made outside `makeEngine` (an adopted private-window popup).
+    func configurePrompts(of engine: any WebEngine, role: EngineRole, profileID: Profile.ID, privateSession: UUID?) {
+        let prompts = engine.pagePrompts
+        prompts.role = role
+        prompts.ownerTabID = nil
+        prompts.profileID = profileID
+        prompts.privateSession = privateSession
+        prompts.router = linkRouter
+        prompts.sitePermissions = sitePermissions
     }
 
     func engine(forTabID id: Tab.ID, profileID: Profile.ID) -> (any WebEngine)? {
