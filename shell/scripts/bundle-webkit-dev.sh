@@ -58,8 +58,9 @@ BIN="$(swift build --package-path "$SHELL_DIR" -c "$CONFIG" --show-bin-path)/rea
 
 APP="$DIST/ReArc Dev.app"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ReArc"
+cp "$SHELL_DIR/Resources/ReArc.icns" "$APP/Contents/Resources/ReArc.icns"
 PLIST="$APP/Contents/Info.plist"
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -71,6 +72,7 @@ cat > "$PLIST" <<PLIST
   <key>CFBundleName</key><string>ReArc Dev</string>
   <key>CFBundleDisplayName</key><string>ReArc Dev</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>ReArc</string>
   <key>CFBundleShortVersionString</key><string>0.0.1</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>

@@ -155,6 +155,12 @@ plutil -replace NSCameraUsageDescription -string "A website you allowed wants to
 plutil -replace NSMicrophoneUsageDescription -string "A website you allowed wants to use your microphone." "$PLIST"
 plutil -replace NSLocationUsageDescription -string "A website you allowed wants to know your location." "$PLIST"
 plutil -replace NSLocationWhenInUseUsageDescription -string "A website you allowed wants to know your location." "$PLIST"
+# The ReArc icon instead of Chromium's. CFBundleIconName (the AppIcon in Assets.car) wins
+# over CFBundleIconFile on macOS, so it is removed; Assets.car itself stays for its other
+# assets. Before signing, so the seal covers the icon and Info.plist.
+cp "$SHELL_DIR/Resources/ReArc.icns" "$APP/Contents/Resources/ReArc.icns"
+plutil -replace CFBundleIconFile -string ReArc "$PLIST"
+plutil -remove CFBundleIconName "$PLIST" 2>/dev/null || true
 if [[ $DEV_MOCK_KEYCHAIN == 1 ]]; then
   plutil -replace ReArcDevUseMockKeychain -bool YES "$PLIST"
   echo "==> DEVELOPMENT bundle: --use-mock-keychain enabled (cookies are not Keychain-encrypted)"

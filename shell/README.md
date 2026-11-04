@@ -67,6 +67,13 @@ dist/chromium/
   *.dylib                                              component dylib closure next to the .app
 ```
 
+Both bundle scripts install the ReArc icon (`Resources/ReArc.icns`, rendered
+from `brand/app-icon.svg`) as `Contents/Resources/ReArc.icns` with
+`CFBundleIconFile=ReArc`. The Chromium bundle also drops `CFBundleIconName`,
+whose `AppIcon` in Chromium's `Assets.car` would otherwise win; `Assets.car`
+stays for its other assets. After rebuilding an installed copy, `touch` it
+and re-register it with `lsregister -f` so Finder and the Dock refresh.
+
 The framework's `@loader_path/../../../../../..` rpath resolves to the
 directory that contains `ReArc.app`, so the dylibs must stay beside it. The
 script checks that every `@rpath` dependency of the executable, framework and
