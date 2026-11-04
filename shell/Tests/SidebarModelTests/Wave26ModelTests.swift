@@ -379,3 +379,41 @@ final class Wave26AirTrafficModelTests: XCTestCase {
         XCTAssertEqual(LinkRoutingState.load(from: defaults), state)
     }
 }
+
+/// Wave 26: Site Control Center.
+final class Wave26SiteControlModelTests: XCTestCase {
+
+    func testSiteIsForWebPagesOnly() {
+        XCTAssertEqual(SiteControlCenter.site(for: URL(string: "https://www.docs.test:8443/a?b")),
+                       SiteControlCenter.Site(origin: "https://www.docs.test:8443", host: "docs.test:8443"))
+        XCTAssertEqual(SiteControlCenter.site(for: URL(string: "http://example.com/"))?.host, "example.com")
+        XCTAssertNil(SiteControlCenter.site(for: URL(string: "about:blank")))
+        XCTAssertNil(SiteControlCenter.site(for: URL(string: "file:///tmp/a.html")))
+        XCTAssertNil(SiteControlCenter.site(for: URL(string: "chrome://settings")))
+        XCTAssertNil(SiteControlCenter.site(for: nil))
+    }
+
+    func testSiteDataRecordsBelongToTheirDomainAndSubdomains() {
+        XCTAssertTrue(SiteControlCenter.siteDataRecord("example.com", belongsTo: "example.com"))
+        XCTAssertTrue(SiteControlCenter.siteDataRecord("Example.com", belongsTo: "mail.example.com"))
+        XCTAssertTrue(SiteControlCenter.siteDataRecord("example.com", belongsTo: "example.com:8080"))
+        XCTAssertFalse(SiteControlCenter.siteDataRecord("example.com", belongsTo: "notexample.com"))
+        XCTAssertFalse(SiteControlCenter.siteDataRecord("mail.example.com", belongsTo: "example.com"))
+        XCTAssertFalse(SiteControlCenter.siteDataRecord("", belongsTo: "example.com"))
+    }
+
+    func testBoostRowsAndSiteDataSummary() {
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        let url = URL(string: "https://docs.test/page")!
+        _ = store.createBoostForCurrentSite(name: "zeta", css: "", pageURL: url)
+        _ = store.createBoostForCurrentSite(name: "Alpha", css: "", pageURL: url)
+        let rows = SiteControlCenter.boostRows(store.boostsMatchingPage(url))
+        XCTAssertEqual(rows.map(\.name), ["Alpha", "zeta"])
+        XCTAssertTrue(SiteControlCenter.boostRows(store.boostsMatchingPage(URL(string: "https://other.test/")!)).isEmpty)
+
+        XCTAssertEqual(SiteControlCenter.siteDataSummary(recordCount: 0), "No cookies or site data")
+        XCTAssertEqual(SiteControlCenter.siteDataSummary(recordCount: 1), "1 kind of site data stored")
+        XCTAssertEqual(SiteControlCenter.siteDataSummary(recordCount: 3), "3 kinds of site data stored")
+        XCTAssertTrue(SiteControlCenter.siteDataSummary(recordCount: nil).contains("engine"))
+    }
+}

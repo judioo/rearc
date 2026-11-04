@@ -86,6 +86,8 @@ public enum AppCommandAction: Equatable, Hashable {
     case setExternalLinkDestination(ExternalLinkDestination)
     /// Air Traffic Control settings (Arc `LinkRouting`).
     case showAirTrafficControl
+    /// The URL field's per-site panel (Arc `ARC_SiteControlCenter`).
+    case showSiteControlCenter
 }
 
 /// Read-only command-bar context for enablement and dynamic commands.
@@ -263,6 +265,8 @@ public struct AppCommand: Equatable, Identifiable {
             }
         case .findInPage:
             return store.selectedTab != nil
+        case .showSiteControlCenter:
+            return SiteControlCenter.site(for: store.selectedTab?.url) != nil
         case .showDownloads, .clearCommandBarHistory, .setAsDefaultBrowser, .showAirTrafficControl:
             return true
         case .setExternalLinkDestination(let destination):
@@ -703,6 +707,13 @@ public enum AppCommandRegistry {
             keywords: ["copy", "quote", "selection", "markdown", "cite"],
             minQueryLength: 2,
             action: .copyAsQuote
+        ),
+        AppCommand(
+            id: "site-controls",
+            title: "Site Controls",
+            keywords: ["site", "controls", "permissions", "cookies", "zoom", "boosts", "data", "settings"],
+            minQueryLength: 2,
+            action: .showSiteControlCenter
         ),
         AppCommand(
             id: "air-traffic-control",
