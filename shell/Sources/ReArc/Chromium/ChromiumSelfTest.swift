@@ -133,7 +133,8 @@ final class ChromiumSelfTest {
                         "profiles", "profile_off_the_record", "script_evaluation_identity", "page_zoom",
                         "isolated_page_messages", "rearc_safe_storage_branding", "os_permission_shutdown",
                         "shutdown_pending_closes", "profile_directory", "webui_daily_pages", "history_recording",
-                        "password_autofill", "find_in_page", "downloads"]
+                        "password_autofill", "find_in_page", "downloads", "javascript_dialogs", "file_chooser",
+                        "permission_prompts", "context_menu", "password_prompts", "devtools"]
         let foreground = ChromiumLaunchArguments.selfTestForegroundSwitches.filter(CommandLine.arguments.contains)
         log("renderer foreground switches (self-test only): "
             + ChromiumLaunchArguments.selfTestForegroundSwitches.joined(separator: " ")
@@ -337,6 +338,9 @@ final class ChromiumSelfTest {
         } else {
             log("ABI-GAP downloads not advertised (ABI minor \(capabilities.abiMinorVersion.map(String.init) ?? "absent") < 17): the tray shows WebKit downloads only")
         }
+
+        // 12d. Host prompt channels (ABI 1.18–1.22) through the tab's PagePromptCenter.
+        try await promptChannelChecks(engine: engine, base: base, window: window)
 
         // 13. Two windows: the tab's one lease moves to a second window and back.
         try await twoWindowChecks(engine: engine, first: window)
@@ -777,7 +781,8 @@ final class ChromiumSelfTest {
         let rejected = "relative/dir".withCString { ReArcDownloadSetPolicy(engine.engineProfileID, $0, 0) }
         try check(rejected == ReArcStatus(REARC_INVALID_ARGUMENT), "relative policy directory returned \(rejected.rearcName)")
         let picker = directory.path.withCString { ReArcDownloadSetPolicy(engine.engineProfileID, $0, 1) }
-        try check(picker == ReArcStatus(REARC_UNSUPPORTED), "prompt mode 1 returned \(picker.rearcName)")
+        let expectedPicker = runtime.capabilities.fileChooser ? ReArcStatus.rearcOK : ReArcStatus(REARC_UNSUPPORTED)
+        try check(picker == expectedPicker, "prompt mode 1 returned \(picker.rearcName)")
         try check(runtime.applyDownloadPolicy(profile: engine.engineProfileID) == .rearcOK, "policy for engine profile \(engine.engineProfileID)")
 
         // 1. A small attachment lands in the policy directory without a picker or a navigation.
@@ -822,6 +827,9 @@ final class ChromiumSelfTest {
         try await wait("cancelled row removed") { controller.list.record(withID: id) == nil }
         let gone = runtime.downloadAction(profile: handle.profile, id: handle.id, action: 4)
         try check(gone == ReArcStatus(REARC_NOT_FOUND), "reveal after remove returned \(gone.rearcName)")
+        let asked = runtime.capabilities.downloadSavePrompt
+            ? try await askWhereToSaveChecks(engine: engine, base: base, controller: controller, backend: backend, directory: directory)
+            : "ABI-GAP Ask where to save needs file_chooser (ABI 1.19)"
         controller.save()
         let saved = DownloadListFile.load(from: directory.appendingPathComponent("Downloads.json"))
         try check(saved.directory == directory.standardizedFileURL.path && saved.list.records.isEmpty,
@@ -830,8 +838,8 @@ final class ChromiumSelfTest {
         log("PASS downloads (ABI 1.17, DownloadsController + ChromiumDownloadBackend): \(SelfTestFixtureServer.smallDownloadSize)-byte "
             + "attachment saved without a picker to the policy directory (tab stayed on /a), tray opened, remove -> removed event; "
             + "trickle paused at \(pausedAt) B (pause again -> invalid_state), resumed to \(resumedAt) B, '\(status)', "
-            + "removed (reveal -> not_found); relative directory -> invalid_argument, prompt 1 -> unsupported; "
-            + "\(backend.eventCount) events")
+            + "removed (reveal -> not_found); relative directory -> invalid_argument, prompt 1 -> \(picker.rearcName); "
+            + "\(backend.eventCount) events; \(asked)")
     }
 
     private func XUnwrap<T>(_ value: T?, _ label: String = #function) throws -> T {
@@ -1385,6 +1393,564 @@ final class ChromiumSelfTest {
     }
 }
 
+// MARK: - Host prompt channels (ABI 1.18–1.22)
+
+/// Answers file panels for the self-test: records each request and replies
+/// with `reply` (nil cancels) unless `hold` keeps the panel open.
+private final class SelfTestFilePanels: FilePanelPresenting {
+    final class Handle: FilePanelHandle {
+        var closed = false
+        func close() { closed = true }
+    }
+
+    var requests: [FileChooserRequest] = []
+    var handles: [Handle] = []
+    var reply: [URL]?
+    var hold = false
+
+    func present(_ request: FileChooserRequest, in window: NSWindow?, completion: @escaping ([URL]?) -> Void) -> FilePanelHandle? {
+        requests.append(request)
+        let handle = Handle()
+        handles.append(handle)
+        if !hold {
+            let reply = self.reply
+            DispatchQueue.main.async { completion(reply) }
+        }
+        return handle
+    }
+}
+
+/// Stands in for the NSMenu (whose tracking loop would block the run): records each plan.
+private final class SelfTestMenus: PageContextMenuPresenting {
+    var plans: [PageContextMenuPlan] = []
+    var choice: PageContextMenuItem?
+    var hold = false
+
+    func present(_ plan: PageContextMenuPlan, at point: CGPoint, in view: NSView?, completion: @escaping (PageContextMenuItem?) -> Void) {
+        plans.append(plan)
+        guard !hold else { return }
+        let choice = self.choice
+        DispatchQueue.main.async { completion(choice) }
+    }
+}
+
+extension ChromiumSelfTest {
+    /// Synthesized input reaches the renderer only while the app is active and the window key and visible.
+    @MainActor
+    private func inputDeliverable(_ window: NSWindow) -> Bool {
+        NSApp.isActive && window.isKeyWindow && window.occlusionState.contains(.visible)
+    }
+
+    @MainActor
+    private func cssCenter(of selector: String, in engine: ChromiumEngine) async throws -> CGPoint {
+        let point = try await engine.evaluate(
+            "(function(){ var r = document.querySelector('\(selector)').getBoundingClientRect(); "
+                + "return { x: r.left + Math.min(30, r.width / 2), y: r.top + r.height / 2 }; })()",
+            in: .page
+        ) as? [String: Double]
+        guard let x = point?["x"], let y = point?["y"] else { throw Failure(description: "no \(selector) on the page") }
+        return CGPoint(x: x, y: y)
+    }
+
+    /// Brings the window forward and gives the page the keyboard.
+    @MainActor
+    private func focus(_ window: NSWindow) {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        if let host = window.contentView?.firstDescendant(ofType: ChromiumHostView.self), let page = host.subviews.first {
+            window.makeFirstResponder(page)
+        }
+    }
+
+    /// Sends a synthesized (right) click to the page at a CSS point.
+    @MainActor
+    private func click(_ window: NSWindow, engine: ChromiumEngine, at css: CGPoint, right: Bool = false, control: Bool = false) {
+        guard let host = window.contentView?.firstDescendant(ofType: ChromiumHostView.self) else { return }
+        window.makeKeyAndOrderFront(nil)
+        let viewPoint = PageZoom.viewPoint(fromCSSPoint: css, zoom: engine.zoomFactor)
+        let local = NSPoint(x: viewPoint.x, y: host.isFlipped ? viewPoint.y : host.bounds.height - viewPoint.y)
+        let location = host.convert(local, to: nil)
+        let types: [NSEvent.EventType] = right ? [.rightMouseDown, .rightMouseUp] : [.leftMouseDown, .leftMouseUp]
+        for type in types {
+            if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: control ? [.control] : [],
+                                              timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                              context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                window.sendEvent(event)
+            }
+        }
+    }
+
+    @MainActor
+    private func rightClickUntil(_ window: NSWindow, engine: ChromiumEngine, at css: CGPoint, _ label: String, _ condition: () -> Bool) async throws {
+        for attempt in 0..<3 {
+            focus(window)
+            click(window, engine: engine, at: css, right: attempt < 2, control: attempt == 2)
+            if await eventually(timeout: 1.5, condition) { return }
+        }
+        throw Failure(description: "timed out waiting for \(label) after three right-clicks")
+    }
+
+    @MainActor
+    private func type(_ text: String, in window: NSWindow) {
+        for character in text {
+            let string = String(character)
+            for kind in [NSEvent.EventType.keyDown, .keyUp] {
+                if let event = NSEvent.keyEvent(with: kind, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                windowNumber: window.windowNumber, context: nil, characters: string,
+                                                charactersIgnoringModifiers: string, isARepeat: false,
+                                                keyCode: string == "\r" ? 36 : 0) {
+                    window.sendEvent(event)
+                }
+            }
+        }
+    }
+
+    /// Waits for `condition`; false (no failure) when it never came, for input-driven steps.
+    @MainActor
+    private func eventually(timeout: TimeInterval, _ condition: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() > deadline { return false }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return true
+    }
+
+    @MainActor
+    private func promptChannelChecks(engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        let capabilities = runtime.capabilities
+        let minor = capabilities.abiMinorVersion.map(String.init) ?? "absent"
+        log("prompt channels: javascript_dialogs=\(capabilities.javascriptDialogs ? 1 : 0) file_chooser=\(capabilities.fileChooser ? 1 : 0) "
+            + "permission_prompts=\(capabilities.permissionPrompts ? 1 : 0) context_menu=\(capabilities.contextMenu ? 1 : 0) "
+            + "password_prompts=\(capabilities.passwordPrompts ? 1 : 0) devtools=\(capabilities.devTools ? 1 : 0); "
+            + "synthesized input \(inputDeliverable(window) ? "deliverable" : "not deliverable (app inactive or window not key)")")
+        let prompts = engine.pagePrompts
+        try check(prompts.anchorView?.window === window, "the page prompt overlay is not in the tab's window")
+        // Input-driven channels first, while the app is most likely still active.
+        if capabilities.fileChooser {
+            try await fileInputChecks(engine: engine, base: base, window: window)
+        } else {
+            log("ABI-GAP file_chooser not advertised (ABI minor \(minor) < 19): file inputs are cancelled")
+        }
+        if capabilities.contextMenu {
+            try await contextMenuChecks(engine: engine, base: base, window: window)
+        } else {
+            log("ABI-GAP context_menu not advertised (ABI minor \(minor) < 21): no page menu on Chromium")
+        }
+        if capabilities.passwordPrompts {
+            try await passwordChecks(engine: engine, base: base, window: window)
+        } else {
+            log("ABI-GAP password_prompts not advertised (ABI minor \(minor) < 22): no save-password offers")
+        }
+        if capabilities.javascriptDialogs {
+            try await beforeUnloadChecks(engine: engine, base: base, window: window)
+            try await dialogChecks(engine: engine, base: base, window: window)
+        } else {
+            log("ABI-GAP javascript_dialogs not advertised (ABI minor \(minor) < 18): pages get Chromium's no-host cancel")
+        }
+        if capabilities.permissionPrompts {
+            try await permissionChecks(engine: engine, base: base)
+        } else {
+            log("ABI-GAP permission_prompts not advertised (ABI minor \(minor) < 20): requests are dismissed")
+        }
+        engine.load(URL(string: "\(base)/a")!)
+        try await wait("page A after the prompt channels") { engine.pageTitle == Self.titleA && !engine.isLoading }
+        try check(!prompts.hasPendingPrompt, "a prompt is still pending after the channel checks")
+    }
+
+    // MARK: JavaScript dialogs (ABI 1.18)
+
+    @MainActor
+    private func dialogChecks(engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        let prompts = engine.pagePrompts
+        engine.load(URL(string: "\(base)/dialogs")!)
+        try await wait("dialogs fixture") { engine.pageTitle == "dialogs" && !engine.isLoading }
+        func run(_ kind: String) async throws { _ = try await engine.evaluate("run('\(kind)')", in: .page) }
+        func shown(_ kind: JavaScriptDialogKind) async throws -> JavaScriptDialogRequest {
+            try await wait("\(kind) dialog request") { prompts.dialog?.request.kind == kind }
+            return prompts.dialog!.request
+        }
+
+        try await run("alert")
+        let alert = try await shown(.alert)
+        try check(alert.message == "hello from ReArc" && alert.title.hasPrefix("127.0.0.1") && alert.origin.hasPrefix("http://127.0.0.1"),
+                  "alert '\(alert.message)' title '\(alert.title)' origin '\(alert.origin)'")
+        try check(prompts.dialog?.offersSuppression == false, "the first dialog offered the dialog limit")
+        prompts.answerDialog(accept: true)
+        try await wait("alert answered") { engine.pageTitle == "alert:done" }
+
+        try await run("confirm")
+        _ = try await shown(.confirm)
+        try check(prompts.dialog?.offersSuppression == true, "the second dialog did not offer the dialog limit")
+        prompts.answerDialog(accept: false)
+        try await wait("confirm cancelled") { engine.pageTitle == "confirm:false" }
+
+        try await run("prompt")
+        _ = try await shown(.prompt)
+        try check(prompts.dialogText == "default name", "prompt default text '\(prompts.dialogText)'")
+        prompts.dialogText = "ReArc ✓"
+        prompts.answerDialog(accept: true)
+        try await wait("prompt answered") { engine.pageTitle == "prompt:ReArc ✓" }
+
+        // "Don't allow this page to create more dialogs": later dialogs are answered without UI.
+        try await run("confirm")
+        _ = try await shown(.confirm)
+        prompts.suppressDialogs = true
+        prompts.answerDialog(accept: true)
+        try await wait("confirm accepted") { engine.pageTitle == "confirm:true" }
+        let eventsBefore = runtime.promptEvents["dialog"] ?? 0
+        try await run("confirm")
+        try await wait("suppressed confirm") { engine.pageTitle == "confirm:false" }
+        try check(prompts.dialog == nil && (runtime.promptEvents["dialog"] ?? 0) == eventsBefore + 1,
+                  "a suppressed dialog was shown (events \(eventsBefore) -> \(runtime.promptEvents["dialog"] ?? 0))")
+
+        // A new document may show dialogs again; navigating away withdraws a pending one.
+        engine.load(URL(string: "\(base)/dialogs")!)
+        try await wait("dialogs fixture reloaded") { engine.pageTitle == "dialogs" && !engine.isLoading }
+        try await run("alert")
+        let pending = try await shown(.alert)
+        let cancelledBefore = prompts.cancelled["dialog"] ?? 0
+        engine.load(URL(string: "\(base)/a")!)
+        try await wait("navigation withdraws the alert") { prompts.dialog == nil && (prompts.cancelled["dialog"] ?? 0) == cancelledBefore + 1 }
+        try await wait("page A after the withdrawn alert") { engine.pageTitle == Self.titleA && !engine.isLoading }
+        let late = runtime.respondDialog(pending.id, JavaScriptDialogReply(accept: true))
+        try check(late == ReArcStatus(REARC_NOT_FOUND), "a reply to the withdrawn alert returned \(late.rearcName)")
+        log("PASS JavaScript dialogs (ABI 1.18, PagePromptCenter): alert '\(alert.title)' accepted, confirm -> false, "
+            + "prompt default 'default name' -> 'ReArc ✓', the second dialog offered the limit and a suppressed confirm "
+            + "answered false without UI, navigation withdrew a pending alert (late reply -> \(late.rearcName))")
+    }
+
+    /// Leave site?: needs the page's sticky user activation, so a synthesized click first.
+    @MainActor
+    private func beforeUnloadChecks(engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        let prompts = engine.pagePrompts
+        engine.load(URL(string: "\(base)/leave")!)
+        try await wait("leave fixture") { engine.pageTitle == "leave" && !engine.isLoading }
+        func activate() async throws -> Bool {
+            for _ in 0..<3 {
+                focus(window)
+                click(window, engine: engine, at: CGPoint(x: 200, y: 200))
+                if await waitActivation(engine) { return true }
+            }
+            return false
+        }
+        guard try await activate() else {
+            log("NOTE beforeunload: synthesized input did not activate the page (app active \(NSApp.isActive), key \(window.isKeyWindow)); "
+                + "Leave site? needs sticky user activation, so its veto and accept paths are not exercised in this run")
+            return
+        }
+        // Navigation: Stay keeps the page.
+        engine.load(URL(string: "\(base)/a")!)
+        let leave = try await waitDialog(prompts, .beforeUnload, "beforeunload on navigation")
+        try check(leave.title == "Leave site?", "beforeunload title '\(leave.title)'")
+        prompts.answerDialog(accept: false)
+        try await Task.sleep(nanoseconds: 800_000_000)
+        try check(engine.currentURL?.path == "/leave", "Stay still navigated to \(engine.currentURL?.path ?? "nil")")
+        // Normal close: Stay vetoes it (ReArcTabClose OK, cancelled).
+        var closes: [Bool] = []
+        _ = try await activate()
+        try check(engine.requestPageClose { closes.append($0) }, "a normal close was not started")
+        _ = try await waitDialog(prompts, .beforeUnload, "beforeunload on close")
+        prompts.answerDialog(accept: false)
+        try await wait("close vetoed") { closes == [false] }
+        try check(engine.tabID != 0 && engine.currentURL?.path == "/leave", "the vetoed close still closed the tab")
+        // Leave continues the navigation.
+        _ = try await activate()
+        engine.load(URL(string: "\(base)/a")!)
+        _ = try await waitDialog(prompts, .beforeUnload, "beforeunload before leaving")
+        prompts.answerDialog(accept: true)
+        try await wait("left the page") { engine.pageTitle == Self.titleA && !engine.isLoading }
+        log("PASS beforeunload (ABI 1.18): 'Leave site?' on navigation -> Stay kept /leave; on a normal close -> Stay vetoed "
+            + "(tab \(engine.tabID) kept); Leave continued to /a")
+    }
+
+    @MainActor
+    private func waitActivation(_ engine: ChromiumEngine) async -> Bool {
+        let deadline = Date().addingTimeInterval(1.5)
+        while Date() < deadline {
+            if (try? await engine.evaluate("navigator.userActivation.hasBeenActive", in: .page)) as? Bool == true { return true }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return false
+    }
+
+    @MainActor
+    private func waitDialog(_ prompts: PagePromptCenter, _ kind: JavaScriptDialogKind, _ label: String) async throws -> JavaScriptDialogRequest {
+        try await wait(label, timeout: 10) { prompts.dialog?.request.kind == kind }
+        return prompts.dialog!.request
+    }
+
+    // MARK: Permissions (ABI 1.20)
+
+    @MainActor
+    private func permissionChecks(engine: ChromiumEngine, base: String) async throws {
+        let prompts = engine.pagePrompts
+        let sites = SitePermissionsController(fileURL: nil)
+        prompts.sitePermissions = sites
+        prompts.profileID = UUID()
+        engine.load(URL(string: "\(base)/permissions")!)
+        try await wait("permissions fixture") { engine.pageTitle == "permissions" && !engine.isLoading }
+        func waitRequest(_ key: String) async throws -> PermissionPromptRequest {
+            try await wait("\(key) permission request", timeout: 10) { prompts.permission?.request.types.map(\.key) == [key] }
+            return prompts.permission!.request
+        }
+        func reset() async throws { _ = try await engine.evaluate("(document.title = 'permissions', true)", in: .page) }
+
+        // This time only: the next request prompts again.
+        _ = try await engine.evaluate("notify()", in: .page)
+        let notify = try await waitRequest("notifications")
+        try check(notify.origin.hasPrefix("http://127.0.0.1") && notify.phrases == ["Show notifications"], "request \(notify)")
+        prompts.rememberPermission = false
+        prompts.answerPermission(.allow)
+        try await wait("granted this time") { engine.pageTitle == "notify:granted" }
+        try await reset()
+        _ = try await engine.evaluate("notify()", in: .page)
+        _ = try await waitRequest("notifications")
+        // Remembered: Chromium stores the block, and the next request gets no prompt.
+        prompts.rememberPermission = true
+        prompts.answerPermission(.deny)
+        try await wait("denied and remembered") { engine.pageTitle == "notify:denied" }
+        try await reset()
+        let eventsBefore = runtime.promptEvents["permission"] ?? 0
+        _ = try await engine.evaluate("notify()", in: .page)
+        try await wait("remembered block answers without a prompt") { engine.pageTitle == "notify:denied" }
+        try check(prompts.permission == nil && (runtime.promptEvents["permission"] ?? 0) == eventsBefore,
+                  "a remembered block prompted again")
+
+        // Dismiss stores nothing; the page sees PERMISSION_DENIED.
+        _ = try await engine.evaluate("geo()", in: .page)
+        let geo = try await waitRequest("geolocation")
+        try check(geo.needsSystemAuthorization, "geolocation should note macOS authorization")
+        prompts.answerPermission(.dismiss)
+        try await wait("geolocation dismissed") { engine.pageTitle == "geo:1" }
+
+        // Navigation withdraws a pending request.
+        try await reset()
+        _ = try await engine.evaluate("geo()", in: .page)
+        let pending = try await waitRequest("geolocation")
+        let cancelledBefore = prompts.cancelled["permission"] ?? 0
+        engine.load(URL(string: "\(base)/a")!)
+        try await wait("navigation withdraws the permission prompt") {
+            prompts.permission == nil && (prompts.cancelled["permission"] ?? 0) == cancelledBefore + 1
+        }
+        let late = runtime.respondPermission(pending.id, .allow, persist: true)
+        try check(late == ReArcStatus(REARC_NOT_FOUND), "a reply to the withdrawn request returned \(late.rearcName)")
+        let recorded = sites.entries(origin: notify.origin, scope: prompts.permissionScope)
+        try check(recorded.map(\.type.key) == ["notifications"] && recorded.first?.entry.decision == .deny && recorded.first?.entry.remembered == true,
+                  "site record \(recorded.map { "\($0.type.key)=\($0.entry.decision)" })")
+        try await wait("page A after permissions") { engine.pageTitle == Self.titleA && !engine.isLoading }
+        log("PASS permission prompts (ABI 1.20): notifications allowed this time (prompted again), then blocked and remembered "
+            + "(the next request answered without a prompt), geolocation dismissed -> PERMISSION_DENIED, navigation withdrew a "
+            + "pending request (late reply -> \(late.rearcName)); site record: notifications blocked (remembered)")
+    }
+
+    // MARK: File inputs (ABI 1.19)
+
+    @MainActor
+    private func fileInputChecks(engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        let prompts = engine.pagePrompts
+        let panels = SelfTestFilePanels()
+        prompts.filePanels = panels
+        defer { prompts.filePanels = SystemFilePanelPresenter() }
+        let fixtures = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-selftest-upload-\(UUID().uuidString)", isDirectory: true)
+        let folder = fixtures.appendingPathComponent("folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixtures) }
+        for name in ["a.txt", "b.txt", "folder/c.txt", "folder/d.txt"] {
+            try Data("rearc \(name)\n".utf8).write(to: fixtures.appendingPathComponent(name))
+        }
+        // A symlink out of the folder is not uploaded (the engine skips symlinks).
+        try FileManager.default.createSymbolicLink(at: folder.appendingPathComponent("escape.txt"), withDestinationURL: fixtures.appendingPathComponent("a.txt"))
+
+        let invalid = ReArcFileChooserRespond(UInt64.max, true, nil, 0)
+        try check(invalid == ReArcStatus(REARC_NOT_FOUND), "a reply to an unknown chooser returned \(invalid.rearcName)")
+        engine.load(URL(string: "\(base)/upload")!)
+        try await wait("upload fixture") { engine.pageTitle == "upload" && !engine.isLoading }
+        panels.reply = [fixtures.appendingPathComponent("a.txt"), fixtures.appendingPathComponent("b.txt")]
+        var opened = false
+        for _ in 0..<3 where !opened {
+            focus(window)
+            click(window, engine: engine, at: CGPoint(x: 200, y: 200))
+            opened = await eventually(timeout: 1.5) { !panels.requests.isEmpty }
+        }
+        guard opened else {
+            log("NOTE file input: the synthesized click opened no chooser (app active \(NSApp.isActive), key \(window.isKeyWindow)); "
+                + "input.click() needs user activation, so <input type=file> is not exercised in this run (save panels are, "
+                + "through Ask where to save); unknown request -> \(invalid.rearcName)")
+            return
+        }
+        let multiple = panels.requests[0]
+        try check(multiple.mode == .openMultiple && multiple.filter.extensions == ["txt"] && multiple.filter.mimeTypes == ["text/plain"],
+                  "chooser mode \(multiple.mode) accept \(multiple.acceptTypes)")
+        try await wait("files reached the page") { engine.pageTitle == "files:a.txt,b.txt" }
+
+        _ = try await engine.evaluate("folder()", in: .page)
+        panels.reply = [folder]
+        click(window, engine: engine, at: CGPoint(x: 200, y: 200))
+        try await wait("folder chooser", timeout: 5) { panels.requests.count == 2 }
+        try check(panels.requests[1].mode == .uploadFolder, "folder chooser mode \(panels.requests[1].mode)")
+        try await wait("folder files reached the page") { engine.pageTitle == "folder:2" }
+
+        // The engine withdraws an open chooser when the page navigates; the panel closes.
+        panels.hold = true
+        click(window, engine: engine, at: CGPoint(x: 200, y: 200))
+        try await wait("held chooser", timeout: 5) { panels.requests.count == 3 }
+        engine.load(URL(string: "\(base)/a")!)
+        try await wait("navigation closes the chooser") { panels.handles.last?.closed == true && prompts.fileChooserRequest == nil }
+        try await wait("page A after the chooser") { engine.pageTitle == Self.titleA && !engine.isLoading }
+        log("PASS file chooser (ABI 1.19): <input multiple accept=.txt,text/plain> -> open-multiple with filter [txt] [text/plain], "
+            + "2 files reached the page; webkitdirectory -> upload folder, 2 files (symlink skipped); navigation closed a held panel; "
+            + "unknown request -> \(invalid.rearcName)")
+    }
+
+    /// Ask where to save (policy prompt 1): the save path comes from the file chooser channel.
+    @MainActor
+    private func askWhereToSaveChecks(
+        engine: ChromiumEngine,
+        base: String,
+        controller: DownloadsController,
+        backend: ChromiumDownloadBackend,
+        directory: URL
+    ) async throws -> String {
+        let panels = SelfTestFilePanels()
+        engine.pagePrompts.filePanels = panels
+        backend.filePanels = panels
+        defer {
+            engine.pagePrompts.filePanels = SystemFilePanelPresenter()
+            backend.filePanels = SystemFilePanelPresenter()
+        }
+        let chosen = directory.appendingPathComponent("chosen", isDirectory: true)
+        try FileManager.default.createDirectory(at: chosen, withIntermediateDirectories: true)
+        let target = chosen.appendingPathComponent("renamed-by-panel.bin")
+        panels.reply = [target]
+        controller.askWhereToSave = true
+        defer { controller.askWhereToSave = false }
+        try check(runtime.asksWhereToSaveDownloads, "Ask where to save did not reach the policy")
+        func row(_ name: String) -> DownloadRecord? { controller.records.first { $0.url.hasSuffix("/\(name)") } }
+
+        try check(engine.navigateNow(URL(string: "\(base)/download/rearc-asked.bin")!) == .rearcOK, "asked download rejected")
+        try await wait("save panel request", timeout: 20) { panels.requests.count == 1 }
+        let request = panels.requests[0]
+        try check(request.mode == .save && request.defaultPath.hasSuffix("rearc-asked.bin"), "save request \(request.mode) '\(request.defaultPath)'")
+        try await wait("asked download complete", timeout: 20) { row("rearc-asked.bin")?.state == .complete }
+        let saved = try XUnwrap(row("rearc-asked.bin"))
+        let size = (try? FileManager.default.attributesOfItem(atPath: target.path))?[.size] as? Int ?? -1
+        try check(saved.targetPath == target.path && size == SelfTestFixtureServer.smallDownloadSize,
+                  "saved to '\(saved.targetPath)' (\(size) bytes), chose '\(target.path)'")
+        controller.perform(.remove, on: saved.id)
+        try await wait("asked row removed") { row("rearc-asked.bin") == nil }
+
+        // Cancel in the panel cancels the download.
+        panels.reply = nil
+        try check(engine.navigateNow(URL(string: "\(base)/download/rearc-declined.bin")!) == .rearcOK, "declined download rejected")
+        try await wait("second save panel request", timeout: 20) { panels.requests.count == 2 }
+        try await wait("declined download cancelled", timeout: 20) {
+            guard let record = row("rearc-declined.bin") else { return false }
+            return record.state == .cancelled
+        }
+        if let declined = row("rearc-declined.bin") {
+            controller.perform(.remove, on: declined.id)
+            try await wait("declined row removed") { row("rearc-declined.bin") == nil }
+        }
+        try await wait("tab still on page A after the asked downloads", timeout: 5) { engine.currentURL?.path == "/a" }
+        return "Ask where to save: save request '\((request.defaultPath as NSString).lastPathComponent)' saved to the chosen "
+            + "\(target.lastPathComponent) (\(size) B), panel cancel -> download cancelled"
+    }
+
+    // MARK: Page context menu (ABI 1.21)
+
+    @MainActor
+    private func contextMenuChecks(engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        let prompts = engine.pagePrompts
+        let menus = SelfTestMenus()
+        prompts.contextMenus = menus
+        defer { prompts.contextMenus = NSMenuContextMenuPresenter() }
+        let unknown = runtime.contextCommand(UInt64.max, .dismiss)
+        try check(unknown == ReArcStatus(REARC_NOT_FOUND), "a command for an unknown menu returned \(unknown.rearcName)")
+        engine.load(URL(string: "\(base)/dialogs")!)
+        try await wait("context menu fixture") { engine.pageTitle == "dialogs" && !engine.isLoading }
+        let link = try await cssCenter(of: "#link", in: engine)
+        var delivered = false
+        for attempt in 0..<3 where !delivered {
+            focus(window)
+            // A fresh page can drop its first input; the last try is a control-click.
+            click(window, engine: engine, at: link, right: attempt < 2, control: attempt == 2)
+            delivered = await eventually(timeout: 1.5) { !menus.plans.isEmpty }
+        }
+        guard delivered else {
+            log("NOTE context menu: the synthesized right-click produced no menu request (app active \(NSApp.isActive), "
+                + "key \(window.isKeyWindow)); the menu is not exercised in this run; unknown request -> \(unknown.rearcName)")
+            return
+        }
+        let linkPlan = menus.plans[0]
+        // Split needs a sidebar tab; this engine is not one.
+        try check(linkPlan.items.prefix(2) == [.openLinkInNewTab, .openLinkInLittleArc] && linkPlan.items.contains(.copyLink)
+                  && linkPlan.items.contains(.openLinkInNewSplit) == (prompts.ownerTabID != nil),
+                  "link menu \(linkPlan.items.map(\.title))")
+        try check(linkPlan.entry(.inspect)?.isEnabled == runtime.capabilities.devTools, "Inspect enabled without an inspection engine")
+        let repliesBefore = runtime.promptReplies["context"] ?? 0
+        try await wait("dismissed link menu") { engine.contextMenuRequestID == nil && (runtime.promptReplies["context"] ?? 0) > repliesBefore }
+
+        // Page menu: Reload runs in the engine.
+        _ = try await engine.evaluate("(window.rearcMarker = 1, true)", in: .page)
+        menus.choice = .reload
+        let plain = try await cssCenter(of: "#plain", in: engine)
+        try await rightClickUntil(window, engine: engine, at: plain, "page menu") { menus.plans.count == 2 }
+        let pagePlan = menus.plans[1]
+        try check(pagePlan.items.contains(.reload) && pagePlan.items.contains(.back) && !pagePlan.items.contains(.copyLink),
+                  "page menu \(pagePlan.items.map(\.title))")
+        try await waitAsync("reload from the page menu") {
+            guard !engine.isLoading else { return false }
+            let marker = (try? await engine.evaluate("typeof window.rearcMarker", in: .page)) as? String
+            return marker == "undefined"
+        }
+
+        // Inspect is refused (unsupported) and the request is dismissed instead.
+        menus.hold = true
+        try await rightClickUntil(window, engine: engine, at: plain, "held menu") { menus.plans.count == 3 && engine.contextMenuRequestID != nil }
+        let held = engine.contextMenuRequestID!
+        let inspect = engine.finishContextMenu(held, item: .inspect)
+        let expected = runtime.capabilities.devTools ? ReArcStatus.rearcOK : ReArcStatus(REARC_UNSUPPORTED)
+        try check(inspect == expected, "Inspect returned \(inspect.rearcName)")
+        let again = runtime.contextCommand(held, .dismiss)
+        try check(again == ReArcStatus(REARC_NOT_FOUND), "the dismissed menu still accepted a command (\(again.rearcName))")
+        log("PASS page context menu (ABI 1.21): link menu \(linkPlan.items.map(\.title)) dismissed; page menu Reload ran in the engine; "
+            + "Inspect -> \(inspect.rearcName) then dismissed (repeat -> \(again.rearcName)); unknown request -> \(unknown.rearcName)")
+    }
+
+    // MARK: Password offers (ABI 1.22)
+
+    @MainActor
+    private func passwordChecks(engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        let prompts = engine.pagePrompts
+        let unknown = runtime.respondPassword(UInt64.max, .notNow)
+        try check(unknown == ReArcStatus(REARC_NOT_FOUND), "a reply to an unknown offer returned \(unknown.rearcName)")
+        engine.load(URL(string: "\(base)/login")!)
+        try await wait("login fixture") { engine.pageTitle == "login" && !engine.isLoading }
+        // Chromium detects submissions from trusted typing only (script-set values do not count).
+        focus(window)
+        click(window, engine: engine, at: try await cssCenter(of: "#user", in: engine))
+        type("rearc-user", in: window)
+        click(window, engine: engine, at: try await cssCenter(of: "#pass", in: engine))
+        type("s3cret-pass-\(Int.random(in: 1000...9999))", in: window)
+        click(window, engine: engine, at: try await cssCenter(of: "#go", in: engine))
+        guard await eventually(timeout: 10, { prompts.password != nil }) else {
+            let typed = (try? await engine.evaluate("document.getElementById('user') ? document.getElementById('user').value : '(left)'", in: .page)) as? String
+            log("NOTE password offer: no save offer after synthesized typing (app active \(NSApp.isActive), key \(window.isKeyWindow), "
+                + "username field '\(typed ?? "?")', page '\(engine.pageTitle ?? "")'); offers need trusted input, so the prompt is "
+                + "not exercised in this run; unknown offer -> \(unknown.rearcName)")
+            return
+        }
+        let offer = prompts.password!.prompt
+        try check(offer.username == "rearc-user" && !offer.isUpdate && offer.origin.hasPrefix("http://127.0.0.1"), "offer \(offer)")
+        prompts.answerPassword(.notNow)
+        let late = runtime.respondPassword(offer.id, .save)
+        try check(late == ReArcStatus(REARC_NOT_FOUND), "a second reply to the offer returned \(late.rearcName)")
+        log("PASS password offer (ABI 1.22): '\(offer.title)' for \(offer.username) -> Not Now (dismiss; nothing stored), "
+            + "second reply -> \(late.rearcName); unknown offer -> \(unknown.rearcName)")
+    }
+}
+
 private extension NSView {
     func firstDescendant<T: NSView>(ofType type: T.Type) -> T? {
         for child in subviews {
@@ -1430,6 +1996,67 @@ final class SelfTestFixtureServer {
         "/find": """
         <!doctype html><html><head><title>find</title></head><body style="font:24px -apple-system">
         <p>needle in a haystack</p><p>Needle</p><p>NEEDLE</p><p>another needle</p></body></html>
+        """,
+        // JavaScript dialogs, run from a timer so the evaluation that starts one returns first.
+        "/dialogs": """
+        <!doctype html><html><head><title>dialogs</title><script>
+        function run(kind) {
+          setTimeout(function () {
+            var r;
+            if (kind === 'alert') { alert('hello from ReArc'); r = 'done'; }
+            else if (kind === 'confirm') { r = confirm('Proceed?'); }
+            else { r = prompt('Name?', 'default name'); }
+            document.title = kind + ':' + r;
+          }, 0);
+          return true;
+        }
+        </script></head><body style="margin:0;font:28px -apple-system">
+        <a id="link" href="/a" style="display:block;padding:40px">context menu link</a>
+        <p id="plain" style="padding:40px;height:300px">plain page text</p></body></html>
+        """,
+        "/leave": """
+        <!doctype html><html><head><title>leave</title><script>
+        window.addEventListener('beforeunload', function (e) { e.preventDefault(); e.returnValue = ''; return ''; });
+        </script></head><body style="margin:0;height:100vh;font:28px -apple-system"><p style="padding:40px">unsaved changes</p></body></html>
+        """,
+        // A file input covering the page, so any click opens the chooser.
+        "/upload": """
+        <!doctype html><html><head><title>upload</title></head><body style="margin:0">
+        <input id="f" type="file" multiple accept=".txt,text/plain"
+          style="position:fixed;left:0;top:0;width:100%;height:100%;opacity:0.01">
+        <script>
+        var f = document.getElementById('f');
+        f.addEventListener('change', function () {
+          var names = Array.prototype.map.call(f.files, function (x) { return x.name; }).sort();
+          document.title = f.webkitdirectory ? 'folder:' + names.length : 'files:' + names.join(',');
+        });
+        f.addEventListener('cancel', function () { document.title = 'files:cancel'; });
+        function folder() { f.multiple = false; f.webkitdirectory = true; return true; }
+        </script></body></html>
+        """,
+        "/permissions": """
+        <!doctype html><html><head><title>permissions</title><script>
+        function notify() {
+          Notification.requestPermission().then(function (r) { document.title = 'notify:' + r; });
+          return true;
+        }
+        function geo() {
+          navigator.geolocation.getCurrentPosition(
+            function () { document.title = 'geo:ok'; },
+            function (e) { document.title = 'geo:' + e.code; });
+          return true;
+        }
+        </script></head><body style="font:28px -apple-system">permissions</body></html>
+        """,
+        "/login": """
+        <!doctype html><html><head><title>login</title></head><body style="margin:0;font:24px -apple-system">
+        <form action="/login-done" method="get" style="padding:40px">
+        <input id="user" name="user" autocomplete="username" style="font-size:24px;width:400px"><br><br>
+        <input id="pass" name="pass" type="password" autocomplete="current-password" style="font-size:24px;width:400px"><br><br>
+        <button id="go" type="submit" style="font-size:24px">Sign in</button></form></body></html>
+        """,
+        "/login-done": """
+        <!doctype html><html><head><title>signed-in</title></head><body>signed in</body></html>
         """,
         // Held back (see `respond`) so a load is still in flight when the test stops it.
         "/slow": """
@@ -1504,7 +2131,9 @@ final class SelfTestFixtureServer {
             return download(connection, name: String(path.dropFirst("/download/".count)))
         }
         let isIcon = path.hasPrefix("/favicon")
-        let body = isIcon ? nil : pages[path]
+        // Form submissions carry a query; pages are keyed by path.
+        let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+        let body = isIcon ? nil : pages[route]
         let found = isIcon || body != nil
         print("[fixture] GET \(path) -> \(found ? 200 : 404)")
         fflush(stdout)
