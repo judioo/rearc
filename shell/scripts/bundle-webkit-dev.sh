@@ -7,6 +7,11 @@
 #
 # Usage: scripts/bundle-webkit-dev.sh [--release] [--open]
 #   --open  launch the bundle when done
+#
+# Ad-hoc signed, no iCloud, unless both are set (environment or shell/signing.local.env;
+# docs/ICLOUD-SETUP.md): REARC_ICLOUD_CONTAINER and REARC_WEBKIT_PROVISIONING_PROFILE, a
+# development profile for com.rearc.browser.webkit-dev. Then REARC_SIGN_IDENTITY and
+# REARC_TEAM_ID sign the bundle with the iCloud/CloudKit entitlements.
 set -euo pipefail
 
 SHELL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,11 +22,35 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --release) CONFIG=release ;;
     --open) OPEN=1 ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 64 ;;
   esac
   shift
 done
+
+die() { echo "bundle-webkit-dev: $*" >&2; exit 1; }
+_vars=(REARC_SIGN_IDENTITY REARC_TEAM_ID REARC_ICLOUD_CONTAINER REARC_WEBKIT_PROVISIONING_PROFILE REARC_ICLOUD_ENVIRONMENT)
+if [[ -f "$SHELL_DIR/signing.local.env" ]]; then
+  # Environment variables take precedence over the file (bash 3.2: no associative arrays).
+  for v in "${_vars[@]}"; do printf -v "_saved_$v" '%s' "${!v:-}"; done
+  # shellcheck disable=SC1091
+  source "$SHELL_DIR/signing.local.env"
+  for v in "${_vars[@]}"; do
+    saved="_saved_$v"
+    if [[ -n ${!saved} ]]; then printf -v "$v" '%s' "${!saved}"; fi
+  done
+fi
+for v in "${_vars[@]}"; do printf -v "$v" '%s' "${!v:-}"; done
+SIGN_IDENTITY="$REARC_SIGN_IDENTITY"
+TEAM_ID="$REARC_TEAM_ID"
+ICLOUD=0
+if [[ -n $REARC_ICLOUD_CONTAINER && -n $REARC_WEBKIT_PROVISIONING_PROFILE ]]; then
+  ICLOUD=1
+elif [[ -n $REARC_ICLOUD_CONTAINER ]]; then
+  echo "==> iCloud off for this bundle: set REARC_WEBKIT_PROVISIONING_PROFILE (a profile for com.rearc.browser.webkit-dev)"
+fi
+# shellcheck source=icloud-signing.sh
+source "$SHELL_DIR/scripts/icloud-signing.sh"
 
 echo "==> swift build (${CONFIG}, WebKit)"
 swift build --package-path "$SHELL_DIR" -c "$CONFIG" --product rearc
@@ -62,7 +91,16 @@ cat > "$PLIST" <<PLIST
 </plist>
 PLIST
 plutil -lint "$PLIST" >/dev/null
-codesign --force --sign - --entitlements "$SHELL_DIR/scripts/ReArc.entitlements" "$APP/Contents/MacOS/ReArc" 2>/dev/null
-echo "==> $APP (ad-hoc signed; ReArc Dev > Set ReArc as Default Browser… asks macOS to register it)"
+if [[ $ICLOUD == 1 ]]; then
+  ENTITLEMENTS="$SHELL_DIR/.build/ReArc.webkit-dev.icloud.entitlements"
+  icloud_prepare "$APP" com.rearc.browser.webkit-dev "$REARC_WEBKIT_PROVISIONING_PROFILE" "$SHELL_DIR/scripts/ReArc.entitlements" "$ENTITLEMENTS"
+  codesign --force --sign "$SIGN_IDENTITY" --identifier com.rearc.browser.webkit-dev --timestamp=none \
+    --entitlements "$ENTITLEMENTS" "$APP"
+  icloud_verify "$APP/Contents/MacOS/ReArc"
+  echo "==> $APP (signed with iCloud; ReArc Dev > Set ReArc as Default Browser… asks macOS to register it)"
+else
+  codesign --force --sign - --entitlements "$SHELL_DIR/scripts/ReArc.entitlements" "$APP/Contents/MacOS/ReArc" 2>/dev/null
+  echo "==> $APP (ad-hoc signed; ReArc Dev > Set ReArc as Default Browser… asks macOS to register it)"
+fi
 [[ $OPEN == 1 ]] && open "$APP"
 exit 0

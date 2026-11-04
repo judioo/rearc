@@ -24,6 +24,13 @@
 #                        development (a stable signature keeps the Keychain "Safe Storage" grant
 #                        across rebuilds), or "Developer ID Application: …" for distribution.
 #   REARC_TEAM_ID        Apple Developer Team ID; the identity's certificate must belong to it.
+#
+# iCloud sidebar sync (optional, off when unset; docs/ICLOUD-SETUP.md):
+#   REARC_ICLOUD_CONTAINER      e.g. iCloud.com.rearc.browser. Adds the iCloud/CloudKit
+#                               entitlements, embeds the profile and signs the whole bundle.
+#   REARC_PROVISIONING_PROFILE  development profile (.provisionprofile) for the bundle id,
+#                               with the container, CloudKit and this Mac.
+#   REARC_ICLOUD_ENVIRONMENT    Development (default) or Production CloudKit environment.
 set -euo pipefail
 
 SHELL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -57,11 +64,18 @@ die() { echo "bundle-chromium: $*" >&2; exit 1; }
 # Local, never-committed signing settings. Environment variables take precedence.
 if [[ -f "$SHELL_DIR/signing.local.env" ]]; then
   _identity="${REARC_SIGN_IDENTITY:-}" _team="${REARC_TEAM_ID:-}"
+  _container="${REARC_ICLOUD_CONTAINER:-}" _profile="${REARC_PROVISIONING_PROFILE:-}" _environment="${REARC_ICLOUD_ENVIRONMENT:-}"
   # shellcheck disable=SC1091
   source "$SHELL_DIR/signing.local.env"
   REARC_SIGN_IDENTITY="${_identity:-${REARC_SIGN_IDENTITY:-}}"
   REARC_TEAM_ID="${_team:-${REARC_TEAM_ID:-}}"
+  REARC_ICLOUD_CONTAINER="${_container:-${REARC_ICLOUD_CONTAINER:-}}"
+  REARC_PROVISIONING_PROFILE="${_profile:-${REARC_PROVISIONING_PROFILE:-}}"
+  REARC_ICLOUD_ENVIRONMENT="${_environment:-${REARC_ICLOUD_ENVIRONMENT:-}}"
 fi
+REARC_ICLOUD_CONTAINER="${REARC_ICLOUD_CONTAINER:-}"
+# shellcheck source=icloud-signing.sh
+source "$SHELL_DIR/scripts/icloud-signing.sh"
 SIGN_IDENTITY="${REARC_SIGN_IDENTITY:-}"
 TEAM_ID="${REARC_TEAM_ID:-}"
 if [[ -n $SIGN_IDENTITY ]]; then
@@ -141,7 +155,18 @@ fi
 # + certificate) is stable, so one "Always Allow" survives rebuilds. Distribution still
 # needs a Developer ID identity, hardened runtime, full nested signing and notarization.
 BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw "$PLIST")"
-if [[ -n $SIGN_IDENTITY ]]; then
+if [[ -n $REARC_ICLOUD_CONTAINER ]]; then
+  # Restricted entitlements: profile, marker and entitlements first, then the whole
+  # bundle is signed so its seal covers Info.plist and embedded.provisionprofile.
+  ENTITLEMENTS="$SCRATCH/ReArc.icloud.entitlements"
+  icloud_prepare "$APP" "$BUNDLE_ID" "${REARC_PROVISIONING_PROFILE:-}" "$SHELL_DIR/scripts/ReArc.entitlements" "$ENTITLEMENTS"
+  codesign --force --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" --timestamp=none \
+    --entitlements "$ENTITLEMENTS" "$APP"
+  actual_team="$(codesign -dv "$APP/Contents/MacOS/ReArc" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  [[ $actual_team == "$TEAM_ID" ]] || die "signed with team '$actual_team', expected REARC_TEAM_ID=$TEAM_ID"
+  icloud_verify "$APP/Contents/MacOS/ReArc"
+  echo "==> signed ReArc.app with iCloud: $SIGN_IDENTITY (team $TEAM_ID, id $BUNDLE_ID)"
+elif [[ -n $SIGN_IDENTITY ]]; then
   codesign --force --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" --timestamp=none \
     --entitlements "$SHELL_DIR/scripts/ReArc.entitlements" "$APP/Contents/MacOS/ReArc"
   if [[ -n $TEAM_ID ]]; then
