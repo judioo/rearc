@@ -410,6 +410,84 @@ The sidebar, other tabs and other windows keep working.
   or notification delegate, so pages leave without asking and location
   and notifications are unavailable there.
 
+### ABI 1.23–1.27 adoption (wave 23)
+
+Follows `engine/docs/C-ABI.md` (sections 1.23–1.25) and
+`engine/docs/WAVE-18D-REPORT.md`, with the search and fullscreen contracts
+from the header (1.26–1.27). Each feature is gated on its minor and flag
+(`history_query` 23, `dangerous_downloads` 24, which also needs
+`downloads`, `tab_discard` 25, `search_autocomplete` 26,
+`html_fullscreen` 27). Configure still takes 1. Every call copies its
+borrowed rows and strings, and a synchronous rejection releases its
+context at once (the self-test checks that none is left).
+
+- **Command-bar history.** On Chromium, `ChromiumCommandBarServices`
+  (`Chromium/ChromiumCommandBar.swift`) asks the profile's HistoryService
+  (`ReArcHistoryQuery`, 50 rows) for every keystroke. Its rows replace
+  `History.json` for that text and are ranked by the same match quality
+  and frecency (`CommandBarSearch`), so history from before the shell's
+  own store shows too. WebKit keeps `History.json`. Off-the-record
+  profiles are never asked.
+- **Row actions.** Rows show Copy URL and, for history, Remove from
+  History on hover, on the highlighted row and in their context menu.
+  Shift+Delete removes the highlighted history row. Removal clears
+  `History.json` and, on Chromium, calls `ReArcHistoryDeleteURL`, then
+  asks again for the typed text.
+- **Search.** The default search comes from the profile's
+  TemplateURLService (`ReArcSearchGetDefaultProvider`, re-read whenever
+  the command bar opens, so chrome://settings/search changes apply). It
+  builds the search row, the private window's address field and the page
+  menu's "Search for". `ReArcSearchClassifyInput` decides URL versus
+  search for the typed text (so `localhost:3000` or an intranet host
+  opens instead of searching). `ReArcAutocompleteStart` (inline
+  autocompletion off) runs per keystroke. A new start supersedes the
+  last, which ends cancelled, and closing the bar stops it. Its search
+  matches show after history, four at most, minus the typed text itself.
+  WebKit uses the ReArc > Search Engine preference (DuckDuckGo by
+  default, or Google, Bing, Ecosia, Brave Search) and, unless Search
+  Suggestions is off, asks the provider's OpenSearch suggest endpoint
+  over an ephemeral session with no cookies, debounced and cancelled per
+  keystroke. Private windows have no suggestions on either engine.
+  Results for older text are dropped (`CommandBarQueryGate`), and the
+  Tab-to-search pill (wave 21) still takes over the bar when chosen.
+- **Dangerous downloads.** The tray asks `ReArcDownloadGetWarning` on
+  each event of an unfinished item and uses its booleans, not the danger
+  code, to offer Keep… (with a confirmation) and Discard. Keep calls
+  `ReArcDownloadResolveDanger(keep)` and asks again, since an item with
+  an insecure and a dangerous warning needs two decisions. Discard
+  removes the item and its file through Chromium. "Review…" on
+  chrome://downloads remains only for engines before 1.24.
+- **Unload tabs.** Unload Tab (tab and favorite context menus), ⌘W on a
+  pinned tab still on its saved URL and on a favorite, and the automatic
+  unload (Archive > Unload Inactive Tabs: never, 30 minutes, 1, 4 (the
+  default) or 12 hours unseen, checked with auto-archive every five
+  minutes) call `ReArcTabDiscard`. The page goes, while its WebContents,
+  back/forward list, boosts and lease stay, and the tab reloads when
+  shown. The discard is retried while the view detaches. If Chromium
+  keeps refusing (media, an unload handler), an explicit unload drops
+  the engine and the automatic one leaves the tab loaded. Kinds 5 and 6
+  of the tab event keep `ChromiumEngine.isDiscarded`. Unloaded rows show
+  a greyed, dimmed icon until the tab is shown. WebKit drops the engine
+  instead, and the tab loads its URL when shown.
+- **HTML fullscreen.** With the callback registered at `ready`, a page's
+  `requestFullscreen()` makes its window native fullscreen.
+  `BrowserView` hides the sidebar and the page card's inset in that
+  window, in the same view tree, because detaching the page would end
+  fullscreen. The page leaving (its own exit, Escape, navigation, hiding,
+  closing) restores the window and sidebar as they were. Leaving native
+  fullscreen with the green button or ⌃⌘F calls `ReArcTabExitFullscreen`.
+  A window already fullscreen stays so. The host keeps the state it
+  wants and toggles once AppKit has finished a transition, since a toggle
+  during one is ignored. WebKit enables `isElementFullscreenEnabled`, and
+  WKWebView shows its own fullscreen window.
+- **Inspect.** The wave 22 placeholder `devtools` gate is gone: the header
+  advertises no DevTools feature, and wave 18d decided not to ship one, so
+  `ChromiumCapabilities.canInspect` is always false and Inspect stays
+  listed disabled (the engine answers `unsupported`).
+
+Not adopted: `printing` (1.28), `page_drops` (1.29) and the 1.30 additions,
+which arrived during this wave.
+
 ### Self-test
 
 The self-test:
@@ -503,8 +581,31 @@ The self-test:
     activation) use synthesized events. Each focuses the page and retries.
     When input still cannot reach the page (app inactive), a step logs a
     NOTE instead of failing.
-18. Verifies every evaluation and profile request context was released
-    (`live script contexts: 0, profile contexts: 0`), then shuts down cleanly.
+18. Wave 23, each gated on its minor and flag:
+    - Dangerous downloads (1.24): with Chromium's manual hash blocklist
+      naming 64 KiB of inert "a" bytes (self-test switch only), two `.sh`
+      downloads started with a link transition arrive as dangerous. The
+      tray's Keep validates one to completion, and Discard removes the
+      other and its file. Nothing opens either file.
+    - Command bar (1.23, 1.26) in the real shell: first a loopback default
+      search (`ReArcSearchSetDefaultProvider`), so no typed text reaches
+      a real search engine. Then HistoryService lists `/nav`, the
+      command bar shows it as an engine history row, and Shift+Delete
+      removes it from HistoryService and `History.json`. Typed words
+      classify as a search on the loopback provider with suggestion rows
+      from its suggest endpoint, a `host:port/path` classifies as a URL,
+      and a superseded autocomplete query ends `cancelled`.
+    - Discard (1.25): the shown tab is refused. Unload Tab on the hidden
+      tab B discards it (kind 5, engine and content generation kept, row
+      dimmed). Selecting B restores it as a new document.
+    - HTML fullscreen (1.27): a click on the fixture's button requests
+      fullscreen, and the window goes native fullscreen without its
+      sidebar. The page's `exitFullscreen()`, Escape and leaving native
+      fullscreen each restore the window. Without input (app inactive)
+      it logs a NOTE.
+19. Verifies every evaluation, profile request and command-bar call
+    context was released (`live script contexts: 0, profile contexts: 0`),
+    then shuts down cleanly.
 
 With the mock keychain the run reaches `RESULT PASS`
 (`selftest-chromium-mockkeychain.log`). The real-Keychain run is covered
@@ -595,7 +696,13 @@ Production needs:
 - **One live view per tab.** A tab shown in two windows renders in one, and
   the other shows a placeholder.
 - **No Inspect.** The page menu lists Inspect disabled: the engine has no
-  browser-less DevTools frontend (WAVE-18C-REPORT "What was not done").
+  browser-less DevTools frontend and advertises none (WAVE-18D-REPORT
+  "DevTools audit and disposition").
+- **Discard refusals.** Chromium will not discard a page that is shown,
+  loading, playing, captured, in PiP or fullscreen, or has unload
+  handlers. The automatic unload leaves those loaded.
+- **Remote suggestions** go to the profile's default search engine as
+  Chromium sends them. History deletion is local (no synced delete).
 - **Password leak check.** When a sign-in is submitted, Chromium's password
   manager runs its leak check against Google's endpoint (the self-test logs
   its 400 for the fixture's credentials). Turning it off is engine or prefs
@@ -840,6 +947,7 @@ space can change profile.
 | ⌥⌘→ / ⌥⌘← | Next / previous space |
 | Two-finger swipe on the sidebar | Previous / next space |
 | Tab / ⌫ in the command bar | Search the typed site / remove the site pill |
+| ⇧⌫ in the command bar | Remove the highlighted history row |
 
 ## Sync: not implemented
 
