@@ -22,17 +22,22 @@ failed=0
 probe() {
   local name="$1"; shift
   local result="$WORK/$name.txt" log="$WORK/$name.log"
-  # `open -W` returns when the app exits; the probe quits by itself after ready.
+  # The probe quits by itself after ready. `open -W` can keep waiting after the app
+  # exited (first launch of a freshly signed copy), so the probe's own log decides.
   open -n -W -a "$APP" --stderr "$log" --stdout "$log" "$@" \
     --args --rearc-launch-probe="$result" --user-data-dir="$WORK/profile-$name" &
   local opener=$! waited=0
-  while kill -0 "$opener" 2>/dev/null && (( waited < 120 )); do sleep 1; waited=$((waited + 1)); done
-  if kill -0 "$opener" 2>/dev/null; then
-    echo "check-launch: $name: still running after ${waited}s (log $log)" >&2
+  while (( waited < 120 )); do
+    grep -q "launch probe: ReArcEngineRun returned" "$log" 2>/dev/null && break
+    kill -0 "$opener" 2>/dev/null || break
+    sleep 1; waited=$((waited + 1))
+  done
+  if ! grep -q "launch probe: ReArcEngineRun returned 0, shutdown ok" "$log" 2>/dev/null; then
+    echo "check-launch: $name: the probe did not shut down cleanly within ${waited}s (log $log)" >&2
     failed=1
-    return
   fi
-  wait "$opener" || true
+  kill "$opener" 2>/dev/null || true
+  wait "$opener" 2>/dev/null || true
   local line; line="$(cat "$result" 2>/dev/null || true)"
   echo "check-launch: $name: ${line:-no probe result} (log $log)"
   [[ $line == *"ready=1 engine=chromium source=infoPlist"* ]] || failed=1
