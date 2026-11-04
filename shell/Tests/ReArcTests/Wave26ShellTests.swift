@@ -171,4 +171,102 @@ final class Wave26ShellTests: XCTestCase {
         model.unsplit(split.id)
         XCTAssertFalse(commands.first { $0.action == .flipSplitOrientation }!.isEnabled(in: context), "no split, no flip")
     }
+
+    // MARK: Command bar
+
+    private func key(_ code: UInt16, _ flags: NSEvent.ModifierFlags, _ characters: String = "\t") -> NSEvent {
+        NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil,
+                         characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code)!
+    }
+
+    private func flags(_ flags: NSEvent.ModifierFlags) -> NSEvent {
+        NSEvent.keyEvent(with: .flagsChanged, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil,
+                         characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 59)!
+    }
+
+    func testInlineCompletionAcceptsAndBackspaceSuppressesIt() {
+        let model = makeModel()
+        model.newTab()
+        model.commandBarText = "git"
+        XCTAssertEqual(model.commandBarInlineCompletion, "github.com")
+        XCTAssertEqual(model.commandBarInlineSuffix, "hub.com")
+        XCTAssertEqual(model.commandBarResults.first?.destinationURL, URL(string: "https://github.com/"))
+        model.commandBarText = "gi"
+        XCTAssertNil(model.commandBarInlineSuffix, "deleting turns the completion off")
+        model.commandBarText = "gith"
+        XCTAssertEqual(model.commandBarInlineSuffix, "ub.com", "typing brings it back")
+        XCTAssertTrue(model.acceptCommandBarInlineCompletion())
+        XCTAssertEqual(model.commandBarText, "github.com")
+        XCTAssertFalse(model.acceptCommandBarInlineCompletion())
+        model.commandBarText = ">git"
+        XCTAssertNil(model.commandBarInlineCompletion, "commands do not complete")
+    }
+
+    func testRoutingModifiersOpenNewTabSplitAndLittleArc() throws {
+        let model = makeModel()
+        let page = model.store.addTab(kind: .today, title: "Page", url: URL(string: "https://page.test/")!)
+        model.store.selectTab(page.id)
+
+        // ⌘L then ⌘↩: the page stays, the result opens in a new tab.
+        model.focusLocation()
+        model.commandBarText = "https://one.test/"
+        model.submitCommandBar(route: .newTab)
+        XCTAssertFalse(model.isCommandBarPresented)
+        XCTAssertEqual(model.store.tab(withID: page.id)?.url.absoluteString, "https://page.test/")
+        XCTAssertEqual(model.store.selectedTab?.url.absoluteString, "https://one.test/")
+        let one = try XCTUnwrap(model.store.selectedTab)
+
+        // ⌘T then ⌥↩: the new tab becomes a pane next to the tab shown before.
+        model.newTab()
+        model.commandBarText = "https://two.test/"
+        model.submitCommandBar(route: .splitView)
+        let split = try XCTUnwrap(model.store.splitContaining(tabID: one.id)?.split)
+        XCTAssertEqual(Set(split.tabs.map(\.url.absoluteString)), ["https://one.test/", "https://two.test/"])
+        XCTAssertEqual(model.store.selectedItemID, split.id)
+
+        // ⌘T then ⇧↩: Little Arc, and the empty new tab goes away.
+        model.selectTab(page.id)
+        let tabsBefore = model.store.displayTabs().count
+        model.newTab()
+        model.commandBarText = "https://three.test/"
+        model.submitCommandBar(route: .littleArc)
+        XCTAssertEqual(model.store.littleArcLiveWindows.last?.url.absoluteString, "https://three.test/")
+        XCTAssertEqual(model.store.displayTabs().count, tabsBefore, "no blank tab left behind")
+        XCTAssertEqual(model.store.selectedTabID, page.id)
+    }
+
+    func testCtrlTabSwitcherCyclesRecentTabsAndCommitsOnRelease() {
+        let model = makeModel()
+        var clock = Date(timeIntervalSince1970: 5_000)
+        model.store.now = { clock }
+        let a = model.store.addTab(kind: .today, title: "A", url: URL(string: "https://a.test")!)
+        let b = model.store.addTab(kind: .today, title: "B", url: URL(string: "https://b.test")!)
+        let c = model.store.addTab(kind: .today, title: "C", url: URL(string: "https://c.test")!)
+        for tab in [a, b, c] {
+            clock += 5
+            model.store.selectTab(tab.id)
+        }
+
+        XCTAssertTrue(model.handleTabSwitcherEvent(key(48, .control)))
+        XCTAssertEqual(model.tabSwitcher?.highlighted.id, b.id)
+        XCTAssertTrue(model.handleTabSwitcherEvent(key(48, .control)))
+        XCTAssertEqual(model.tabSwitcher?.highlighted.id, a.id)
+        XCTAssertTrue(model.handleTabSwitcherEvent(key(48, [.control, .shift], "\u{19}")))
+        XCTAssertEqual(model.tabSwitcher?.highlighted.id, b.id, "Shift steps back")
+        XCTAssertFalse(model.handleTabSwitcherEvent(flags([])), "the release passes through")
+        XCTAssertNil(model.tabSwitcher)
+        XCTAssertEqual(model.store.selectedTabID, b.id, "releasing Control picks the highlighted tab")
+
+        XCTAssertTrue(model.handleTabSwitcherEvent(key(48, .control)))
+        XCTAssertTrue(model.handleTabSwitcherEvent(key(53, .control, "\u{1b}")))
+        XCTAssertNil(model.tabSwitcher, "Escape cancels")
+        XCTAssertEqual(model.store.selectedTabID, b.id)
+        XCTAssertFalse(model.handleTabSwitcherEvent(key(48, [])), "plain Tab is the page's")
+
+        // The menu item (no Control held) switches at once to the previous tab.
+        model.cycleRecentTabs(forward: true, controlHeld: false)
+        XCTAssertNil(model.tabSwitcher)
+        XCTAssertEqual(model.store.selectedTabID, c.id)
+        XCTAssertEqual(titles(ShellMenus.tabSwitcher(model)), ["Tab Switcher (Forward)", "Tab Switcher (Backward)"])
+    }
 }

@@ -89,6 +89,9 @@ final class BrowserViewModel {
     var pinnedSectionCollapse = PinnedSectionCollapseState()
     /// Expand Current Split: the pane a window shows alone, per split.
     var splitMaximize = SplitPaneMaximizeState()
+    /// The open Ctrl+Tab switcher.
+    var tabSwitcher: TabSwitcherSession?
+    @ObservationIgnored var tabSwitcherMonitor: Any?
     /// The confirmation toast over the page ("Copied URL"), cleared after a moment.
     var toast: ShellToast?
     @ObservationIgnored var lastCopiedLinkText: String?
@@ -98,12 +101,17 @@ final class BrowserViewModel {
     var commandBarText = "" {
         didSet {
             commandBarHighlightedIndex = 0
+            // Deleting turns inline completion off until the next character (omnibox rule).
+            commandBarSuppressesInlineCompletion = commandBarText.count < oldValue.count && oldValue.hasPrefix(commandBarText)
             if commandBarText != oldValue { refreshCommandBarLive() }
         }
     }
     var commandBarHighlightedIndex = 0
     /// The tab the command bar will navigate on submit.
-    private var commandBarTargetID: Tab.ID?
+    var commandBarTargetID: Tab.ID?
+    /// The tab shown before ⌘T made the bar's new tab: a ⌥↩ split pairs with it.
+    var commandBarSplitAnchorID: Tab.ID?
+    var commandBarSuppressesInlineCompletion = false
 
     /// The site a Tab-triggered scoped search is aimed at (Arc site search pill).
     var commandBarSiteSearch: SiteSearchEngine?
@@ -127,7 +135,8 @@ final class BrowserViewModel {
             history: visitHistory,
             externalLinkDestination: externalLinkDestination,
             live: commandBarLive,
-            searchProvider: searchProvider
+            searchProvider: searchProvider,
+            inlineCompletion: commandBarInlineCompletion
         )
     }
 
@@ -1017,9 +1026,11 @@ final class BrowserViewModel {
 
     /// Cmd+T: create a fresh today tab and open the command bar into it.
     func newTab() {
+        let previous = store.selectedTabID
         let tab = store.addTab(kind: .today, title: "New Tab", url: URL(string: "about:blank")!)
         store.selectTab(tab.id)
         openCommandBar(target: tab.id, text: "")
+        commandBarSplitAnchorID = previous
     }
 
     /// Cmd+L: open the command bar aimed at the selected tab.
@@ -1082,7 +1093,9 @@ final class BrowserViewModel {
         commandBarHighlightedIndex = min(max(next, 0), count - 1)
     }
 
-    func submitCommandBar() {
+    /// Return in the command bar; ⌘↩, ⌥↩ and ⇧↩ pick another destination
+    /// for a page result (`CommandBarRoute`). Commands ignore the route.
+    func submitCommandBar(route: CommandBarRoute = .current) {
         if let intent = commandBarURLIntent {
             guard let url = URLEntry.resolve(commandBarText, engine: engineHost.navigationSchemes, provider: searchProvider) else {
                 commandBarError = "Enter a valid URL"
@@ -1104,6 +1117,10 @@ final class BrowserViewModel {
             let choice = results[index]
             switch choice.kind {
             case .openTab:
+                if route != .current, let tabID = choice.tabID, let tab = store.tab(withID: tabID) {
+                    routeCommandBar(to: tab.url, route)
+                    return
+                }
                 if let tabID = choice.tabID {
                     store.focusTab(tabID)
                     loadSelectedIfNeeded()
@@ -1126,8 +1143,7 @@ final class BrowserViewModel {
                 }
             case .openURL, .history, .suggestion, .search:
                 if let url = choice.destinationURL {
-                    navigateCommandBar(to: url)
-                    dismissCommandBar()
+                    routeCommandBar(to: url, route)
                     return
                 }
             }
@@ -1137,9 +1153,8 @@ final class BrowserViewModel {
             dismissCommandBar()
             return
         }
-        navigateCommandBar(to: url)
-        dismissCommandBar()
-        loadSelectedIfNeeded()
+        routeCommandBar(to: url, route)
+        if route == .current { loadSelectedIfNeeded() }
     }
 
     /// Opens a Chromium-owned page (settings, version, history, downloads,
@@ -1167,7 +1182,7 @@ final class BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
-    private func navigateCommandBar(to url: URL) {
+    func navigateCommandBar(to url: URL) {
         guard NavigationURLPolicy.allows(url, engine: engineHost.navigationSchemes) else {
             commandBarError = "That URL scheme is not allowed"
             return
@@ -1190,6 +1205,7 @@ final class BrowserViewModel {
 
     private func openCommandBar(target: Tab.ID?, text: String) {
         commandBarSiteSearch = nil
+        commandBarSplitAnchorID = nil
         commandBarTargetID = target
         commandBarText = text
         commandBarError = nil

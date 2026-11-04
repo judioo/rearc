@@ -78,6 +78,9 @@ struct BrowserView: View {
                     .onTapGesture { model.dismissCommandBar() }
                 CommandBarOverlay(
                     text: $model.commandBarText,
+                    inlineSuffix: model.commandBarInlineSuffix,
+                    onAcceptCompletion: { model.acceptCommandBarInlineCompletion() },
+                    onSubmitRoute: { model.submitCommandBar(route: $0) },
                     results: model.commandBarResults,
                     highlightedIndex: model.commandBarHighlightedIndex,
                     errorMessage: model.commandBarError,
@@ -96,6 +99,15 @@ struct BrowserView: View {
                     onCancel: { model.dismissCommandBar() }
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.97)))
+            }
+
+            if let switcher = model.tabSwitcher, isKeyWindowSheetOwner {
+                TabSwitcherOverlay(
+                    session: switcher,
+                    favicon: { item in model.store.tab(withID: item.id).flatMap { model.favicon(for: $0) } },
+                    onSelect: { model.selectTabSwitcherItem($0) }
+                )
+                .transition(.opacity)
             }
         }
         .tint(model.themeColor(in: windowID))
@@ -158,6 +170,7 @@ struct BrowserView: View {
         }
         .onAppear {
             ExternalLinkRouter.shared.attach(model)
+            model.installTabSwitcherMonitor()
             model.store.registerWindow(windowID)
             stripCloseWindowShortcut()
             model.restoreLittleArcWindowsIfNeeded()

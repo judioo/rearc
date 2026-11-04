@@ -116,6 +116,15 @@ enum ShellMenus {
         ]]
     }
 
+    /// Tabs menu: Arc's Tab Switcher (forward/backward), recent tabs first.
+    /// The app-wide key monitor handles the keys; the items show them.
+    static func tabSwitcher(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("Tab Switcher (Forward)", "\t", .control) { model.cycleRecentTabs(forward: true) },
+            ShellMenuItem("Tab Switcher (Backward)", "\t", [.control, .shift]) { model.cycleRecentTabs(forward: false) },
+        ]]
+    }
+
     /// Tabs menu: Cmd+1…8 select that sidebar row (favorites, pinned, Today),
     /// Cmd+9 the last one (Arc / Chrome "Switch to Nth Tab").
     static func tabPositions(_ model: BrowserViewModel) -> [[ShellMenuItem]] {

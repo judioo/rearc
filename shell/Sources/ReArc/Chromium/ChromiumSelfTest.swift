@@ -1724,6 +1724,32 @@ final class ChromiumSelfTest {
         model.selectTab(tab.id)
         model.deleteTab(pinned.id)
         log("PASS unread dot: a background title change on pinned P set isUnread (row title follows); selecting P cleared it")
+
+        // Command bar ⌘↩ opens the fixture page in a new tab (tab A stays); Ctrl+Tab goes back.
+        model.focusLocation()
+        model.commandBarText = "\(base)/a?routed=1"
+        model.submitCommandBar(route: .newTab)
+        guard let routed = store.selectedTab, routed.id != tab.id else { throw Failure(description: "⌘↩ opened no new tab") }
+        let routedEngine = try shellEngine(model, routed)
+        try await wait("⌘↩ new tab loaded", timeout: 20) { routedEngine.pageTitle == Self.titleA && !routedEngine.isLoading }
+        try check(store.tab(withID: tab.id)?.url.path == "/a" && engine.currentURL?.query == nil, "⌘↩ navigated tab A")
+        func key(_ flags: NSEvent.ModifierFlags) -> NSEvent? {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil,
+                             characters: "\t", charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: 48)
+        }
+        guard let ctrlTab = key(.control), let release = NSEvent.keyEvent(
+            with: .flagsChanged, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+            characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 59) else { throw Failure(description: "key events") }
+        try check(model.handleTabSwitcherEvent(ctrlTab) && model.tabSwitcher?.highlighted.id == tab.id,
+                  "Ctrl+Tab highlights \(model.tabSwitcher?.highlighted.title ?? "nothing"), not tab A")
+        _ = model.handleTabSwitcherEvent(release)
+        try await wait("Ctrl+Tab release selects tab A and re-attaches it", timeout: 20) {
+            store.selectedTabID == tab.id && model.tabSwitcher == nil && engine.attachmentID != nil
+        }
+        model.deleteTab(routed.id)
+        model.selectTab(tab.id)
+        log("PASS command bar ⌘↩ opened \(routedEngine.currentURL?.absoluteString ?? "") in a new tab; Ctrl+Tab (MRU switcher) "
+            + "highlighted tab A and releasing Control selected it")
     }
 
     // MARK: Trusted navigation

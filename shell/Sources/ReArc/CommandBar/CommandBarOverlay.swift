@@ -7,9 +7,17 @@ import SidebarModel
 /// an empty query removes it again (Arc site search, COMMAND-BAR §4.2).
 /// Rows offer Copy URL and, for history, Remove from History on hover or
 /// highlight and in their context menu; Shift+Delete removes the
-/// highlighted history row (COMMAND-BAR §6.4).
+/// highlighted history row (COMMAND-BAR §6.4). A typed domain completes
+/// inline in grey (Right Arrow takes it), and ⌘↩ / ⌥↩ / ⇧↩ open a page
+/// result in a new tab, a split or Little Arc (COMMAND-BAR §3, §6.3).
 struct CommandBarOverlay: View {
     @Binding var text: String
+    /// The inline completion's grey remainder after the typed text.
+    var inlineSuffix: String?
+    /// Right Arrow: returns true when it took the completion.
+    var onAcceptCompletion: () -> Bool = { false }
+    /// Return with a routing modifier.
+    var onSubmitRoute: (CommandBarRoute) -> Void = { _ in }
     let results: [CommandBarSearch.Result]
     let highlightedIndex: Int
     var errorMessage: String?
@@ -44,7 +52,21 @@ struct CommandBarOverlay: View {
                     .textFieldStyle(.plain)
                     .font(.title3)
                     .focused($isFieldFocused)
+                    .overlay(alignment: .leading) { inlineCompletion }
                     .onSubmit(onSubmit)
+                    .onKeyPress(.return, phases: .down) { press in
+                        let route = CommandBarRoute(
+                            command: press.modifiers.contains(.command),
+                            option: press.modifiers.contains(.option),
+                            shift: press.modifiers.contains(.shift)
+                        )
+                        guard route != .current else { return .ignored }
+                        onSubmitRoute(route)
+                        return .handled
+                    }
+                    .onKeyPress(.rightArrow, phases: .down) { press in
+                        press.modifiers.isEmpty && onAcceptCompletion() ? .handled : .ignored
+                    }
                     .onKeyPress(.tab) { onTab() ? .handled : .ignored }
                     .onKeyPress(.delete) {
                         if NSEvent.modifierFlags.contains(.shift), onDeleteHighlighted() { return .handled }
@@ -84,6 +106,19 @@ struct CommandBarOverlay: View {
                     }
                 }
                 .frame(maxHeight: 280)
+                if showsRouteHints {
+                    Divider()
+                    HStack(spacing: 14) {
+                        ForEach(CommandBarRoute.allCases, id: \.self) { route in
+                            Text(route.hint)
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+                    .accessibilityElement(children: .combine)
+                }
             }
         }
         .frame(width: 520)
@@ -103,6 +138,24 @@ struct CommandBarOverlay: View {
             onMoveHighlight(1)
             return .handled
         }
+    }
+
+    /// The typed text, invisible, then the completion's remainder in grey.
+    @ViewBuilder
+    private var inlineCompletion: some View {
+        if let inlineSuffix, !inlineSuffix.isEmpty {
+            (Text(text).foregroundColor(.clear) + Text(inlineSuffix).foregroundColor(.secondary.opacity(0.7)))
+                .font(.title3)
+                .lineLimit(1)
+                .allowsHitTesting(false)
+                .accessibilityLabel("Completes to \(text + inlineSuffix)")
+        }
+    }
+
+    /// Routing applies to pages, not commands.
+    private var showsRouteHints: Bool {
+        guard results.indices.contains(highlightedIndex) else { return false }
+        return results[highlightedIndex].kind != .command
     }
 
     private var placeholder: String {

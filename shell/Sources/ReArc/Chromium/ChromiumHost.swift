@@ -641,7 +641,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         tabs.addItem(.separator())
         tabs.addItem(target.item("Next Tab", "]", [.command, .shift]) { model.selectNextTab() })
         tabs.addItem(target.item("Previous Tab", "[", [.command, .shift]) { model.selectPreviousTab() })
-        tabs.addItem(target.item("Select Next Tab", "\t", [.control]) { model.selectNextTab() })
+        target.add(ShellMenus.tabSwitcher(model), to: tabs)
         tabs.addItem(.separator())
         tabs.addItem(target.item("Add Split View", "") { model.addSplitView(orientation: .horizontal) })
         tabs.addItem(target.item("Separate from Split View", "") {

@@ -105,8 +105,7 @@ struct ReArcApp: App {
                     .keyboardShortcut("]", modifiers: [.command, .shift])
                 Button("Previous Tab") { model.selectPreviousTab() }
                     .keyboardShortcut("[", modifiers: [.command, .shift])
-                Button("Select Next Tab") { model.selectNextTab() }
-                    .keyboardShortcut(.tab, modifiers: .control)
+                ShellMenuButtons(groups: ShellMenus.tabSwitcher(model))
                 Divider()
                 Button("Add Split View") { model.addSplitView(orientation: .horizontal) }
                 Button("Separate from Split View") {
