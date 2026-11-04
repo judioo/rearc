@@ -11,8 +11,10 @@ public enum CommandBarSearch {
     public enum ResultKind: Equatable {
         case openTab
         case openURL
-        /// A page from the shell's visit history (`VisitHistory`).
+        /// A page from visit history (the shell's `VisitHistory`, or the engine's on Chromium).
         case history
+        /// A search provider's autocomplete suggestion.
+        case suggestion
         case search
         case command
     }
@@ -64,9 +66,11 @@ public enum CommandBarSearch {
     public static let historyLimit = 5
 
     /// Builds ranked results: open tabs first, then visit history (pages not
-    /// already open), then commands, then the search fallback. A query that
-    /// is itself an address puts its "Open" row ahead of history, so Enter
-    /// goes where the user typed.
+    /// already open), then the provider's suggestions, then commands, then the
+    /// search fallback. A query that is itself an address puts its "Open" row
+    /// ahead of history, so Enter goes where the user typed. `live` results
+    /// for this exact text replace the shell's history and URL-vs-search
+    /// guess (Chromium) and add suggestions; for other text they are ignored.
     public static func results(
         for query: String,
         in store: SidebarStore,
@@ -78,6 +82,8 @@ public enum CommandBarSearch {
         navigationSchemes: NavigationURLPolicy.EngineSchemes = [],
         history: VisitHistory = VisitHistory(),
         externalLinkDestination: ExternalLinkDestination = .littleArc,
+        live: CommandBarLiveResults? = nil,
+        searchProvider: SearchProvider = .duckDuckGo,
         now: Date = Date()
     ) -> [Result] {
         let (mode, needle) = parseMode(query)
@@ -100,8 +106,20 @@ public enum CommandBarSearch {
             guard !needle.isEmpty else { return [] }
             let tabs = tabResults(for: needle, in: store)
             var output = tabs
-            let resolved = URLEntry.resolve(query, engine: navigationSchemes)
-            let direct = resolved.flatMap { looksLikeDirectNavigation(query) ? $0 : nil }
+            let current = live.flatMap { $0.applies(to: query) ? $0 : nil }
+            let resolved: URL?
+            let direct: URL?
+            switch current?.classification {
+            case .url(let url) where NavigationURLPolicy.allows(url, engine: navigationSchemes):
+                resolved = url
+                direct = url
+            case .search(let url):
+                resolved = url
+                direct = nil
+            default:
+                resolved = URLEntry.resolve(query, engine: navigationSchemes, provider: searchProvider)
+                direct = resolved.flatMap { looksLikeDirectNavigation(query) ? $0 : nil }
+            }
             if let url = direct {
                 output.append(Result(
                     id: "url-\(url.absoluteString)",
@@ -114,7 +132,11 @@ public enum CommandBarSearch {
             // Pages already open as tabs (or typed exactly) are not repeated as history.
             var shown = Set(tabs.compactMap { $0.destinationURL.flatMap(VisitHistory.key(for:)) })
             if let url = direct, let key = VisitHistory.key(for: url) { shown.insert(key) }
-            output.append(contentsOf: historyResults(for: needle, in: history, now: now, excluding: shown))
+            let historySource = current?.history.map { VisitHistory(records: $0) } ?? history
+            let historyRows = historyResults(for: needle, in: historySource, now: now, excluding: shown)
+            output.append(contentsOf: historyRows)
+            historyRows.compactMap { $0.destinationURL.flatMap(VisitHistory.key(for:)) }.forEach { shown.insert($0) }
+            output.append(contentsOf: suggestionResults(current?.suggestions ?? [], query: query, excluding: shown, fallback: resolved))
             output.append(contentsOf: commandResults(matching: needle, context: context, store: store, allowEmpty: false))
             if direct == nil, let searchURL = resolved {
                 output.append(Result(
@@ -211,6 +233,35 @@ public enum CommandBarSearch {
                 destinationURL: record.url
             )
         }
+    }
+
+    // MARK: - Suggestions
+
+    /// Provider suggestions, minus the typed text itself (the search row
+    /// covers it) and pages already listed.
+    private static func suggestionResults(
+        _ suggestions: [SearchSuggestion],
+        query: String,
+        excluding shown: Set<String>,
+        fallback: URL?
+    ) -> [Result] {
+        let typed = CommandBarLiveResults.normalized(query)
+        var seen: Set<String> = [typed]
+        var rows: [Result] = []
+        for suggestion in suggestions {
+            let text = CommandBarLiveResults.normalized(suggestion.text)
+            guard !text.isEmpty, seen.insert(text).inserted, suggestion.destinationURL != fallback else { continue }
+            if let key = VisitHistory.key(for: suggestion.destinationURL), shown.contains(key) { continue }
+            rows.append(Result(
+                id: "suggest-\(suggestion.destinationURL.absoluteString)",
+                kind: .suggestion,
+                title: suggestion.text,
+                subtitle: suggestion.destinationURL.host(),
+                destinationURL: suggestion.destinationURL
+            ))
+            if rows.count == suggestionLimit { break }
+        }
+        return rows
     }
 
     // MARK: - Commands

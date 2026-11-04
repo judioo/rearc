@@ -1,9 +1,15 @@
 import Foundation
 
 /// Resolves free-form command-bar input into a URL: full URLs pass through,
-/// bare hosts get an https:// scheme, and anything else becomes a web search.
+/// bare hosts get an https:// scheme, and anything else becomes a web search
+/// with `provider` (the engine's default search on Chromium, the shell
+/// preference on WebKit).
 public enum URLEntry {
-    public static func resolve(_ input: String, engine: NavigationURLPolicy.EngineSchemes = []) -> URL? {
+    public static func resolve(
+        _ input: String,
+        engine: NavigationURLPolicy.EngineSchemes = [],
+        provider: SearchProvider = .duckDuckGo
+    ) -> URL? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
@@ -19,13 +25,11 @@ public enum URLEntry {
             return url
         }
 
-        return searchURL(for: trimmed)
+        return searchURL(for: trimmed, provider: provider)
     }
 
     /// The web search for `text` (command bar fallback, "Search for …" in the page menu).
-    public static func searchURL(for text: String) -> URL? {
-        var components = URLComponents(string: "https://duckduckgo.com/")
-        components?.queryItems = [URLQueryItem(name: "q", value: text)]
-        return components?.url
+    public static func searchURL(for text: String, provider: SearchProvider = .duckDuckGo) -> URL? {
+        provider.searchURL(for: text)
     }
 }

@@ -44,6 +44,40 @@ public enum DownloadDanger: Equatable, Sendable {
     }
 }
 
+/// Chromium's current warning on an unfinished download (ABI 1.24
+/// `ReArcDownloadGetWarning`). The danger code alone does not say whether a
+/// decision is possible (4 is a pending check, 6 user-validated): the
+/// booleans do. Keep validates the insecure warning first, then the danger
+/// one, so a kept item can still ask again.
+public struct DownloadWarning: Equatable, Sendable {
+    public var dangerType: UInt32
+    /// 0 unknown, 1 safe, 2 validated, 3 warn, 4 block, 5 silent block.
+    public var insecureStatus: UInt32
+    public var isDangerous: Bool
+    public var isInsecure: Bool
+
+    public init(dangerType: UInt32, insecureStatus: UInt32, isDangerous: Bool, isInsecure: Bool) {
+        self.dangerType = dangerType
+        self.insecureStatus = insecureStatus
+        self.isDangerous = isDangerous
+        self.isInsecure = isInsecure
+    }
+
+    /// Keep and Discard apply.
+    public var offersDecision: Bool { isDangerous || isInsecure }
+
+    public var message: String {
+        if isInsecure { return "This file can't be downloaded securely" }
+        if case .warning(let text) = DownloadDanger(dangerType: dangerType) { return text }
+        return "This file may be harmful"
+    }
+}
+
+/// Keep or Discard for a download Chromium warned about (`ReArcDownloadResolveDanger`).
+public enum DownloadDangerDecision: UInt32, Sendable {
+    case keep = 0, discard = 1
+}
+
 public struct DownloadRecord: Codable, Equatable, Identifiable, Sendable {
     /// Chromium's GUID, or a shell UUID for WebKit downloads.
     public var id: String
