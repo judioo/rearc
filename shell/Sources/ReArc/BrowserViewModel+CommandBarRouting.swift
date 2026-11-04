@@ -116,11 +116,16 @@ extension BrowserViewModel {
     }
 
     /// One app-wide monitor sees Ctrl+Tab before the page or a menu does,
-    /// and Control's release ends the switcher.
+    /// and Control's release ends the switcher. It also notes each click's keys.
     func installTabSwitcherMonitor() {
         guard tabSwitcherMonitor == nil else { return }
-        tabSwitcherMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] event in
+        tabSwitcherMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged, .leftMouseDown]) { [weak self] event in
             guard let self else { return event }
+            if event.type == .leftMouseDown {
+                // ⌥⌘-click routing on Chromium reads this (BrowserViewModel+LittleArcChrome).
+                self.noteMouseDown(modifiers: event.modifierFlags)
+                return event
+            }
             return self.handleTabSwitcherEvent(event) ? nil : event
         }
     }
@@ -149,6 +154,6 @@ extension BrowserViewModel {
 
     /// Ctrl+Tab belongs to browser windows, not private windows.
     private var keyBrowserWindowIsFront: Bool {
-        keyPrivateWindow == nil
+        keyPrivateWindow == nil && keyLittleArcID == nil
     }
 }

@@ -235,6 +235,8 @@ final class WKEngine: NSObject, WebEngine {
     private var boostEditorOpen = false
     var onBoostPageshow: (() -> Void)?
     var onNavigationCommit: ((URL?, String?) -> Void)?
+    /// ⌥⌘-click on a link (`LittleArcLinkOpening`); nil follows the link.
+    @ObservationIgnored var littleArcLinkHandler: ((URL) -> Void)?
     let supportsBoostEditor = true
     /// Find-in-page session numbering and counts (`FindInPage.swift`).
     @ObservationIgnored let findSession = WebKitFindSession()
@@ -722,6 +724,18 @@ extension WKEngine: WKNavigationDelegate {
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
+        let flags = navigationAction.modifierFlags
+        if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url,
+           let littleArcLinkHandler,
+           LittleArcChrome.clickOpensLittleArc(
+               command: flags.contains(.command), option: flags.contains(.option),
+               shift: flags.contains(.shift), control: flags.contains(.control)
+           ) {
+            // ⌥⌘-click: the link opens in Little Arc, the page stays.
+            decisionHandler(.cancel)
+            littleArcLinkHandler(url)
+            return
+        }
         decisionHandler(navigationAction.shouldPerformDownload && downloadCenter != nil ? .download : .allow)
     }
 
@@ -842,6 +856,8 @@ private struct WebViewRepresentable: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView { webView }
     func updateNSView(_ nsView: WKWebView, context: Context) {}
 }
+
+extension WKEngine: LittleArcLinkOpening {}
 
 extension WKEngine: PageSelectionReading {
     func selectedText() async -> String? {

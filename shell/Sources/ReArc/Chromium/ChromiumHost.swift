@@ -560,6 +560,10 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             })
         }
         app.addSubmenu(links, title: "External Links")
+        app.addItem(target.checkItem("Open Little Arc from Anywhere (\(LittleArcHotkeyPreference.display))",
+                                     isOn: { model.isLittleArcHotkeyEnabled }) {
+            model.isLittleArcHotkeyEnabled.toggle()
+        })
         app.addItem(.separator())
         app.addItem(withTitle: "Hide ReArc", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         app.addItem(.separator())
@@ -570,6 +574,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let file = NSMenu(title: "File")
         file.addItem(target.item("New Tab", "t") { model.newTab() })
         file.addItem(target.item("New Window", "n") { [weak self] in self?.openBrowserWindow() })
+        file.addItem(target.item("New Little Arc Window", "n", [.command, .option]) { model.openBlankLittleArc() })
         if runtime.capabilities.profileOffTheRecord {
             file.addItem(target.item("New Private Window", "n", [.command, .shift]) {
                 model.openPrivateWindow()
@@ -725,6 +730,11 @@ extension BrowserViewModel {
     func adoptChromiumTab(_ event: ChromiumTabEvent, profileKey: ChromiumProfileKey?) -> Bool {
         let blank = URL(string: "about:blank")!
         let url = event.url.flatMap(URL.init(string:)).flatMap { $0.absoluteString.isEmpty ? nil : $0 } ?? blank
+        // ⌥⌘-click: Chromium makes a background tab (as for ⌘-click); the keys
+        // held at that click send it to Little Arc instead, in the opener's profile.
+        if event.disposition == 1 || event.disposition == 2, takeLittleArcClick() {
+            return adoptChromiumLittleArc(event, profileKey: profileKey, url: url)
+        }
         let tab = store.addTab(kind: .today, title: event.title.flatMap { $0.isEmpty ? nil : $0 } ?? "New Tab", url: url)
         let profileID = profileID(for: tab)
         // The contents already live in the opener's BrowserContext; keep it.
@@ -745,6 +755,27 @@ extension BrowserViewModel {
         if event.disposition != 2 {
             selectTab(tab.id)
         }
+        return true
+    }
+
+    /// The contents keep their BrowserContext, so the Little Arc takes the opener's profile.
+    func adoptChromiumLittleArc(_ event: ChromiumTabEvent, profileKey: ChromiumProfileKey?, url: URL) -> Bool {
+        var profileID = store.activeProfileID
+        if case .persistent(let owner) = profileKey { profileID = owner }
+        let record = store.createLittleArcWindow(url: url, title: event.title.flatMap { $0.isEmpty ? nil : $0 }, profileID: profileID)
+        let engine = ChromiumEngine(
+            runtime: ChromiumRuntime.shared,
+            adopting: event,
+            initialURL: url,
+            context: EngineProfileContext(profileID: profileID),
+            profileKey: profileKey ?? .persistent(profileID),
+            shellID: record.id,
+            role: .littleArc
+        )
+        engineHost.adoptLittleArc(engine, id: record.id, profileID: profileID)
+        requestLittleArcWindow(record.id)
+        loadLittleArcIfNeeded(record.id)
+        littleArcAdoptions += 1
         return true
     }
 }

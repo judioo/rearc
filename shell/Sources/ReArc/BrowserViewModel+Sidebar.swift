@@ -42,7 +42,7 @@ extension BrowserViewModel {
     /// The page navigation commands act on: the key private window's page,
     /// else the selected tab (the focused pane of a split).
     var navigationEngine: (any WebEngine)? {
-        keyPrivateWindow?.engine ?? focusedEngine
+        keyPrivateWindow?.engine ?? keyLittleArcEngine ?? focusedEngine
     }
 
     func goBack() { navigationEngine?.goBack() }

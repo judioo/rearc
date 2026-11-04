@@ -92,6 +92,17 @@ final class BrowserViewModel {
     /// The open Ctrl+Tab switcher.
     var tabSwitcher: TabSwitcherSession?
     @ObservationIgnored var tabSwitcherMonitor: Any?
+    /// The Little Arc whose window is key (nil when a browser window is).
+    var keyLittleArcID: LittleArcWindow.ID?
+    /// A Little Arc whose address field should start editing (⌘L, New Little Arc Window).
+    var littleArcFocusRequest: LittleArcWindow.ID?
+    var littleArcHotkeyPreference = LittleArcHotkeyPreference()
+    @ObservationIgnored var littleArcHotkeyDefaults: UserDefaults = .standard
+    @ObservationIgnored var littleArcHotkey: GlobalHotkey?
+    @ObservationIgnored var littleArcHotkeyStarted = false
+    /// ⌥⌘-click contents the Chromium shell adopted as Little Arcs (self-test).
+    @ObservationIgnored var littleArcAdoptions = 0
+    @ObservationIgnored var lastMouseDown: (modifiers: NSEvent.ModifierFlags, at: Date)?
     /// The confirmation toast over the page ("Copied URL"), cleared after a moment.
     var toast: ShellToast?
     @ObservationIgnored var lastCopiedLinkText: String?
@@ -823,6 +834,7 @@ final class BrowserViewModel {
         engine.linkPeekHandler = { [weak self] url in
             self?.showPeek(url: url)
         }
+        configureLittleArcClicks(on: engine)
     }
 
     // MARK: - Peek
@@ -905,7 +917,7 @@ final class BrowserViewModel {
         littleArcOpenRequests = []
     }
 
-    private func requestLittleArcWindow(_ id: LittleArcWindow.ID) {
+    func requestLittleArcWindow(_ id: LittleArcWindow.ID) {
         if let windowPresenter {
             windowPresenter.presentLittleArcWindow(id)
         } else {
@@ -1035,6 +1047,10 @@ final class BrowserViewModel {
 
     /// Cmd+L: open the command bar aimed at the selected tab.
     func focusLocation() {
+        if let id = keyLittleArcID, store.littleArcWindow(withID: id) != nil {
+            littleArcFocusRequest = id
+            return
+        }
         guard let selected = store.selectedTab else {
             newTab()
             return

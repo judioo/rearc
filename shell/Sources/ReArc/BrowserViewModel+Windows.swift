@@ -14,6 +14,7 @@ extension BrowserViewModel {
     /// A browser window became key: bring back its space and selection, and
     /// load what it shows (the key window's host also takes the tab's lease).
     func windowBecameKey(_ window: SidebarWindowID) {
+        keyLittleArcID = nil
         store.windowBecameKey(window)
         reconcileEngineOwnership()
         loadSelectedIfNeeded()

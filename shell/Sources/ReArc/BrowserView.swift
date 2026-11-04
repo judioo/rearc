@@ -171,6 +171,7 @@ struct BrowserView: View {
         .onAppear {
             ExternalLinkRouter.shared.attach(model)
             model.installTabSwitcherMonitor()
+            model.startLittleArcHotkey()
             model.store.registerWindow(windowID)
             stripCloseWindowShortcut()
             model.restoreLittleArcWindowsIfNeeded()

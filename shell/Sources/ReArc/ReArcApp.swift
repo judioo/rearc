@@ -39,6 +39,7 @@ struct ReArcApp: App {
                         Text(destination.menuTitle).tag(destination)
                     }
                 }
+                Toggle("Open Little Arc from Anywhere (\(LittleArcHotkeyPreference.display))", isOn: $model.isLittleArcHotkeyEnabled)
                 if let preference = model.webKitSearchPreference {
                     Picker("Search Engine", selection: Binding(
                         get: { preference.providerID },
@@ -60,6 +61,8 @@ struct ReArcApp: App {
                     .keyboardShortcut("t")
                 Button("New Private Window") { model.openPrivateWindow() }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
+                Button("New Little Arc Window") { model.openBlankLittleArc() }
+                    .keyboardShortcut("n", modifiers: [.command, .option])
             }
             // Cmd+S — toggle the sidebar, replacing File > Save.
             CommandGroup(replacing: .saveItem) {

@@ -186,6 +186,21 @@ final class EngineHost {
         return created
     }
 
+    func existingLittleArcEngine(_ id: UUID, profileID: Profile.ID) -> (any WebEngine)? {
+        littleArcEngines[LittleArcEngineKey(id: id, profileID: profileID)]
+    }
+
+    /// Chromium-created contents opened by ⌥⌘-click become a Little Arc's page.
+    func adoptLittleArc(_ engine: any WebEngine, id: UUID, profileID: Profile.ID) {
+        let prompts = engine.pagePrompts
+        prompts.role = .littleArc
+        prompts.ownerTabID = nil
+        prompts.profileID = profileID
+        prompts.router = linkRouter
+        prompts.sitePermissions = sitePermissions
+        littleArcEngines[LittleArcEngineKey(id: id, profileID: profileID)] = engine
+    }
+
     func removeLittleArc(_ id: UUID, profileID: Profile.ID) {
         littleArcEngines[LittleArcEngineKey(id: id, profileID: profileID)] = nil
     }

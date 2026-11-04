@@ -1154,6 +1154,17 @@ final class ChromiumSelfTest {
         }
         try check(little.role == .littleArc && little.leaseHolder?.window === littleWindow, "Little Arc lease not in its window")
         let littleLease = little.attachmentID ?? 0
+        // Wave 26 chrome: the address field loads in the Little Arc; Back (menu) acts on the key Little Arc.
+        try check(model.navigateLittleArc(record.id, to: "\(base)/nav"), "Little Arc address field refused /nav")
+        try await wait("Little Arc address field navigated", timeout: 20) {
+            little.currentURL?.path == "/nav" && !little.isLoading && little.canGoBack
+        }
+        model.keyLittleArcID = record.id
+        model.goBack()
+        try await wait("Back in the key Little Arc", timeout: 20) { little.currentURL?.path == "/a" && !little.isLoading }
+        try check(engineA.currentURL?.path == "/a", "Back moved tab A instead of the Little Arc")
+        model.keyLittleArcID = nil
+        log("PASS Little Arc chrome: address field -> /nav in the Little Arc, Back on the key Little Arc -> /a (tab A untouched)")
         shell.dismissLittleArcWindow(record.id)
         try await wait("Little Arc window closed and archived") {
             shell.window(forLittleArc: record.id) == nil && store.littleArcWindow(withID: record.id) == nil
@@ -1195,7 +1206,7 @@ final class ChromiumSelfTest {
         } else {
             log("ABI-GAP html_fullscreen not advertised: page fullscreen requests are refused")
         }
-        try await wave26SidebarChecks(model: model, store: store, tab: tabA, engine: engineA, base: base)
+        try await wave26SidebarChecks(model: model, store: store, tab: tabA, engine: engineA, base: base, window: first)
         if runtime.capabilities.pictureInPicture {
             try await pictureInPictureChecks(model: model, tab: tabA, engine: engineA, other: tabB)
         } else {
@@ -1652,18 +1663,19 @@ final class ChromiumSelfTest {
     /// Pinned collapse, Copy URL formats, the loading ring, a crashed page's
     /// recovery and the unread dot, on the shell's own model and tab A.
     @MainActor
-    private func wave26SidebarChecks(model: BrowserViewModel, store: SidebarStore, tab: Tab, engine: ChromiumEngine, base: String) async throws {
+    private func wave26SidebarChecks(model: BrowserViewModel, store: SidebarStore, tab: Tab, engine: ChromiumEngine, base: String,
+                                     window: NSWindow) async throws {
         model.selectTab(tab.id)
         let space = store.activeSpaceID
         let pinned = store.addTab(kind: .pinned, title: "Pinned P", url: URL(string: "\(base)/a")!)
         ShellMenus.sidebarItems(model).flatMap { $0 }.first { $0.title == "Collapse Pinned Section" }?.action()
-        let window = store.keyWindowID
-        try check(model.isPinnedSectionCollapsed(spaceID: space, in: window), "Collapse Pinned Section left it expanded")
+        let keyWindow = store.keyWindowID
+        try check(model.isPinnedSectionCollapsed(spaceID: space, in: keyWindow), "Collapse Pinned Section left it expanded")
         let collapsedRows = PinnedSectionCollapseState.visibleEntries(
             store.content(for: space).pinned, isCollapsed: true, selectedID: store.selectedItemID(inSpace: space))
         try check(collapsedRows.isEmpty, "a collapsed section with a Today selection shows \(collapsedRows.count) rows")
         _ = model.executeCommand(.expandPinnedSection, commandID: nil)
-        try check(!model.isPinnedSectionCollapsed(spaceID: space, in: window), "Expand Pinned Section left it collapsed")
+        try check(!model.isPinnedSectionCollapsed(spaceID: space, in: keyWindow), "Expand Pinned Section left it collapsed")
         log("PASS pinned section: Collapse (menu) hides the pinned rows in the key window, Expand (command) shows them")
 
         // Copy URL formats, on a private pasteboard; Quote reads the page's selection.
@@ -1750,6 +1762,54 @@ final class ChromiumSelfTest {
         model.selectTab(tab.id)
         log("PASS command bar ⌘↩ opened \(routedEngine.currentURL?.absoluteString ?? "") in a new tab; Ctrl+Tab (MRU switcher) "
             + "highlighted tab A and releasing Control selected it")
+        try await optionCommandClickChecks(model: model, store: store, tab: tab, engine: engine, base: base, window: window)
+    }
+
+    /// ⌥⌘-click on a link in tab A: Chromium makes a background tab, which the
+    /// shell adopts as a Little Arc (the click's keys, as the app monitor notes them).
+    @MainActor
+    private func optionCommandClickChecks(model: BrowserViewModel, store: SidebarStore, tab: Tab, engine: ChromiumEngine, base: String,
+                                          window: NSWindow) async throws {
+        guard inputDeliverable(window) else {
+            log("NOTE ⌥⌘-click: synthesized input is not deliverable (app active \(NSApp.isActive)); not exercised in this run")
+            return
+        }
+        loadShellTab(model, store.tab(withID: tab.id) ?? tab, engine, URL(string: "\(base)/links")!)
+        try await wait("tab A on the link fixture", timeout: 15) { engine.pageTitle == "links" && !engine.isLoading }
+        let link = try await cssCenter(of: "#blank", in: engine)
+        let adoptionsBefore = model.littleArcAdoptions
+        let tabsBefore = store.displayTabs().count
+        var opened = false
+        for _ in 0..<3 where !opened {
+            focus(window)
+            model.noteMouseDown(modifiers: [.command, .option])
+            click(window, engine: engine, at: link, modifiers: [.command, .option])
+            opened = await eventually(timeout: 2) { model.littleArcAdoptions > adoptionsBefore }
+        }
+        if opened, let record = store.littleArcLiveWindows.last,
+           let little = model.littleArcEngine(for: record.id) as? ChromiumEngine {
+            try await wait("⌥⌘-clicked link loaded in Little Arc", timeout: 20) {
+                little.currentURL?.path == "/a" && little.pageTitle == Self.titleA && !little.isLoading
+            }
+            try check(little.role == .littleArc && store.displayTabs().count == tabsBefore && engine.pageTitle == "links",
+                      "⌥⌘-click: role \(little.role), tabs \(tabsBefore) -> \(store.displayTabs().count), tab A '\(engine.pageTitle ?? "")'")
+            model.windowPresenter?.dismissLittleArcWindow(record.id)
+            try await wait("⌥⌘-click Little Arc closed") { store.littleArcWindow(withID: record.id) == nil }
+            log("PASS ⌥⌘-click: Chromium's new contents for the target=_blank link became Little Arc tab \(little.tabID) on /a; "
+                + "no sidebar tab; tab A stayed on its page (ordinary links: the engine denies background-tab OpenURLFromTab)")
+        } else {
+            log("NOTE ⌥⌘-click: the synthesized click opened no tab (app active \(NSApp.isActive), key \(window.isKeyWindow)); not exercised")
+        }
+        loadShellTab(model, store.tab(withID: tab.id) ?? tab, engine, URL(string: "\(base)/a")!)
+        try await wait("tab A back on /a", timeout: 15) { engine.currentURL?.path == "/a" && engine.pageTitle == Self.titleA && !engine.isLoading }
+    }
+
+    /// Loads a shell tab's page and its sidebar URL together, so a window
+    /// becoming key (`loadSelectedIfNeeded`) does not send it back.
+    @MainActor
+    private func loadShellTab(_ model: BrowserViewModel, _ tab: Tab, _ engine: ChromiumEngine, _ url: URL) {
+        model.store.updateTab(tab.id, url: url)
+        engine.load(url)
     }
 
     // MARK: Trusted navigation
@@ -1927,7 +1987,8 @@ extension ChromiumSelfTest {
 
     /// Sends a synthesized (right) click to the page at a CSS point.
     @MainActor
-    private func click(_ window: NSWindow, engine: ChromiumEngine, at css: CGPoint, right: Bool = false, control: Bool = false) {
+    private func click(_ window: NSWindow, engine: ChromiumEngine, at css: CGPoint, right: Bool = false, control: Bool = false,
+                       modifiers: NSEvent.ModifierFlags = []) {
         guard let host = window.contentView?.firstDescendant(ofType: ChromiumHostView.self) else { return }
         window.makeKeyAndOrderFront(nil)
         let viewPoint = PageZoom.viewPoint(fromCSSPoint: css, zoom: engine.zoomFactor)
@@ -1935,7 +1996,7 @@ extension ChromiumSelfTest {
         let location = host.convert(local, to: nil)
         let types: [NSEvent.EventType] = right ? [.rightMouseDown, .rightMouseUp] : [.leftMouseDown, .leftMouseUp]
         for type in types {
-            if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: control ? [.control] : [],
+            if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: control ? [.control] : modifiers,
                                               timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                                               context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
                 window.sendEvent(event)
@@ -2785,7 +2846,7 @@ extension ChromiumSelfTest {
         try await wait("PiP closed", timeout: 10) { !model.isPictureInPicture(tab.id) }
         model.selectTab(tab.id)
         let phases = runtime.pictureInPictureEvents.dropFirst(eventsBefore).filter { $0.tabID == engine.tabID }.map { "\($0.phase)" }
-        engine.load(URL(string: "\(serverBase)/a")!)
+        loadShellTab(model, tab, engine, URL(string: "\(serverBase)/a")!)
         try await wait("tab A back on /a after PiP", timeout: 15) { engine.pageTitle == Self.titleA && !engine.isLoading }
         log("PASS Picture in Picture (ABI 1.30): MediaRecorder WebM with audio -> pip_available; \(paths.joined(separator: "; ")); "
             + "sidebar badge followed pip_active; overlay \(NSStringFromClass(Swift.type(of: overlay!))); events \(phases.joined(separator: ","))")
@@ -2922,6 +2983,11 @@ final class SelfTestFixtureServer {
         </script></head><body style="margin:0;font:28px -apple-system">
         <a id="link" href="/a" style="display:block;padding:40px">context menu link</a>
         <p id="plain" style="padding:40px;height:300px">plain page text</p></body></html>
+        """,
+        // Wave 26: a target=_blank link for ⌥⌘-click to Little Arc.
+        "/links": """
+        <!doctype html><html><head><title>links</title></head><body style="margin:0;font:28px -apple-system">
+        <a id="blank" target="_blank" href="/a" style="display:block;padding:40px">new window link</a></body></html>
         """,
         "/leave": """
         <!doctype html><html><head><title>leave</title><script>

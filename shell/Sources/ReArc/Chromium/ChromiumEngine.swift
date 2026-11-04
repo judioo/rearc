@@ -191,11 +191,12 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
         initialURL: URL,
         context: EngineProfileContext,
         profileKey: ChromiumProfileKey,
-        shellID: UUID
+        shellID: UUID,
+        role: EngineRole = .tab
     ) {
         self.runtime = runtime
         self.profileContext = context
-        self.role = .tab
+        self.role = role
         self.shellID = shellID
         self.profileKey = profileKey
         tabID = event.tabID

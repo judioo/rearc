@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import WebKit
 import XCTest
 @testable import ReArc
@@ -268,5 +269,64 @@ final class Wave26ShellTests: XCTestCase {
         XCTAssertNil(model.tabSwitcher)
         XCTAssertEqual(model.store.selectedTabID, c.id)
         XCTAssertEqual(titles(ShellMenus.tabSwitcher(model)), ["Tab Switcher (Forward)", "Tab Switcher (Backward)"])
+    }
+
+    // MARK: Little Arc
+
+    func testBlankLittleArcFocusesItsAddressAndNavigates() throws {
+        let model = makeModel()
+        let record = model.openBlankLittleArc()
+        XCTAssertEqual(record.url.absoluteString, "about:blank")
+        XCTAssertEqual(model.littleArcFocusRequest, record.id, "the address field starts editing")
+        XCTAssertTrue(model.navigateLittleArc(record.id, to: "https://little.test/page"))
+        XCTAssertEqual(model.store.littleArcWindow(withID: record.id)?.url.absoluteString, "https://little.test/page")
+        XCTAssertFalse(model.navigateLittleArc(record.id, to: "javascript:alert(1)"), "the URL policy still applies")
+        XCTAssertFalse(model.navigateLittleArc(UUID(), to: "https://little.test/"))
+
+        // ⌘L in a key Little Arc edits its address; Ctrl+Tab stays out of it.
+        model.littleArcFocusRequest = nil
+        model.keyLittleArcID = record.id
+        model.focusLocation()
+        XCTAssertEqual(model.littleArcFocusRequest, record.id)
+        XCTAssertFalse(model.isCommandBarPresented)
+        XCTAssertTrue(model.navigationEngine === model.littleArcEngine(for: record.id), "⌘[ / ⌘] act on the Little Arc")
+        let tab = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .control, timestamp: 0, windowNumber: 0, context: nil,
+                                   characters: "\t", charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: 48)!
+        XCTAssertFalse(model.handleTabSwitcherEvent(tab))
+        model.windowBecameKey(SidebarWindowID())
+        XCTAssertNil(model.keyLittleArcID, "a browser window taking key ends it")
+    }
+
+    func testLittleArcProfileMenuMovesThePage() throws {
+        let model = makeModel()
+        let work = model.store.addProfile(name: "Work")
+        let record = model.openLittleArc(url: URL(string: "https://little.test/")!)
+        let before = model.littleArcEngine(for: record.id)
+        model.changeLittleArcProfile(record.id, to: work.id)
+        XCTAssertEqual(model.store.littleArcWindow(withID: record.id)?.profileID, work.id)
+        XCTAssertNil(model.engineHost.existingLittleArcEngine(record.id, profileID: record.profileID), "the old profile's page is gone")
+        XCTAssertFalse(model.littleArcEngine(for: record.id) === before)
+        XCTAssertEqual((model.littleArcEngine(for: record.id) as? WKEngine)?.profileContext.profileID, work.id)
+    }
+
+    func testLittleArcMenusAndHotkeyPreference() {
+        let model = makeModel()
+        model.littleArcHotkeyDefaults = UserDefaults(suiteName: "rearc-w26-hotkey-\(UUID().uuidString)")!
+        model.startLittleArcHotkey()
+        XCTAssertFalse(model.isLittleArcHotkeyEnabled, "off until turned on")
+        XCTAssertNil(model.littleArcHotkey)
+        XCTAssertEqual(GlobalHotkey.carbonModifiers([.command, .option]), UInt32(cmdKey | optionKey))
+    }
+
+    func testOptionCommandClickIsTakenOnceWithinTwoSeconds() {
+        let model = makeModel()
+        let now = Date()
+        model.noteMouseDown(modifiers: [.command, .option], at: now)
+        XCTAssertTrue(model.takeLittleArcClick(now: now.addingTimeInterval(0.3)))
+        XCTAssertFalse(model.takeLittleArcClick(now: now.addingTimeInterval(0.4)), "one click, one Little Arc")
+        model.noteMouseDown(modifiers: [.command], at: now)
+        XCTAssertFalse(model.takeLittleArcClick(now: now), "⌘-click stays a tab")
+        model.noteMouseDown(modifiers: [.command, .option], at: now)
+        XCTAssertFalse(model.takeLittleArcClick(now: now.addingTimeInterval(3)), "too late for that click")
     }
 }
