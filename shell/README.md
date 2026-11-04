@@ -705,7 +705,18 @@ The self-test:
     retry. If it still cannot (a terminal launch under cooperative
     activation, a locked screen), it logs a NOTE with the reason, and
     the steps keep their NOTE fallbacks.
-20. Verifies every evaluation, profile request and command-bar call
+20. Wave 26, on the shell's own model and tab A: Collapse and Expand
+    Pinned Section; Copy URL as Markdown and Copy as Quote (the page's
+    selection, read in the editor world); the loading ring on a held-back
+    load, then Stop; a synthesized `is_crashed` event shows the sad tab
+    and the next commit after Reload clears it; a background title change
+    on a pinned tab sets the unread dot and selecting it clears it; ⌘↩ in
+    the command bar opens a new tab and Ctrl+Tab (MRU switcher) goes back;
+    Split View flip and Expand Current Split; the Little Arc address field
+    and Back on the key Little Arc; ⌥⌘-click on a `target=_blank` link
+    adopted as a Little Arc; an Air Traffic Control rule sending a GetURL
+    link to a Little Arc; and the Site Control Center's zoom.
+21. Verifies every evaluation, profile request and command-bar call
     context was released (`live script contexts: 0, profile contexts: 0`),
     then shuts down cleanly.
 
@@ -716,6 +727,13 @@ For the first time, HTML fullscreen was exercised end to end: enter,
 the page's exit, Escape, and leaving native fullscreen as the green
 button and ⌃⌘F do (`toggleFullScreen`). So were the file input, password
 offer, beforeunload and PiP back to tab.
+
+The password step types a field only after the page reports it
+focused, and submits only when both fields hold what was typed
+(retyping up to four times). Input reaches the renderer asynchronously,
+and a fresh page can drop its first synthesized click. In wave 25 that
+once left the username empty in the save offer. With the app inactive
+it makes one try and logs a NOTE.
 
 The self-test (only the self-test) passes
 `--disable-backgrounding-occluded-windows`,
@@ -1015,6 +1033,82 @@ space can change profile.
   without changing the default browser. Tests use a fake service and never
   touch LaunchServices.
 
+## Wave 26: sidebar polish, split, command bar, Little Arc, links, sites
+
+- **Pinned section.** Hover the space name for a chevron, or use Expand /
+  Collapse Pinned Section (Tabs menu, space header menu, command bar). The
+  flag is per window and per space and is not saved. A collapsed section
+  keeps the selected pinned tab visible, as a collapsed folder does.
+- **+ menu.** New Tab, New Folder, New Space…, New Note, New Easel, New
+  Boost (the page on screen in the editor with the picker, else the Boosts
+  library) and Split View right or bottom, with Arc's icons.
+- **Copy URL.** ⇧⌘C plain, ⌥⇧⌘C as Markdown (`[title](url)`, brackets
+  and parentheses escaped), Copy as Quote (the page's selection as a
+  Markdown quote with the source link, or the link alone). Each shows a
+  "Copied" toast at the bottom of the page.
+- **Unread dot.** A pinned tab or favorite that is not on screen and
+  changes its title more than 3 s after its last load (Gmail "(3) Inbox")
+  gets the dot (`UnreadActivityPolicy`). The row title follows the page.
+  Selecting the tab clears it.
+- **Loading and crashed tabs.** The row's icon shows a progress ring while
+  the page loads, and the page a glowing bar on its top edge (Chromium
+  `load_progress`, WebKit `estimatedProgress`). A crashed renderer
+  (Chromium `is_crashed` from PrimaryMainFrameRenderProcessGone, WebKit
+  `webViewWebContentProcessDidTerminate`) keeps the tab. The row shows a
+  warning icon and the page "This page crashed" with Reload. Chromium
+  reports the crash but not the recovery, so the next main-frame commit
+  clears it. The self-test cannot crash a renderer (`chrome://crash` is
+  not admitted), so it feeds the engine's event shape.
+- **Split View.** Flip Split Orientation and Expand Current Split (Tabs
+  menu, the split's context menu, command bar). An expanded pane fills the
+  content area and its siblings stay open. A pill shows the split again,
+  and so does focusing another pane. It is window state and not saved.
+- **Command bar.** A typed domain completes inline in grey, from the hosts
+  you visit most, then a bundled list of about 200 popular sites
+  (`TopDomains`, ReArc's own list; Arc's ships 458). → takes it, Return
+  opens it, and deleting turns it off until the next character.
+  ⌘↩ opens the result in a new tab, ⌥↩ in a split next to the page (with
+  ⌘T, next to the tab shown before), ⇧↩ in Little Arc (⌘T's empty tab is
+  removed). The spec evidences ⌘-key force routing but not the keys
+  (COMMAND-BAR §9.3), so these are ReArc's choice, shown in the bar's
+  footer.
+- **Ctrl+Tab.** A recent-tab switcher (Arc `ModalItemSwitcher`): tabs of
+  the active profile across its spaces and favorites, most recently shown
+  first (`lastActiveAt`), a split once. ⌃⇥ steps forward, ⌃⇧⇥ back, and
+  releasing ⌃ switches. Esc cancels. The menu item (no ⌃ held) switches to
+  the previous tab at once. An app-wide key monitor handles it before the
+  page does, in browser windows only.
+- **Little Arc.** The window has back, forward, reload or stop, an address
+  placeholder (the host) that becomes its mini command bar (URL or search,
+  inline completion, loads in that window), the profile indicator with a
+  menu to change profile (the page reloads on the other profile's
+  storage), Open in ReArc and Close. ⌘L and Back/Forward act on a key
+  Little Arc. File > New Little Arc Window is ⌥⌘N. ReArc > Open Little Arc
+  from Anywhere registers ⌥⌘N system-wide through Carbon
+  `RegisterEventHotKey` (no Accessibility permission). It is off by default
+  because the spec does not give Arc's combination. ⌥⌘-click on a link
+  opens it in Little Arc: WebKit sees the modifiers on the navigation
+  action. On Chromium the shell notes the keys at mouse-down and adopts
+  the engine's new contents as a Little Arc. The engine creates contents
+  only for `target=_blank` links: it denies background-tab
+  `OpenURLFromTab`, so ⌘- and ⌥⌘-clicks on ordinary links open nothing.
+- **Air Traffic Control.** ReArc > Air Traffic Control… (or the command)
+  edits ordered rules: Domain is (subdomains too), URL contains, or URL
+  matches a `*` pattern over the URL without its scheme. Each rule sends
+  links from other apps to a space (a new tab there, or the tab already
+  showing it) or to a Little Arc in a profile. The first enabled rule
+  whose space or profile still exists wins. Everything else follows
+  External Links. A tester shows where a typed link would go. Rules are
+  saved in user defaults (`ReArcLinkRoutingRules`).
+- **Site Control Center.** The URL field's site icon (and the permission
+  indicator) opens one panel per site: connection, the wave 22
+  permissions (reset on WebKit, Site Settings on Chromium), the site's
+  boosts with switches plus New Boost and Edit, zoom −/+/Reset for that
+  page, and cookies and site data. WebKit counts the site's record types
+  in its data store and Clear Site Data removes them and reloads. Chromium
+  opens `chrome://settings/content/siteDetails`, which lists and clears
+  them. Also the Site Controls command.
+
 ## Model rules worth knowing
 
 - Favorites belong to a **profile** and show in every space of that profile
@@ -1033,8 +1127,8 @@ space can change profile.
 - Closing the selected tab selects whatever now occupies its display position
   (next tab, or previous if it was last), `nil` when nothing remains.
 - Selection is remembered per space when switching spaces.
-- Display order = favorites → pinned → today; Cmd+Shift+]/[ and Ctrl+Tab
-  cycle through that order with wraparound.
+- Display order = favorites → pinned → today; Cmd+Shift+]/[ cycle through
+  that order with wraparound. Ctrl+Tab goes by recency instead (wave 26).
 - Submitting the command bar on a **favorite** spawns a today tab instead of
   mutating the favorite (favorites are launchpads).
 
@@ -1049,13 +1143,17 @@ space can change profile.
 | ⌘= / ⌘- / ⌘0 | Zoom in / out / actual size |
 | ⌘S | Toggle sidebar (when hidden, point at the left edge to float it) |
 | ⌘⇧] / ⌘⇧[ | Next / previous tab |
-| ⌃⇥ | Next tab |
+| ⌃⇥ / ⌃⇧⇥ | Recent-tab switcher forward / backward; release ⌃ to switch, Esc cancels |
 | ⌘[ / ⌘] | Back / forward |
 | ⌘R / ⇧⌘R / ⌘. | Reload / reload ignoring cache / stop |
 | ⌘D | Pin or unpin the selected tab |
 | ⌘1 … ⌘8 / ⌘9 | Select that sidebar row / the last one |
 | ⌘Y / ⌥⌘L | History / Downloads (Chromium with `webui_daily_pages`) |
-| ⇧⌘C | Copy the page URL |
+| ⇧⌘C / ⌥⇧⌘C | Copy the page URL / as Markdown (Copy as Quote in the Tabs menu) |
+| ⌥⌘N | New Little Arc window (also system-wide once turned on in the ReArc menu) |
+| ⌥⌘-click a link | Open it in Little Arc |
+| → in the command bar | Take the grey domain completion |
+| ⌘↩ / ⌥↩ / ⇧↩ in the command bar | Open the result in a new tab / a split / Little Arc |
 | ⌘P | Print the page (native print panel as a sheet; File > Export as PDF… saves it) |
 | ⌃1 … ⌃9 | Switch to space 1–9 of the active profile |
 | ⌥⌘→ / ⌥⌘← | Next / previous space |
