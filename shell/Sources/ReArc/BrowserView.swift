@@ -198,6 +198,15 @@ struct BrowserView: View {
         } message: {
             Text(model.pendingDeletionMessage.message)
         }
+        .alert(spaceProfileChangeText.title, isPresented: Binding(
+            get: { model.pendingSpaceProfileChange != nil && isKeyWindowSheetOwner },
+            set: { if !$0 { model.pendingSpaceProfileChange = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { model.pendingSpaceProfileChange = nil }
+            Button(spaceProfileChangeText.action) { model.confirmSpaceProfileChange() }
+        } message: {
+            Text(spaceProfileChangeText.message)
+        }
         .alert("Rename Profile", isPresented: Binding(
             get: { model.pendingProfileRenameID != nil },
             set: { if !$0 { model.pendingProfileRenameID = nil } }
@@ -211,6 +220,10 @@ struct BrowserView: View {
                 model.pendingProfileRenameID = nil
             }
         }
+    }
+
+    private var spaceProfileChangeText: (title: String, message: String, action: String) {
+        model.pendingSpaceProfileChange.map(model.spaceProfileChangeMessage) ?? ("", "", "")
     }
 
     /// Only the key window presents the shared New Space sheet.

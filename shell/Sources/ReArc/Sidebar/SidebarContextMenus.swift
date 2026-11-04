@@ -146,6 +146,7 @@ struct SpaceContextMenu: View {
     var body: some View {
         Button("Rename Space…") { model.beginRename(.space(space.id)) }
         Button("Edit Theme and Icon…") { model.spaceEditorID = space.id }
+        SpaceProfileMenu(model: model, space: space)
         Divider()
         Button("New Space…") { model.beginSpaceCreation(profileID: space.profileID) }
         Button("Reset All Tabs in This Space") {
@@ -166,5 +167,25 @@ struct SpaceContextMenu: View {
         Divider()
         Button("Delete Space…", role: .destructive) { model.pendingDeletion = .space(space.id) }
             .disabled(!model.canDeleteSpaces)
+    }
+}
+
+/// Change Profile submenu: the profiles this space can move to (Arc
+/// `changeProfileForCurrentSpace`). Moving asks for confirmation first.
+struct SpaceProfileMenu: View {
+    let model: BrowserViewModel
+    let space: Space
+
+    var body: some View {
+        let choices = model.store.profileChoices(forSpace: space.id)
+        Menu("Change Profile") {
+            ForEach(choices) { profile in
+                Button(profile.name) { model.requestSpaceProfileChange(space.id, to: profile.id) }
+            }
+        }
+        .disabled(choices.isEmpty)
+        .help(model.store.spaces(in: space.profileID).count > 1
+              ? "Move this space and its tabs to another profile"
+              : "A profile keeps at least one space")
     }
 }

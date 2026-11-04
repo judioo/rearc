@@ -53,6 +53,8 @@ final class BrowserViewModel {
     var pendingRename: SidebarRenameRequest?
     var pendingRenameText = ""
     var pendingDeletion: SidebarDeletionRequest?
+    /// A space waiting for confirmation to move to another profile.
+    var pendingSpaceProfileChange: SpaceProfileChange?
     @ObservationIgnored var autoArchiveTimer: Timer?
     /// Engine whose favicon is being tracked, per tab.
     @ObservationIgnored var faviconObservedEngines: [Tab.ID: ObjectIdentifier] = [:]
@@ -1064,6 +1066,8 @@ final class BrowserViewModel {
             selectSpace(spaceID)
         case .switchToProfile(let profileID):
             selectProfile(profileID)
+        case .moveSpaceToProfile(let profileID):
+            requestSpaceProfileChange(store.activeSpaceID, to: profileID)
         case .createProfile:
             _ = addProfile()
         case .renameActiveProfile:

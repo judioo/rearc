@@ -10,6 +10,8 @@ public enum AppCommandAction: Equatable, Hashable {
     case moveTabToSpace(Space.ID)
     case switchToSpace(Space.ID)
     case switchToProfile(Profile.ID)
+    /// Change Profile of Current Space (Arc `changeProfileForCurrentSpace`).
+    case moveSpaceToProfile(Profile.ID)
     case createProfile
     case renameActiveProfile
     case createSpace
@@ -148,6 +150,8 @@ public struct AppCommand: Equatable, Identifiable {
             return store.activeSpaceID != spaceID
         case .switchToProfile(let profileID):
             return store.activeProfileID != profileID
+        case .moveSpaceToProfile(let profileID):
+            return store.profileChangeBlocker(forSpace: store.activeSpaceID, to: profileID) == nil
         case .createProfile:
             return true
         case .renameActiveProfile:
@@ -264,6 +268,13 @@ public enum AppCommandRegistry {
                 keywords: ["profile", profile.name, "switch", "account"],
                 minQueryLength: 1,
                 action: .switchToProfile(profile.id)
+            ))
+            commands.append(AppCommand(
+                id: "move-space-profile-\(profile.id.uuidString)",
+                title: "Move Space to \(profile.name)",
+                keywords: ["change", "profile", profile.name, "space", "move"],
+                minQueryLength: 2,
+                action: .moveSpaceToProfile(profile.id)
             ))
         }
         if let tab = context.store.selectedTab,

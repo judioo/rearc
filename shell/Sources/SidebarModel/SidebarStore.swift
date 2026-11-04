@@ -401,6 +401,23 @@ public final class SidebarStore {
         selectSpace(profileSpaces[next].id)
     }
 
+    /// Moves `spaces[index]` to another profile (SidebarStore+SpaceProfile).
+    /// The old profile's space memory must not point at a space it lost, and
+    /// the space on screen stays on screen: the active profile follows it.
+    func reassignSpaceProfile(at index: Int, to profileID: Profile.ID, sortRank: String) {
+        let id = spaces[index].id
+        let source = spaces[index].profileID
+        spaces[index].profileID = profileID
+        spaces[index].sortRank = sortRank
+        if lastActiveSpaceByProfile[source] == id {
+            lastActiveSpaceByProfile[source] = spaces(in: source).first?.id
+        }
+        if activeSpaceID == id {
+            activeProfileID = profileID
+            lastActiveSpaceByProfile[profileID] = id
+        }
+    }
+
     public func setUnpinnedShared(_ shared: Bool, for spaceID: Space.ID) {
         guard let index = spaces.firstIndex(where: { $0.id == spaceID }) else { return }
         spaces[index].unpinnedShared = shared

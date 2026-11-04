@@ -118,4 +118,40 @@ final class Wave21ShellTests: XCTestCase {
         if let id = pager.endSwipe() { model.selectSpace(id) }
         XCTAssertEqual(model.space(in: window).id, second.id)
     }
+
+    // MARK: Changing a space's profile
+
+    func testChangingASpaceProfileReloadsItsTabsInTheNewProfile() {
+        let model = makeModel()
+        let home = model.store.activeProfile
+        let keep = model.store.activeSpace
+        let moving = model.store.addSpace(name: "Moving")
+        let work = model.store.addProfile(name: "Work")
+        model.selectSpace(moving.id)
+        let tab = model.store.addTab(kind: .today, title: "Mail", url: URL(string: "https://mail.test")!)
+        model.selectTab(tab.id)
+        XCTAssertNotNil(model.engineHost.engine(forTabID: tab.id, profileID: home.id))
+
+        model.requestSpaceProfileChange(moving.id, to: work.id)
+        let text = model.spaceProfileChangeMessage(model.pendingSpaceProfileChange!)
+        XCTAssertEqual(text.title, "Move “Moving” to Work?")
+        XCTAssertTrue(text.message.contains("1 tab reload in Work"))
+        XCTAssertTrue(text.message.contains("stay in \(home.name)"))
+        model.confirmSpaceProfileChange()
+        XCTAssertNil(model.pendingSpaceProfileChange)
+
+        XCTAssertEqual(model.store.space(withID: moving.id)?.profileID, work.id)
+        XCTAssertNil(model.engineHost.engine(forTabID: tab.id, profileID: home.id), "the old profile's engine is closed")
+        XCTAssertNotNil(model.engineHost.engine(forTabID: tab.id, profileID: work.id), "the selected tab reloads on the new profile")
+        XCTAssertEqual(model.profileID(for: model.store.tab(withID: tab.id)!), work.id)
+        XCTAssertEqual(model.store.spaces(in: home.id).map(\.id), [keep.id])
+    }
+
+    func testAProfileKeepsItsLastSpace() {
+        let model = makeModel()
+        let work = model.store.addProfile(name: "Work")
+        model.requestSpaceProfileChange(model.store.activeSpaceID, to: work.id)
+        XCTAssertNil(model.pendingSpaceProfileChange, "nothing to confirm when the move is refused")
+        XCTAssertEqual(model.changeSpaceProfile(model.store.activeSpaceID, to: work.id), .lastSpaceInProfile)
+    }
 }

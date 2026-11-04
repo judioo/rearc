@@ -147,4 +147,61 @@ final class Wave21ModelTests: XCTestCase {
         XCTAssertEqual(half.accent.red, 0.5, accuracy: 1e-9)
         XCTAssertEqual(SpaceTheme.black.mixed(with: .white, fraction: 2), .white, "fractions clamp")
     }
+
+    // MARK: Changing a space's profile
+
+    private func twoProfileStore() -> (SidebarStore, home: Profile, work: Profile, a: Space, b: Space) {
+        let store = SidebarStore(spaces: [Space(name: "A", sortRank: "a"), Space(name: "B", sortRank: "b")])
+        let home = store.activeProfile
+        let work = store.addProfile(name: "Work")
+        let spaces = store.spaces(in: home.id)
+        return (store, home, work, spaces[0], spaces[1])
+    }
+
+    func testChangingAProfileMovesTheSpaceWithItsTabs() throws {
+        let (store, home, work, a, b) = twoProfileStore()
+        store.selectSpace(b.id)
+        let tab = store.addTab(kind: .pinned, title: "Docs", url: URL(string: "https://docs.test")!)
+        let before = store.mutationJournal.allEntries().count
+
+        XCTAssertNil(store.changeProfile(ofSpace: b.id, to: work.id))
+        XCTAssertEqual(store.space(withID: b.id)?.profileID, work.id)
+        XCTAssertEqual(store.spaces(in: home.id).map(\.id), [a.id])
+        XCTAssertEqual(store.spaces(in: work.id).last?.id, b.id, "it lands after the profile's spaces")
+        XCTAssertEqual(store.activeSpaceID, b.id, "the space on screen stays on screen")
+        XCTAssertEqual(store.activeProfileID, work.id, "and the active profile follows it")
+        XCTAssertEqual(store.spaceContaining(tabID: tab.id), b.id, "tabs stay in the space")
+        let journal = store.mutationJournal.allEntries().dropFirst(before).map(\.mutation)
+        XCTAssertTrue(journal.contains { if case .moveSpace(id: b.id, _) = $0 { return true }; return false })
+        XCTAssertTrue(journal.contains(.upsertSpace(id: b.id)))
+
+        // Switching back to the old profile lands on a space it still has.
+        store.selectProfile(home.id)
+        XCTAssertEqual(store.activeSpaceID, a.id)
+
+        let data = try JSONEncoder().encode(store.makeSnapshot())
+        let restored = SidebarStore()
+        restored.applySnapshot(try JSONDecoder().decode(SidebarSnapshot.self, from: data))
+        XCTAssertEqual(restored.space(withID: b.id)?.profileID, work.id, "the new profile persists")
+    }
+
+    func testProfileChangeBlockers() {
+        let (store, home, work, a, _) = twoProfileStore()
+        XCTAssertEqual(store.changeProfile(ofSpace: a.id, to: home.id), .sameProfile)
+        XCTAssertEqual(store.changeProfile(ofSpace: a.id, to: UUID()), .profileNotFound)
+        XCTAssertEqual(store.changeProfile(ofSpace: UUID(), to: work.id), .spaceNotFound)
+        let workSpace = store.spaces(in: work.id)[0]
+        XCTAssertEqual(store.changeProfile(ofSpace: workSpace.id, to: home.id), .lastSpaceInProfile)
+        XCTAssertEqual(store.profileChoices(forSpace: a.id).map(\.id), [work.id])
+        XCTAssertTrue(store.profileChoices(forSpace: workSpace.id).isEmpty)
+        XCTAssertEqual(store.space(withID: workSpace.id)?.profileID, work.id, "a refused change changes nothing")
+    }
+
+    func testMoveSpaceToProfileCommand() {
+        let (store, _, work, _, _) = twoProfileStore()
+        let context = CommandBarContext(store: store, isSidebarVisible: true, closedTabStack: ClosedTabStack())
+        let commands = AppCommandRegistry.all(in: context)
+        XCTAssertTrue(commands.contains { $0.action == .moveSpaceToProfile(work.id) && $0.title == "Move Space to Work" })
+        XCTAssertFalse(commands.contains { $0.action == .moveSpaceToProfile(store.activeProfileID) })
+    }
 }

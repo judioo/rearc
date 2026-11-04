@@ -19,6 +19,12 @@ enum SidebarRenameRequest: Equatable {
 
 /// Destructive sidebar actions that ask first (Arc `SpaceDeletionConfiguration`,
 /// `DeleteProfileDialog`).
+/// Change Profile of a space, waiting for confirmation (Arc ConfirmInterProfileMove).
+struct SpaceProfileChange: Equatable {
+    var spaceID: Space.ID
+    var profileID: Profile.ID
+}
+
 enum SidebarDeletionRequest: Equatable {
     case space(Space.ID)
     case folderAndContents(UUID)
@@ -349,6 +355,51 @@ extension BrowserViewModel {
         case .profile(let id): deleteProfile(id, deletingSpaces: true)
         case nil: break
         }
+    }
+
+    // MARK: - Space profile (wave 21)
+
+    /// Asks before moving a space to another profile; does nothing when the
+    /// move is not allowed.
+    func requestSpaceProfileChange(_ spaceID: Space.ID, to profileID: Profile.ID) {
+        guard store.profileChangeBlocker(forSpace: spaceID, to: profileID) == nil else { return }
+        pendingSpaceProfileChange = SpaceProfileChange(spaceID: spaceID, profileID: profileID)
+    }
+
+    func spaceProfileChangeMessage(_ change: SpaceProfileChange) -> (title: String, message: String, action: String) {
+        let space = store.space(withID: change.spaceID)
+        let source = space.flatMap { store.profile(withID: $0.profileID) }
+        let destination = store.profile(withID: change.profileID)
+        let content = store.content(for: change.spaceID)
+        let count = SidebarTree.tabs(content.pinned + content.today).count
+        let tabs = "\(count) tab\(count == 1 ? "" : "s")"
+        return ("Move “\(space?.name ?? "Space")” to \(destination?.name ?? "Profile")?",
+                "Its \(tabs) reload in \(destination?.name ?? "the new profile"). Cookies, sign-ins and site data stay in \(source?.name ?? "the old profile"), so you may need to sign in again. Back and forward history is lost.",
+                "Move Space")
+    }
+
+    func confirmSpaceProfileChange() {
+        defer { pendingSpaceProfileChange = nil }
+        guard let change = pendingSpaceProfileChange else { return }
+        changeSpaceProfile(change.spaceID, to: change.profileID)
+    }
+
+    /// Moves the space, then swaps its tabs' engines for ones on the new
+    /// profile's storage: `reconcileEngineOwnership` closes engines keyed to
+    /// the old profile, and loading creates fresh ones at each tab's URL.
+    @discardableResult
+    func changeSpaceProfile(_ spaceID: Space.ID, to profileID: Profile.ID) -> SpaceProfileChangeError? {
+        let tabIDs = SidebarTree.tabs(store.content(for: spaceID).pinned + store.content(for: spaceID).today).map(\.id)
+        if let error = store.changeProfile(ofSpace: spaceID, to: profileID) { return error }
+        for id in tabIDs {
+            // A boost editing session belonged to the closed engine.
+            boostEditorDraftByTab[id] = nil
+            boostSessionApplyByTab[id] = nil
+            lastPickedSnapshotByTab[id] = nil
+        }
+        reconcileEngineOwnership()
+        loadSelectedIfNeeded()
+        return nil
     }
 
     // MARK: - Spaces

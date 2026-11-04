@@ -3,8 +3,9 @@ import SwiftUI
 import SidebarModel
 
 /// Edit Space sheet: name, theme color (Arc style editor swatch pads plus a
-/// custom color well, SIDEBAR-SPEC §4.6) and icon (SF Symbols or an emoji).
-/// Changes apply live, like Arc's editor; Done closes the sheet.
+/// custom color well, SIDEBAR-SPEC §4.6), icon (SF Symbols or an emoji) and
+/// profile. Changes apply live, like Arc's editor, except a profile change,
+/// which asks first; Done closes the sheet.
 struct SpaceEditorView: View {
     let model: BrowserViewModel
     let spaceID: Space.ID
@@ -12,6 +13,8 @@ struct SpaceEditorView: View {
 
     @State private var name = ""
     @State private var emoji = ""
+    /// A profile change waiting for confirmation (the sheet has its own alert).
+    @State private var profileChange: SpaceProfileChange?
 
     var body: some View {
         let store = model.store
@@ -25,6 +28,10 @@ struct SpaceEditorView: View {
                     .textFieldStyle(.roundedBorder)
                     .font(.title3)
                     .onSubmit(commitName)
+            }
+
+            if let space {
+                profileRow(space)
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -93,9 +100,41 @@ struct SpaceEditorView: View {
         }
         .padding(20)
         .frame(width: 360)
+        .alert(profileChange.map(model.spaceProfileChangeMessage)?.title ?? "", isPresented: Binding(
+            get: { profileChange != nil },
+            set: { if !$0 { profileChange = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { profileChange = nil }
+            Button("Move Space") {
+                if let change = profileChange { model.changeSpaceProfile(change.spaceID, to: change.profileID) }
+                profileChange = nil
+            }
+        } message: {
+            Text(profileChange.map(model.spaceProfileChangeMessage)?.message ?? "")
+        }
         .onAppear {
             name = space?.name ?? ""
             if let icon = space?.iconName, !Space.isSymbolName(icon) { emoji = icon }
+        }
+    }
+
+    private func profileRow(_ space: Space) -> some View {
+        let choices = model.store.profileChoices(forSpace: space.id)
+        return HStack {
+            Text("Profile").font(.headline)
+            Spacer()
+            Menu(model.store.profile(withID: space.profileID)?.name ?? "Profile") {
+                ForEach(choices) { profile in
+                    Button("Move to \(profile.name)") {
+                        profileChange = SpaceProfileChange(spaceID: space.id, profileID: profile.id)
+                    }
+                }
+            }
+            .fixedSize()
+            .disabled(choices.isEmpty)
+            .help(choices.isEmpty && model.store.profiles.count > 1
+                  ? "A profile keeps at least one space"
+                  : "Move this space and its tabs to another profile")
         }
     }
 
