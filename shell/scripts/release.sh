@@ -91,10 +91,15 @@ echo "==> version $MARKETING ($BUILD_NUMBER), engine Chromium $ENGINE_VERSION ov
 
 # 4. Sign (inside-out, hardened runtime, timestamps), then keep the symbols.
 "$SHELL_DIR/scripts/sign-release.sh" "$APP" 2>&1 | tee "$DIST/sign-release.log"
+# Only the dSYMs of code that ships (the out dir also has host build tools'), plus the shell's.
 mkdir -p "$DIST/symbols"
-for dsym in "$OUT"/*.dSYM; do
+FW_DIR="$APP/Contents/Frameworks/Chromium Framework.framework/Versions/$ENGINE_VERSION"
+for shipped in "$FW_DIR/Chromium Framework" "$FW_DIR/Libraries/"*.dylib "$FW_DIR/Helpers/"*; do
+  dsym="$OUT/$(basename "$shipped" .app).dSYM"
   [[ -e $dsym ]] && cp -cR "$dsym" "$DIST/symbols/"
 done
+SHELL_DSYM="$(swift build --package-path "$SHELL_DIR" --scratch-path "$SHELL_DIR/.build-chromium" -c release --show-bin-path)/rearc.dSYM"
+[[ -e $SHELL_DSYM ]] && cp -cR "$SHELL_DSYM" "$DIST/symbols/ReArc.dSYM"
 echo "==> $(find "$DIST/symbols" -maxdepth 1 -name '*.dSYM' | wc -l | tr -d ' ') dSYMs in $DIST/symbols"
 echo "==> bundle ready in $((SECONDS - START))s: $APP ($(du -sh "$APP" | cut -f1))"
 

@@ -142,7 +142,7 @@ for path in "${signed[@]}"; do
   fi
 done
 for helper in "Chromium Helper (Renderer).app" "Chromium Helper (GPU).app"; do
-  codesign -d --entitlements - --xml "$FW_DIR/Helpers/$helper" 2>/dev/null | grep -q 'com.apple.security.cs.allow-jit' \
+  grep -q 'com.apple.security.cs.allow-jit' <<<"$(codesign -d --entitlements - --xml "$FW_DIR/Helpers/$helper" 2>/dev/null)" \
     || { echo "  $helper lacks allow-jit" >&2; problems=1; }
 done
 [[ -z $REARC_ICLOUD_CONTAINER ]] || icloud_verify "$APP/Contents/MacOS/ReArc"

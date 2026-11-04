@@ -33,7 +33,9 @@ load_signing_env "$SHELL_DIR"
 IDENTITY="$(release_identity)"
 [[ -n $IDENTITY ]] || die "no signing identity (REARC_RELEASE_IDENTITY or REARC_SIGN_IDENTITY)"
 codesign --verify --deep --strict "$APP" || die "$APP is not validly signed; run scripts/sign-release.sh first"
-codesign -dvv "$APP" 2>&1 | grep -q 'flags=.*runtime' || die "$APP lacks the hardened runtime; run scripts/sign-release.sh"
+# Captured first: under pipefail, grep -q closing the pipe early would fail codesign with SIGPIPE.
+app_info="$(codesign -dvv "$APP" 2>&1)"
+grep -q 'flags=.*runtime' <<<"$app_info" || die "$APP lacks the hardened runtime; run scripts/sign-release.sh"
 
 VERSION="$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")"
 BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")"

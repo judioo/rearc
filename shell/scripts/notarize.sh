@@ -41,7 +41,7 @@ case "$TARGET" in
     TARGET="${TARGET%/}"
     check_signed "$TARGET"
     codesign --verify --deep --strict "$TARGET"
-    codesign -dvv "$TARGET" 2>&1 | grep -q 'flags=.*runtime' || die "$TARGET lacks the hardened runtime"
+    grep -q 'flags=.*runtime' <<<"$(codesign -dvv "$TARGET" 2>&1)" || die "$TARGET lacks the hardened runtime"
     SUBMIT="$WORK/$(basename "$TARGET" .app).zip"
     ditto -c -k --keepParent "$TARGET" "$SUBMIT"
     STAPLE="$TARGET" ;;
