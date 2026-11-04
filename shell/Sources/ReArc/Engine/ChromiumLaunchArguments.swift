@@ -80,9 +80,36 @@ enum ChromiumLaunchArguments {
     /// gesture (synthesized clicks cannot activate a page while the app is inactive).
     static let selfTestAutoplaySwitch = "--autoplay-policy=no-user-gesture-required"
 
-    static func selfTestArguments(_ arguments: [String]) -> [String] {
-        let extra = selfTestForegroundSwitches + [selfTestDangerSwitch, selfTestAutoplaySwitch]
+    /// Self-test only (engine/tests NO_OUTSIDE_NETWORK, wave 18f): no
+    /// background services, and every non-loopback name fails to resolve, so
+    /// the run reaches no outside service (Google or otherwise). The leak
+    /// check is also turned off by the test before any sign-in.
+    static let selfTestNoOutsideNetworkSwitches = [
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost",
+    ]
+
+    /// Self-test only: Chromium shows autofill suggestions only while the
+    /// tab's view has focus in a key window; a run from a terminal often
+    /// cannot make its window key (as in engine/tests autofill).
+    static let selfTestAutofillFocusSwitch = "--disable-features=RWHVMacHasFocusReturnsFalseForNonKeyWindow"
+
+    /// `extensionDirs`: the self-test's local unpacked fixtures (`--load-extension`).
+    static func selfTestArguments(_ arguments: [String], extensionDirs: [String] = []) -> [String] {
+        var extra = selfTestForegroundSwitches + [selfTestDangerSwitch, selfTestAutoplaySwitch]
+            + selfTestNoOutsideNetworkSwitches + [selfTestAutofillFocusSwitch]
+        if !extensionDirs.isEmpty { extra.append("--load-extension=" + extensionDirs.joined(separator: ",")) }
         return arguments + extra.filter { !arguments.contains($0) }
+    }
+
+    /// Secure DNS off in a fresh self-test profile: automatic DoH dials its
+    /// resolver's IP literal, which resolver rules cannot map (wave 18f).
+    static func prepareSelfTestUserDataDir(_ directory: URL) {
+        let localState = directory.appendingPathComponent("Local State")
+        guard !FileManager.default.fileExists(atPath: localState.path) else { return }
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? Data(#"{"dns_over_https":{"mode":"off"}}"#.utf8).write(to: localState)
     }
 
     /// The `--user-data-dir` the engine runs with (last occurrence wins, as in Chromium).

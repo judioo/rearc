@@ -20,7 +20,7 @@ final class ChromiumSelfTest {
         let description: String
     }
 
-    static let watchdogSeconds = 240.0
+    static let watchdogSeconds = 300.0
     static let titleA = "ReArc Selftest A"
     static let titleData = "ReArc Selftest Data"
     static let boostPackageID = UUID(uuidString: "5E1F7E57-B005-4000-8000-000000000001")!
@@ -139,7 +139,9 @@ final class ChromiumSelfTest {
                         "password_autofill", "find_in_page", "downloads", "javascript_dialogs", "file_chooser",
                         "permission_prompts", "context_menu", "password_prompts", "history_query",
                         "dangerous_downloads", "tab_discard", "search_autocomplete", "html_fullscreen", "printing",
-                        "page_drops", "picture_in_picture"]
+                        "page_drops", "picture_in_picture", "extension_tab_helpers", "extension_install_prompts",
+                        "extension_actions", "autofill_suggestions", "password_leak_detection", "extension_windows",
+                        "autofill_save_prompts", "http_auth"]
         let foreground = ChromiumLaunchArguments.selfTestForegroundSwitches.filter(CommandLine.arguments.contains)
         log("renderer foreground switches (self-test only): "
             + ChromiumLaunchArguments.selfTestForegroundSwitches.joined(separator: " ")
@@ -160,6 +162,9 @@ final class ChromiumSelfTest {
         log("PASS tab created: shell \(shellTabID) -> engine tab \(engine.tabID), \(engine.profileKey) -> engine profile \(engine.engineProfileID)")
         try await wait("tab.created snapshot") { engine.contentGeneration != 0 }
         log("PASS tab.created event: content_generation \(engine.contentGeneration)")
+
+        // 1b. Wave 27: the leak check off before any sign-in, so nothing reaches Google's leak service.
+        try leakDetectionChecks()
 
         // 2. data: URL with a known title (trusted navigation, ABI 1.5 navigation_extended).
         let dataURL = URL(string: "data:text/html,<title>\(Self.titleData)</title>".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!)!
@@ -1212,6 +1217,7 @@ final class ChromiumSelfTest {
         } else {
             log("ABI-GAP picture_in_picture not advertised (ABI minor \(runtime.capabilities.abiMinorVersion.map(String.init) ?? "absent") < 30): Picture in Picture is WebKit-only")
         }
+        try await wave27ShellChecks(model: model, store: store, shell: shell, tab: tabA, engine: engineA, base: base, window: first)
 
         // Private window: PrivateWindowModel on an off-the-record profile under the
         // active profile; its end closes that profile, and a new one starts empty.
@@ -2942,6 +2948,384 @@ extension ChromiumSelfTest {
     }
 }
 
+// MARK: - Wave 27: extensions, autofill, leak check, HTTP auth (ABI 1.31–1.38)
+
+/// Local unpacked MV3 fixtures for `--load-extension` (as engine/tests
+/// run_c_abi.py "act" and "click"): never a Web Store install.
+enum SelfTestExtensionFixture {
+    static let popupName = "ReArc selftest popup"
+    static let popupTitle = "ReArc selftest action"
+    static let clickName = "ReArc selftest click"
+    static let popupSize = CGSize(width: 320, height: 180)
+
+    /// Writes the fixtures into a fresh temp directory; their paths for `--load-extension`.
+    static func write() -> [URL] {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-selftest-extensions-\(ProcessInfo.processInfo.processIdentifier)")
+        try? FileManager.default.removeItem(at: root)
+        let popup = root.appendingPathComponent("popup"), click = root.appendingPathComponent("click")
+        func file(_ dir: URL, _ name: String, _ text: String) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? Data(text.utf8).write(to: dir.appendingPathComponent(name))
+        }
+        file(popup, "manifest.json", """
+        {"name":"\(popupName)","version":"1.0","manifest_version":3,"background":{"service_worker":"bg.js"},
+         "action":{"default_title":"\(popupTitle)","default_popup":"popup.html","default_icon":{"16":"icon16.png","32":"icon32.png"}}}
+        """)
+        file(popup, "bg.js", """
+        const badge = () => { chrome.action.setBadgeText({text: '7'}); chrome.action.setBadgeBackgroundColor({color: '#ff0000'}); };
+        chrome.runtime.onInstalled.addListener(badge); chrome.runtime.onStartup.addListener(badge); badge();
+        """)
+        // 320x180 of content; it reports its view type and closes itself (window.close()).
+        file(popup, "popup.html", """
+        <!doctype html><title>popup</title><body style="margin:0"><div style="width:\(Int(popupSize.width))px;height:\(Int(popupSize.height))px;background:#2a6">popup</div>
+        <script src="popup.js"></script>
+        """)
+        file(popup, "popup.js", "document.title = 'popup:' + chrome.extension.getViews({type: 'popup'}).length; setTimeout(() => window.close(), 3000);")
+        for size in [16, 32] { try? png(size).write(to: popup.appendingPathComponent("icon\(size).png")) }
+        file(click, "manifest.json", """
+        {"name":"\(clickName)","version":"1.0","manifest_version":3,"background":{"service_worker":"bg.js"},"action":{"default_title":"\(clickName)"}}
+        """)
+        // First click: tabs.create with what Chromium sees as the active tab and window;
+        // later clicks: uninstallSelf with its confirmation (the host's prompt; the self-test cancels).
+        file(click, "bg.js", """
+        let clicks = 0;
+        chrome.action.onClicked.addListener(async (tab) => {
+          clicks += 1;
+          if (clicks > 1) { chrome.management.uninstallSelf({showConfirmDialog: true}).catch(() => {}); return; }
+          const [cur] = await chrome.tabs.query({active: true, currentWindow: true});
+          const win = await chrome.windows.getCurrent();
+          const info = {cur: cur ? cur.id : null, clicked: tab.id, win: win.id, winTab: tab.windowId};
+          chrome.tabs.create({url: chrome.runtime.getURL('page.html') + '#' + encodeURIComponent(JSON.stringify(info))});
+        });
+        """)
+        file(click, "page.html", "<!doctype html><title>ext-page</title><script src=\"page.js\"></script>")
+        file(click, "page.js", "document.title = 'ext-page' + decodeURIComponent(location.hash.slice(1));")
+        return [popup, click]
+    }
+
+    private static func png(_ size: Int) -> Data {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size, bitsPerSample: 8, samplesPerPixel: 4,
+                                   hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor(red: 0.82, green: 0.19, blue: 0.19, alpha: 1).setFill()
+        NSRect(x: 0, y: 0, width: size, height: size).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.representation(using: .png, properties: [:]) ?? Data()
+    }
+}
+
+/// Records extension prompts and cancels each (nothing is removed or installed).
+final class SelfTestExtensionPrompts: ExtensionPromptPresenting {
+    final class Handle: ExtensionPromptHandle {
+        var closed = false
+        func close() { closed = true }
+    }
+
+    private(set) var requests: [ExtensionPromptRequest] = []
+
+    func present(_ request: ExtensionPromptRequest, in window: NSWindow?,
+                 completion: @escaping (ExtensionPromptAction) -> Void) -> ExtensionPromptHandle? {
+        requests.append(request)
+        DispatchQueue.main.async { completion(.cancel) }
+        return Handle()
+    }
+}
+
+extension ChromiumSelfTest {
+    private var minorText: String { runtime.capabilities.abiMinorVersion.map(String.init) ?? "absent" }
+
+    /// ABI 1.35: default on, round trip, then off for every self-test profile.
+    @MainActor
+    fileprivate func leakDetectionChecks() throws {
+        guard runtime.capabilities.passwordLeakDetection else {
+            log("ABI-GAP password_leak_detection not advertised (ABI minor \(minorText) < 35): no Check Passwords for Leaks toggle")
+            return
+        }
+        let profile = runtime.defaultProfileID
+        let initial = runtime.passwordLeakDetection(profile: profile)
+        try check(initial.status == .rearcOK && initial.enabled && !initial.managed,
+                  "leak detection default: \(initial.status.rearcName) enabled \(initial.enabled) managed \(initial.managed)")
+        try check(runtime.setPasswordLeakDetection(profile: profile, enabled: false) == .rearcOK, "turning the leak check off failed")
+        let off = runtime.passwordLeakDetection(profile: profile)
+        try check(off.status == .rearcOK && !off.enabled, "leak detection after set off: \(off.enabled)")
+        // In memory only (never the user's defaults): profiles opened later get it off too.
+        runtime.leakDetectionPreference.explicitChoice = false
+        runtime.openPersistentEngineProfiles.forEach(runtime.applyLeakDetectionPreference(profile:))
+        let invalid = runtime.passwordLeakDetection(profile: 0).status
+        try check(invalid != .rearcOK, "leak detection on profile 0 returned ok")
+        log("PASS password leak check (ABI 1.35): default on (not managed), set off -> off, profile 0 -> \(invalid.rearcName); "
+            + "off for all \(runtime.openPersistentEngineProfiles.count) open self-test profile(s) and those opened later")
+    }
+
+    @MainActor
+    fileprivate func wave27ShellChecks(model: BrowserViewModel, store: SidebarStore, shell: ChromiumShell, tab: Tab,
+                                       engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        if runtime.capabilities.passwordLeakDetection {
+            let items = NSApp.mainMenu?.items.first?.submenu?.items.map(\.title) ?? []
+            try check(items.contains("Check Passwords for Leaks"), "the ReArc menu has no Check Passwords for Leaks (\(items))")
+            try check(!runtime.leakDetectionEnabled, "the toggle does not show the self-test's off value")
+            log("PASS ReArc > Check Passwords for Leaks reads the profile's value (off in the self-test)")
+        }
+        try await extensionChecks(model: model, store: store, shell: shell, tab: tab, engine: engine)
+        try await autofillChecks(model: model, store: store, tab: tab, engine: engine, base: base, window: window)
+        try await httpAuthChecks(model: model, tab: tab, engine: engine, base: base)
+        model.selectTab(tab.id)
+        loadShellTab(model, tab, engine, URL(string: "\(base)/a")!)
+        try await wait("tab A after the wave 27 checks") { engine.pageTitle == Self.titleA && !engine.isLoading }
+    }
+
+    // MARK: Extensions (ABI 1.31–1.33, 1.36)
+
+    @MainActor
+    private func extensionChecks(model: BrowserViewModel, store: SidebarStore, shell: ChromiumShell, tab: Tab, engine: ChromiumEngine) async throws {
+        let capabilities = runtime.capabilities
+        guard capabilities.extensionActions, let host = shell.extensionHost else {
+            log("ABI-GAP extension_actions not advertised (ABI minor \(minorText) < 33): no extensions toolbar on Chromium")
+            return
+        }
+        let controller = model.extensions
+        controller.defaults = UserDefaults(suiteName: "rearc-selftest-extensions-\(UUID().uuidString)")!
+        let prompts = SelfTestExtensionPrompts()
+        host.prompts = prompts
+        try check(controller.isAvailable, "the extensions toolbar is not available")
+        var actions: [ExtensionActionItem] = []
+        try await waitAsync("the fixture extensions' actions", timeout: 20) {
+            controller.refresh(engine, scale: 2)
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            actions = controller.actions(for: engine)
+            let popup = actions.first { $0.name == SelfTestExtensionFixture.popupName }
+            return popup?.displayBadge == "7" && actions.contains { $0.name == SelfTestExtensionFixture.clickName }
+        }
+        let popupAction = actions.first { $0.name == SelfTestExtensionFixture.popupName }!
+        let clickAction = actions.first { $0.name == SelfTestExtensionFixture.clickName }!
+        let png: [UInt8] = [0x89, 0x50, 0x4E, 0x47]
+        try check(popupAction.title == SelfTestExtensionFixture.popupTitle && popupAction.hasPopup && popupAction.isEnabled,
+                  "popup action \(popupAction)")
+        try check(popupAction.badgeBackgroundColor?.red == 1 && popupAction.badgeBackgroundColor?.green == 0, "badge color \(String(describing: popupAction.badgeBackgroundColor))")
+        try check(popupAction.iconPNG.map { Array($0.prefix(4)) == png } == true, "action icon is not a PNG")
+        try check(!clickAction.hasPopup, "the click fixture has a popup")
+        controller.togglePin(popupAction.id)
+        try check(controller.pinnedActions(for: engine).map(\.id) == [popupAction.id], "pinning did not put the action in the toolbar")
+        log("PASS extension actions (ABI 1.33): \(actions.count) local unpacked fixtures; '\(popupAction.title)' badge '7' red, "
+            + "popup, \(popupAction.iconPNG?.count ?? 0)-byte icon; pinned to the toolbar, the rest in the extensions menu")
+
+        // Popup: a registry tab in the popup panel, sized by the renderer, closed by window.close().
+        let tabsBefore = store.displayTabs().count
+        controller.run(popupAction.id, for: engine, anchor: nil)
+        try await wait("the extension popup adopted", timeout: 10) { host.popups.engine != nil }
+        let popupEngine = host.popups.engine!
+        let popupTab = popupEngine.tabID
+        try await wait("the popup attached in its panel") { popupEngine.attachmentID != nil && popupEngine.leaseHolder?.window === host.popups.window }
+        try await wait("the popup resized to its content", timeout: 10) { host.popups.size == SelfTestExtensionFixture.popupSize }
+        try await wait("the popup page title") { popupEngine.pageTitle?.hasPrefix("popup:") == true }
+        let panelSize = host.popups.window?.frame.size
+        try check(popupEngine.pageTitle == "popup:1", "popup title \(popupEngine.pageTitle ?? "-") (getViews popup count)")
+        try check(panelSize == SelfTestExtensionFixture.popupSize, "popup panel size \(String(describing: panelSize))")
+        try check(controller.openPopupExtensionID == popupAction.id, "the toolbar does not show the open popup")
+        try check(store.displayTabs().count == tabsBefore, "the popup became a sidebar tab")
+        try await wait("the popup closed by its window.close()", timeout: 10) { host.popups.engine == nil }
+        try check(controller.openPopupExtensionID == nil, "the toolbar still shows a popup")
+        log("PASS extension popup (ABI 1.33): popup tab \(popupTab) attached in the popup panel, resized to "
+            + "\(Int(SelfTestExtensionFixture.popupSize.width))x\(Int(SelfTestExtensionFixture.popupSize.height)) by \(host.popups.resizes) event(s), "
+            + "'popup:1', no sidebar tab; window.close() dismissed it")
+
+        // Escape closes a popup the page did not close.
+        controller.run(popupAction.id, for: engine, anchor: nil)
+        try await wait("the popup again", timeout: 10) { host.popups.engine?.attachmentID != nil }
+        host.popups.dismiss()
+        try check(host.popups.engine == nil && host.popups.window == nil, "dismiss left the popup")
+        log("PASS extension popup dismissed by the shell (focus loss, Escape, tab switch, second click share this path)")
+
+        // tabs.create from the click fixture, through the host's tab request (ABI 1.36).
+        guard capabilities.extensionWindows else {
+            log("ABI-GAP extension_windows not advertised (ABI minor \(minorText) < 36): extension tabs.create fails")
+            controller.togglePin(popupAction.id)
+            return
+        }
+        host.reconcileWindows()
+        let spaceWindow = host.windowID(forSpace: store.activeSpaceID)
+        let (stateStatus, state) = runtime.extensionState(tab: engine.tabID)
+        try check(stateStatus == .rearcOK && state.window_id == spaceWindow && state.active, "tab A's extension state \(stateStatus.rearcName) \(state)")
+        let before = Set(store.displayTabs().map(\.id))
+        let requestsBefore = runtime.extensionTabRequests.count
+        controller.run(clickAction.id, for: engine, anchor: nil)
+        try await wait("the extension's tab in the sidebar", timeout: 15) { store.displayTabs().contains { !before.contains($0.id) } }
+        let created = store.displayTabs().first { !before.contains($0.id) }!
+        let createdEngine = try shellEngine(model, created)
+        try await wait("the extension page loaded", timeout: 15) { createdEngine.pageTitle?.hasPrefix("ext-page{") == true }
+        let json = String((createdEngine.pageTitle ?? "").dropFirst("ext-page".count))
+        let info = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] ?? [:]
+        let request = runtime.extensionTabRequests.dropFirst(requestsBefore).first
+        try check(request?.kind == .createTab && request?.url.hasPrefix("chrome-extension://") == true, "tab request \(String(describing: request))")
+        try check(info["cur"] as? Int == Int(state.tab_id) && info["clicked"] as? Int == Int(state.tab_id),
+                  "the extension saw active \(info["cur"] ?? "-") / clicked \(info["clicked"] ?? "-"), tab A is \(state.tab_id)")
+        try check(info["win"] as? Int == Int(spaceWindow) && info["winTab"] as? Int == Int(spaceWindow), "window ids \(info)")
+        try check(store.spaceContaining(tabID: created.id) == store.activeSpaceID, "the extension's tab is not in the current space")
+        host.reconcileWindows()
+        let createdState = runtime.extensionState(tab: createdEngine.tabID).1
+        try check(createdState.window_id == spaceWindow && createdState.active, "the new tab's extension state \(createdState)")
+        log("PASS extension tabs.create (ABI 1.36): request \(request?.id ?? 0) -> a today tab in the current space, loaded "
+            + "\(request?.url.split(separator: "#").first ?? ""); the extension saw tab A (\(state.tab_id)) active in window \(spaceWindow) "
+            + "(the space), and the new tab became active there")
+
+        // Uninstall confirmation through the host (ABI 1.32); the self-test cancels it.
+        controller.run(clickAction.id, for: engine, anchor: nil)
+        if await eventually(timeout: 8, { prompts.requests.contains { $0.kind == .uninstall } }) {
+            let prompt = prompts.requests.first { $0.kind == .uninstall }!
+            try check(prompt.name == SelfTestExtensionFixture.clickName, "uninstall prompt for \(prompt.name)")
+            try await waitAsync("the click fixture still installed", timeout: 5) {
+                controller.refresh(engine, scale: 2)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                return controller.actions(for: engine).contains { $0.id == clickAction.id }
+            }
+            log("PASS extension uninstall prompt (ABI 1.32): '\(prompt.displayTitle)' / '\(prompt.displayAcceptLabel)' as a host sheet; "
+                + "cancelled, the extension stays")
+        } else {
+            log("NOTE extension uninstall prompt: management.uninstallSelf({showConfirmDialog}) sent no host prompt within 8 s "
+                + "(prompt events: \(runtime.extensionPromptEvents.map { "\($0.phase)/\($0.request.kind)" }))")
+        }
+        model.deleteTab(created.id)
+        model.selectTab(tab.id)
+        controller.togglePin(popupAction.id)
+    }
+
+    // MARK: Autofill suggestions (ABI 1.34) and save offers (1.37)
+
+    @MainActor
+    private func autofillChecks(model: BrowserViewModel, store: SidebarStore, tab: Tab, engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        guard runtime.capabilities.autofillSuggestions else {
+            log("ABI-GAP autofill_suggestions not advertised (ABI minor \(minorText) < 34): no suggestions UI on Chromium")
+            return
+        }
+        let unknown = runtime.acceptAutofill(UInt64.max, index: 0)
+        try check(unknown == ReArcStatus(REARC_NOT_FOUND), "accept on an unknown list returned \(unknown.rearcName)")
+        model.selectTab(tab.id)
+        loadShellTab(model, tab, engine, URL(string: "\(base)/autofill")!)
+        try await wait("the autofill fixture") { engine.pageTitle == "autofill" && !engine.isLoading }
+        let prompts = engine.pagePrompts
+        _ = await bringToFront(window, for: "autofill")
+        func clickField(_ id: String) async -> Bool {
+            for _ in 0..<3 {
+                focus(window)
+                guard let center = try? await cssCenter(of: "#\(id)", in: engine) else { return false }
+                click(window, engine: engine, at: center)
+                if await eventually(timeout: 2, { prompts.autofill != nil }) { return true }
+            }
+            return false
+        }
+        guard await clickField("dl") else {
+            log("NOTE autofill: the synthesized click on a datalist field produced no suggestions (app active \(NSApp.isActive), "
+                + "key \(window.isKeyWindow)); the dropdown is not exercised in this run; unknown list -> \(unknown.rearcName)")
+            return
+        }
+        let popup = prompts.autofill!
+        let row = popup.rows.first { $0.value == "rearc-option-one" }
+        try check(popup.product == .datalist && row != nil, "suggestions product \(popup.product.rawValue) rows \(popup.rows.map(\.value))")
+        let panel = (prompts.autofillPanels as? AutofillPanelPresenter)?.visiblePanel
+        try check(panel != nil && panel?.isKeyWindow == false, "the suggestion panel is not on screen (or took the keyboard)")
+        if let panel, let anchor = prompts.anchorView, let anchorWindow = anchor.window {
+            let view = anchorWindow.convertToScreen(anchor.convert(anchor.bounds, to: nil))
+            let fieldBottom = view.maxY - popup.field.maxY
+            try check(abs(panel.frame.maxY - (fieldBottom - AutofillPopupLayout.gap)) < 1 || panel.frame.minY > fieldBottom,
+                      "panel \(panel.frame) not at the field (bottom \(fieldBottom))")
+        }
+        // Down in the field: Chromium moves the selection and reports it (phase 2).
+        if let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                       windowNumber: window.windowNumber, context: nil, characters: "\u{F701}",
+                                       charactersIgnoringModifiers: "\u{F701}", isARepeat: false, keyCode: 125) {
+            window.sendEvent(down)
+        }
+        let selected = await eventually(timeout: 2) { prompts.autofill?.selected != nil }
+        while prompts.autofillShownFor < AutofillAcceptPolicy.earlyAcceptGuard { try await Task.sleep(nanoseconds: 50_000_000) }
+        prompts.acceptAutofillRow(row!.id)
+        try await waitAsync("the datalist value filled", timeout: 5) {
+            (try? await engine.evaluate("document.getElementById('dl').value", in: .page)) as? String == "rearc-option-one"
+        }
+        try await wait("the suggestions hidden after accept") { prompts.autofill == nil && panel?.isVisible != true }
+        log("PASS autofill dropdown (ABI 1.34): datalist product, rows \(popup.rows.map { popup.primaryText(of: $0) }), "
+            + "panel under the field without taking the keyboard; Down -> \(selected ? "selection reported" : "no selection event (NOTE)"); "
+            + "click accepted 'rearc-option-one'; unknown list -> \(unknown.rearcName)")
+        if await clickField("dl") {
+            let request = prompts.autofill!.requestID
+            let tabs = Set(store.displayTabs().map(\.id))
+            let status = runtime.manageAutofill(request)
+            let opened = await eventually(timeout: 3) { store.displayTabs().contains { !tabs.contains($0.id) && $0.url.scheme == "chrome" } }
+            if let settings = store.displayTabs().first(where: { !tabs.contains($0.id) && $0.url.scheme == "chrome" }) {
+                log("PASS autofill Manage… (ABI 1.34): ReArcAutofillManage -> \(status.rearcName), opened \(settings.url.absoluteString) as a tab")
+                model.deleteTab(settings.id)
+                model.selectTab(tab.id)
+            } else {
+                log("NOTE autofill Manage…: \(status.rearcName), no settings page for the datalist product (opened \(opened))")
+                prompts.dismissAutofill()
+            }
+        }
+        try await addressSaveChecks(model: model, tab: tab, engine: engine, base: base, window: window)
+    }
+
+    @MainActor
+    private func addressSaveChecks(model: BrowserViewModel, tab: Tab, engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        guard runtime.capabilities.autofillSavePrompts else {
+            log("ABI-GAP autofill_save_prompts not advertised (ABI minor \(minorText) < 37): no card or address save offers")
+            return
+        }
+        let unknown = runtime.respondAutofillSave(UInt64.max, .ignore)
+        try check(unknown == ReArcStatus(REARC_NOT_FOUND), "a reply to an unknown save offer returned \(unknown.rearcName)")
+        let prompts = engine.pagePrompts
+        let fields = [("name", "Rearc Tester"), ("street", "1 Test Way"), ("city", "Testville"), ("state", "CA"), ("zip", "94043")]
+        var typed = true
+        for (id, value) in fields where typed {
+            typed = await typeIntoField(id, value, engine: engine, window: window)
+        }
+        if typed { click(window, engine: engine, at: try await cssCenter(of: "#save", in: engine)) }
+        guard typed, await eventually(timeout: 10, { prompts.autofillSave != nil }) else {
+            log("NOTE address save offer: no offer after synthesized typing (typed \(typed), app active \(NSApp.isActive), key \(window.isKeyWindow)); "
+                + "Chromium imports typed forms only, so the offer is not exercised in this run; unknown offer -> \(unknown.rearcName)")
+            return
+        }
+        let offer = prompts.autofillSave!.offer
+        try check(offer.kind == .address && offer.summary.contains("1 Test Way"), "save offer \(offer)")
+        prompts.answerAutofillSave(.decline)
+        let late = runtime.respondAutofillSave(offer.id, .accept)
+        try check(late == ReArcStatus(REARC_NOT_FOUND), "a second reply to the offer returned \(late.rearcName)")
+        log("PASS address save offer (ABI 1.37): '\(offer.title)' \(offer.summaryLines) -> No Thanks (declined; nothing stored), "
+            + "second reply -> \(late.rearcName)")
+    }
+
+    // MARK: HTTP authentication (ABI 1.38)
+
+    @MainActor
+    private func httpAuthChecks(model: BrowserViewModel, tab: Tab, engine: ChromiumEngine, base: String) async throws {
+        guard runtime.capabilities.httpAuth else {
+            log("ABI-GAP http_auth not advertised (ABI minor \(minorText) < 38): sign-in challenges are cancelled")
+            return
+        }
+        let unknown = runtime.respondHTTPAuth(UInt64.max, credentials: nil)
+        try check(unknown == ReArcStatus(REARC_NOT_FOUND), "a reply to an unknown sign-in returned \(unknown.rearcName)")
+        let prompts = engine.pagePrompts
+        model.selectTab(tab.id)
+        loadShellTab(model, tab, engine, URL(string: "\(base)/auth/basic")!)
+        try await wait("the sign-in sheet", timeout: 10) { prompts.httpAuth != nil }
+        let first = prompts.httpAuth!.challenge
+        try check(first.challenger.hasPrefix("http://127.0.0.1") && first.realm == SelfTestFixtureServer.authRealm
+                  && first.scheme.lowercased() == "basic" && !first.isProxy && first.isInsecure, "challenge \(first)")
+        prompts.answerHTTPAuth(signIn: false)
+        try await wait("the 401 page after Cancel") { engine.pageTitle == "auth-denied" && !engine.isLoading }
+        engine.reload(ignoringCache: true)
+        try await wait("the sign-in sheet again", timeout: 10) { prompts.httpAuth != nil }
+        let second = prompts.httpAuth!.challenge
+        prompts.authUsername = SelfTestFixtureServer.authCredentials.username
+        prompts.authPassword = SelfTestFixtureServer.authCredentials.password
+        prompts.answerHTTPAuth(signIn: true)
+        try check(prompts.authPassword.isEmpty, "the sheet kept the password after answering")
+        try await wait("the page after Sign In") { engine.pageTitle == "auth-ok" && !engine.isLoading }
+        let late = runtime.respondHTTPAuth(second.id, credentials: nil)
+        try check(late == ReArcStatus(REARC_NOT_FOUND), "a second reply returned \(late.rearcName)")
+        log("PASS HTTP auth (ABI 1.38): '\(first.title)' for \(first.challenger) realm '\(first.realm)' (\(first.scheme), not private) "
+            + "-> Cancel showed the 401 page; again -> Sign In loaded 'auth-ok'; second reply -> \(late.rearcName); unknown -> \(unknown.rearcName)")
+    }
+}
+
 private extension NSView {
     func firstDescendant<T: NSView>(ofType type: T.Type) -> T? {
         for child in subviews {
@@ -3119,6 +3503,22 @@ final class SelfTestFixtureServer {
         <input id="pass" name="pass" type="password" autocomplete="current-password" style="font-size:24px;width:400px"><br><br>
         <button id="go" type="submit" style="font-size:24px">Sign in</button></form></body></html>
         """,
+        // Wave 27: a datalist field (suggestions without saved data) and an address form.
+        "/autofill": """
+        <!doctype html><html><head><title>autofill</title></head><body style="margin:0;font:20px -apple-system">
+        <div style="padding:30px"><input id="dl" list="opts" autocomplete="off" style="font-size:20px;width:320px">
+        <datalist id="opts"><option value="rearc-option-one"><option value="rearc-option-two"></datalist></div>
+        <form action="/autofill-done" method="get" style="padding:30px">
+        <input id="name" name="name" autocomplete="name" style="font-size:20px;width:320px"><br>
+        <input id="street" name="street" autocomplete="address-line1" style="font-size:20px;width:320px"><br>
+        <input id="city" name="city" autocomplete="address-level2" style="font-size:20px;width:320px"><br>
+        <input id="state" name="state" autocomplete="address-level1" style="font-size:20px;width:320px"><br>
+        <input id="zip" name="zip" autocomplete="postal-code" style="font-size:20px;width:320px"><br>
+        <button id="save" type="submit" style="font-size:20px">Save</button></form></body></html>
+        """,
+        "/autofill-done": """
+        <!doctype html><html><head><title>autofill-done</title></head><body>saved</body></html>
+        """,
         "/login-done": """
         <!doctype html><html><head><title>signed-in</title></head><body>signed in</body></html>
         """,
@@ -3186,11 +3586,32 @@ final class SelfTestFixtureServer {
             }
             let head = String(decoding: request, as: UTF8.self)
             let path = head.split(separator: " ", maxSplits: 2).dropFirst().first.map(String.init) ?? "/"
-            respond(connection, path: path)
+            respond(connection, path: path, head: head)
         }
     }
 
-    private static func respond(_ connection: NWConnection, path: String) {
+    /// Wave 27 HTTP auth: Basic, realm "rearc-selftest", user rearc / local-secret.
+    static let authCredentials = (username: "rearc", password: "local-secret")
+    static let authRealm = "rearc-selftest"
+
+    private static func authenticate(_ connection: NWConnection, path: String, head: String) {
+        let expected = "Basic " + Data("\(authCredentials.username):\(authCredentials.password)".utf8).base64EncodedString()
+        let sent = head.split(separator: "\r\n").first { $0.lowercased().hasPrefix("authorization:") }
+            .map { $0.dropFirst("authorization:".count).trimmingCharacters(in: .whitespaces) }
+        let ok = sent == expected
+        print("[fixture] GET \(path) -> \(ok ? 200 : 401) (basic auth\(sent == nil ? "" : ", credentials sent"))")
+        fflush(stdout)
+        let body = Data((ok ? "<!doctype html><title>auth-ok</title>signed in" : "<!doctype html><title>auth-denied</title>denied").utf8)
+        let head = "HTTP/1.1 \(ok ? "200 OK" : "401 Unauthorized")\r\n"
+            + (ok ? "" : "WWW-Authenticate: Basic realm=\"\(authRealm)\"\r\n")
+            + "Content-Type: text/html; charset=utf-8\r\nContent-Length: \(body.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        connection.send(content: Data(head.utf8) + body, completion: .contentProcessed { _ in connection.cancel() })
+    }
+
+    private static func respond(_ connection: NWConnection, path: String, head: String) {
+        if path.hasPrefix("/auth/") {
+            return authenticate(connection, path: path, head: head)
+        }
         if path.hasPrefix("/download/") {
             return download(connection, name: String(path.dropFirst("/download/".count)))
         }

@@ -38,7 +38,12 @@ enum ChromiumHost {
             if options.selfTest {
                 let test = ChromiumSelfTest(runtime: runtime)
                 runtime.onReady = { test.start() }
-                let code = runtime.run(arguments: ChromiumLaunchArguments.selfTestArguments(arguments), keychain: keychain)
+                if let dir = ChromiumLaunchArguments.userDataDir(in: arguments) {
+                    ChromiumLaunchArguments.prepareSelfTestUserDataDir(URL(fileURLWithPath: dir, isDirectory: true))
+                }
+                let extensions = SelfTestExtensionFixture.write()
+                let code = runtime.run(arguments: ChromiumLaunchArguments.selfTestArguments(arguments, extensionDirs: extensions.map(\.path)),
+                                       keychain: keychain)
                 exit(test.exitCode(runResult: code))
             }
             if let path = options.launchProbePath {
