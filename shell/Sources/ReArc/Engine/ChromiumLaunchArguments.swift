@@ -76,8 +76,12 @@ enum ChromiumLaunchArguments {
         "--safebrowsing-manual-download-blacklist=" + selfTestDangerousDownloadSHA256
     }
 
+    /// Self-test only: the PiP fixture's video plays with sound without a user
+    /// gesture (synthesized clicks cannot activate a page while the app is inactive).
+    static let selfTestAutoplaySwitch = "--autoplay-policy=no-user-gesture-required"
+
     static func selfTestArguments(_ arguments: [String]) -> [String] {
-        let extra = selfTestForegroundSwitches + [selfTestDangerSwitch]
+        let extra = selfTestForegroundSwitches + [selfTestDangerSwitch, selfTestAutoplaySwitch]
         return arguments + extra.filter { !arguments.contains($0) }
     }
 

@@ -2,6 +2,7 @@
 import AppKit
 import Foundation
 import Network
+import PDFKit
 import ReArcEngine
 import SidebarModel
 import SwiftUI
@@ -27,6 +28,8 @@ final class ChromiumSelfTest {
     private let runtime: ChromiumRuntime
     private var failures: [String] = []
     private var server: SelfTestFixtureServer?
+    /// The loopback fixture's origin ("http://127.0.0.1:<port>").
+    private var serverBase = ""
     private var engine: ChromiumEngine?
     private var window: NSWindow?
     private var shutdownStatus: ReArcStatus?
@@ -135,7 +138,8 @@ final class ChromiumSelfTest {
                         "shutdown_pending_closes", "profile_directory", "webui_daily_pages", "history_recording",
                         "password_autofill", "find_in_page", "downloads", "javascript_dialogs", "file_chooser",
                         "permission_prompts", "context_menu", "password_prompts", "history_query",
-                        "dangerous_downloads", "tab_discard", "search_autocomplete", "html_fullscreen", "printing"]
+                        "dangerous_downloads", "tab_discard", "search_autocomplete", "html_fullscreen", "printing",
+                        "page_drops", "picture_in_picture"]
         let foreground = ChromiumLaunchArguments.selfTestForegroundSwitches.filter(CommandLine.arguments.contains)
         log("renderer foreground switches (self-test only): "
             + ChromiumLaunchArguments.selfTestForegroundSwitches.joined(separator: " ")
@@ -180,6 +184,7 @@ final class ChromiumSelfTest {
         self.server = server
         let port = try await server.start()
         let base = "http://127.0.0.1:\(port)"
+        serverBase = base
         log("fixture server on \(base)")
         // Shell tabs load before they are first shown (background/adopted tabs), so try that first.
         engine.load(URL(string: "\(base)/a")!)
@@ -290,13 +295,16 @@ final class ChromiumSelfTest {
         }
         log("PASS forward: \(engine.currentURL?.absoluteString ?? "") '\(engine.pageTitle ?? "")'")
 
-        // 7. Media surface: mute is independent of sessions; PiP reports unsupported.
+        // 7. Media surface: mute is independent of sessions. PiP without a video:
+        //    invalid_state with the ABI 1.30 callback, unsupported before it.
         engine.setMuted(true)
         try await wait("muted media event", timeout: 5) { engine.isMuted }
         let pip = engine.requestPictureInPicture()
-        try check(pip == ReArcStatus(REARC_UNSUPPORTED), "PiP returned \(pip.rearcName)")
+        let expectedPiP = ReArcStatus(capabilities.pictureInPicture ? REARC_INVALID_STATE : REARC_UNSUPPORTED)
+        try check(pip == expectedPiP, "PiP on a page without video returned \(pip.rearcName), expected \(expectedPiP.rearcName)")
         let media = engine.mediaState
-        log("PASS mute observed via media event (metadata title \(media.title ?? "nil") artist \(media.artist ?? "nil") album \(media.album ?? "nil")); PiP -> \(pip.rearcName) (not advertised)")
+        log("PASS mute observed via media event (metadata title \(media.title ?? "nil") artist \(media.artist ?? "nil") album \(media.album ?? "nil")); "
+            + "PiP without a video -> \(pip.rearcName)\(capabilities.pictureInPicture ? "" : " (not advertised)")")
 
         // 8-10. Script evaluation, cancellation and the Chromium boost editor/picker.
         if capabilities.scriptEvaluation {
@@ -342,6 +350,20 @@ final class ChromiumSelfTest {
 
         // 12d. Host prompt channels (ABI 1.18–1.22) through the tab's PagePromptCenter.
         try await promptChannelChecks(engine: engine, base: base, window: window)
+
+        // 12e. Wave 24: printing (ABI 1.28) and drops into pages (ABI 1.29) on the attached tab.
+        if capabilities.printing {
+            try await printingChecks(engine: engine, base: base, window: window)
+        } else {
+            log("ABI-GAP printing not advertised (ABI minor \(capabilities.abiMinorVersion.map(String.init) ?? "absent") < 28): Print and Export as PDF are hidden on Chromium")
+        }
+        if capabilities.pageDrops {
+            try await pageDropChecks(engine: engine, base: base, window: window)
+        } else {
+            log("ABI-GAP page_drops not advertised (ABI minor \(capabilities.abiMinorVersion.map(String.init) ?? "absent") < 29): drops into pages stay aborted")
+        }
+        engine.load(URL(string: "\(base)/a")!)
+        try await wait("page A after the wave 24 page checks") { engine.pageTitle == Self.titleA && !engine.isLoading }
 
         // 13. Two windows: the tab's one lease moves to a second window and back.
         try await twoWindowChecks(engine: engine, first: window)
@@ -1149,6 +1171,11 @@ final class ChromiumSelfTest {
         } else {
             log("ABI-GAP html_fullscreen not advertised: page fullscreen requests are refused")
         }
+        if runtime.capabilities.pictureInPicture {
+            try await pictureInPictureChecks(model: model, tab: tabA, engine: engineA, other: tabB)
+        } else {
+            log("ABI-GAP picture_in_picture not advertised (ABI minor \(runtime.capabilities.abiMinorVersion.map(String.init) ?? "absent") < 30): Picture in Picture is WebKit-only")
+        }
 
         // Private window: PrivateWindowModel on an off-the-record profile under the
         // active profile; its end closes that profile, and a new one starts empty.
@@ -1461,6 +1488,7 @@ final class ChromiumSelfTest {
         model.selectTab(tab.id)
         engine.load(URL(string: "\(base)/fullscreen")!)
         try await wait("fullscreen fixture", timeout: 15) { engine.pageTitle == "fs-ready" && !engine.isLoading && engine.attachmentID != nil }
+        _ = await bringToFront(window, for: "HTML fullscreen")
         let button = try await cssCenter(of: "#go", in: engine)
         let sidebarBefore = model.isSidebarVisible
         guard try await enterPageFullscreen(model, window: window, engine: engine, button: button) else {
@@ -1823,6 +1851,7 @@ extension ChromiumSelfTest {
 
     @MainActor
     private func promptChannelChecks(engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        _ = await bringToFront(window, for: "prompt channel")
         let capabilities = runtime.capabilities
         let minor = capabilities.abiMinorVersion.map(String.init) ?? "absent"
         log("prompt channels: javascript_dialogs=\(capabilities.javascriptDialogs ? 1 : 0) file_chooser=\(capabilities.fileChooser ? 1 : 0) "
@@ -2264,6 +2293,352 @@ extension ChromiumSelfTest {
     }
 }
 
+// MARK: - Wave 24: printing, drops into pages, Picture in Picture (ABI 1.28–1.30)
+
+/// Records print operations instead of opening the print panel; `finish` ends them.
+private final class SelfTestPrintRunner: PrintOperationRunning {
+    var operations: [NSPrintOperation] = []
+    var windows: [NSWindow?] = []
+    private var completions: [(Bool) -> Void] = []
+
+    func run(_ operation: NSPrintOperation, in window: NSWindow?, completion: @escaping (Bool) -> Void) {
+        operations.append(operation)
+        windows.append(window)
+        completions.append(completion)
+    }
+
+    func finishAll() {
+        let pending = completions
+        completions = []
+        pending.forEach { $0(false) }
+    }
+}
+
+/// Answers Export as PDF… with a fixed file instead of a save panel.
+private struct SelfTestPDFDestination: PDFDestinationChoosing {
+    let url: URL
+
+    func chooseDestination(suggestedName: String, in window: NSWindow?, completion: @escaping (URL?) -> Void) {
+        DispatchQueue.main.async { completion(url) }
+    }
+}
+
+/// A synthetic NSDraggingInfo over a private pasteboard, for Chromium's real
+/// NSDraggingDestination (WebContentsViewCocoa), as engine/tests/c_abi_drops_host.mm
+/// does. It never touches the general or the drag pasteboard.
+private final class SelfTestDrag: NSObject, NSDraggingInfo {
+    let draggingPasteboard: NSPasteboard
+    let draggingLocation: NSPoint
+    private weak var window: NSWindow?
+    var draggingFormation: NSDraggingFormation = .default
+    var animatesToDestination = false
+    var numberOfValidItemsForDrop = 1
+
+    init(pasteboard: NSPasteboard, location: NSPoint, window: NSWindow) {
+        draggingPasteboard = pasteboard
+        draggingLocation = location
+        self.window = window
+    }
+
+    var draggingDestinationWindow: NSWindow? { window }
+    var draggingSourceOperationMask: NSDragOperation { [.copy, .link, .generic] }
+    var draggedImageLocation: NSPoint { draggingLocation }
+    var draggedImage: NSImage? { nil }
+    var draggingSource: Any? { nil }
+    var draggingSequenceNumber: Int { 24 }
+    var springLoadingHighlight: NSSpringLoadingHighlight { .none }
+    func slideDraggedImage(to screenPoint: NSPoint) {}
+    func resetSpringLoading() {}
+    func enumerateDraggingItems(
+        options enumOpts: NSDraggingItemEnumerationOptions = [],
+        for view: NSView?,
+        classes classArray: [AnyClass],
+        searchOptions: [NSPasteboard.ReadingOptionKey: Any] = [:],
+        using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void
+    ) {}
+}
+
+extension ChromiumSelfTest {
+    /// Brings ReArc to the front for input-driven steps: activation, then one
+    /// retry. A run from a terminal often cannot take focus (cooperative
+    /// activation, a locked screen); the caller then logs a NOTE.
+    @MainActor
+    private func bringToFront(_ window: NSWindow, for label: String) async -> Bool {
+        if inputDeliverable(window) { return true }
+        for attempt in 1 ... 2 {
+            NSApp.unhide(nil)
+            if #available(macOS 14.0, *) { NSApp.activate() }
+            NSApp.activate(ignoringOtherApps: true)
+            NSRunningApplication.current.activate(options: [.activateAllWindows])
+            window.orderFrontRegardless()
+            window.makeKeyAndOrderFront(nil)
+            if await eventually(timeout: attempt == 1 ? 2 : 4, { self.inputDeliverable(window) }) {
+                log("front: ReArc active with the \(label) window key (attempt \(attempt))")
+                return true
+            }
+        }
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        let locked = (session?["CGSSessionScreenIsLocked"] as? Bool) ?? false
+        log("NOTE front: ReArc could not become the active app for \(label) after a retry (active \(NSApp.isActive), "
+            + "key \(window.isKeyWindow), screen locked \(locked), frontmost "
+            + "'\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "-")')")
+        return false
+    }
+
+    // MARK: Printing (ABI 1.28)
+
+    /// PDF bytes and pages, page ranges, the page's window.print() through the
+    /// shell's printer (recorded, no real panel), one job per page, Cmd+P and Export as PDF.
+    @MainActor
+    private func printingChecks(engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        engine.load(URL(string: "\(base)/print")!)
+        try await wait("print fixture", timeout: 15) { engine.pageTitle == "print-ready" && !engine.isLoading }
+        let (status, pdf) = await engine.printToPDF(paper: .letter)
+        let data = pdf ?? Data()
+        let pages = PDFDocument(data: data)?.pageCount ?? 0
+        try check(status == .rearcOK && PDFSignature.isPDF(data) && pages == 3,
+                  "print to PDF: \(status.rearcName), \(data.count) bytes, %PDF \(PDFSignature.isPDF(data)), \(pages) page(s)")
+        let (rangeStatus, rangePDF) = await engine.printToPDF(paper: PrintPaperSetup(widthInches: 8.27, heightInches: 11.69, landscape: true), pageRanges: "2")
+        let rangePages = rangePDF.flatMap { PDFDocument(data: $0) }
+        let landscape = rangePages?.page(at: 0).map { $0.bounds(for: .mediaBox).width > $0.bounds(for: .mediaBox).height } ?? false
+        try check(rangeStatus == .rearcOK && rangePages?.pageCount == 1 && landscape,
+                  "page range 2 (A4 landscape): \(rangeStatus.rearcName), \(rangePages?.pageCount ?? 0) page(s), landscape \(landscape)")
+        let (badStatus, badPDF) = await engine.printToPDF(paper: nil, pageRanges: "9")
+        try check(badStatus == ReArcStatus(REARC_INVALID_ARGUMENT) && badPDF == nil, "out-of-range pages: \(badStatus.rearcName)")
+
+        let printer = PagePrinter.shared
+        let recorder = SelfTestPrintRunner()
+        let savedRunner = printer.runner, savedChooser = printer.destinationChooser
+        var errors: [Error] = []
+        printer.runner = recorder
+        printer.onError = { errors.append($0) }
+        defer {
+            recorder.finishAll()
+            printer.runner = savedRunner
+            printer.destinationChooser = savedChooser
+            printer.onError = nil
+        }
+        // window.print(): the page's request completes at once (beforeprint, afterprint), the shell prints the PDF.
+        let requestsBefore = engine.printRequestCount
+        _ = try await engine.evaluate("(window.print(), true)", in: .page)
+        try await wait("print request and recorded print operation", timeout: 15) {
+            engine.printRequestCount == requestsBefore + 1 && recorder.operations.count == 1 || !errors.isEmpty
+        }
+        try check(errors.isEmpty, "print failed: \(errors)")
+        try await wait("beforeprint+afterprint", timeout: 5) { engine.pageTitle == "beforeprint+afterprint" }
+        let operation = recorder.operations[0]
+        try check(recorder.windows[0] === window && operation.printInfo.topMargin == 0,
+                  "print operation: sheet window \(String(describing: recorder.windows[0])), top margin \(operation.printInfo.topMargin)")
+        // While its panel is open, another print of the same page is dropped (Cmd+P included).
+        let dropped = printer.droppedRequests
+        printer.print(engine)
+        try check(printer.droppedRequests == dropped + 1 && recorder.operations.count == 1, "a second print while the panel is open was not dropped")
+        recorder.finishAll()
+        printer.print(engine)
+        try await wait("Cmd+P print operation", timeout: 15) { recorder.operations.count == 2 || !errors.isEmpty }
+        try check(errors.isEmpty, "Cmd+P failed: \(errors)")
+        recorder.finishAll()
+
+        // Export as PDF… to a temporary file (the save panel is answered with it).
+        let exportURL = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-selftest-export-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: exportURL) }
+        printer.destinationChooser = SelfTestPDFDestination(url: exportURL)
+        var exported: Result<URL, Error>?
+        printer.exportPDF(engine) { exported = $0 }
+        try await wait("Export as PDF", timeout: 15) { exported != nil }
+        let file = (try? Data(contentsOf: exportURL)) ?? Data()
+        let filePages = PDFDocument(url: exportURL)?.pageCount ?? 0
+        try check(PDFSignature.isPDF(file) && filePages >= 1, "exported PDF: \(String(describing: exported)), \(file.count) bytes, \(filePages) page(s)")
+        try check(runtime.livePrintContexts == 0, "\(runtime.livePrintContexts) print-to-PDF context(s) never released")
+        log("PASS printing (ABI 1.28): ReArcTabPrintToPDF -> %PDF \(data.count) bytes, \(pages) pages; page range 2 on A4 "
+            + "landscape -> 1 landscape page; range 9 -> invalid_argument; window.print() -> print request (source 0), "
+            + "'beforeprint+afterprint', print operation from the PDF as a sheet on the tab's window (recorded, no panel); "
+            + "a second print while it is open dropped; Cmd+P -> print operation; Export as PDF -> \(file.count)-byte PDF, "
+            + "\(filePages) page(s); contexts released")
+    }
+
+    // MARK: Drops into pages (ABI 1.29)
+
+    private static func findView(named className: String, in view: NSView) -> NSView? {
+        if NSStringFromClass(Swift.type(of: view)) == className { return view }
+        for subview in view.subviews {
+            if let found = findView(named: className, in: subview) { return found }
+        }
+        return nil
+    }
+
+    /// Enter, two updates, drop; then the page's event log.
+    @MainActor
+    private func drag(_ pasteboard: NSPasteboard, onto destination: NSView, host: NSView, window: NSWindow,
+                      engine: ChromiumEngine) async throws -> (enter: NSDragOperation, performed: Bool, log: String) {
+        let location = host.convert(NSPoint(x: host.bounds.midX, y: host.bounds.midY), to: nil)
+        let info = SelfTestDrag(pasteboard: pasteboard, location: location, window: window)
+        let enter = destination.draggingEntered(info)
+        for _ in 0 ..< 2 {
+            try await Task.sleep(nanoseconds: 300_000_000)
+            _ = destination.draggingUpdated(info)
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let performed = destination.performDragOperation(info)
+        try await Task.sleep(nanoseconds: 800_000_000)
+        let log = try await engine.evaluate("log.splice(0).join('\\n')", in: .page) as? String ?? "?"
+        return (enter, performed, log)
+    }
+
+    private func pasteboard(_ write: (NSPasteboard) -> Void) -> NSPasteboard {
+        let board = NSPasteboard(name: NSPasteboard.Name("com.rearc.selftest.drag.\(UUID().uuidString)"))
+        board.clearContents()
+        write(board)
+        return board
+    }
+
+    /// Text and a file reach the page's drop handler; a sidebar drag (the
+    /// shell's private type) never reaches it at all.
+    @MainActor
+    private func pageDropChecks(engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        try check(runtime.dropPolicy == .shell, "drop policy at ready: \(String(describing: runtime.dropPolicy))")
+        let provider = SidebarDragPayload.itemProvider(for: UUID())
+        try check(provider.registeredTypeIdentifiers.contains(SidebarDragType.identifier),
+                  "sidebar drags do not carry \(SidebarDragType.identifier): \(provider.registeredTypeIdentifiers)")
+        engine.load(URL(string: "\(base)/drop")!)
+        try await wait("drop fixture", timeout: 15) { engine.pageTitle == "drop-ready" && !engine.isLoading && engine.attachmentID != nil }
+        guard let host = engine.leaseHolder, let destination = Self.findView(named: "WebContentsViewCocoa", in: host) else {
+            throw Failure(description: "no WebContentsViewCocoa under the tab's host view")
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        let text = try await drag(pasteboard { $0.setString("rearc dropped text", forType: .string) },
+                                  onto: destination, host: host, window: window, engine: engine)
+        try check(text.enter != [] && text.performed && text.log.contains("drop|text=rearc dropped text"),
+                  "text drop: enter \(text.enter.rawValue) performed \(text.performed) log '\(text.log)'")
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-selftest-drop-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("rearc-drop.txt")
+        try Data("dropped file".utf8).write(to: fileURL)
+        let file = try await drag(pasteboard { _ = $0.writeObjects([fileURL as NSURL]) },
+                                  onto: destination, host: host, window: window, engine: engine)
+        try check(file.enter != [] && file.log.contains("files=rearc-drop.txt:12") && file.log.contains("content=dropped file"),
+                  "file drop: enter \(file.enter.rawValue) performed \(file.performed) log '\(file.log)'")
+
+        let id = UUID().uuidString
+        let sidebar = try await drag(pasteboard {
+            $0.declareTypes([SidebarDragPayload.pasteboardType, .string], owner: nil)
+            $0.setData(Data(id.utf8), forType: SidebarDragPayload.pasteboardType)
+            $0.setString(id, forType: .string)
+        }, onto: destination, host: host, window: window, engine: engine)
+        try check(sidebar.enter == [] && !sidebar.performed && sidebar.log.isEmpty,
+                  "sidebar drag reached the page: enter \(sidebar.enter.rawValue) performed \(sidebar.performed) log '\(sidebar.log)'")
+        try check(engine.currentURL?.path == "/drop", "a drop navigated the tab to \(engine.currentURL?.absoluteString ?? "nil")")
+        log("PASS drops into pages (ABI 1.29): policy files+text+urls+images, blocked \(SidebarDragType.identifier); "
+            + "through WebContentsViewCocoa: text -> page drop handler; a Finder file -> File 'rearc-drop.txt' (12 bytes, "
+            + "contents read); a sidebar drag (private type + UUID text) -> no operation and no page event; tab stayed on /drop")
+    }
+
+    // MARK: Picture in Picture (ABI 1.30)
+
+    private func pictureInPictureOverlay() -> NSWindow? {
+        NSApp.windows.first { $0.isVisible && NSStringFromClass(Swift.type(of: $0)).hasPrefix("NativeWidgetMac") }
+    }
+
+    /// Chromium's overlay hides its controls until the pointer is over it;
+    /// back to tab is 24 px, 28 px from the right, 5 px from the top (c_abi_pip_host.mm).
+    @MainActor
+    private func clickBackToTab(in overlay: NSWindow) async {
+        guard let content = overlay.contentView else { return }
+        let center = NSPoint(x: content.bounds.midX, y: content.bounds.midY)
+        let now = ProcessInfo.processInfo.systemUptime
+        if let entered = NSEvent.enterExitEvent(with: .mouseEntered, location: center, modifierFlags: [], timestamp: now,
+                                                windowNumber: overlay.windowNumber, context: nil, eventNumber: 0,
+                                                trackingNumber: 0, userData: nil) {
+            content.mouseEntered(with: entered)
+        }
+        if let moved = NSEvent.mouseEvent(with: .mouseMoved, location: center, modifierFlags: [], timestamp: now,
+                                          windowNumber: overlay.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0) {
+            content.mouseMoved(with: moved)
+        }
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        let button = NSPoint(x: content.bounds.width - 40, y: content.bounds.height - 17)
+        for type in [NSEvent.EventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(with: type, location: button, modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: overlay.windowNumber,
+                                                 context: nil, eventNumber: 1, clickCount: type == .mouseMoved ? 0 : 1,
+                                                 pressure: type == .leftMouseDown ? 1 : 0) else { continue }
+            switch type {
+            case .mouseMoved: content.mouseMoved(with: event)
+            case .leftMouseDown: content.mouseDown(with: event)
+            default: content.mouseUp(with: event)
+            }
+        }
+    }
+
+    /// The command enters and leaves PiP (sidebar badge, the page's PiP
+    /// events), switching away from the playing tab enters it automatically and
+    /// coming back leaves it, and the overlay's back-to-tab shows the tab.
+    @MainActor
+    private func pictureInPictureChecks(model: BrowserViewModel, tab: Tab, engine: ChromiumEngine, other: Tab) async throws {
+        model.selectTab(tab.id)
+        engine.load(URL(string: "\(serverBase)/pip")!)
+        try await wait("PiP fixture playing", timeout: 25) {
+            engine.pageTitle == "pip-playing" || engine.pageTitle?.hasPrefix("pip-err") == true
+        }
+        try check(engine.pageTitle == "pip-playing", "PiP fixture: '\(engine.pageTitle ?? "")'")
+        try await wait("pip_available media event", timeout: 15) { model.mediaState(for: tab.id).canPictureInPicture }
+        try check(model.store.selectedTabID == tab.id, "the PiP tab is not selected")
+
+        // 1. The command (menu item, command bar) enters PiP; the sidebar row shows the badge.
+        let eventsBefore = runtime.pictureInPictureEvents.count
+        model.togglePictureInPicture()
+        try await wait("PiP entered through the command", timeout: 10) {
+            model.isPictureInPicture(tab.id) && engine.isPictureInPicture && engine.pageTitle == "pip-in"
+        }
+        let overlay = pictureInPictureOverlay()
+        try check(overlay != nil, "no Chromium PiP overlay window")
+        model.togglePictureInPicture()
+        try await wait("PiP left through the command", timeout: 10) {
+            !model.isPictureInPicture(tab.id) && !engine.isPictureInPicture && engine.pageTitle == "pip-out"
+        }
+
+        // 2. Automatic PiP: switching to another tab puts the playing video in PiP; coming back ends it.
+        let automatic = model.automaticPictureInPicture
+        if !automatic { model.automaticPictureInPicture = true }
+        defer { if !automatic { model.automaticPictureInPicture = false } }
+        model.selectTab(other.id)
+        try await wait("automatic PiP on switching away", timeout: 10) {
+            model.isPictureInPicture(tab.id) && model.autoPiPEnteredTabIDs.contains(tab.id) && engine.pageTitle == "pip-in"
+        }
+        model.selectTab(tab.id)
+        try await wait("automatic PiP ends when the tab is shown again", timeout: 10) {
+            !model.isPictureInPicture(tab.id) && !model.autoPiPEnteredTabIDs.contains(tab.id) && engine.pageTitle == "pip-out"
+        }
+        var paths = ["command in and out", "automatic on switching away, back on return"]
+
+        // 3. Back to tab (phase 2) from the overlay's button shows the tab again.
+        model.selectTab(other.id)
+        try await wait("automatic PiP for back-to-tab", timeout: 10) { model.isPictureInPicture(tab.id) }
+        if let overlay = pictureInPictureOverlay() {
+            await clickBackToTab(in: overlay)
+            if await eventually(timeout: 4, { runtime.pictureInPictureEvents.contains { $0.tabID == engine.tabID && $0.phase == .backToTab } }) {
+                try await wait("back to tab shows the tab", timeout: 10) {
+                    model.store.selectedTabID == tab.id && !model.isPictureInPicture(tab.id)
+                }
+                paths.append("back to tab (overlay button) selects the tab")
+            } else {
+                log("NOTE PiP back to tab: the synthesized click on the overlay produced no back-to-tab event; leaving through the command")
+            }
+        }
+        if model.isPictureInPicture(tab.id) { model.setPictureInPicture(false, tabID: tab.id) }
+        try await wait("PiP closed", timeout: 10) { !model.isPictureInPicture(tab.id) }
+        model.selectTab(tab.id)
+        let phases = runtime.pictureInPictureEvents.dropFirst(eventsBefore).filter { $0.tabID == engine.tabID }.map { "\($0.phase)" }
+        engine.load(URL(string: "\(serverBase)/a")!)
+        try await wait("tab A back on /a after PiP", timeout: 15) { engine.pageTitle == Self.titleA && !engine.isLoading }
+        log("PASS Picture in Picture (ABI 1.30): MediaRecorder WebM with audio -> pip_available; \(paths.joined(separator: "; ")); "
+            + "sidebar badge followed pip_active; overlay \(NSStringFromClass(Swift.type(of: overlay!))); events \(phases.joined(separator: ","))")
+    }
+}
+
 private extension NSView {
     func firstDescendant<T: NSView>(ofType type: T.Type) -> T? {
         for child in subviews {
@@ -2317,6 +2692,60 @@ final class SelfTestFixtureServer {
         document.addEventListener('fullscreenchange', function () {
           if (!document.fullscreenElement) document.title = 'fs-off';
         });
+        </script></body></html>
+        """,
+        // Three printed pages; the title records beforeprint/afterprint around window.print().
+        "/print": """
+        <!doctype html><html><head><title>print-ready</title><style>div{height:900px;break-after:page}</style></head>
+        <body style="font:24px -apple-system"><div>page one</div><div>page two</div><div>page three</div><script>
+        addEventListener('beforeprint', function () { document.title = 'beforeprint'; });
+        addEventListener('afterprint', function () { document.title += '+afterprint'; });
+        </script></body></html>
+        """,
+        // A drop target covering the page that logs every dragenter and drop.
+        "/drop": """
+        <!doctype html><html><head><title>drop-ready</title></head><body style="margin:0;height:100vh"><script>
+        window.log = [];
+        ['dragenter', 'dragover'].forEach(function (t) {
+          document.addEventListener(t, function (e) {
+            e.preventDefault();
+            if (t === 'dragenter') log.push('enter:' + Array.prototype.slice.call(e.dataTransfer.types).join(','));
+          });
+        });
+        document.addEventListener('drop', function (e) {
+          e.preventDefault();
+          var d = e.dataTransfer, files = Array.prototype.slice.call(d.files);
+          var entry = 'drop|text=' + d.getData('text/plain') + '|uri=' + d.getData('text/uri-list')
+            + '|files=' + files.map(function (f) { return f.name + ':' + f.size; }).join(';');
+          if (!files[0]) { log.push(entry + '|content='); return; }
+          files[0].text().then(function (c) { log.push(entry + '|content=' + c.slice(0, 40)); });
+        });
+        </script></body></html>
+        """,
+        // A playing video with an audio track. A MediaRecorder WebM of a canvas and a
+        // silent oscillator is a normal player (Chromium offers browser-initiated PiP
+        // for it, never for a MediaStream). Autoplay is allowed by a self-test switch.
+        "/pip": """
+        <!doctype html><html><head><title>pip-loading</title></head><body style="margin:0">
+        <video id="v" playsinline style="width:400px;height:300px"></video><script>
+        var v = document.getElementById('v');
+        var c = document.createElement('canvas'); c.width = 320; c.height = 180;
+        var g = c.getContext('2d'), n = 0;
+        setInterval(function () { g.fillStyle = 'hsl(' + (n++ * 10 % 360) + ',80%,50%)'; g.fillRect(0, 0, 320, 180); }, 50);
+        var stream = c.captureStream(20), ac = new AudioContext(), osc = ac.createOscillator();
+        var dest = ac.createMediaStreamDestination(), gain = ac.createGain();
+        gain.gain.value = 0; osc.connect(gain); gain.connect(dest); osc.start();
+        stream.addTrack(dest.stream.getAudioTracks()[0]);
+        var parts = [], rec = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8,opus' });
+        rec.ondataavailable = function (e) { parts.push(e.data); };
+        rec.onstop = function () {
+          v.loop = true;
+          v.src = URL.createObjectURL(new Blob(parts, { type: 'video/webm' }));
+          v.play().then(function () { document.title = 'pip-playing'; }, function (e) { document.title = 'pip-err:' + e.name; });
+        };
+        v.addEventListener('enterpictureinpicture', function () { document.title = 'pip-in'; });
+        v.addEventListener('leavepictureinpicture', function () { document.title = 'pip-out'; });
+        rec.start(); setTimeout(function () { rec.stop(); }, 2500);
         </script></body></html>
         """,
         // Four case-insensitive "needle"s, two of them lowercase.
