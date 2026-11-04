@@ -542,4 +542,47 @@ final class Wave28ModelTests: XCTestCase {
         XCTAssertNil(store.importBookmarks([], spaceName: "Nothing"))
         XCTAssertEqual(store.spaces.count, 2, "an empty file makes no space")
     }
+
+    // MARK: DevTools and client certificates (engine wave 18h)
+
+    func testDevToolsSessionsDockByDefaultAndCloseWithTheirFrontend() {
+        var sessions = DevToolsSessions()
+        let a = UUID(), b = UUID()
+        sessions.opened(41, for: a)
+        sessions.opened(99, for: a)
+        XCTAssertEqual(sessions.session(for: a), DevToolsSession(frontendTabID: 41, placement: .docked), "one frontend per tab, docked")
+        sessions.opened(42, for: b)
+        sessions.setPlacement(.window, for: b)
+        XCTAssertEqual(sessions.session(for: b)?.placement, .window)
+        XCTAssertEqual(sessions.tab(forFrontend: 42), b)
+        XCTAssertEqual(sessions.frontendClosed(42), b, "the engine closed it with its page")
+        XCTAssertNil(sessions.session(for: b))
+        XCTAssertNil(sessions.frontendClosed(42))
+        XCTAssertEqual(sessions.close(for: a)?.frontendTabID, 41)
+        sessions.setDockFraction(2)
+        XCTAssertEqual(sessions.dockFraction, DevToolsSessions.dockFractionRange.upperBound)
+        sessions.setDockFraction(.nan)
+        XCTAssertEqual(sessions.dockFraction, DevToolsSessions.dockFractionRange.upperBound)
+    }
+
+    func testClientCertificateRequestText() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let valid = ClientCertificateIdentity(fingerprint: String(repeating: "AB", count: 32), subject: "Zed", issuer: "B CA",
+                                              expiryMicroseconds: 2_240_000_000_000_000)
+        let expired = ClientCertificateIdentity(fingerprint: String(repeating: "0F", count: 32), subject: "Amy", issuer: "E CA",
+                                                expires: now.addingTimeInterval(-1))
+        let other = ClientCertificateIdentity(fingerprint: String(repeating: "C1", count: 32), subject: "bob", issuer: "B CA",
+                                              expires: now.addingTimeInterval(86_400))
+        let request = ClientCertificateRequest(id: 7, origin: "https://mtls.test:8443", identities: [expired, valid, other])
+        XCTAssertEqual(request.host, "mtls.test:8443")
+        XCTAssertEqual(ClientCertificateRequest(id: 1, origin: "https://a.test:443", identities: []).host, "a.test")
+        XCTAssertEqual(request.message, "Select a certificate to identify yourself to mtls.test:8443.")
+        XCTAssertEqual(request.sortedIdentities(now: now).map(\.subject), ["bob", "Zed", "Amy"], "valid first, then by name")
+        XCTAssertTrue(expired.isExpired(at: now))
+        XCTAssertEqual(valid.expires, Date(timeIntervalSince1970: 2_240_000_000), "Unix microseconds")
+        XCTAssertTrue(valid.groupedFingerprint.hasPrefix("AB AB AB"))
+        XCTAssertTrue(ClientCertificateIdentity.isValidFingerprint(valid.fingerprint))
+        XCTAssertFalse(ClientCertificateIdentity.isValidFingerprint("ABC"))
+        XCTAssertTrue(ClientCertificateRequest(id: 2, origin: "https://x.test", identities: []).message.contains("you have none"))
+    }
 }
