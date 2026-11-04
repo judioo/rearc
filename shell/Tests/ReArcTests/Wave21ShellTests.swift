@@ -217,4 +217,42 @@ final class Wave21ShellTests: XCTestCase {
         model.commandBarText = "youtube"
         XCTAssertNil(model.commandBarSiteSearchSuggestion)
     }
+
+    // MARK: Boost library
+
+    func testBoostLibraryCreatesTogglesDuplicatesAndDeletes() throws {
+        let model = makeModel()
+        XCTAssertNil(model.executeCommand(.manageBoosts, commandID: nil))
+        XCTAssertTrue(model.isBoostLibraryPresented, "View Boosts opens the library")
+
+        XCTAssertEqual(model.createBoost(name: "", site: ""), "Enter a site to boost", "no page on screen and no site typed")
+        XCTAssertNotNil(model.createBoost(name: "X", site: "nope"))
+        XCTAssertNil(model.createBoost(name: "", site: "github.com"))
+        var rows = model.boostLibraryRows()
+        XCTAssertEqual(rows.map(\.name), ["Boost for github.com"])
+        let id = rows[0].id
+
+        model.setBoostEnabled(id, enabled: false)
+        XCTAssertFalse(model.boostLibraryRows()[0].enabled)
+        model.setBoostsMasterEnabled(false)
+        XCTAssertFalse(model.boostsMasterEnabled)
+        model.setBoostsMasterEnabled(true)
+
+        let copy = try XCTUnwrap(model.duplicateBoost(id))
+        XCTAssertTrue(model.renameBoost(copy, to: "Second"))
+        rows = model.boostLibraryRows()
+        XCTAssertEqual(rows.map(\.name), ["Boost for github.com", "Second"])
+
+        model.deleteBoost(id)
+        XCTAssertEqual(model.boostLibraryRows().map(\.id), [copy])
+
+        let tab = model.store.addTab(kind: .today, title: "News", url: URL(string: "https://news.test/a")!)
+        model.selectTab(tab.id)
+        XCTAssertNil(model.createBoost(name: "Mine", site: ""), "an empty site boosts the page on screen")
+        XCTAssertTrue(model.boostLibraryRows().contains { $0.name == "Mine" && $0.matchesCurrentPage })
+
+        model.openBoostSite(copy)
+        XCTAssertFalse(model.isBoostLibraryPresented)
+        XCTAssertEqual(model.store.selectedTab?.url, URL(string: "https://github.com/"))
+    }
 }

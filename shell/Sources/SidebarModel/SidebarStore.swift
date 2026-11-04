@@ -1064,6 +1064,22 @@ public final class SidebarStore {
         return package
     }
 
+    /// Renames a boost (Arc `renameBoost`); empty names are refused.
+    @discardableResult
+    public func renameBoost(packageID: UUID, to name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        var library = boostLibrary(for: activeProfileID)
+        guard !trimmed.isEmpty,
+              var package = library.package(id: packageID),
+              let install = library.installation(for: packageID) else { return false }
+        guard package.manifest.name != trimmed else { return true }
+        package.manifest.name = trimmed
+        package.manifest.updatedAt = now()
+        library.upsertPackage(package, installation: install)
+        updateBoostLibrary(library)
+        return true
+    }
+
     public func importBoostPackage(_ package: BoostPackage) -> BoostLibraryMutationError? {
         let enabled = BoostInterchange.defaultEnabledOnImport(package)
         return addBoost(package, enabled: enabled)

@@ -170,6 +170,12 @@ struct BrowserView: View {
             ArchiveView(model: model)
         }
         .sheet(isPresented: Binding(
+            get: { model.isBoostLibraryPresented && isKeyWindowSheetOwner },
+            set: { model.isBoostLibraryPresented = $0 }
+        )) {
+            BoostLibraryView(model: model)
+        }
+        .sheet(isPresented: Binding(
             get: { model.spaceEditorID != nil },
             set: { if !$0 { model.spaceEditorID = nil } }
         )) {

@@ -78,6 +78,7 @@ struct BottomBarView: View {
                 Divider()
                 Button("New Easel") { _ = model.createEasel() }
                 Button("New Note") { _ = model.createEasel(title: "Note", note: true) }
+                Button("View Boosts") { model.isBoostLibraryPresented = true }
                 Divider()
                 Button("Add Split View (Right)") {
                     model.addSplitView(orientation: .horizontal)

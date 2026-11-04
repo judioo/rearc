@@ -297,4 +297,43 @@ final class Wave21ModelTests: XCTestCase {
         XCTAssertEqual(rows.first?.kind, .search)
         XCTAssertEqual(CommandBarSearch.siteSearchResults(youtube, query: "").first?.title, "Open YouTube")
     }
+
+    // MARK: Boost library
+
+    func testLibraryRowsFollowInstallOrderAndDescribeEachBoost() throws {
+        let store = SidebarStore(spaces: [Space(name: "A", sortRank: "a")])
+        let style = try XCTUnwrap(store.createBoostForCurrentSite(name: "Quiet GitHub", css: "a{}", pageURL: url("https://github.com/x")))
+        var script = BoostPackage.newScript(name: "Script", hostScope: [BoostHostRule(host: "example.com"), BoostHostRule(host: "example.org")], js: "1")
+        script.metadata.colorHex = "#FF0000"
+        XCTAssertNil(store.addBoost(script))
+
+        let rows = BoostLibraryListing.rows(store.boostLibrary(), currentPage: url("https://github.com/rearc"))
+        XCTAssertEqual(rows.map(\.name), ["Quiet GitHub", "Script"])
+        XCTAssertEqual(rows[0].sites, "github.com")
+        XCTAssertTrue(rows[0].enabled && rows[0].hasStyle && !rows[0].hasScript)
+        XCTAssertTrue(rows[0].matchesCurrentPage)
+        XCTAssertEqual(rows[0].siteURL, url("https://github.com/"))
+        XCTAssertEqual(rows[1].sites, "example.com and 1 more")
+        XCTAssertFalse(rows[1].enabled, "script boosts start off")
+        XCTAssertFalse(rows[1].scriptAllowed)
+        XCTAssertFalse(rows[1].matchesCurrentPage)
+
+        XCTAssertEqual(BoostLibraryListing.rows(store.boostLibrary(), filter: "example.org").map(\.id), [script.manifest.id])
+        XCTAssertEqual(BoostLibraryListing.rows(store.boostLibrary(), filter: "quiet").map(\.id), [style.manifest.id])
+    }
+
+    func testRenameBoostAndSiteParsing() throws {
+        let store = SidebarStore(spaces: [Space(name: "A", sortRank: "a")])
+        let boost = try XCTUnwrap(store.createBoostForCurrentSite(name: "Old", css: "", pageURL: url("https://news.test")))
+        XCTAssertTrue(store.renameBoost(packageID: boost.manifest.id, to: "  New  "))
+        XCTAssertEqual(store.boostLibrary().package(id: boost.manifest.id)?.manifest.name, "New")
+        XCTAssertFalse(store.renameBoost(packageID: boost.manifest.id, to: " "))
+        XCTAssertFalse(store.renameBoost(packageID: UUID(), to: "X"))
+
+        XCTAssertEqual(BoostLibraryListing.siteURL(from: "GitHub.com"), url("https://github.com/"))
+        XCTAssertEqual(BoostLibraryListing.siteURL(from: "https://www.x.com/home"), url("https://www.x.com/"))
+        XCTAssertNil(BoostLibraryListing.siteURL(from: "not a site"))
+        XCTAssertNil(BoostLibraryListing.siteURL(from: "localhost"))
+        XCTAssertNil(BoostLibraryListing.siteURL(from: ""))
+    }
 }

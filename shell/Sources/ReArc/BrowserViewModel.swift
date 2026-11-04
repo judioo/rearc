@@ -44,6 +44,8 @@ final class BrowserViewModel {
     /// leading edge (Arc `SidebarHovering` / floating sidebar).
     var isSidebarPeeking = false
     var isArchivePresented = false
+    /// View Boosts: the Boosts library sheet.
+    var isBoostLibraryPresented = false
     /// Space being edited in the Edit Space sheet (name, theme, icon).
     var spaceEditorID: Space.ID?
     /// The New Space dialog's fields while it is open.
@@ -730,6 +732,16 @@ final class BrowserViewModel {
         peekSession = nil
     }
 
+    /// Opens `url` in a new Today tab of the active space and selects it.
+    @discardableResult
+    func openInNewTab(_ url: URL) -> Tab {
+        let tab = store.addTab(kind: .today, title: url.host() ?? "New Tab", url: url)
+        store.selectTab(tab.id)
+        engineHost.engine(for: tab, profileID: profileID(for: tab)).load(url)
+        loadSelectedIfNeeded()
+        return tab
+    }
+
     func peekOpenInFullTab() {
         guard let session = peekSession else { return }
         let url = session.url
@@ -1176,9 +1188,7 @@ final class BrowserViewModel {
                 }
             }
         case .manageBoosts:
-            let count = store.boostLibrary().packages.count
-            commandBarError = "Boost library: \(count) package\(count == 1 ? "" : "s") in \(store.activeProfile.name)"
-            return nil
+            isBoostLibraryPresented = true
         case .toggleBoost(let packageID):
             let library = store.boostLibrary()
             guard let install = library.installation(for: packageID) else {

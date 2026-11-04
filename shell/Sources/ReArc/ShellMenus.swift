@@ -160,6 +160,7 @@ enum ShellMenus {
             ],
             [
                 ShellMenuItem("View Archive") { model.isArchivePresented = true },
+                ShellMenuItem("View Boosts") { model.isBoostLibraryPresented = true },
             ],
         ]
     }

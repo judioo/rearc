@@ -473,7 +473,7 @@ public enum AppCommandRegistry {
             ),
             AppCommand(
                 id: "manage-boosts",
-                title: "Manage Boosts",
+                title: "View Boosts",
                 keywords: ["boost", "boosts", "library", "manage", "extensions"],
                 minQueryLength: 2,
                 action: .manageBoosts
