@@ -114,6 +114,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private let menuTarget = ChromiumMenuTarget()
     /// The tray's Chromium side; the controller only holds it weakly.
     private var downloadBackend: ChromiumDownloadBackend?
+    /// Toolbar actions, popups, extension prompts, windows and tab requests (wave 27).
+    private(set) var extensionHost: ChromiumExtensionHost?
     /// The window showing the HTML-fullscreen page, the native state the
     /// shell wants for it (nil: leave it as the user has it), and the
     /// transition in progress.
@@ -183,6 +185,18 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             }
         }
         model.commandBarServices = ChromiumCommandBarServices(runtime: runtime)
+        let extensionHost = ChromiumExtensionHost(runtime: runtime, model: model)
+        extensionHost.install()
+        self.extensionHost = extensionHost
+        if runtime.capabilities.autofillSuggestions {
+            // "Manage…" in the suggestions: Chromium's settings page for the product, as a tab.
+            runtime.onAutofillSettings = { [weak model] url, _ in model?.openPageInNewTab(url, title: "Settings") }
+        }
+        if runtime.capabilities.passwordLeakDetection {
+            // The self-test sets its own choice first (off: no sign-in reaches Google's leak service).
+            if runtime.leakDetectionPreference.explicitChoice == nil { runtime.leakDetectionPreference = .load(from: .standard) }
+            runtime.openPersistentEngineProfiles.forEach(runtime.applyLeakDetectionPreference(profile:))
+        }
         if runtime.capabilities.pictureInPicture {
             runtime.onPictureInPictureBackToTab = { [weak self, weak model] engine in
                 MainActor.assumeIsolated {
@@ -580,6 +594,13 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
                 model.automaticPictureInPicture.toggle()
             })
         }
+        if runtime.capabilities.passwordLeakDetection {
+            // Chrome's "Warn you if passwords are exposed in a data breach" (on by default).
+            let runtime = runtime
+            app.addItem(target.checkItem("Check Passwords for Leaks", isOn: { runtime.leakDetectionEnabled }) {
+                runtime.setLeakDetectionForAllProfiles(!runtime.leakDetectionEnabled)
+            })
+        }
         let links = NSMenu(title: "External Links")
         for destination in ExternalLinkDestination.allCases {
             links.addItem(target.checkItem(destination.menuTitle, isOn: { model.externalLinkDestination == destination }) {
@@ -658,6 +679,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         if runtime.capabilities.webUIDailyPages {
             view.addItem(.separator())
             target.add(ShellMenus.browserPages(model), to: view)
+            if runtime.capabilities.extensionToolbar {
+                view.addItem(target.item("Chrome Web Store", "") { model.openChromeWebStore() })
+            }
         }
         main.addSubmenu(view, title: "View")
 

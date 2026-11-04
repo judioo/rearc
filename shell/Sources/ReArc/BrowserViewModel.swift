@@ -217,6 +217,8 @@ final class BrowserViewModel {
     let findBar = FindBarModel()
     /// The sidebar's downloads tray (both engines).
     let downloads: DownloadsController
+    /// Extension actions and pins (Chromium only; hidden on WebKit).
+    let extensions = ExtensionsController()
     /// Permission answers per site (URL field indicator; WebKit's remembered answers).
     let sitePermissions: SitePermissionsController
     /// Command-bar visit history, saved next to the sidebar file.

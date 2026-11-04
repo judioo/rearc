@@ -28,6 +28,7 @@ struct SidebarToolbarView: View {
                         model.reload(ignoringCache: NSEvent.modifierFlags.contains(.shift))
                     }
                 }
+                ExtensionToolbarView(model: model, engine: engine)
                 ProfileAvatarView(profile: profile, diameter: 18)
                     .opacity(0.85)
                     .padding(.leading, 4)
