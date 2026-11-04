@@ -100,6 +100,15 @@ final class EngineHost {
         return []
     }
 
+    /// PiP video plays in shell views (Chromium `pip_embedded`, ABI 1.43).
+    var supportsLiveVideo: Bool {
+        #if REARC_CHROMIUM
+        return ChromiumRuntime.active?.capabilities.pipEmbedded ?? false
+        #else
+        return false
+        #endif
+    }
+
     /// Binds an engine the shell did not create (a Chromium-created tab) to a sidebar tab.
     func adopt(_ engine: any WebEngine, for tab: Tab, profileID: Profile.ID) {
         let prompts = engine.pagePrompts

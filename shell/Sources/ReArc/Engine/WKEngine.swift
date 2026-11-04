@@ -31,6 +31,7 @@ private final class MediaStateMessageHandler: NSObject, WKScriptMessageHandler {
               let body = message.body as? [String: Any] else { return }
         let state = WebMediaState(
             isPlaying: body["isPlaying"] as? Bool ?? false,
+            isPaused: body["isPaused"] as? Bool ?? false,
             isAudible: body["isAudible"] as? Bool ?? false,
             title: body["title"] as? String,
             artist: body["artist"] as? String,
@@ -76,12 +77,14 @@ final class WKEngine: NSObject, WebEngine {
       }
       function scan() {
         var media = Array.prototype.slice.call(document.querySelectorAll('video, audio'));
-        var isPlaying = false, isAudible = false, canPiP = false;
+        var isPlaying = false, isPaused = false, isAudible = false, canPiP = false;
         for (var i = 0; i < media.length; i++) {
           var el = media[i];
           if (!el.paused && !el.ended) {
             isPlaying = true;
             if (!el.muted && el.volume > 0) isAudible = true;
+          } else if (el.paused && !el.ended && el.currentTime > 0) {
+            isPaused = true;
           }
           if (el.tagName === 'VIDEO' && el.disablePictureInPicture !== true) {
             canPiP = true;
@@ -93,6 +96,7 @@ final class WKEngine: NSObject, WebEngine {
         });
         var payload = {
           isPlaying: isPlaying,
+          isPaused: !isPlaying && isPaused,
           isAudible: isAudible,
           title: meta.title,
           artist: meta.artist,

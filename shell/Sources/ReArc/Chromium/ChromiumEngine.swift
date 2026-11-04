@@ -56,7 +56,7 @@ private let snapshotCallback: ReArcSnapshotCallback = { context, status, _, gene
 /// engine profile is open (named profiles open asynchronously); commands
 /// issued earlier wait for it.
 @Observable
-final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding, PageFullscreenControlling {
+final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding, PageFullscreenControlling, LiveVideoProviding {
     let profileContext: EngineProfileContext
     @ObservationIgnored let role: EngineRole
     @ObservationIgnored let shellID: UUID
@@ -84,6 +84,8 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     private(set) var isPageFullscreen = false
     /// ABI 1.30: this tab's video is in the Picture in Picture window (PiP events).
     private(set) var isPictureInPicture = false
+    /// ABI 1.43: the engine overlay showing this tab's PiP video, while its session is shown.
+    private(set) var videoOverlay: ChromiumVideoOverlay?
     /// Print requests the page made (ABI 1.28), for logs and the self-test.
     @ObservationIgnored private(set) var printRequestCount = 0
     /// 0 secure, 1 insecure, 2 dangerous, 3 none, 4 unknown (engine security_state).
@@ -315,6 +317,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
             isCrashed = false
             isPageFullscreen = false
             isPictureInPicture = false
+            videoOverlay = nil
             tabID = 0
             engineProfileID = 0
             resumeCommitWaiters(throwing: ChromiumScriptError.noTab)
@@ -356,9 +359,14 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
                 snapshot.pipAvailable = false
                 snapshot.pipActive = false
             }
+            if runtime.capabilities.pipEmbedded {
+                var actions: UInt32 = 0
+                if ReArcTabGetMediaActions(tabID, &actions) == .rearcOK { snapshot.actions = actions }
+            }
             var state = ChromiumMediaMapping.apply(snapshot, to: mediaState)
             // The PiP event is authoritative; a media event can lag it.
             if runtime.capabilities.pictureInPicture { state.isPictureInPicture = isPictureInPicture || snapshot.pipActive }
+            state.hasLiveVideo = videoOverlay != nil
             if state != mediaState { mediaStateSubject.send(state) }
         case .security:
             securityLevel = event.security
@@ -552,6 +560,21 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
         case .backToTab:
             break
         }
+    }
+
+    // MARK: Live video (ABI 1.43)
+
+    var liveVideo: (any LiveVideoHandle)? { videoOverlay }
+
+    /// An overlay event for this tab (nil: the overlay closed).
+    func videoOverlayChanged(_ overlay: ChromiumVideoOverlay?) {
+        let shown = overlay?.isShown == true ? overlay : nil
+        if shown !== videoOverlay { videoOverlay = shown }
+        // Ended media leaves the player: the session closes (a looping video never ends).
+        if let shown, shown.hasEnded { shown.perform(.close) }
+        var state = mediaState
+        state.hasLiveVideo = shown != nil
+        if state != mediaState { mediaStateSubject.send(state) }
     }
 
     // MARK: Printing (ABI 1.28)

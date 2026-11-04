@@ -410,6 +410,18 @@ private let pictureInPictureCallback: ReArcPictureInPictureCallback = { context,
     MainActor.assumeIsolated { runtime(from: context).handlePictureInPicture(copied) }
 }
 
+private let videoOverlayCallback: ReArcVideoOverlayCallback = { context, event in
+    guard let e = event?.pointee, let kind = ChromiumVideoOverlayEvent.Kind(rawValue: e.kind) else { return }
+    // `created` hands over a +1 view; take that reference here.
+    let view = e.view.map { Unmanaged<NSView>.fromOpaque($0).takeRetainedValue() }
+    let copied = ChromiumVideoOverlayEvent(
+        profileID: e.profile_id, tabID: e.tab_id, contentGeneration: e.content_generation, overlayID: e.overlay_id,
+        kind: kind, view: view, width: e.width, height: e.height, playback: e.playback, buttons: e.buttons,
+        muted: e.muted, duration: e.duration, position: e.position, rate: e.rate,
+        title: e.title.map { String(cString: $0) } ?? ""
+    )
+    MainActor.assumeIsolated { runtime(from: context).handleVideoOverlay(copied) }
+}
 /// Context for one `ReArcTabPrintToPDF`. Retained (+1) across the C call;
 /// released once, by the completion or on synchronous rejection.
 final class PrintToPDFBox {
@@ -518,6 +530,10 @@ final class ChromiumRuntime {
     /// Print requests received and PiP events, per kind (logs, self-test).
     private(set) var printRequests = 0
     private(set) var pictureInPictureEvents: [ChromiumPictureInPictureEvent] = []
+    /// Live engine video overlays by overlay ID (ABI 1.43), until `closed`.
+    private(set) var videoOverlays: [UInt64: ChromiumVideoOverlay] = [:]
+    /// Overlay event kinds received, in order (logs, self-test).
+    private(set) var videoOverlayEvents: [(overlayID: UInt64, kind: ChromiumVideoOverlayEvent.Kind)] = []
     /// The drop policy the engine accepted at `ready` (nil: drops into pages stay aborted).
     private(set) var dropPolicy: PageDropPolicy?
     /// Default download directory, written to every open profile's Chromium
@@ -695,6 +711,10 @@ final class ChromiumRuntime {
         }
         if capabilities.pictureInPicture {
             ReArcEngineSetPictureInPictureCallback(pictureInPictureCallback, context)
+        }
+        // Wave 32 (ABI 1.43): PiP video renders into shell views (sidebar card, floating panel).
+        if capabilities.pipEmbedded {
+            ReArcEngineSetVideoOverlayCallback(videoOverlayCallback, context)
         }
         if capabilities.downloads {
             // Before any tab exists; each profile gets its policy when it opens.
@@ -1303,6 +1323,26 @@ final class ChromiumRuntime {
         guard let engine = engines[event.tabID]?.value else { return }
         engine.handlePictureInPicture(event)
         if event.phase == .backToTab { onPictureInPictureBackToTab?(engine) }
+    }
+
+    fileprivate func handleVideoOverlay(_ event: ChromiumVideoOverlayEvent) {
+        videoOverlayEvents.append((event.overlayID, event.kind))
+        if videoOverlayEvents.count > 200 { videoOverlayEvents.removeFirst(videoOverlayEvents.count - 200) }
+        if event.kind != .position {
+            ChromiumLog.info("video_overlay \(event.overlayID) tab \(event.tabID) \(event.kind)")
+        }
+        switch event.kind {
+        case .created:
+            guard let view = event.view else { return }
+            videoOverlays[event.overlayID] = ChromiumVideoOverlay(overlayID: event.overlayID, tabID: event.tabID, view: view)
+        case .closed:
+            guard let overlay = videoOverlays.removeValue(forKey: event.overlayID) else { return }
+            engines[overlay.tabID]?.value?.videoOverlayChanged(nil)
+        default:
+            guard let overlay = videoOverlays[event.overlayID] else { return }
+            overlay.apply(event)
+            engines[overlay.tabID]?.value?.videoOverlayChanged(overlay)
+        }
     }
 
     /// `ReArcEngineSetDropPolicy` (ABI 1.29). Each call replaces the whole policy.

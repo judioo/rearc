@@ -50,7 +50,9 @@ final class ChromiumMediaMappingTests: XCTestCase {
     func testHasMetadataFalseLeavesMetadataUnchanged() {
         // Even empty strings in the event must not clear metadata when has_metadata is false.
         let next = ChromiumMediaMapping.apply(snapshot(playback: 1, audible: false, hasMetadata: false, title: "", artist: "", album: ""), to: playing)
-        XCTAssertEqual(next, WebMediaState(isPlaying: false, isAudible: false, title: "Song", artist: "Band", album: "Record"))
+        // Playback 1 is paused (wave 32); without action bits (below ABI 1.43) both track buttons stay enabled.
+        XCTAssertEqual(next, WebMediaState(isPlaying: false, isPaused: true, isAudible: false, title: "Song", artist: "Band", album: "Record",
+                                           canPreviousTrack: true, canNextTrack: true))
     }
 
     func testHasMetadataTrueReplacesAllFieldsTogether() {
@@ -62,7 +64,7 @@ final class ChromiumMediaMappingTests: XCTestCase {
 
     func testAuthoritativeSnapshotClearsWithEmptyOrMissingStrings() {
         let cleared = ChromiumMediaMapping.apply(snapshot(playback: 2, audible: false, hasMetadata: true, title: "", artist: "", album: ""), to: playing)
-        XCTAssertEqual(cleared, WebMediaState(isPlaying: false, isAudible: false))
+        XCTAssertEqual(cleared, WebMediaState(isPlaying: false, isAudible: false, canPreviousTrack: true, canNextTrack: true))
         let partial = ChromiumMediaMapping.apply(snapshot(hasMetadata: true, title: "Only title"), to: playing)
         XCTAssertEqual(partial.title, "Only title")
         XCTAssertNil(partial.artist)

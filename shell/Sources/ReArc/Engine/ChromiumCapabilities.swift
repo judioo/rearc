@@ -49,6 +49,7 @@ struct ChromiumCapabilities: Equatable {
     static let devToolsFeature = "devtools"
     static let clientCertificatesFeature = "client_certificates"
     static let keyEquivalentEventsFeature = "key_equivalent_events"
+    static let pipEmbeddedFeature = "pip_embedded"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -94,6 +95,7 @@ struct ChromiumCapabilities: Equatable {
         devToolsFeature: 40,
         clientCertificatesFeature: 41,
         keyEquivalentEventsFeature: 42,
+        pipEmbeddedFeature: 43,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -184,6 +186,9 @@ struct ChromiumCapabilities: Equatable {
     /// The page's verdict on each Command/Control key (`ReArcEngineSetKeyEquivalentCallback`):
     /// unconsumed keys run the shell's menu shortcut instead of being dropped.
     var keyEquivalentEvents: Bool
+    /// Video PiP renders into a shell view (`ReArcEngineSetVideoOverlayCallback`) and
+    /// media events come with `ReArcTabGetMediaActions`; requires `pictureInPicture`.
+    var pipEmbedded: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -235,6 +240,7 @@ struct ChromiumCapabilities: Equatable {
         devTools = adopted(Self.devToolsFeature)
         clientCertificates = adopted(Self.clientCertificatesFeature)
         keyEquivalentEvents = adopted(Self.keyEquivalentEventsFeature)
+        pipEmbedded = pictureInPicture && adopted(Self.pipEmbeddedFeature)
     }
 
     /// Inspect in the page menu: the shell opens a hosted frontend itself
@@ -305,6 +311,7 @@ struct ChromiumCapabilities: Equatable {
             (Self.devToolsFeature, devTools),
             (Self.clientCertificatesFeature, clientCertificates),
             (Self.keyEquivalentEventsFeature, keyEquivalentEvents),
+            (Self.pipEmbeddedFeature, pipEmbedded),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

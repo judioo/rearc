@@ -13,6 +13,8 @@ struct ChromiumMediaSnapshot: Equatable {
     /// ABI 1.30 with a PiP callback registered; false otherwise.
     var pipAvailable = false
     var pipActive = false
+    /// ABI 1.43 `ReArcTabGetMediaActions` bits; nil before (track buttons stay enabled).
+    var actions: UInt32?
 }
 
 /// Maps engine media events onto `WebMediaState` (C-ABI.md "Services
@@ -23,6 +25,15 @@ enum ChromiumMediaMapping {
     static func apply(_ snapshot: ChromiumMediaSnapshot, to state: WebMediaState) -> WebMediaState {
         var next = state
         next.isPlaying = snapshot.playback == 0
+        next.isPaused = snapshot.playback == 1
+        if let actions = snapshot.actions {
+            next.canPreviousTrack = actions & previousTrackBit != 0
+            next.canNextTrack = actions & nextTrackBit != 0
+        } else {
+            // No availability before ABI 1.43: the engine rejects an unsupported skip itself.
+            next.canPreviousTrack = true
+            next.canNextTrack = true
+        }
         next.isAudible = snapshot.audible
         // Real only while the shell's PiP callback is registered (ABI 1.30); false before.
         next.canPictureInPicture = snapshot.pipAvailable
@@ -34,6 +45,10 @@ enum ChromiumMediaMapping {
         }
         return next
     }
+
+    /// `REARC_MEDIA_ACTION_PREVIOUS_TRACK` / `_NEXT_TRACK` (rearc_engine_abi.h).
+    static let previousTrackBit: UInt32 = 1 << 2
+    static let nextTrackBit: UInt32 = 1 << 3
 
     private static func nonEmpty(_ value: String?) -> String? {
         guard let value, !value.isEmpty else { return nil }
