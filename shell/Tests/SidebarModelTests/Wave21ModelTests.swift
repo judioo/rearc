@@ -336,4 +336,40 @@ final class Wave21ModelTests: XCTestCase {
         XCTAssertNil(BoostLibraryListing.siteURL(from: "localhost"))
         XCTAssertNil(BoostLibraryListing.siteURL(from: ""))
     }
+
+    // MARK: External links
+
+    func testExternalLinksRouteByPreferenceAndReuseOpenTabs() {
+        let store = SidebarStore(spaces: [Space(name: "A", sortRank: "a"), Space(name: "B", sortRank: "b")])
+        let b = store.spaces(in: store.activeProfileID)[1]
+        store.selectSpace(b.id)
+        let page = url("https://example.com/a")
+        XCTAssertEqual(ExternalLinkRouting.route(page, destination: .littleArc, in: store),
+                       .littleArc(page, profileID: store.activeProfileID))
+        XCTAssertEqual(ExternalLinkRouting.route(page, destination: .activeSpace, in: store),
+                       .newTab(page, spaceID: b.id), "a new tab lands in the space in front")
+
+        let open = store.addTab(kind: .today, title: "A", url: page)
+        XCTAssertEqual(ExternalLinkRouting.route(page, destination: .littleArc, in: store), .focusTab(open.id),
+                       "a page already open is focused, not opened twice")
+
+        XCTAssertEqual(ExternalLinkRouting.route(url("javascript:alert(1)"), destination: .activeSpace, in: store), .rejected)
+        XCTAssertEqual(ExternalLinkRouting.route(url("mailto:a@b.c"), destination: .activeSpace, in: store), .rejected)
+        XCTAssertEqual(ExternalLinkRouting.route(url("chrome://settings"), destination: .activeSpace, in: store), .rejected)
+    }
+
+    func testExternalLinkPreferencePersistsAndHasACommand() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "rearc-w21-\(UUID().uuidString)"))
+        XCTAssertEqual(ExternalLinkDestination.load(from: defaults), .littleArc, "Arc's default")
+        ExternalLinkDestination.activeSpace.save(to: defaults)
+        XCTAssertEqual(ExternalLinkDestination.load(from: defaults), .activeSpace)
+
+        let store = SidebarStore()
+        let context = CommandBarContext(store: store, isSidebarVisible: true, closedTabStack: ClosedTabStack(),
+                                        externalLinkDestination: .littleArc)
+        let actions = AppCommandRegistry.all(in: context).map(\.action)
+        XCTAssertTrue(actions.contains(.setAsDefaultBrowser))
+        XCTAssertTrue(actions.contains(.setExternalLinkDestination(.activeSpace)))
+        XCTAssertFalse(actions.contains(.setExternalLinkDestination(.littleArc)), "the current choice is hidden")
+    }
 }

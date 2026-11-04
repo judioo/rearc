@@ -68,6 +68,9 @@ public enum AppCommandAction: Equatable, Hashable {
     case findInPage
     case showDownloads
     case clearCommandBarHistory
+    /// Arc `setAsDefaultBrowser` (COMMAND-BAR §6.6).
+    case setAsDefaultBrowser
+    case setExternalLinkDestination(ExternalLinkDestination)
 }
 
 /// Read-only command-bar context for enablement and dynamic commands.
@@ -83,6 +86,8 @@ public struct CommandBarContext {
     public var tabMuteModel: TabMediaMuteModel
     /// What the running engine admits beyond the base URL set (Chromium WebUI, view-source).
     public var navigationSchemes: NavigationURLPolicy.EngineSchemes
+    /// Where links from other apps open now (its own command is hidden).
+    public var externalLinkDestination: ExternalLinkDestination
 
     public init(
         store: SidebarStore,
@@ -92,8 +97,10 @@ public struct CommandBarContext {
         focusedLittleArcID: LittleArcWindow.ID? = nil,
         mediaByTab: [Tab.ID: WebMediaState] = [:],
         tabMuteModel: TabMediaMuteModel = TabMediaMuteModel(),
-        navigationSchemes: NavigationURLPolicy.EngineSchemes = []
+        navigationSchemes: NavigationURLPolicy.EngineSchemes = [],
+        externalLinkDestination: ExternalLinkDestination = .littleArc
     ) {
+        self.externalLinkDestination = externalLinkDestination
         self.store = store
         self.isSidebarVisible = isSidebarVisible
         self.closedTabStack = closedTabStack
@@ -234,8 +241,10 @@ public struct AppCommand: Equatable, Identifiable {
             }
         case .findInPage:
             return store.selectedTab != nil
-        case .showDownloads, .clearCommandBarHistory:
+        case .showDownloads, .clearCommandBarHistory, .setAsDefaultBrowser:
             return true
+        case .setExternalLinkDestination(let destination):
+            return context.externalLinkDestination != destination
         }
     }
 }
@@ -275,6 +284,15 @@ public enum AppCommandRegistry {
                 keywords: ["change", "profile", profile.name, "space", "move"],
                 minQueryLength: 2,
                 action: .moveSpaceToProfile(profile.id)
+            ))
+        }
+        for destination in ExternalLinkDestination.allCases {
+            commands.append(AppCommand(
+                id: "external-links-\(destination.rawValue)",
+                title: destination.title,
+                keywords: ["external", "links", "default", "browser", "little", "arc", "space", "open"],
+                minQueryLength: 3,
+                action: .setExternalLinkDestination(destination)
             ))
         }
         if let tab = context.store.selectedTab,
@@ -470,6 +488,13 @@ public enum AppCommandRegistry {
                 keywords: ["boost", "new", "create", "site", "extension", "css"],
                 minQueryLength: 2,
                 action: .newBoostForSite
+            ),
+            AppCommand(
+                id: "set-default-browser",
+                title: "Set as Default Browser",
+                keywords: ["default", "browser", "default browser", "links", "set"],
+                minQueryLength: 3,
+                action: .setAsDefaultBrowser
             ),
             AppCommand(
                 id: "manage-boosts",

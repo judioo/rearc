@@ -11,6 +11,8 @@ enum ReArcMain {
             arguments: CommandLine.arguments,
             environment: ProcessInfo.processInfo.environment
         )
+        // Links from other apps (ReArc as the default browser), both engines.
+        if !options.selfTest { ExternalLinkRouter.shared.install() }
         if options.engine == .chromium {
             #if REARC_CHROMIUM
             ChromiumHost.launch(options)

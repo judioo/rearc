@@ -170,6 +170,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         }
         NSApp.mainMenu = makeMainMenu(model: model)
         openBrowserWindow()
+        ExternalLinkRouter.shared.attach(model)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(applicationDidBecomeActive(_:)),
@@ -381,6 +382,15 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             app.addItem(target.item("About Chromium Engine", "") { model.openBrowserPage(.version) })
             app.addItem(.separator())
         }
+        app.addItem(target.item("Set ReArc as Default Browser…", "") { model.setAsDefaultBrowser() })
+        let links = NSMenu(title: "External Links")
+        for destination in ExternalLinkDestination.allCases {
+            links.addItem(target.checkItem(destination.menuTitle, isOn: { model.externalLinkDestination == destination }) {
+                model.externalLinkDestination = destination
+            })
+        }
+        app.addSubmenu(links, title: "External Links")
+        app.addItem(.separator())
         app.addItem(withTitle: "Hide ReArc", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         app.addItem(.separator())
         // NSApp.terminate is routed to terminate_requested -> ReArcEngineShutdown.
@@ -477,8 +487,21 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     }
 }
 
-final class ChromiumMenuTarget: NSObject {
+final class ChromiumMenuTarget: NSObject, NSMenuItemValidation {
     private var actions: [Int: () -> Void] = [:]
+    /// Checkmark state, read each time the menu opens.
+    private var checks: [Int: () -> Bool] = [:]
+
+    func checkItem(_ title: String, isOn: @escaping () -> Bool, action: @escaping () -> Void) -> NSMenuItem {
+        let item = item(title, "", [], action: action)
+        checks[item.tag] = isOn
+        return item
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if let isOn = checks[menuItem.tag] { menuItem.state = isOn() ? .on : .off }
+        return true
+    }
 
     func item(
         _ title: String,

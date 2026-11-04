@@ -77,6 +77,7 @@ public enum CommandBarSearch {
         tabMuteModel: TabMediaMuteModel = TabMediaMuteModel(),
         navigationSchemes: NavigationURLPolicy.EngineSchemes = [],
         history: VisitHistory = VisitHistory(),
+        externalLinkDestination: ExternalLinkDestination = .littleArc,
         now: Date = Date()
     ) -> [Result] {
         let (mode, needle) = parseMode(query)
@@ -88,7 +89,8 @@ public enum CommandBarSearch {
             focusedLittleArcID: focusedLittleArcID,
             mediaByTab: mediaByTab,
             tabMuteModel: tabMuteModel,
-            navigationSchemes: navigationSchemes
+            navigationSchemes: navigationSchemes,
+            externalLinkDestination: externalLinkDestination
         )
 
         switch mode {

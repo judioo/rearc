@@ -119,6 +119,11 @@ PLIST="$APP/Contents/Info.plist"
 plutil -replace CFBundleExecutable -string ReArc "$PLIST"
 plutil -replace CFBundleName -string ReArc "$PLIST"
 plutil -replace CFBundleDisplayName -string ReArc "$PLIST"
+# A browser: LaunchServices offers it as the default for web links, and other apps'
+# http/https links arrive as GetURL Apple Events (ExternalLinkRouter). Set explicitly so
+# the bundle never depends on what the engine's own plist declares.
+plutil -replace CFBundleURLTypes -json \
+  '[{"CFBundleURLName":"Web site URL","CFBundleTypeRole":"Viewer","CFBundleURLSchemes":["http","https"]}]' "$PLIST"
 if [[ $DEV_MOCK_KEYCHAIN == 1 ]]; then
   plutil -replace ReArcDevUseMockKeychain -bool YES "$PLIST"
   echo "==> DEVELOPMENT bundle: --use-mock-keychain enabled (cookies are not Keychain-encrypted)"

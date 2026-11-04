@@ -31,6 +31,14 @@ struct ReArcApp: App {
         }
         .defaultSize(width: 1000, height: 720)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Set ReArc as Default Browser…") { model.setAsDefaultBrowser() }
+                Picker("External Links", selection: $model.externalLinkDestination) {
+                    ForEach(ExternalLinkDestination.allCases, id: \.self) { destination in
+                        Text(destination.menuTitle).tag(destination)
+                    }
+                }
+            }
             // Cmd+T — new tab, replacing File > New (window).
             CommandGroup(replacing: .newItem) {
                 Button("New Tab") { model.newTab() }

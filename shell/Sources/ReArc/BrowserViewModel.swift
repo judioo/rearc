@@ -44,6 +44,15 @@ final class BrowserViewModel {
     /// leading edge (Arc `SidebarHovering` / floating sidebar).
     var isSidebarPeeking = false
     var isArchivePresented = false
+    /// Where links from other apps open; remembered across launches.
+    var externalLinkDestination: ExternalLinkDestination = .load(from: .standard) {
+        didSet { externalLinkDestination.save(to: externalLinkDefaults) }
+    }
+    @ObservationIgnored var externalLinkDefaults: UserDefaults = .standard
+    @ObservationIgnored var defaultBrowser: any DefaultBrowserSetting = SystemDefaultBrowser()
+    /// Bumped when the default-browser state may have changed (menus re-read it).
+    var defaultBrowserRevision = 0
+    var defaultBrowserMessage: String?
     /// View Boosts: the Boosts library sheet.
     var isBoostLibraryPresented = false
     /// Space being edited in the Edit Space sheet (name, theme, icon).
@@ -87,7 +96,8 @@ final class BrowserViewModel {
             mediaByTab: mediaStateByTab,
             tabMuteModel: tabMuteModel,
             navigationSchemes: engineHost.navigationSchemes,
-            history: visitHistory
+            history: visitHistory,
+            externalLinkDestination: externalLinkDestination
         )
     }
 
@@ -1189,6 +1199,10 @@ final class BrowserViewModel {
             }
         case .manageBoosts:
             isBoostLibraryPresented = true
+        case .setAsDefaultBrowser:
+            setAsDefaultBrowser()
+        case .setExternalLinkDestination(let destination):
+            externalLinkDestination = destination
         case .toggleBoost(let packageID):
             let library = store.boostLibrary()
             guard let install = library.installation(for: packageID) else {

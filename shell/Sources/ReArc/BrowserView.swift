@@ -142,7 +142,16 @@ struct BrowserView: View {
         } message: {
             Text(model.captureErrorMessage ?? "")
         }
+        .alert("Default Browser", isPresented: Binding(
+            get: { model.defaultBrowserMessage != nil && isKeyWindowSheetOwner },
+            set: { if !$0 { model.defaultBrowserMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { model.defaultBrowserMessage = nil }
+        } message: {
+            Text(model.defaultBrowserMessage ?? "")
+        }
         .onAppear {
+            ExternalLinkRouter.shared.attach(model)
             model.store.registerWindow(windowID)
             stripCloseWindowShortcut()
             model.restoreLittleArcWindowsIfNeeded()

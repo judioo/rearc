@@ -3,6 +3,20 @@ import XCTest
 @testable import ReArc
 @testable import SidebarModel
 
+/// Records default-browser requests; never touches LaunchServices.
+private final class FakeDefaultBrowser: DefaultBrowserSetting {
+    var canBecomeDefault = true
+    var isDefault = false
+    var result: Error?
+    private(set) var requests = 0
+
+    func makeDefault(_ completion: @escaping (Error?) -> Void) {
+        requests += 1
+        if result == nil { isDefault = true }
+        completion(result)
+    }
+}
+
 /// Wave 21: space swipes and the themed window, changing a space's profile,
 /// drag-to-split, tab-to-search, the boost library and external links.
 final class Wave21ShellTests: XCTestCase {
@@ -254,5 +268,75 @@ final class Wave21ShellTests: XCTestCase {
         model.openBoostSite(copy)
         XCTAssertFalse(model.isBoostLibraryPresented)
         XCTAssertEqual(model.store.selectedTab?.url, URL(string: "https://github.com/"))
+    }
+
+    // MARK: Default browser and external links
+
+    func testSetAsDefaultBrowserAsksOnceAndExplainsRefusals() {
+        let model = makeModel()
+        let fake = FakeDefaultBrowser()
+        model.defaultBrowser = fake
+
+        fake.canBecomeDefault = false
+        model.setAsDefaultBrowser()
+        XCTAssertEqual(fake.requests, 0)
+        XCTAssertEqual(model.defaultBrowserMessage, "Run ReArc from its app bundle to make it your default browser.")
+
+        fake.canBecomeDefault = true
+        model.defaultBrowserMessage = nil
+        XCTAssertNil(model.executeCommand(.setAsDefaultBrowser, commandID: nil))
+        XCTAssertEqual(fake.requests, 1)
+        XCTAssertTrue(model.isDefaultBrowser)
+        XCTAssertNil(model.defaultBrowserMessage)
+
+        model.setAsDefaultBrowser()
+        XCTAssertEqual(fake.requests, 1, "already the default: nothing to ask")
+        XCTAssertEqual(model.defaultBrowserMessage, "ReArc is already your default browser.")
+
+        let refused = FakeDefaultBrowser()
+        refused.result = NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "declined"])
+        model.defaultBrowser = refused
+        model.setAsDefaultBrowser()
+        XCTAssertEqual(model.defaultBrowserMessage, "ReArc could not become the default browser: declined")
+    }
+
+    func testSystemDefaultBrowserIsNeverSetFromATestProcess() {
+        // The test runner is no app bundle, so the real service refuses before LaunchServices.
+        XCTAssertFalse(SystemDefaultBrowser().canBecomeDefault)
+        XCTAssertFalse(SystemDefaultBrowser().isDefault)
+    }
+
+    func testExternalLinksOpenInLittleArcOrTheCurrentSpace() throws {
+        let model = makeModel()
+        model.externalLinkDefaults = try XCTUnwrap(UserDefaults(suiteName: "rearc-w21-\(UUID().uuidString)"))
+        model.externalLinkDestination = .littleArc
+        let page = URL(string: "https://example.com/news")!
+        model.openExternalURL(page)
+        XCTAssertEqual(model.store.littleArcLiveWindows.last?.url, page)
+        let tabCount = model.store.displayTabs().count
+
+        model.externalLinkDestination = .activeSpace
+        let other = URL(string: "https://example.org/")!
+        model.openExternalURL(other)
+        XCTAssertEqual(model.store.selectedTab?.url, other)
+        XCTAssertEqual(model.store.displayTabs().count, tabCount + 1)
+
+        model.openExternalURL(other)
+        XCTAssertEqual(model.store.displayTabs().count, tabCount + 1, "the open tab is focused again")
+        model.openExternalURL(URL(string: "javascript:alert(1)")!)
+        XCTAssertEqual(model.store.displayTabs().count, tabCount + 1)
+        XCTAssertNil(model.executeCommand(.setExternalLinkDestination(.littleArc), commandID: nil))
+        XCTAssertEqual(model.externalLinkDestination, .littleArc)
+    }
+
+    func testLinksBeforeTheModelWaitForIt() {
+        let router = ExternalLinkRouter()
+        let page = URL(string: "https://example.net/")!
+        router.receive(page)
+        let model = makeModel()
+        model.externalLinkDefaults = UserDefaults(suiteName: "rearc-w21-\(UUID().uuidString)")!
+        model.externalLinkDestination = .activeSpace
+        router.attach(model)
+        XCTAssertEqual(model.store.selectedTab?.url, page)
     }
 }
