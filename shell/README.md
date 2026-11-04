@@ -1063,30 +1063,46 @@ space can change profile.
 | Tab / ⌫ in the command bar | Search the typed site / remove the site pill |
 | ⇧⌫ in the command bar | Remove the highlighted history row |
 
-## Sync: not implemented
+## Sync: iCloud (wave 25, not yet run on real iCloud)
 
-**Nothing syncs.** Sidebar state lives only in the local `sidebar.json`.
-What exists is the local groundwork:
+The sidebar syncs through CloudKit, but only in a build signed with an
+iCloud container. Every other build (`swift run`, `swift test`, ad-hoc
+bundles, and bundles made without `REARC_ICLOUD_CONTAINER`) gets the inert
+`UnavailableSyncEngine`, never creates a `CKContainer`, and Settings says
+"iCloud sync unavailable in this build". The account steps are in
+`docs/ICLOUD-SETUP.md`; records, merge rules and how this differs from
+SYNC-DESIGN are in `docs/SYNC-RECORDS.md`.
 
-- A **mutation journal** records sidebar mutations with LexoRank ordering, a
-  device id and a monotonic sequence. Folder placement is its own mutation,
-  `placeItemInFolder`. `SyncOutboundPipeline` coalesces the journal and hands
-  it to a `SyncEngine`, and `CloudKitRecordMapper` maps entries to CloudKit
-  record fields (unit-tested). None of it reaches a server.
-- `LocalSyncEngine` (SwiftPM dev builds) keeps everything on the machine,
-  and the bottom-bar dot stays grey.
-- `CloudKitSyncEngine` is a **stub**. It is used only when the bundle
-  declares the iCloud container `iCloud.net.rearc.sidebar`. `push` maps
-  the records and discards them, and `pull` returns nothing. It never
-  creates the `com.rearc.sidebar.graph.v1` zone or calls a CloudKit
-  operation. Since wave 19 it always reports
-  `unavailable("CloudKit upload is not implemented; sidebar changes stay on
-  this Mac")`, so the dot stays grey. `SyncOutboundPipeline` no longer sets
-  a status itself, and `SyncStatusPresentation` shows green only for
-  `idleSynced`, which only an engine with a confirmed upload may report.
-  Without the entitlement, `makeEngine()` returns `unavailable(reason:)`.
+- **What syncs:** spaces with their themes and icons, profiles, Favorites,
+  pinned tabs, folders, splits in Pinned, and Boosts with their per-space
+  policy. Today tabs, easels, selection, the archive and Little Arc windows
+  stay on each Mac.
+- **How:** `SidebarSyncCoordinator` diffs the sidebar against the last merged
+  records and stamps changed fields with a hybrid logical clock. It then
+  fetches and merges (field-level last-writer-wins plus tombstones), rebuilds
+  the sidebar, and uploads with optimistic concurrency, merging and retrying
+  on conflicts. Lists are ordered by per-row LexoRank fields, repaired so
+  that concurrent reorders converge. Orphans and folder cycles are rescued
+  the same way on every Mac.
+- **Transport:** `SidebarSyncTransport`. `CloudKitSyncTransport` uses
+  CKSyncEngine (macOS 14) on the private database, zone
+  `com.rearc.sidebar.graph.v1`, with payloads in `encryptedValues`.
+  `InMemorySyncServer` is the test double: change tokens, stale tags, zone
+  resets, account switches, and network, quota and rate-limit faults.
+- **Offline:** unconfirmed writes stay `pending` in `sync-state.json` next to
+  `sidebar.json`. They upload after reconnecting or relaunching. Transient
+  errors back off: 5 s × 2ⁿ, at most 15 min, never sooner than `retryAfter`.
+- **Settings:** the WebKit build has the standard Settings window (⌘,). On
+  Chromium, ⌘, opens Chromium's settings, so use **ReArc > iCloud Sync…**.
+  Both show the toggle (off by default), status, account, last synced time,
+  queued changes and **Sync Now**. The bottom-bar dot turns green only after
+  the server confirmed every pending write.
+- **Signing opt-in:** `REARC_ICLOUD_CONTAINER` and
+  `REARC_PROVISIONING_PROFILE` in `signing.local.env` (see
+  `signing.example.env`). `scripts/icloud-signing.sh` checks the profile,
+  merges the iCloud entitlements, embeds the profile and signs the bundle.
 
-Real sync (zone setup, record upload and fetch with change tokens, conflict
-merge, then the end-to-end encryption in `docs/SYNC-DESIGN.md`) is future
-work. The Archive, folder expansion and auto-archive thresholds are not in
-the journal.
+The mutation journal and `SyncOutboundPipeline` remain. They now only tell
+the scheduler that something changed. Not done yet: ReArc's own end-to-end
+encryption, recovery phrase and device pairing (SYNC-DESIGN P2), push
+notifications, and a first run against a real iCloud container.
