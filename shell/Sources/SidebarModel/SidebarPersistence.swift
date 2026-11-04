@@ -151,11 +151,13 @@ public final class SidebarFilePersistence: SidebarPersisting {
 
     private func writeNow() {
         guard autosaveEnabled, let store else { return }
-        let snapshot = captureSnapshot(from: store)
-        guard let data = try? encoder.encode(snapshot) else { return }
-        let directory = fileURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try? data.write(to: fileURL, options: [.atomic])
+        let snapshot = ModelSignposts.measure(ModelSignposts.persistence, "SidebarSnapshot") { captureSnapshot(from: store) }
+        ModelSignposts.measure(ModelSignposts.persistence, "SidebarEncodeWrite") {
+            guard let data = try? encoder.encode(snapshot) else { return }
+            let directory = fileURL.deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try? data.write(to: fileURL, options: [.atomic])
+        }
     }
 
     /// Snapshots must be taken on the main thread because `SidebarStore` is main-thread-owned.

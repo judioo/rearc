@@ -3,10 +3,13 @@ import Foundation
 extension SidebarStore {
 
     func notifyMutation(_ mutation: SidebarJournalMutation? = nil) {
-        if let mutation {
-            mutationJournal.record(mutation)
+        ModelSignposts.measure(ModelSignposts.model, "StoreMutation",
+                               detail: mutation.map { String(describing: $0).prefix(while: { $0 != "(" }).description } ?? "untracked") {
+            if let mutation {
+                mutationJournal.record(mutation)
+            }
+            onDidMutate?()
         }
-        onDidMutate?()
     }
 
     func journalInsertItem(

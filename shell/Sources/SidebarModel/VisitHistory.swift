@@ -196,6 +196,12 @@ public enum VisitHistoryFile {
     }
 
     public static func save(_ history: VisitHistory, to url: URL) throws {
+        try ModelSignposts.measure(ModelSignposts.persistence, "VisitHistorySave", detail: "\(history.records.count) visits") {
+            try write(history, to: url)
+        }
+    }
+
+    private static func write(_ history: VisitHistory, to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
