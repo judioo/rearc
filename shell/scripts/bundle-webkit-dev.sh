@@ -46,6 +46,10 @@ cat > "$PLIST" <<PLIST
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSCameraUsageDescription</key><string>A website you allowed wants to use your camera.</string>
+  <key>NSMicrophoneUsageDescription</key><string>A website you allowed wants to use your microphone.</string>
+  <key>NSLocationUsageDescription</key><string>A website you allowed wants to know your location.</string>
+  <key>NSLocationWhenInUseUsageDescription</key><string>A website you allowed wants to know your location.</string>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
@@ -58,7 +62,7 @@ cat > "$PLIST" <<PLIST
 </plist>
 PLIST
 plutil -lint "$PLIST" >/dev/null
-codesign --force --sign - "$APP/Contents/MacOS/ReArc" 2>/dev/null
+codesign --force --sign - --entitlements "$SHELL_DIR/scripts/ReArc.entitlements" "$APP/Contents/MacOS/ReArc" 2>/dev/null
 echo "==> $APP (ad-hoc signed; ReArc Dev > Set ReArc as Default Browser… asks macOS to register it)"
 [[ $OPEN == 1 ]] && open "$APP"
 exit 0

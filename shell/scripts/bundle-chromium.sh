@@ -124,6 +124,12 @@ plutil -replace CFBundleDisplayName -string ReArc "$PLIST"
 # the bundle never depends on what the engine's own plist declares.
 plutil -replace CFBundleURLTypes -json \
   '[{"CFBundleURLName":"Web site URL","CFBundleTypeRole":"Viewer","CFBundleURLSchemes":["http","https"]}]' "$PLIST"
+# Usage strings macOS shows when a page the user allowed asks for the camera, microphone
+# or location (TCC). Without them the request is denied silently.
+plutil -replace NSCameraUsageDescription -string "A website you allowed wants to use your camera." "$PLIST"
+plutil -replace NSMicrophoneUsageDescription -string "A website you allowed wants to use your microphone." "$PLIST"
+plutil -replace NSLocationUsageDescription -string "A website you allowed wants to know your location." "$PLIST"
+plutil -replace NSLocationWhenInUseUsageDescription -string "A website you allowed wants to know your location." "$PLIST"
 if [[ $DEV_MOCK_KEYCHAIN == 1 ]]; then
   plutil -replace ReArcDevUseMockKeychain -bool YES "$PLIST"
   echo "==> DEVELOPMENT bundle: --use-mock-keychain enabled (cookies are not Keychain-encrypted)"
@@ -137,14 +143,14 @@ fi
 BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw "$PLIST")"
 if [[ -n $SIGN_IDENTITY ]]; then
   codesign --force --sign "$SIGN_IDENTITY" --identifier "$BUNDLE_ID" --timestamp=none \
-    "$APP/Contents/MacOS/ReArc"
+    --entitlements "$SHELL_DIR/scripts/ReArc.entitlements" "$APP/Contents/MacOS/ReArc"
   if [[ -n $TEAM_ID ]]; then
     actual_team="$(codesign -dv "$APP/Contents/MacOS/ReArc" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
     [[ $actual_team == "$TEAM_ID" ]] || die "signed with team '$actual_team', expected REARC_TEAM_ID=$TEAM_ID"
   fi
   echo "==> signed ReArc executable: $SIGN_IDENTITY (team ${TEAM_ID:-unchecked}, id $BUNDLE_ID)"
 else
-  codesign --force --sign - "$APP/Contents/MacOS/ReArc" 2>/dev/null
+  codesign --force --sign - --entitlements "$SHELL_DIR/scripts/ReArc.entitlements" "$APP/Contents/MacOS/ReArc" 2>/dev/null
   echo "==> ad-hoc signed ReArc executable (set REARC_SIGN_IDENTITY for a stable signature)"
 fi
 
