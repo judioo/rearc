@@ -81,6 +81,8 @@ public enum CommandBarSearch {
         tabMuteModel: TabMediaMuteModel = TabMediaMuteModel(),
         navigationSchemes: NavigationURLPolicy.EngineSchemes = [],
         history: VisitHistory = VisitHistory(),
+        historyIndex: VisitHistorySearchIndex? = nil,
+        commandCatalog: [AppCommand]? = nil,
         externalLinkDestination: ExternalLinkDestination = .littleArc,
         live: CommandBarLiveResults? = nil,
         searchProvider: SearchProvider = .duckDuckGo,
@@ -102,7 +104,7 @@ public enum CommandBarSearch {
 
         switch mode {
         case .commandsOnly:
-            return commandResults(matching: needle, context: context, store: store, allowEmpty: true)
+            return commandResults(matching: needle, catalog: commandCatalog ?? AppCommandRegistry.all(in: context), store: store, allowEmpty: true)
         case .blended:
             guard !needle.isEmpty else { return [] }
             let tabs = tabResults(for: needle, in: store)
@@ -147,11 +149,12 @@ public enum CommandBarSearch {
             if let completed, let key = VisitHistory.key(for: completed) { shown.insert(key) }
             if let url = direct, let key = VisitHistory.key(for: url) { shown.insert(key) }
             let historySource = current?.history.map { VisitHistory(records: $0) } ?? history
-            let historyRows = historyResults(for: needle, in: historySource, now: now, excluding: shown)
+            let historyRows = historyResults(for: needle, in: historySource,
+                                             index: current?.history == nil ? historyIndex : nil, now: now, excluding: shown)
             output.append(contentsOf: historyRows)
             historyRows.compactMap { $0.destinationURL.flatMap(VisitHistory.key(for:)) }.forEach { shown.insert($0) }
             output.append(contentsOf: suggestionResults(current?.suggestions ?? [], query: query, excluding: shown, fallback: resolved))
-            output.append(contentsOf: commandResults(matching: needle, context: context, store: store, allowEmpty: false))
+            output.append(contentsOf: commandResults(matching: needle, catalog: commandCatalog ?? AppCommandRegistry.all(in: context), store: store, allowEmpty: false))
             if direct == nil, let searchURL = resolved {
                 output.append(Result(
                     id: "search-\(searchURL.absoluteString)",
@@ -234,10 +237,12 @@ public enum CommandBarSearch {
     private static func historyResults(
         for needle: String,
         in history: VisitHistory,
+        index: VisitHistorySearchIndex?,
         now: Date,
         excluding shown: Set<String>
     ) -> [Result] {
-        history.matches(for: needle, now: now, limit: historyLimit, excluding: shown).map { match in
+        let matches = (index ?? history.searchIndex).matches(for: needle, now: now, limit: historyLimit, excluding: shown)
+        return matches.map { match in
             let record = match.record
             return Result(
                 id: "history-\(record.url.absoluteString)",
@@ -288,11 +293,10 @@ public enum CommandBarSearch {
 
     private static func commandResults(
         matching needle: String,
-        context: CommandBarContext,
+        catalog: [AppCommand],
         store: SidebarStore,
         allowEmpty: Bool
     ) -> [Result] {
-        let catalog = AppCommandRegistry.all(in: context)
         var ranked: [RankedCommand] = []
 
         for command in catalog {

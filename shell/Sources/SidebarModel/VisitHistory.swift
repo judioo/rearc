@@ -33,6 +33,9 @@ public struct VisitHistory: Codable, Equatable, Sendable {
 
     /// Keyed by `VisitHistory.key(for:)`.
     public private(set) var records: [String: VisitRecord]
+    /// Derived text, prepared on load and updated one page at a time. It is
+    /// neither persisted nor part of history's value equality.
+    public private(set) var searchIndex: VisitHistorySearchIndex
 
     public init(records: [VisitRecord] = []) {
         var byKey: [String: VisitRecord] = [:]
@@ -41,7 +44,23 @@ public struct VisitHistory: Codable, Equatable, Sendable {
             byKey[key] = record
         }
         self.records = byKey
+        self.searchIndex = VisitHistorySearchIndex(records: byKey)
     }
+
+    private enum CodingKeys: String, CodingKey { case records }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        records = try values.decode([String: VisitRecord].self, forKey: .records)
+        searchIndex = VisitHistorySearchIndex(records: records)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(records, forKey: .records)
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool { lhs.records == rhs.records }
 
     public var isEmpty: Bool { records.isEmpty }
     public var count: Int { records.count }
@@ -81,28 +100,35 @@ public struct VisitHistory: Codable, Equatable, Sendable {
             records[key] = VisitRecord(url: url, title: title ?? "", firstVisit: date)
             evictIfNeeded()
         }
+        searchIndex.update(records[key], for: key)
     }
 
     /// The page's title arrived after its commit; not a new visit.
     public mutating func updateTitle(url: URL, title: String) {
         guard !title.isEmpty, let key = Self.key(for: url), records[key] != nil else { return }
         records[key]?.title = title
+        searchIndex.update(records[key], for: key)
     }
 
     public mutating func remove(url: URL) {
         guard let key = Self.key(for: url) else { return }
         records[key] = nil
+        searchIndex.update(nil, for: key)
     }
 
     public mutating func removeAll() {
         records = [:]
+        searchIndex = VisitHistorySearchIndex(records: [:])
     }
 
     private mutating func evictIfNeeded() {
         guard records.count > Self.capacity else { return }
         let overflow = records.count - Self.capacity
         let oldest = records.sorted { $0.value.lastVisit < $1.value.lastVisit }.prefix(overflow).map(\.key)
-        for key in oldest { records[key] = nil }
+        for key in oldest {
+            records[key] = nil
+            searchIndex.update(nil, for: key)
+        }
     }
 
     // MARK: Ranking
