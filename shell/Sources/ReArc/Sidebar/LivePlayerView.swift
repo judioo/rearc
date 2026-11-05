@@ -162,8 +162,11 @@ struct LiveVideoScrubber: View {
 }
 
 /// Parents the engine's video view. The same view moves between the sidebar
-/// card and the floating panel; whichever host was updated last while on
-/// screen holds it. Each layout reports the view's screen rect to the engine.
+/// card and the floating panel. The panel outranks a sidebar (it is only on
+/// screen while the placement is `.panel`), and a key window's sidebar
+/// outranks another window's. When a host lets the view go, the next host
+/// waiting for it adopts it, so the order in which SwiftUI and the panel
+/// update doesn't matter. Each layout reports the view's screen rect to the engine.
 struct LiveVideoHostView: NSViewRepresentable {
     enum Owner { case sidebar, panel }
 
@@ -171,7 +174,7 @@ struct LiveVideoHostView: NSViewRepresentable {
     let owner: Owner
 
     func makeNSView(context: Context) -> LiveVideoContainerView {
-        LiveVideoContainerView()
+        LiveVideoContainerView(owner: owner)
     }
 
     func updateNSView(_ container: LiveVideoContainerView, context: Context) {
@@ -184,7 +187,19 @@ struct LiveVideoHostView: NSViewRepresentable {
 }
 
 final class LiveVideoContainerView: NSView {
+    /// Every host in a window, so a released view can go to the next one.
+    private static let hosts = NSHashTable<LiveVideoContainerView>.weakObjects()
+
+    let owner: LiveVideoHostView.Owner
     private var video: (any LiveVideoHandle)?
+
+    init(owner: LiveVideoHostView.Owner) {
+        self.owner = owner
+        super.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     override var isFlipped: Bool { true }
 
@@ -194,8 +209,15 @@ final class LiveVideoContainerView: NSView {
     }
 
     func release() {
-        if let view = video?.view, view.superview === self { view.removeFromSuperview() }
+        let view = video?.view
         video = nil
+        Self.hosts.remove(self)
+        guard let view, view.superview === self else { return }
+        view.removeFromSuperview()
+        for other in Self.hosts.allObjects where other.video?.view === view {
+            other.adoptIfPossible()
+            if view.superview != nil { break }
+        }
     }
 
     override func viewDidMoveToWindow() {
@@ -214,12 +236,22 @@ final class LiveVideoContainerView: NSView {
         reportFrame()
     }
 
+    /// Whether this host keeps the view rather than give it to `other`.
+    private func outranks(_ other: LiveVideoContainerView) -> Bool {
+        guard let window, window !== other.window else { return false }
+        switch (owner, other.owner) {
+        case (.panel, .sidebar): return true
+        case (.sidebar, .panel): return false
+        default: return window.isVisible && window.isKeyWindow
+        }
+    }
+
     private func adoptIfPossible() {
         guard let video, window != nil else { return }
+        Self.hosts.add(self)
         let view = video.view
         if view.superview !== self {
-            // Another visible host (a key window's sidebar, the panel) keeps it.
-            if let other = view.window, other.isVisible, other !== window, other.isKeyWindow { return }
+            if let holder = view.superview as? LiveVideoContainerView, holder.outranks(self) { return }
             view.removeFromSuperview()
             view.frame = bounds
             view.autoresizingMask = [.width, .height]
