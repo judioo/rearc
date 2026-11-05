@@ -130,6 +130,11 @@ final class ChromiumBench {
             abiMinor: Int(runtime.capabilities.abiMinorVersion ?? 0), bridge: String(cString: ReArcEngineBridgeVersion()),
             chromium: String(cString: ReArcEngineVersion()))
         hangs.start { [weak self] in self?.scenario ?? "-" }
+        if options.suites.contains(.launchChild) {
+            try await startServer()
+            try await launchChild()
+            return
+        }
         // Our own processes (browser, GPU, utilities, renderers) are not "other".
         let ours = await metrics.processes().map(\.pid)
         let rest = cpu.sample(pids: ours)
@@ -140,24 +145,8 @@ final class ChromiumBench {
         log(String(format: "other processes at rest: %.1f%% of the CPU; contamination limit %.1f%%",
                    restingOtherCPU * 100, contaminationLimit * 100))
 
-        // Generate the page set before the first request (first visits must not pay for it).
-        _ = (BenchPages.images.count, BenchPages.spaScript.count, BenchPages.article.count, BenchPages.list.count)
-        if let path = options.dumpPagesPath { try BenchPages.dump(to: URL(fileURLWithPath: path, isDirectory: true)) }
-        let server = try LoopbackFixtureServer()
-        LoopbackFixtureServer.configure { settings in
-            settings.logsRequests = false
-            settings.routes = BenchPages.route
-        }
-        let port = try await server.start()
-        base = "http://127.0.0.1:\(port)"
-        report.fixture = BenchReport.Fixture(sidebar: options.fixture, seed: options.seed, server: "loopback 127.0.0.1",
-                                             pages: BenchPages.names)
-
+        try await startServer()
         try await setUpShell()
-        if options.suites.contains(.launchChild) {
-            try await launchChild()
-            return
-        }
         if options.suites.contains(.ui) { try await uiSuite() }
         if options.suites.contains(.page) { try await pageSuite() }
         if options.suites.contains(.memory) { try await memorySuite() }
@@ -183,6 +172,26 @@ final class ChromiumBench {
         }
     }
 
+    private var server: LoopbackFixtureServer?
+    /// Building the fixture sidebar in-process (a real launch decodes sidebar.json instead).
+    private var fixtureBuildSeconds = 0.0
+
+    private func startServer() async throws {
+        // Generate the page set before the first request (first visits must not pay for it).
+        _ = (BenchPages.images.count, BenchPages.spaScript.count, BenchPages.article.count, BenchPages.list.count)
+        if let path = options.dumpPagesPath { try BenchPages.dump(to: URL(fileURLWithPath: path, isDirectory: true)) }
+        let server = try LoopbackFixtureServer()
+        LoopbackFixtureServer.configure { settings in
+            settings.logsRequests = false
+            settings.routes = BenchPages.route
+        }
+        let port = try await server.start()
+        self.server = server
+        base = "http://127.0.0.1:\(port)"
+        report.fixture = BenchReport.Fixture(sidebar: options.fixture, seed: options.seed, server: "loopback 127.0.0.1",
+                                             pages: BenchPages.names)
+    }
+
     private func finish() {
         hangs.stop()
         if writeReport() {
@@ -204,9 +213,12 @@ final class ChromiumBench {
 
     private var delivery: ShellInput.Delivery { ShellInput.deliverable(window) ? .appKit : .direct }
 
-    private func setUpShell() async throws {
+    /// The fixture sidebar, the model and the real ChromiumShell with its window.
+    private func makeShell() throws {
         let size = BenchFixture.Size(rawValue: options.fixture) ?? .items500
+        let building = ProcessInfo.processInfo.systemUptime
         fixture = BenchFixture.make(size, seed: options.seed) { [base] in URL(string: "\(base)/bench/tab/\($0)")! }
+        fixtureBuildSeconds = ProcessInfo.processInfo.systemUptime - building
         let store = fixture.store
         // A small page selected at start: the first Today tab of the first space.
         if let first = store.content(for: fixture.spaceIDs[0]).todayLeaves.first?.id { store.selectTab(first) }
@@ -223,6 +235,10 @@ final class ChromiumBench {
         probe.attach(to: window)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    private func setUpShell() async throws {
+        try makeShell()
         // A loopback default search: typed text never reaches a real engine.
         if runtime.capabilities.searchAutocomplete, let services = model.commandBarServices as? ChromiumCommandBarServices {
             let engine = try selectedEngine()
@@ -871,6 +887,8 @@ final class ChromiumBench {
         record("launch.exec_to_main", ms(start, LaunchTimeline.main))
         record("launch.main_to_engine_ready", ms(LaunchTimeline.main, LaunchTimeline.engineReady))
         let fcp = pageTimings.arm(timeout: 15) { $0.kind == .firstContentfulPaint }
+        try makeShell()
+        record("launch.fixture_build", fixtureBuildSeconds * 1000)
         let visible = await probe.nextFrame(after: window)
         PerfSignposts.launchEvent("FirstSidebarFrame")
         record("launch.window_visible", ms(start, visible?.target))
@@ -879,7 +897,8 @@ final class ChromiumBench {
         let usable = await bar.value()
         PerfSignposts.launchEvent("FirstInputHandled")
         record("launch.first_usable", ms(start, usable?.target), input: delivery)
-        let painted = await fcp.value()
+        let painted = contentCanPresent ? await fcp.value() : nil
+        if !contentCanPresent { _ = contentTimeout(0) }
         PerfSignposts.launchEvent("FirstPageFrame")
         record("launch.first_page_frame", ms(start, micros: painted?.valueMicros))
         report.status = "complete"
