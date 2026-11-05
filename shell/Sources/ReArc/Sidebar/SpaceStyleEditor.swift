@@ -441,7 +441,7 @@ struct ChooseThemeRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .popover(isPresented: $isPresented, arrowEdge: .trailing) {
+        .popover(isPresented: $isPresented, arrowEdge: .leading) {
             SpaceStyleEditor(theme: $theme)
         }
     }

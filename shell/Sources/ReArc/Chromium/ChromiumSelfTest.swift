@@ -4334,7 +4334,7 @@ extension ChromiumSelfTest {
         try await wait("Choose a Theme popover", timeout: 5) { !popoverWindows().isEmpty }
         let rowPopover = popoverWindows()[0].frame
         let side = rowPopover.maxX <= rowFrame.minX + 2 ? "left" : rowPopover.minX >= rowFrame.maxX - 2 ? "right" : "over"
-        try check(side != "over", "the Choose a Theme popover \(rowPopover) overlaps its row \(rowFrame)")
+        try check(side == "left", "the Choose a Theme popover \(rowPopover) must be left of its row \(rowFrame), got \(side)")
         popoverWindows().forEach { $0.close() }
         model.spaceCreationDraft = nil
         try await wait("Create a Space sheet closed", timeout: 5) { window.attachedSheet == nil && popoverWindows().isEmpty }
