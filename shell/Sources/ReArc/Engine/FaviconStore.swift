@@ -8,7 +8,9 @@ import SidebarModel
 /// Files hold the image bytes as the engine delivered them.
 @Observable
 final class FaviconStore {
-    private var images: [String: NSImage] = [:]
+    /// Observed per host (`cells`), so one icon arriving redraws the rows showing that host only.
+    @ObservationIgnored private var images: [String: NSImage] = [:]
+    @ObservationIgnored private let cells = ObservationCells<String>()
     @ObservationIgnored private var missingOnDisk: Set<String> = []
     @ObservationIgnored private let directory: URL?
     @ObservationIgnored private let ioQueue = DispatchQueue(label: "net.rearc.favicons", qos: .utility)
@@ -25,6 +27,7 @@ final class FaviconStore {
 
     func image(for url: URL) -> NSImage? {
         guard let key = Self.hostKey(for: url) else { return nil }
+        cells.access(key)
         if let cached = images[key] { return cached }
         guard let directory, !missingOnDisk.contains(key) else { return nil }
         let file = directory.appendingPathComponent(Self.fileName(for: key))
@@ -36,7 +39,7 @@ final class FaviconStore {
             return nil
         }
         // Loaded during a view update: publish on the next turn, not mid-render.
-        DispatchQueue.main.async { [weak self] in self?.images[key] = image }
+        DispatchQueue.main.async { [weak self] in self?.setImage(image, for: key) }
         return image
     }
 
@@ -45,7 +48,7 @@ final class FaviconStore {
     @discardableResult
     func store(_ data: Data, for pageURL: URL, persist: Bool = true) -> Bool {
         guard let key = Self.hostKey(for: pageURL), let image = NSImage(data: data) else { return false }
-        images[key] = image
+        setImage(image, for: key)
         missingOnDisk.remove(key)
         guard persist, let directory else { return true }
         let file = directory.appendingPathComponent(Self.fileName(for: key))
@@ -54,6 +57,11 @@ final class FaviconStore {
             try? data.write(to: file, options: .atomic)
         }
         return true
+    }
+
+    private func setImage(_ image: NSImage, for key: String) {
+        images[key] = image
+        cells.invalidate(key)
     }
 
     /// Host names map to file names with anything outside [a-z0-9.-] replaced.

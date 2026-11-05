@@ -19,7 +19,14 @@ final class EngineHost {
         let profileID: Profile.ID
     }
 
-    private var engines: [TabEngineKey: any WebEngine] = [:]
+    /// Observed per key (`engineCells`): creating or dropping one tab's
+    /// engine notifies the views that looked that tab up, not every row.
+    @ObservationIgnored private var engines: [TabEngineKey: any WebEngine] = [:]
+    private enum EngineCell: Hashable {
+        case tab(TabEngineKey)
+        case allTabs
+    }
+    @ObservationIgnored private let engineCells = ObservationCells<EngineCell>()
     private var ephemeralEngines: [EphemeralEngineKey: any WebEngine] = [:]
     private var littleArcEngines: [LittleArcEngineKey: any WebEngine] = [:]
     /// WebKit engines hand their downloads to the tray (Chromium reports its own).
@@ -33,11 +40,25 @@ final class EngineHost {
     /// the **active** profile's storage at load time (see `BrowserViewModel.profileID(for:)`).
     func engine(for tab: Tab, profileID: Profile.ID) -> any WebEngine {
         let key = TabEngineKey(tabID: tab.id, profileID: profileID)
+        defer { engineCells.access(.tab(key)) }
         if let existing = engines[key] { return existing }
         let context = EngineProfileContext(profileID: profileID)
         let created = makeEngine(context: context, role: .tab, shellID: tab.id)
-        engines[key] = created
+        setTabEngine(created, for: key)
         return created
+    }
+
+    private func setTabEngine(_ engine: (any WebEngine)?, for key: TabEngineKey) {
+        engines[key] = engine
+        engineCells.invalidate(.tab(key))
+        engineCells.invalidate(.allTabs)
+    }
+
+    /// Drops the tab engines `remove` picks, in place; nothing is notified when none goes.
+    private func removeTabEngines(where remove: (TabEngineKey) -> Bool) {
+        let doomed = engines.keys.filter(remove)
+        guard !doomed.isEmpty else { return }
+        for key in doomed { setTabEngine(nil, for: key) }
     }
 
     /// The single place that picks the concrete engine type.
@@ -117,7 +138,7 @@ final class EngineHost {
         prompts.profileID = profileID
         prompts.router = linkRouter
         prompts.sitePermissions = sitePermissions
-        engines[TabEngineKey(tabID: tab.id, profileID: profileID)] = engine
+        setTabEngine(engine, for: TabEngineKey(tabID: tab.id, profileID: profileID))
     }
 
     /// Prompt identity for an engine made outside `makeEngine` (an adopted private-window popup).
@@ -132,36 +153,46 @@ final class EngineHost {
     }
 
     func engine(forTabID id: Tab.ID, profileID: Profile.ID) -> (any WebEngine)? {
-        engines[TabEngineKey(tabID: id, profileID: profileID)]
+        let key = TabEngineKey(tabID: id, profileID: profileID)
+        engineCells.access(.tab(key))
+        return engines[key]
     }
 
     func allTabEngines() -> [(Tab.ID, Profile.ID, any WebEngine)] {
-        engines.map { (key, engine) in (key.tabID, key.profileID, engine) }
+        engineCells.access(.allTabs)
+        return engines.map { (key, engine) in (key.tabID, key.profileID, engine) }
     }
 
     /// Drops cached engines for the given tab ids (all profile contexts).
     func evictEngines(forTabIDs ids: [Tab.ID]) {
         let idSet = Set(ids)
-        engines = engines.filter { !idSet.contains($0.key.tabID) }
+        removeTabEngines { idSet.contains($0.tabID) }
     }
 
     /// Drops every engine (tabs, peeks, Little Arc) that used the given profile.
     func evictEngines(forProfileID id: Profile.ID) {
-        engines = engines.filter { $0.key.profileID != id }
-        ephemeralEngines = ephemeralEngines.filter { $0.key.profileID != id }
-        littleArcEngines = littleArcEngines.filter { $0.key.profileID != id }
+        removeTabEngines { $0.profileID == id }
+        if ephemeralEngines.keys.contains(where: { $0.profileID == id }) {
+            ephemeralEngines = ephemeralEngines.filter { $0.key.profileID != id }
+        }
+        if littleArcEngines.keys.contains(where: { $0.profileID == id }) {
+            littleArcEngines = littleArcEngines.filter { $0.key.profileID != id }
+        }
     }
 
-    /// Removes tab engines whose tab/profile pair is not in the live sidebar ownership set.
+    /// Removes tab engines whose tab/profile pair is not in the live sidebar
+    /// ownership set. Nothing changes (or is notified) when all are live.
     func pruneTabEngines(retaining keys: Set<TabEngineKey>) {
-        engines = engines.filter { keys.contains($0.key) }
+        removeTabEngines { !keys.contains($0) }
     }
 
     func pruneLittleArcEngines(retaining keys: Set<LittleArcEngineKey>) {
+        guard littleArcEngines.keys.contains(where: { !keys.contains($0) }) else { return }
         littleArcEngines = littleArcEngines.filter { keys.contains($0.key) }
     }
 
     func pruneEphemeralEngines(retaining keys: Set<EphemeralEngineKey>) {
+        guard ephemeralEngines.keys.contains(where: { !keys.contains($0) }) else { return }
         ephemeralEngines = ephemeralEngines.filter { keys.contains($0.key) }
     }
 
@@ -183,7 +214,7 @@ final class EngineHost {
     }
 
     func remove(_ id: Tab.ID) {
-        engines = engines.filter { $0.key.tabID != id }
+        removeTabEngines { $0.tabID == id }
     }
 
     func engine(forLittleArc id: UUID, profileID: Profile.ID) -> any WebEngine {
