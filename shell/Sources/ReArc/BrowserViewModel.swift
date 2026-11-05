@@ -72,6 +72,15 @@ final class BrowserViewModel {
     }
 
     var isSidebarVisible = true
+    /// The page is laid out beside the sidebar. It goes wide at the start of
+    /// a hide and narrow at the end of a show, so Chromium resizes once per
+    /// toggle and never per frame (ARC-RECORDING-ANALYSIS.md §3).
+    var isSidebarLaidOut = true
+    /// 1 shown, 0 hidden; animated by ⌘S. The sidebar's right edge sits at
+    /// `sidebarReveal × sidebarWidth`.
+    var sidebarReveal: Double = 1
+    /// ⌘S is mid-slide; `isSidebarVisible` says which way.
+    var isSidebarSliding = false
     /// Points; dragged from the sidebar's trailing edge, saved when the drag ends.
     var sidebarWidth: CGFloat = SidebarWidth.load()
     /// The hidden sidebar shown floating while the pointer is at the window's
@@ -101,6 +110,8 @@ final class BrowserViewModel {
     var defaultBrowserMessage: String?
     /// Space being edited in the Edit Space sheet (name, theme, icon).
     var spaceEditorID: Space.ID?
+    /// Edit Theme Color: the space whose header shows the theme editor popover.
+    var themePopoverSpaceID: Space.ID?
     /// The New Space dialog's fields while it is open.
     var spaceCreationDraft: SpaceDraft?
     /// Today tabs archived by the last Clear, for Undo.
@@ -631,8 +642,11 @@ final class BrowserViewModel {
     }
 
     /// New Space: opens the creation dialog (name, icon, theme, profile).
+    /// Arc starts a new space on its built-in theme (ARC-RECORDING-ANALYSIS.md §1, row 7).
     func beginSpaceCreation(profileID: Profile.ID? = nil) {
-        spaceCreationDraft = SpaceDraft.suggested(in: store, profileID: profileID)
+        var draft = SpaceDraft.suggested(in: store, profileID: profileID)
+        draft.theme = .arcDefault
+        spaceCreationDraft = draft
     }
 
     @discardableResult
@@ -644,16 +658,30 @@ final class BrowserViewModel {
         return space
     }
 
-    /// ⌘S (Arc's Show/Hide Sidebar): the content card takes the sidebar's
-    /// width (or gives it back) on Arc's spring; the page keeps keyboard
-    /// focus. While hidden, the window's leading edge floats it.
+    /// ⌘S (Arc's Show/Hide Sidebar), as the user's recording shows it
+    /// (ARC-RECORDING-ANALYSIS.md §3): one quick push with no overshoot. The
+    /// sidebar slides with the page's leading edge. A hide lays the page out
+    /// wide at once and the receding sidebar uncovers it; a show slides the
+    /// wide page right with the sidebar and lays it out narrow at the end.
+    /// The page keeps keyboard focus. While hidden, the window's leading edge
+    /// floats the sidebar.
     func toggleSidebar() {
         PerfSignposts.interaction(.sidebarToggle, isSidebarVisible ? "hide" : "show")
+        let showing = !isSidebarVisible
+        isSidebarVisible = showing
+        isSidebarPeeking = false
+        isSidebarSliding = true
+        if !showing { isSidebarLaidOut = false }
         withAnimation(Self.sidebarAnimation, completionCriteria: .logicallyComplete) {
-            isSidebarVisible.toggle()
-            isSidebarPeeking = false
+            sidebarReveal = showing ? 1 : 0
         } completion: { [weak self] in
-            self?.onShellAnimationComplete?(.sidebarToggle)
+            guard let self else { return }
+            // A newer toggle owns the state now.
+            if self.isSidebarVisible == showing {
+                self.isSidebarSliding = false
+                if showing { self.isSidebarLaidOut = true }
+            }
+            self.onShellAnimationComplete?(.sidebarToggle)
         }
     }
 
@@ -661,10 +689,11 @@ final class BrowserViewModel {
     enum ShellAnimation { case sidebarToggle, sidebarPeek }
     @ObservationIgnored var onShellAnimationComplete: ((ShellAnimation) -> Void)?
 
-    /// Arc animates the sidebar with a spring (`sidebarTransformAnimation`);
-    /// its parameters are not in the binary's strings, so these are inferred
-    /// (docs/SHORTCUTS.md "⌘S").
-    static let sidebarAnimation = Animation.spring(response: 0.35, dampingFraction: 0.85)
+    /// Arc's ⌘S has exactly one intermediate frame at 10 fps in 4 of 4
+    /// events and never passes its end, so ≈ 100–150 ms with no overshoot.
+    /// It replaces wave 30's inferred `spring(response: 0.35, dampingFraction: 0.85)`.
+    static let sidebarAnimationDuration = 0.12
+    static let sidebarAnimation = Animation.timingCurve(0.3, 0, 0.2, 1, duration: sidebarAnimationDuration)
 
     /// Loads the selected tab's URL into its engine if the engine isn't
     /// already showing it (fresh engine or URL changed in the model).

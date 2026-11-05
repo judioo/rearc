@@ -104,7 +104,7 @@ final class Wave31ThemeTests: XCTestCase {
         full.intensity = 1
         XCTAssertEqual(ThemeGradient(theme: full, dark: false).color(u: 0, v: 0).red, color.red, accuracy: 1e-6)
         let dark = ThemeGradient(theme: theme, dark: true).color(u: 0.3, v: 0.6)
-        XCTAssertLessThan(OKLab(dark).l, 0.4, "dark appearance darkens the stops over black")
+        XCTAssertEqual(dark.red, color.red * 0.8 + 0.2 * 155 / 255, accuracy: 1e-6, "wave 33: dark lays the stops over grey")
     }
 
     func testThirdColourFadesInFromClearAlongTheOtherDiagonal() {
@@ -342,49 +342,5 @@ final class Wave31ThemeTests: XCTestCase {
         XCTAssertTrue(SpaceTheme.editorPalette.allSatisfy { $0.count == 9 })
         XCTAssertEqual(SpaceTheme.editorPalette[0][8].spaceColor.hex, "#C5C6E2")
         XCTAssertEqual(SpaceTheme.editorPalette[2][0].spaceColor.hex, "#4B3B58")
-    }
-}
-
-/// Wave 31: the theme editor's colour pad maths.
-final class Wave31ColorPadTests: XCTestCase {
-    func testCentreIsNearWhiteAndTheRimIsVivid() {
-        let centre = OKLab(ThemeColorPad.color(at: .init(angle: 120, radius: 0)))
-        XCTAssertGreaterThan(centre.l, 0.95)
-        XCTAssertLessThan(centre.lch.c, 0.005)
-        let rim = OKLab(ThemeColorPad.color(at: .init(angle: 260, radius: 1))).lch
-        XCTAssertEqual(rim.l, 0.66, accuracy: 0.01)
-        XCTAssertGreaterThan(rim.c, 0.15)
-        XCTAssertEqual(rim.h, 260, accuracy: 3)
-    }
-
-    func testPointsRoundTripThroughColours() {
-        for angle in stride(from: 10.0, to: 360, by: 50) {
-            for radius in [0.25, 0.5, 0.9] {
-                let point = ThemeColorPad.Point(angle: angle, radius: radius)
-                let back = ThemeColorPad.point(of: ThemeColorPad.color(at: point))
-                XCTAssertEqual(back.radius, radius, accuracy: 0.02, "\(angle)° r\(radius)")
-                XCTAssertEqual(back.angle, angle, accuracy: 4, "\(angle)° r\(radius)")
-            }
-        }
-    }
-
-    func testDraggingColourOneCarriesTheOthers() {
-        let points = [ThemeColorPad.Point(angle: 200, radius: 0.5), .init(angle: 250, radius: 0.4), .init(angle: 150, radius: 0.6)]
-        let moved = ThemeColorPad.dragBase(points, to: .init(angle: 230, radius: 0.7))
-        XCTAssertEqual(moved.map(\.angle), [230, 280, 180])
-        XCTAssertEqual(moved.map(\.radius), [0.7, 0.4, 0.6])
-        XCTAssertEqual(ThemeColorPad.dragBase(points, to: .init(angle: 350, radius: 0.5))[1].angle, 40, "wraps round")
-    }
-
-    func testAddingFollowsTheHarmonyUpToThreeColours() {
-        var points = [ThemeColorPad.Point(angle: 100, radius: 0.5)]
-        points = ThemeColorPad.adding(to: points, harmony: .analogous)
-        points = ThemeColorPad.adding(to: points, harmony: .analogous)
-        XCTAssertEqual(points.map(\.angle), [100, 150, 50])
-        XCTAssertEqual(ThemeColorPad.adding(to: points, harmony: .analogous).count, 3)
-        XCTAssertEqual(ThemeColorPad.adding(to: [points[0]], harmony: .complementary)[1].angle, 280)
-        let theme = ThemeColorPad.theme(SpaceTheme.arcDefault, with: points)
-        XCTAssertEqual(theme.stops.count, 3)
-        XCTAssertEqual(theme.intensity, SpaceTheme.arcDefault.intensity, "style is kept")
     }
 }

@@ -18,9 +18,14 @@ extension BrowserViewModel {
     }
 
     /// The strips for a window, front first. A source whose video shows in
-    /// the floating panel has none until the panel is minimized.
+    /// the floating panel has none until the panel is minimized, and one in
+    /// the page's own Picture in Picture window has none while it is open
+    /// (Arc's pop-out, ARC-RECORDING-ANALYSIS.md §7).
     func mediaStrips(in window: SidebarWindowID?) -> [Tab.ID] {
-        let suppressed = Set(livePlacements.keys.filter { effectiveLivePlacement(for: $0)?.suppressesStrip == true })
+        var suppressed = Set(livePlacements.keys.filter { effectiveLivePlacement(for: $0)?.suppressesStrip == true })
+        for (id, media) in mediaStateByTab where media.isPictureInPicture && livePlacements[id] == nil {
+            suppressed.insert(id)
+        }
         return mediaControls.strips(visibleTabIDs: visibleTabIDs(in: window), suppressed: suppressed)
     }
 

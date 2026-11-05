@@ -30,10 +30,10 @@ struct ThemeLayerView: View {
     }
 }
 
-/// A window theme that dissolves from one fully rendered theme into the
-/// next (§3.7): the old one stays opaque underneath while the new one fades
-/// in over it, so every frame is a per-pixel mix, not a dimmed overlap.
-/// During a swipe the mix follows the finger instead.
+/// The window theme. A clicked or shortcut switch and every editor change
+/// swap it between two frames with no blend, as Arc does
+/// (ARC-RECORDING-ANALYSIS.md §2.9, §4). During a swipe the two spaces'
+/// rendered themes mix per pixel by the pager's fraction (§3.7).
 struct ThemeCrossfadeView: View {
     let theme: SpaceTheme
     let dark: Bool
@@ -41,16 +41,8 @@ struct ThemeCrossfadeView: View {
     var swipe: (from: SpaceTheme, to: SpaceTheme, fraction: Double)?
     var dark2: Bool?
 
-    @State private var previous: ThemeKey?
-    @State private var progress = 1.0
-
-    struct ThemeKey: Equatable {
-        var theme: SpaceTheme
-        var dark: Bool
-    }
-
-    /// Arc's clicked-switch duration is unmeasured (§8); 0.35 s ease-in-out.
-    static let duration = 0.35
+    /// Wave 31 dissolved clicked switches over 0.35 s; Arc swaps in ≤ 1 frame.
+    static let duration = 0.0
 
     var body: some View {
         ZStack {
@@ -59,23 +51,10 @@ struct ThemeCrossfadeView: View {
                 ThemeLayerView(theme: swipe.to, dark: dark2 ?? dark)
                     .opacity(swipe.fraction)
             } else {
-                if let previous, progress < 1 {
-                    ThemeLayerView(theme: previous.theme, dark: previous.dark)
-                }
                 ThemeLayerView(theme: theme, dark: dark)
-                    .opacity(previous == nil ? 1 : progress)
             }
         }
-        .onChange(of: ThemeKey(theme: theme, dark: dark)) { old, _ in
-            guard swipe == nil else { return }
-            previous = old
-            progress = 0
-            withAnimation(.easeInOut(duration: Self.duration)) {
-                progress = 1
-            } completion: {
-                if progress >= 1 { previous = nil }
-            }
-        }
+        .transaction { $0.animation = nil }
     }
 }
 
@@ -155,9 +134,17 @@ struct ThemeChromeColors {
     /// Floating panels over the window (command bar, Peek): the theme's
     /// `backgroundExtra` / dark `background` washed over the material.
     var panel: Color
+    /// Toasts: the theme's `background` role, a pale tint of the space colour.
+    var toast: Color
+    /// The command bar's selected row: the accent lightened toward white
+    /// (`#2731FF` → `#858AFF` on the default theme, ARC-RECORDING-ANALYSIS.md §8).
+    var selection: Color
+    /// The chrome's text roles are the dark ones (`ThemeGradient.usesDarkChrome`).
     var isDark: Bool
+    /// The space is in dark appearance, whatever its chrome text uses.
+    var isWindowDark: Bool
 
-    init(theme: SpaceTheme, dark: Bool) {
+    init(theme: SpaceTheme, dark: Bool, windowDark: Bool? = nil) {
         let roles = SpaceThemeRoles(theme: theme)
         let semantic = roles.semantic(dark: dark)
         let chrome = roles.chrome(dark: dark)
@@ -173,10 +160,18 @@ struct ThemeChromeColors {
         rowHover = Color(semantic.backgroundExtra).opacity(dark ? 0.08 : 0.42)
         focus = Color(semantic.focus).opacity(semantic.focusAlpha)
         panel = Color(dark ? semantic.background : semantic.backgroundExtra).opacity(dark ? 0.6 : 0.55)
+        toast = Color(semantic.background)
+        selection = Color(Self.selection(accent: semantic.foregroundPrimary))
         isDark = dark
+        isWindowDark = windowDark ?? dark
     }
 
     static let fallback = ThemeChromeColors(theme: .arcDefault, dark: false)
+
+    /// 43.5 % of the way to white fits #2731FF → #858AFF to a level.
+    static func selection(accent: SpaceColor) -> SpaceColor {
+        accent.mixed(with: .white, fraction: 0.435)
+    }
 }
 
 extension EnvironmentValues {

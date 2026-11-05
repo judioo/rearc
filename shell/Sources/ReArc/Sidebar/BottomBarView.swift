@@ -19,6 +19,7 @@ struct BottomBarView: View {
     @State private var draggedSpaceID: Space.ID?
     @State private var showingSpaceList = false
     @State private var showingProfileList = false
+    @State private var showingPlusMenu = false
     @State private var renamingProfileID: Profile.ID?
     @State private var renameDraft = ""
     @State private var profileActionError: String?
@@ -92,40 +93,21 @@ struct BottomBarView: View {
                 .padding(.trailing, 8)
             }
 
-            // Arc's + menu (`ARC_SidebarPlusButton` icons: add-tab, folder,
-            // space, note, easel, boost, split-add-right, split-add-bottom).
-            Menu {
-                Button { model.newTab() } label: { Label("New Tab", systemImage: "plus.square") }
-                Button { model.newFolder() } label: { Label("New Folder", systemImage: "folder.badge.plus") }
-                Button { model.beginSpaceCreation(profileID: current.profileID) } label: {
-                    Label("New Space…", systemImage: "plus.rectangle.portrait")
-                }
-                Divider()
-                Button { _ = model.createEasel(title: "Note", note: true) } label: { Label("New Note", systemImage: "note.text") }
-                Button { _ = model.createEasel() } label: { Label("New Easel", systemImage: "scribble.variable") }
-                Button { model.newBoost() } label: { Label("New Boost", systemImage: "paintbrush.pointed") }
-                Divider()
-                Button { model.addSplitView(orientation: .horizontal) } label: {
-                    Label("Add Split View (Right)", systemImage: "rectangle.split.2x1")
-                }
-                Button { model.addSplitView(orientation: .vertical) } label: {
-                    Label("Add Split View (Bottom)", systemImage: "rectangle.split.1x2")
-                }
-                Divider()
-                Button("Spaces in \(profile.name)…") { showingSpaceList = true }
-                Button("Profiles…") { showingProfileList = true }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 15, weight: .medium))
+            // Arc's + menu: an in-window panel above the bar; the + turns
+            // into × while it is open (ARC-RECORDING-ANALYSIS.md §5.1).
+            Button { showingPlusMenu.toggle() } label: {
+                Image(systemName: showingPlusMenu ? "xmark" : "plus")
+                    .font(.system(size: showingPlusMenu ? 13 : 15, weight: .medium))
                     .foregroundStyle(chrome.glyph)
                     .frame(width: 18, height: 24)
                     .contentShape(Rectangle())
             }
-            .menuStyle(.button)
             .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("New Tab, Folder, Space, Note, Easel, Boost or Split View")
+            .help("New Space, Folder, Easel, Boost, Split or Tab")
+            .accessibilityLabel(showingPlusMenu ? "Close Menu" : "New")
+            .popover(isPresented: $showingPlusMenu, arrowEdge: .top) {
+                PlusMenuPanel(sections: plusMenu(current: current, profile: profile)) { showingPlusMenu = false }
+            }
         }
         .padding(.horizontal, 17)
         .frame(height: Self.height)
@@ -145,6 +127,22 @@ struct BottomBarView: View {
         } message: {
             Text(profileActionError ?? "")
         }
+    }
+
+    /// Arc's rows and shortcuts in Arc's order, then ReArc's extras.
+    private func plusMenu(current: Space, profile: Profile) -> [[PlusMenuPanel.Row]] {
+        [
+            [.init("New Space", "plus.rectangle.portrait") { model.beginSpaceCreation(profileID: current.profileID) },
+             .init("New Folder", "folder.badge.plus") { model.newFolder() }],
+            [.init("New Easel", "scribble.variable", shortcut: "⌃⇧E") { _ = model.createEasel() },
+             .init("New Boost", "paintbrush.pointed") { model.newBoost() }],
+            [.init("New Split", "rectangle.split.2x1", shortcut: "⌃⇧=") { model.addSplitView(orientation: .horizontal) },
+             .init("New Tab", "plus.square", shortcut: "⌘T") { model.newTab() }],
+            [.init("New Note", "note.text") { _ = model.createEasel(title: "Note", note: true) },
+             .init("Split Below", "rectangle.split.1x2") { model.addSplitView(orientation: .vertical) },
+             .init("Spaces in \(profile.name)…", "square.stack") { showingSpaceList = true },
+             .init("Profiles…", "person.2") { showingProfileList = true }],
+        ]
     }
 
     private func beginRename(_ profile: Profile) {
@@ -200,13 +198,15 @@ private struct SpaceIconButton: View {
     @Binding var draggedSpaceID: Space.ID?
     @State private var isTargeted = false
 
+    @State private var isHovering = false
     @Environment(\.themeChrome) private var chrome
 
     var body: some View {
         Button { model.selectSpace(space.id) } label: {
             Group {
-                if isCurrent {
-                    // The current space shows its icon in place of its dot.
+                if isCurrent || isHovering {
+                    // The current space shows its icon in place of its dot,
+                    // and so does a hovered one (ARC-RECORDING-ANALYSIS.md §4).
                     SpaceIconView(iconName: space.iconName, size: 11)
                         .foregroundStyle(chrome.accent)
                         .frame(width: 22, height: 24)
@@ -221,6 +221,7 @@ private struct SpaceIconButton: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
         .help("\(space.name) (⌃\(index + 1)) — drop a tab here to move it to this space")
         .contextMenu { SpaceContextMenu(model: model, space: space) }
         .onDrag {
@@ -395,5 +396,61 @@ private struct ProfileListView: View {
         }
         .padding(.vertical, 6)
         .frame(minWidth: 220)
+    }
+}
+
+/// The + menu's panel: sections of rows with an SF Symbol, the title and
+/// Arc's shortcut, a grey chip under the hovered row (§5.1; ≈ 213 pt wide).
+struct PlusMenuPanel: View {
+    struct Row: Identifiable {
+        let id = UUID()
+        var title: String
+        var systemImage: String
+        var shortcut: String?
+        var action: () -> Void
+
+        init(_ title: String, _ systemImage: String, shortcut: String? = nil, action: @escaping () -> Void) {
+            self.title = title
+            self.systemImage = systemImage
+            self.shortcut = shortcut
+            self.action = action
+        }
+    }
+
+    let sections: [[Row]]
+    let dismiss: () -> Void
+    @State private var hovered: UUID?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(sections.enumerated()), id: \.offset) { index, rows in
+                if index > 0 { Divider().padding(.vertical, 4).padding(.horizontal, 8) }
+                ForEach(rows) { row in
+                    Button {
+                        dismiss()
+                        row.action()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: row.systemImage).frame(width: 18).foregroundStyle(.secondary)
+                            Text(row.title)
+                            Spacer(minLength: 12)
+                            if let shortcut = row.shortcut {
+                                Text(shortcut).foregroundStyle(.tertiary)
+                            }
+                        }
+                        .font(.system(size: 13))
+                        .padding(.horizontal, 8)
+                        .frame(height: 26)
+                        .background(hovered == row.id ? Color.primary.opacity(0.08) : .clear,
+                                    in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hovered = $0 ? row.id : (hovered == row.id ? nil : hovered) }
+                }
+            }
+        }
+        .padding(6)
+        .frame(width: 213)
     }
 }

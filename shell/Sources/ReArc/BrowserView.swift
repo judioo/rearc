@@ -22,12 +22,14 @@ struct BrowserView: View {
 
     var body: some View {
         ZStack {
-            HStack(spacing: 0) {
-                if model.isSidebarVisible, !isPageFullscreen {
-                    SidebarView(model: model, draggedItemID: $draggedItemID)
-                        .transition(.move(edge: .leading))
-                }
+            // ⌘S pushes the sidebar with the card's leading edge; the card
+            // is laid out beside it only at rest (`isSidebarLaidOut`).
+            ZStack(alignment: .topLeading) {
                 contentCard
+                if model.isSidebarVisible || model.isSidebarSliding, !isPageFullscreen {
+                    SidebarView(model: model, draggedItemID: $draggedItemID)
+                        .offset(x: (model.sidebarReveal - 1) * model.sidebarWidth)
+                }
             }
             // The sidebar and card run up under the title bar: the traffic
             // lights sit on the theme like the rest of the sidebar (§4.5).
@@ -81,29 +83,13 @@ struct BrowserView: View {
                 Color.black.opacity(0.2)
                     .ignoresSafeArea()
                     .onTapGesture { model.dismissCommandBar() }
-                CommandBarOverlay(
-                    text: $model.commandBarText,
-                    inlineSuffix: model.commandBarInlineSuffix,
-                    onAcceptCompletion: { model.acceptCommandBarInlineCompletion() },
-                    onSubmitRoute: { model.submitCommandBar(route: $0) },
-                    results: model.commandBarResults,
-                    highlightedIndex: model.commandBarHighlightedIndex,
-                    errorMessage: model.commandBarError,
-                    siteSearch: model.commandBarSiteSearch,
-                    siteSearchSuggestion: model.commandBarSiteSearchSuggestion,
-                    onTab: { model.enterCommandBarSiteSearch() },
-                    onDeleteBackward: { model.exitCommandBarSiteSearch() },
-                    onDeleteHighlighted: { model.deleteHighlightedCommandBarHistoryRow() },
-                    onRowAction: { model.performCommandBarRowAction($0, on: $1) },
-                    onMoveHighlight: { model.moveCommandBarHighlight(by: $0) },
-                    onSelectIndex: { index in
-                        model.commandBarHighlightedIndex = index
-                        model.submitCommandBar()
-                    },
-                    onSubmit: { model.submitCommandBar() },
-                    onCancel: { model.dismissCommandBar() },
-                    focusRequest: model.commandBarFocusRequest
-                )
+                // Centred on the window, not the card, its top 38 % down (ARC-RECORDING-ANALYSIS.md §8).
+                GeometryReader { geometry in
+                    commandBar(width: min(CommandBarOverlay.arcWidth, geometry.size.width - 40))
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, max(20, min(geometry.size.height * CommandBarOverlay.topFraction, geometry.size.height - 440)))
+                }
+                .ignoresSafeArea()
                 .transition(.opacity.combined(with: .scale(scale: 0.97)))
             }
 
@@ -131,7 +117,9 @@ struct BrowserView: View {
             WindowOcclusionReader { model.handleWindowOcclusion($0) }
                 .frame(width: 0, height: 0)
         )
-        .background(TrafficLightPositioner().frame(width: 0, height: 0))
+        // Arc hides the traffic lights with the sidebar (ARC-RECORDING-ANALYSIS.md §3).
+        .background(TrafficLightPositioner(isHidden: !model.isSidebarVisible && !model.isSidebarPeeking && !isPageFullscreen)
+            .frame(width: 0, height: 0))
         // The shown space's Appearance (Automatic, Light, Dark) sets the
         // window's, which its pages, easels and notes follow.
         .background(
@@ -287,10 +275,39 @@ struct BrowserView: View {
         }
     }
 
+    private func commandBar(width: CGFloat) -> some View {
+        CommandBarOverlay(
+            text: $model.commandBarText,
+            inlineSuffix: model.commandBarInlineSuffix,
+            onAcceptCompletion: { model.acceptCommandBarInlineCompletion() },
+            onSubmitRoute: { model.submitCommandBar(route: $0) },
+            results: model.commandBarResults,
+            highlightedIndex: model.commandBarHighlightedIndex,
+            errorMessage: model.commandBarError,
+            siteSearch: model.commandBarSiteSearch,
+            siteSearchSuggestion: model.commandBarSiteSearchSuggestion,
+            onTab: { model.enterCommandBarSiteSearch() },
+            onDeleteBackward: { model.exitCommandBarSiteSearch() },
+            onDeleteHighlighted: { model.deleteHighlightedCommandBarHistoryRow() },
+            onRowAction: { model.performCommandBarRowAction($0, on: $1) },
+            onMoveHighlight: { model.moveCommandBarHighlight(by: $0) },
+            onSelectIndex: { index in
+                model.commandBarHighlightedIndex = index
+                model.submitCommandBar()
+            },
+            onSubmit: { model.submitCommandBar() },
+            onCancel: { model.dismissCommandBar() },
+            focusRequest: model.commandBarFocusRequest,
+            width: width,
+            spaceName: { model.store.space(withID: $0)?.name }
+        )
+    }
+
     /// The focused space's chrome colours in its resolved appearance.
     private var themeChrome: ThemeChromeColors {
         let theme = model.space(in: windowID).theme
-        return ThemeChromeColors(theme: theme, dark: theme.appearance.isDark(systemDark: SystemAppearance.isDark(colorScheme)))
+        let dark = theme.appearance.isDark(systemDark: SystemAppearance.isDark(colorScheme))
+        return ThemeChromeColors(theme: theme, dark: ThemeGradient.usesDarkChrome(theme: theme, dark: dark), windowDark: dark)
     }
 
     /// This window shows a page in HTML fullscreen: only the page, edge to edge.
@@ -383,14 +400,17 @@ struct BrowserView: View {
         let inset: CGFloat = fullscreen ? 0 : Self.cardInset
         let showsToolbar = urlInToolbar && !fullscreen
             && model.librarySection(in: windowID) == nil && model.selectedEaselRef(in: windowID) == nil
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        let slide = fullscreen ? SidebarSlide() : SidebarSlide(
+            reveal: model.sidebarReveal, width: model.sidebarWidth, inset: inset,
+            showing: model.isSidebarVisible, laidOut: model.isSidebarLaidOut
+        )
+        let shape = CardShape(radius: radius, leadingCut: slide.cut)
         return VStack(spacing: 0) {
             if showsToolbar {
                 CardToolbarView(model: model)
                     .zIndex(1)
             }
             contentArea
-                .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil)
                 .overlay {
                     if let session = model.pageCaptureSession,
                        session.window == nil ? isKeyWindowSheetOwner : session.window == windowID {
@@ -406,12 +426,14 @@ struct BrowserView: View {
                     }
                 }
         }
+        .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil)
         .clipShape(shape)
         .background(shape.fill(cardFill))
-        .background(CardShadow(radius: radius).opacity(fullscreen ? 0 : 1))
+        .background(CardShadow(shape: shape).opacity(fullscreen ? 0 : 1))
         .padding(.vertical, inset)
         .padding(.trailing, inset)
-        .padding(.leading, model.isSidebarVisible && !fullscreen ? 0 : inset)
+        .padding(.leading, model.isSidebarLaidOut && !fullscreen ? model.sidebarWidth : inset)
+        .offset(x: slide.offset)
         .ignoresSafeArea(edges: fullscreen ? .all : [])
     }
 
@@ -419,10 +441,10 @@ struct BrowserView: View {
     static let cardRadius: CGFloat = 8
 
     /// About 70 % white over the theme in light (`#F6F4FA` → `#FAF7F7` on the
-    /// default); a near-black wash over it in dark (Arc's dark card is
-    /// unobserved, §8).
+    /// default). In dark the card has no wash: an empty page shows the
+    /// gradient at full strength (ARC-RECORDING-ANALYSIS.md §2.7, frame 1000).
     private var cardFill: Color {
-        themeChrome.isDark ? Color(white: 0.1).opacity(0.85) : Color.white.opacity(0.7)
+        themeChrome.isWindowDark ? Color.clear : Color.white.opacity(0.7)
     }
 
     @ViewBuilder
@@ -474,10 +496,9 @@ struct BrowserView: View {
 /// y 2.5). The shape itself is cut out, so the card's translucent fill is
 /// not darkened by the shadow underneath it.
 private struct CardShadow: View {
-    let radius: CGFloat
+    let shape: CardShape
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         shape
             .fill(Color.black)
             .shadow(color: .black.opacity(0.22), radius: 3, x: 0, y: 1.25)
@@ -488,6 +509,43 @@ private struct CardShadow: View {
                     .compositingGroup()
             }
             .allowsHitTesting(false)
+    }
+}
+
+/// Where the card sits while ⌘S slides (ARC-RECORDING-ANALYSIS.md §3). The
+/// sidebar's right edge is at `reveal × width`. Hiding, the card is already
+/// laid out wide and the strip the sidebar still covers is cut away
+/// (`cut`). Showing, the wide card moves right with the edge (`offset`)
+/// until it is laid out narrow at the end.
+struct SidebarSlide: Equatable {
+    var cut: CGFloat = 0
+    var offset: CGFloat = 0
+
+    init() {}
+
+    init(reveal: Double, width: CGFloat, inset: CGFloat, showing: Bool, laidOut: Bool) {
+        let edge = CGFloat(reveal) * width
+        if !showing { cut = max(0, edge - inset) }
+        if showing, !laidOut { offset = CGFloat(reveal) * (width - inset) }
+    }
+}
+
+/// The card's rounded rectangle less a strip at its leading edge (the part
+/// a sliding sidebar still covers). The strip animates with the sidebar.
+struct CardShape: Shape {
+    var radius: CGFloat
+    var leadingCut: CGFloat = 0
+
+    var animatableData: CGFloat {
+        get { leadingCut }
+        set { leadingCut = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let card = Path(roundedRect: rect, cornerRadius: radius, style: .continuous)
+        let cut = min(max(leadingCut, 0), rect.width)
+        guard cut > 0 else { return card }
+        return card.intersection(Path(CGRect(x: rect.minX + cut, y: rect.minY, width: rect.width - cut, height: rect.height)))
     }
 }
 

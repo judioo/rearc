@@ -22,6 +22,12 @@ public struct SpacePaging: Sendable {
         /// Placeholder for Arc's paging spring (DESIGN-TOKENS §4.2 values are UN):
         /// quick, with a trace of overshoot after a fast flick.
         public static let page = Spring(response: 0.42, dampingFraction: 0.86)
+
+        /// A clicked or shortcut switch. Arc settles ≈ 200–300 ms after the
+        /// click with no visible overshoot, and barely moves in the first
+        /// frame (ARC-RECORDING-ANALYSIS.md §4). Critically damped from rest
+        /// starts slowly and is within 2 % of the page at ≈ 230 ms.
+        public static let click = Spring(response: 0.25, dampingFraction: 1)
     }
 
     public private(set) var pageCount: Int
@@ -29,6 +35,10 @@ public struct SpacePaging: Sendable {
     public private(set) var targetPage: Int
     public private(set) var isTracking = false
     public var spring: Spring
+    /// Springs a clicked or shortcut switch (`go(to:)`).
+    public var clickSpring: Spring
+    /// The spring now running: `spring` after a swipe, `clickSpring` after `go(to:)`.
+    private var running: Spring
 
     /// Rest state or the spring's start: offset from the target and velocity
     /// (pages per second) at `springStart`.
@@ -46,10 +56,12 @@ public struct SpacePaging: Sendable {
     /// Past this offset the spring counts as settled.
     static let restThreshold = 0.0005
 
-    public init(pageCount: Int, page: Int, spring: Spring = .page) {
+    public init(pageCount: Int, page: Int, spring: Spring = .page, clickSpring: Spring = .click) {
         self.pageCount = max(pageCount, 1)
         self.targetPage = Self.clamp(page, count: max(pageCount, 1))
         self.spring = spring
+        self.clickSpring = clickSpring
+        self.running = spring
     }
 
     // MARK: Reading
@@ -76,8 +88,8 @@ public struct SpacePaging: Sendable {
     public var restTime: TimeInterval? {
         if isTracking { return nil }
         if springOffset == 0, springVelocity == 0 { return springStart }
-        let omega = 2 * Double.pi / max(spring.response, 0.01)
-        let zeta = min(max(spring.dampingFraction, 0.05), 1)
+        let omega = 2 * Double.pi / max(running.response, 0.01)
+        let zeta = min(max(running.dampingFraction, 0.05), 1)
         let omegaD = zeta < 1 ? omega * (1 - zeta * zeta).squareRoot() : omega
         let b = (springVelocity + zeta * omega * springOffset) / omegaD
         let amplitude = (springOffset * springOffset + b * b).squareRoot() * (zeta >= 1 ? 2 : 1)
@@ -126,6 +138,7 @@ public struct SpacePaging: Sendable {
         target = Self.clamp(target, count: pageCount)
         isTracking = false
         samples = []
+        running = spring
         startSpring(to: target, from: release, velocity: velocity, at: time)
         return target
     }
@@ -136,6 +149,7 @@ public struct SpacePaging: Sendable {
         let release = Self.rubberBand(trackedPosition, count: pageCount)
         isTracking = false
         samples = []
+        running = spring
         startSpring(to: trackingOrigin, from: release, velocity: 0, at: time)
     }
 
@@ -156,7 +170,9 @@ public struct SpacePaging: Sendable {
             return
         }
         guard !isTracking, page != targetPage else { return }
-        startSpring(to: page, from: position(at: time), velocity: velocity(at: time), at: time)
+        let from = position(at: time), velocity = velocity(at: time)
+        running = clickSpring
+        startSpring(to: page, from: from, velocity: velocity, at: time)
     }
 
     // MARK: Physics
@@ -180,8 +196,8 @@ public struct SpacePaging: Sendable {
         let x0 = springOffset
         let v0 = springVelocity
         if x0 == 0, v0 == 0 { return (0, 0) }
-        let omega = 2 * Double.pi / max(spring.response, 0.01)
-        let zeta = min(max(spring.dampingFraction, 0), 1)
+        let omega = 2 * Double.pi / max(running.response, 0.01)
+        let zeta = min(max(running.dampingFraction, 0), 1)
         if zeta >= 1 {
             let c = v0 + omega * x0
             let e = exp(-omega * t)

@@ -55,23 +55,75 @@ extension View {
             }
     }
 
-    /// A transient confirmation capsule at the page's bottom edge.
+    /// A transient confirmation just inside the card's top-right corner,
+    /// over the toolbar strip (ARC-RECORDING-ANALYSIS.md §6).
     func shellToast(_ toast: ShellToast?) -> some View {
-        overlay(alignment: .bottom) {
+        overlay(alignment: .topTrailing) {
             if let toast {
-                Label(toast.message, systemImage: toast.systemImage)
-                    .font(.callout.weight(.medium))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(.regularMaterial, in: Capsule())
-                    .shadow(color: .black.opacity(0.15), radius: 6, y: 2)
-                    .padding(.bottom, 18)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                ShellToastView(toast: toast)
+                    .padding(.top, 5)
+                    .padding(.trailing, 6)
+                    .transition(.scale(scale: 0.5, anchor: .topTrailing).combined(with: .opacity))
                     .id(toast.id)
-                    .allowsHitTesting(false)
-                    .accessibilityAddTraits(.isStaticText)
             }
         }
+    }
+}
+
+extension ShellToast {
+    /// In over one or two 10 fps frames from ≈ 50 % scale; out in one.
+    static let inAnimation = Animation.easeOut(duration: 0.15)
+    static let outAnimation = Animation.easeIn(duration: 0.1)
+}
+
+/// The toast itself: a rounded rectangle tinted by the space's theme, with
+/// a thin border and a soft shadow; keycaps as chips, then the action.
+struct ShellToastView: View {
+    let toast: ShellToast
+    @Environment(\.themeChrome) private var chrome
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: toast.systemImage)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(chrome.accent)
+            HStack(spacing: 3) {
+                ForEach(Array(toast.segments.enumerated()), id: \.offset) { _, segment in
+                    if segment.isKeycap {
+                        Text(segment.text)
+                            .font(.system(size: 11, weight: .semibold))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(chrome.title.opacity(0.08), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).strokeBorder(chrome.title.opacity(0.2)))
+                    } else {
+                        Text(segment.text)
+                    }
+                }
+            }
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(chrome.title)
+            .lineLimit(1)
+            if case .share(let url) = toast.action {
+                ShareLink(item: url) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 22, height: 20)
+                        .background(chrome.title.opacity(0.08), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(chrome.title)
+                .help("Share")
+            }
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, toast.action == nil ? 12 : 6)
+        .frame(height: 30)
+        .background(chrome.toast, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(chrome.title.opacity(0.1)))
+        .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isStaticText)
     }
 }
 

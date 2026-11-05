@@ -38,6 +38,16 @@ struct CommandBarOverlay: View {
     /// Bumped when the field must take focus again (after ⌘T swaps the page
     /// that had it out from under the bar).
     var focusRequest = 0
+    /// Arc's bar is ≈ 765 pt wide (ARC-RECORDING-ANALYSIS.md §8).
+    var width: CGFloat = CommandBarOverlay.arcWidth
+    /// The space a switch-to-tab row's tab lives in.
+    var spaceName: (Space.ID) -> String? = { _ in nil }
+
+    static let arcWidth: CGFloat = 765
+    static let rowHeight: CGFloat = 43
+    static let rowSpacing: CGFloat = 6
+    /// The bar's top sits 38 % of the way down the window.
+    static let topFraction: CGFloat = 0.38
 
     private var isCommandMode: Bool { text.hasPrefix(">") }
 
@@ -97,11 +107,13 @@ struct CommandBarOverlay: View {
             if !results.isEmpty {
                 Divider()
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
+                    LazyVStack(alignment: .leading, spacing: Self.rowSpacing) {
                         ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
                             CommandBarResultRow(
                                 result: result,
                                 isHighlighted: index == highlightedIndex,
+                                selection: selectionColor,
+                                spaceName: result.kind == .openTab ? result.spaceID.flatMap(spaceName) : nil,
                                 onAction: { onRowAction($0, result) }
                             )
                             .contentShape(Rectangle())
@@ -109,7 +121,9 @@ struct CommandBarOverlay: View {
                         }
                     }
                 }
-                .frame(maxHeight: 280)
+                .padding(.vertical, 6)
+                // As tall as its rows, up to about six (Arc's rows sit on a ≈ 49 pt pitch).
+                .frame(height: min(CGFloat(results.count) * (Self.rowHeight + Self.rowSpacing) + 12, 6 * (Self.rowHeight + Self.rowSpacing)))
                 if showsRouteHints {
                     Divider()
                     HStack(spacing: 14) {
@@ -125,9 +139,12 @@ struct CommandBarOverlay: View {
                 }
             }
         }
-        .frame(width: 520)
-        // Tinted by the focused space (THEMES.md §3.6; roles still to confirm, §8).
-        .background(themeChrome.panel, in: RoundedRectangle(cornerRadius: 14))
+        .frame(width: width)
+        // A neutral frosted panel, not the space's palette: only the selected
+        // row takes the theme (ARC-RECORDING-ANALYSIS.md §8). A site search
+        // tints the whole panel with the site's colour (frame 3034).
+        .background(siteSearch.map { Color($0.color).opacity(0.22) } ?? Color.white.opacity(themeChrome.isWindowDark ? 0 : 0.3),
+                    in: RoundedRectangle(cornerRadius: 14))
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
@@ -150,6 +167,12 @@ struct CommandBarOverlay: View {
         }
     }
 
+    /// The selected row's fill: the theme accent lightened (`#858AFF` from
+    /// `#2731FF` on Imara), or the site's colour during a site search.
+    private var selectionColor: Color {
+        siteSearch.map { Color($0.color) } ?? themeChrome.selection
+    }
+
     /// The typed text, invisible, then the completion's remainder in grey.
     @ViewBuilder
     private var inlineCompletion: some View {
@@ -170,34 +193,33 @@ struct CommandBarOverlay: View {
 
     private var placeholder: String {
         if let siteSearch { return "Search \(siteSearch.name)" }
-        return isCommandMode ? "Type a command…" : "Search or enter URL"
+        return isCommandMode ? "Type a command…" : "Search or Enter URL…"
     }
 }
 
-/// One result: icon, title and subtitle, and its row actions while hovered
-/// or highlighted.
+/// One result on one line: icon, title, then "— subtitle" in grey; a
+/// switch-to-tab row ends with its space's name and a → chip (§8). The
+/// selected row is a rounded fill in the theme accent with white text. Row
+/// actions show while hovered or selected.
 private struct CommandBarResultRow: View {
     let result: CommandBarSearch.Result
     let isHighlighted: Bool
+    let selection: Color
+    var spaceName: String?
     let onAction: (CommandBarRowAction) -> Void
     @State private var isHovering = false
 
     var body: some View {
         let actions = CommandBarSearch.rowActions(for: result)
+        let secondary = isHighlighted ? Color.white.opacity(0.8) : Color.secondary
         HStack(spacing: 10) {
             Image(systemName: Self.icon(for: result.kind))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(secondary)
                 .frame(width: 18)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(result.title)
-                    .lineLimit(1)
-                if let subtitle = result.subtitle {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
+            (Text(result.title).foregroundColor(isHighlighted ? .white : .primary)
+                + Text(result.subtitle.map { " — \($0)" } ?? "").foregroundColor(secondary))
+                .lineLimit(1)
+                .truncationMode(.tail)
             Spacer(minLength: 0)
             if isHovering || isHighlighted {
                 ForEach(actions, id: \.title) { action in
@@ -205,17 +227,32 @@ private struct CommandBarResultRow: View {
                         Image(systemName: action.systemImage)
                             .font(.system(size: 11, weight: .semibold))
                             .frame(width: 22, height: 22)
-                            .background(Circle().fill(Color.primary.opacity(0.08)))
+                            .background(Circle().fill((isHighlighted ? Color.white : Color.primary).opacity(0.12)))
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(secondary)
                     .help(action == .deleteFromHistory ? "\(action.title) (⇧⌫)" : action.title)
                 }
             }
+            if let spaceName {
+                Text(spaceName)
+                    .font(.system(size: 12, weight: isHighlighted ? .semibold : .regular))
+                    .foregroundStyle(secondary)
+                    .lineLimit(1)
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(isHighlighted ? selection : Color.secondary)
+                    .frame(width: 22, height: 20)
+                    .background(isHighlighted ? Color.white : Color.clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(Color.secondary.opacity(isHighlighted ? 0 : 0.35)))
+                    .accessibilityLabel("Switch to Tab")
+            }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(isHighlighted ? Color.accentColor.opacity(0.18) : Color.clear)
+        .padding(.horizontal, 10)
+        .frame(height: CommandBarOverlay.rowHeight)
+        .background(isHighlighted ? selection : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.horizontal, 8)
         .onHover { isHovering = $0 }
         .contextMenu {
             ForEach(actions, id: \.title) { action in

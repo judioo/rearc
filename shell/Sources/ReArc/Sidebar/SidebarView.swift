@@ -200,6 +200,7 @@ private struct SpaceHeaderView: View {
     var onTogglePinned: () -> Void = {}
     @State private var isHovering = false
     @Environment(\.themeChrome) private var chrome
+    @Environment(\.sidebarWindow) private var window
 
     var body: some View {
         // Arc: an 18 pt icon at x 17, the name in 13 pt semibold grey at x 45.
@@ -246,6 +247,16 @@ private struct SpaceHeaderView: View {
         }
         .frame(height: SidebarMetrics.headerHeight)
         .contentShape(Rectangle())
+        // Edit Theme Color hangs the editor under the header (ARC-RECORDING-ANALYSIS.md §2.1).
+        .popover(isPresented: Binding(
+            get: { model.themePopoverSpaceID == space.id && model.isKeyBrowserWindow(window) },
+            set: { if !$0 { model.themePopoverSpaceID = nil } }
+        ), arrowEdge: .bottom) {
+            SpaceStyleEditor(theme: Binding(
+                get: { model.store.space(withID: space.id)?.theme ?? .default },
+                set: { model.store.setSpaceTheme(space.id, theme: $0) }
+            ))
+        }
         .onTapGesture(count: 2) { model.beginRename(.space(space.id)) }
         .onHover { isHovering = $0 }
         .contextMenu {

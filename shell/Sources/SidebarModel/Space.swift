@@ -227,6 +227,21 @@ public struct SpaceTheme: Hashable, Codable, Sendable {
 
     /// The names of `editorPalette`'s rows.
     public static let editorPaletteNames = ["Pastel", "Greyscale", "Drab"]
+
+    /// The editor's first swatch page as the user's recording shows it: nine
+    /// saturated colours, none of them in the three catalog sets above
+    /// (ARC-RECORDING-ANALYSIS.md §2.5; sampled from the video, ±3–5 levels).
+    public static let editorVibrant: [SpaceTheme] = [
+        "#EFE6E0", "#EF91B6", "#9D6794", "#EF5260", "#FE794C", "#F8CF4C", "#2AE48A", "#62B2D4", "#5A5C7C",
+    ].map { hex in
+        let color = SpaceColor(hex: hex)!
+        return SpaceTheme(red: color.red, green: color.green, blue: color.blue)
+    }
+
+    /// The pages the editor's ‹ › arrows step through: the observed set first,
+    /// then the three catalog sets (their place behind the arrows is inferred).
+    public static let editorSwatchPages: [[SpaceTheme]] = [editorVibrant] + editorPalette
+    public static let editorSwatchPageNames = ["Vibrant"] + editorPaletteNames
 }
 
 /// The part of a theme beyond its base colour. It syncs in its own record

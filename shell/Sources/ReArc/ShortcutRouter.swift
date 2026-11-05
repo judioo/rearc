@@ -139,6 +139,7 @@ final class ShortcutRouter {
 extension BrowserViewModel {
     /// Arc's "again" prompt; the second press must come while it shows.
     func showShortcutPrompt(_ shortcut: ArcShortcut) {
-        showToast(ShortcutRouting.promptMessage(for: shortcut), systemImage: "keyboard", duration: ShortcutPromptArming.window)
+        showToast(ShortcutRouting.promptMessage(for: shortcut), systemImage: "keyboard", keycaps: [shortcut.display],
+                  duration: ShortcutPromptArming.window)
     }
 }

@@ -28,21 +28,39 @@ public struct ThemeGradient: Hashable, Sendable {
     }
 
     /// The theme in one appearance. Light draws the stops over white, as the
-    /// shader does with `translucencyStyle: light`. Arc's dark treatment is
-    /// not known (THEMES.md §8); ReArc darkens each stop to a third of its
-    /// OKLab lightness, keeps (and lifts) its chroma so the hue survives, and
-    /// lays it over the theme's dark `background` role instead of black.
+    /// shader does with `translucencyStyle: light`. Dark keeps the gradient
+    /// and lays the same stops over a mid grey, so it reads darker and greyer
+    /// (the sidebar dropped 20 levels in every channel at the switch, frames
+    /// 942 → 943: (1 − 0.8) · (255 − 155)). Arc's built-in theme has its own
+    /// navy gradient in dark (ARC-RECORDING-ANALYSIS.md §2.7).
     public init(theme: SpaceTheme, dark: Bool) {
-        let stops = theme.stops.map { stop -> OKLab in
-            let lab = stop.spaceColor.oklab
-            return dark ? OKLab(l: lab.l * 0.33, a: lab.a * 1.4, b: lab.b * 1.4) : lab
+        if dark, ThemeColorPad.isUnset(theme) {
+            self.init(base: Self.defaultDarkStops.map(OKLab.init), overlay: nil, alpha: 1, underlay: .black)
+            return
         }
+        let stops = theme.stops.map(\.spaceColor.oklab)
         self.init(
             base: Array(stops.prefix(2)),
             overlay: stops.count > 2 ? stops[2] : nil,
             alpha: theme.intensity,
-            underlay: dark ? SpaceThemeRoles(theme: theme).dark.background : .white
+            underlay: dark ? Self.darkUnderlay : .white
         )
+    }
+
+    /// The dark appearance's underlay (`#9B9B9B`).
+    public static let darkUnderlay = SpaceColor(red: 155.0 / 255, green: 155.0 / 255, blue: 155.0 / 255)
+
+    /// Arc's default theme in dark, on screen: `#202032` at the top left to
+    /// `#2A1E30` past 75 % of the diagonal (frame 2365; `#261D2F` bottom left).
+    public static let defaultDarkStops = [SpaceColor(hex: "#202032")!, SpaceColor(hex: "#2A1E30")!]
+
+    /// Whether the sidebar's text and glyphs use the dark roles. In dark, a
+    /// coloured theme stays light enough for Arc's dark text (its stored
+    /// `contentOverBackgroundAppearance` is `light`); the navy default and
+    /// themes that land dark take the light text.
+    public static func usesDarkChrome(theme: SpaceTheme, dark: Bool) -> Bool {
+        guard dark else { return false }
+        return OKLab(ThemeGradient(theme: theme, dark: true).color(u: 0.5, v: 0.5)).l < 0.6
     }
 
     /// `tBase`: projection onto the base line, 0…1.

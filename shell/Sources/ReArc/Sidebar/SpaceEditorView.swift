@@ -34,10 +34,10 @@ struct SpaceEditorView: View {
                 profileRow(space)
             }
 
-            SpaceStyleEditor(theme: Binding(
+            ChooseThemeRow(theme: Binding(
                 get: { model.store.space(withID: spaceID)?.theme ?? .default },
                 set: { model.store.setSpaceTheme(spaceID, theme: $0) }
-            ))
+            ), title: "Edit Theme Color")
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Icon").font(.headline)

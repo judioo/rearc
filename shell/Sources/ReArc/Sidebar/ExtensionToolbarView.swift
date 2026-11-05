@@ -107,76 +107,100 @@ struct ExtensionIcon: View {
     }
 }
 
+/// Arc's toolbar popover (ARC-RECORDING-ANALYSIS.md §9, frame 3380): a row
+/// of square Share / Boost / Capture buttons, then an "Extensions" grid of
+/// rounded tiles, four to a row, pinned ones with a blue pin badge, and a +
+/// tile last. Right-click a tile to pin or unpin it.
 private struct ExtensionsMenu: View {
     let model: BrowserViewModel
     let engine: (any WebEngine)?
     let run: (String) -> Void
     let dismiss: () -> Void
+    @Environment(\.sidebarWindow) private var window
+
+    private let columns = Array(repeating: GridItem(.fixed(48), spacing: 8), count: 4)
 
     var body: some View {
         let actions = model.extensions.actions(for: engine)
-        VStack(alignment: .leading, spacing: 2) {
+        let url = engine?.currentURL
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                if let url {
+                    ShareLink(item: url) { squareLabel("Share", "square.and.arrow.up") }
+                        .buttonStyle(.plain)
+                } else {
+                    squareLabel("Share", "square.and.arrow.up").opacity(0.4)
+                }
+                squareButton("Boost", "paintbrush.pointed.fill") { model.newBoost() }
+                squareButton("Capture", "camera.fill") { _ = model.beginPageCapture(in: window) }
+            }
             Text("Extensions")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 4)
-            if actions.isEmpty {
-                Text("No extensions")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-            }
-            ForEach(actions) { action in
-                HStack(spacing: 8) {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+                ForEach(actions) { action in
+                    let pinned = model.extensions.pins.isPinned(action.id)
                     Button { run(action.id) } label: {
-                        HStack(spacing: 8) {
-                            ExtensionIcon(action: action, size: 16)
-                            Text(action.name).font(.system(size: 13)).lineLimit(1)
-                            Spacer(minLength: 8)
-                        }
-                        .contentShape(Rectangle())
+                        ExtensionIcon(action: action, size: 22)
+                            .frame(width: 48, height: 48)
+                            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(alignment: .topTrailing) {
+                                if pinned {
+                                    Image(systemName: "pin.fill")
+                                        .font(.system(size: 7, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .frame(width: 14, height: 14)
+                                        .background(Color.blue, in: Circle())
+                                        .offset(x: 4, y: -4)
+                                }
+                            }
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .disabled(!action.isEnabled)
                     .help(action.tooltip)
-                    let pinned = model.extensions.pins.isPinned(action.id)
-                    Button { model.extensions.togglePin(action.id) } label: {
-                        Image(systemName: pinned ? "pin.fill" : "pin")
-                            .font(.system(size: 11))
-                            .foregroundStyle(pinned ? Color.accentColor : Color.secondary)
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
+                    .accessibilityLabel(action.name)
+                    .contextMenu {
+                        Button(pinned ? "Unpin \(action.name)" : "Pin \(action.name)") { model.extensions.togglePin(action.id) }
                     }
-                    .buttonStyle(.plain)
-                    .help(pinned ? "Unpin \(action.name)" : "Pin \(action.name)")
-                    .accessibilityLabel(pinned ? "Unpin \(action.name)" : "Pin \(action.name)")
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
+                Button {
+                    dismiss()
+                    model.openChromeWebStore()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 48, height: 48)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Chrome Web Store")
+                .accessibilityLabel("Add Extensions")
+                .contextMenu { Button("Manage Extensions") { model.openBrowserPage(.extensions) } }
             }
-            Divider().padding(.vertical, 4)
-            menuRow("Manage Extensions", "gearshape") { model.openBrowserPage(.extensions) }
-            menuRow("Chrome Web Store", "bag") { model.openChromeWebStore() }
         }
-        .padding(.vertical, 10)
-        .frame(width: 260)
+        .padding(12)
+        .frame(width: 4 * 48 + 3 * 8 + 24)
     }
 
-    private func menuRow(_ title: String, _ symbol: String, _ action: @escaping () -> Void) -> some View {
+    private func squareLabel(_ title: String, _ symbol: String) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 15))
+            .frame(width: 48, height: 40)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .contentShape(Rectangle())
+            .help(title)
+            .accessibilityLabel(title)
+    }
+
+    private func squareButton(_ title: String, _ symbol: String, _ action: @escaping () -> Void) -> some View {
         Button {
             dismiss()
             action()
-        } label: {
-            Label(title, systemImage: symbol)
-                .font(.system(size: 13))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-        }
+        } label: { squareLabel(title, symbol) }
         .buttonStyle(.plain)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
     }
 }
 

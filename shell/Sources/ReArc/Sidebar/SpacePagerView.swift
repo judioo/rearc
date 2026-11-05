@@ -174,8 +174,16 @@ struct SpaceThemeBackground: View {
     let pager: SpacePagerController?
     @Environment(\.colorScheme) private var colorScheme
 
+    /// The window's space; Create a Space previews the new space's theme in
+    /// the key window (ARC-RECORDING-ANALYSIS.md §5.2).
+    private var shownSpace: Space {
+        var space = model.space(in: window)
+        if let draft = model.spaceCreationDraft, model.isKeyBrowserWindow(window) { space.theme = draft.theme }
+        return space
+    }
+
     var body: some View {
-        let space = model.space(in: window)
+        let space = shownSpace
         let systemDark = SystemAppearance.isDark(colorScheme)
         TimelineView(.animation(paused: !(pager?.isSwipeDriven ?? false))) { context in
             let swipe = pager?.transition(at: context.date.timeIntervalSinceReferenceDate)

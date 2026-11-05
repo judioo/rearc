@@ -46,6 +46,10 @@ struct CardToolbarView: View {
             .frame(maxWidth: .infinity)
 
             HStack(spacing: 0) {
+                if !model.isSidebarVisible {
+                    // With the sidebar hidden its toggle moves here, before back (§3).
+                    navButton("sidebar.left", help: "Show Sidebar (⌘S)", enabled: true) { model.toggleSidebar() }
+                }
                 navButton("arrow.left", help: "Back (⌘[)", enabled: engine?.canGoBack == true) { model.goBack() }
                 navButton("arrow.right", help: "Forward (⌘])", enabled: engine?.canGoForward == true) { model.goForward() }
                 if engine?.isLoading == true {
@@ -141,11 +145,18 @@ struct TrafficLightPositioner: NSViewRepresentable {
     /// The title bar area tall enough to hold the buttons at that centre.
     static let titlebarHeight: CGFloat = 47
 
+    /// The sidebar is hidden: so are the buttons, as in Arc.
+    var isHidden = false
+
     func makeNSView(context: Context) -> PositionerView { PositionerView() }
-    func updateNSView(_ nsView: PositionerView, context: Context) { nsView.reposition() }
+    func updateNSView(_ nsView: PositionerView, context: Context) {
+        nsView.buttonsHidden = isHidden
+        nsView.reposition()
+    }
 
     final class PositionerView: NSView {
         private var observers: [NSObjectProtocol] = []
+        var buttonsHidden = false
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -169,6 +180,10 @@ struct TrafficLightPositioner: NSViewRepresentable {
         deinit { observers.forEach(NotificationCenter.default.removeObserver) }
 
         func reposition() {
+            for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                guard let button = window?.standardWindowButton(kind), button.isHidden != buttonsHidden else { continue }
+                button.isHidden = buttonsHidden
+            }
             guard let window, !window.styleMask.contains(.fullScreen),
                   let close = window.standardWindowButton(.closeButton),
                   let titlebar = close.superview, let container = titlebar.superview else { return }
