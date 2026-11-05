@@ -59,11 +59,18 @@ enum ChromiumSearchMapping {
     /// Search matches in Chromium's rank order. URL matches are left out:
     /// history rows come from `ReArcHistoryQuery`, and the typed address
     /// from the classification.
-    static func suggestions(_ matches: [ChromiumAutocompleteMatch]) -> [SearchSuggestion] {
+    static func suggestions(_ matches: [ChromiumAutocompleteMatch], partialQuery: String? = nil) -> [SearchSuggestion] {
         matches.compactMap { match in
             guard match.kind == 2, let url = URL(string: match.destinationURL), url.scheme != nil else { return nil }
             let text = match.contents.isEmpty ? match.fillIntoEdit : match.contents
             guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+            // Chromium may carry cached suggestions from its previous input
+            // into a partial result. Stream only rows completing this input;
+            // the terminal snapshot admits corrections and non-prefix matches.
+            if let partialQuery {
+                let needle = partialQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                guard !needle.isEmpty, text.lowercased().hasPrefix(needle) else { return nil }
+            }
             return SearchSuggestion(text: text, destinationURL: url)
         }
     }

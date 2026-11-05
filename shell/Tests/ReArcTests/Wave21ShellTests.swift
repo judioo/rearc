@@ -215,11 +215,12 @@ final class Wave21ShellTests: XCTestCase {
         XCTAssertFalse(model.exitCommandBarSiteSearch(), "Delete edits the query while it has text")
         XCTAssertEqual(model.commandBarResults.first?.destinationURL?.absoluteString,
                        "https://www.youtube.com/results?search_query=lofi%20beats")
-        let tabID = model.store.selectedTabID!
+        let previousTabID = model.store.selectedTabID
         model.submitCommandBar()
         XCTAssertFalse(model.isCommandBarPresented)
         XCTAssertNil(model.commandBarSiteSearch, "dismissing clears the pill")
-        XCTAssertEqual(model.store.tab(withID: tabID)?.url.host(), "www.youtube.com")
+        XCTAssertNotEqual(model.store.selectedTabID, previousTabID, "⌘T creates the result's tab on submit")
+        XCTAssertEqual(model.store.selectedTab?.url.host(), "www.youtube.com")
     }
 
     func testCommandModeAndURLIntentsNeverOfferSiteSearch() {

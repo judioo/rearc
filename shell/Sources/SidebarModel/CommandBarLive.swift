@@ -53,6 +53,29 @@ public struct CommandBarLiveResults: Equatable, Sendable {
     }
 }
 
+/// Independent sources replace only their own snapshot. The final value is
+/// independent of whether history, classification or suggestions answers first;
+/// an autocomplete snapshot keeps the provider's order and replaces its partial.
+public struct CommandBarLiveAccumulator: Sendable {
+    public enum Update: Sendable {
+        case history([VisitRecord])
+        case classification(InputClassification?)
+        case suggestions([SearchSuggestion])
+    }
+
+    public private(set) var results: CommandBarLiveResults
+
+    public init(query: String) { results = CommandBarLiveResults(query: query) }
+
+    public mutating func merge(_ update: Update) {
+        switch update {
+        case .history(let rows): results.history = rows
+        case .classification(let classification): results.classification = classification
+        case .suggestions(let rows): results.suggestions = rows
+        }
+    }
+}
+
 /// Per-keystroke request generations: every edit starts a new generation
 /// and cancels the previous one, and a completion is used only while its
 /// generation is still the newest.

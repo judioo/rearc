@@ -13,9 +13,13 @@ extension BrowserViewModel {
     /// bundled list). None after a deletion, for commands, site searches and
     /// URL prompts.
     var commandBarInlineCompletion: String? {
-        guard isCommandBarPresented, !commandBarSuppressesInlineCompletion, commandBarSiteSearch == nil,
-              commandBarURLIntent == nil else { return nil }
-        return InlineDomainCompletion.complete(commandBarText, candidates: InlineDomainCompletion.candidates(history: visitHistory))
+        commandBarInlineCache.value {
+            guard isCommandBarPresented, !commandBarText.isEmpty, !commandBarText.hasPrefix(">"),
+                  !commandBarSuppressesInlineCompletion, commandBarSiteSearch == nil,
+                  commandBarURLIntent == nil else { return nil }
+            let candidates = commandBarDomainCache.value { InlineDomainCompletion.candidates(history: visitHistory) }
+            return InlineDomainCompletion.complete(commandBarText, candidates: candidates)
+        }
     }
 
     /// The grey text after the caret.
@@ -52,7 +56,7 @@ extension BrowserViewModel {
                 openInNewTab(url)
             }
         case .splitView:
-            let anchorID = blankTarget == nil ? target?.id : commandBarSplitAnchorID
+            let anchorID = commandBarCreatesNewTab || blankTarget != nil ? commandBarSplitAnchorID : target?.id
             guard let anchorID, let anchor = store.tab(withID: anchorID), anchor.kind != .favorite else {
                 if blankTarget == nil { openInNewTab(url) } else { navigateCommandBar(to: url) }
                 break

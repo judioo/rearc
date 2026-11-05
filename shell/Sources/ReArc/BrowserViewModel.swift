@@ -140,8 +140,8 @@ final class BrowserViewModel {
     @ObservationIgnored let shortcutRouter = ShortcutRouter()
     /// Cycle Tab Backward/Forward's visit order (⌃⌘← / ⌃⌘→).
     @ObservationIgnored var tabVisitCycle: TabVisitCycle?
-    /// The tab ⌘T made, removed again when its command bar closes untouched.
-    @ObservationIgnored var commandBarNewTabID: Tab.ID?
+    /// ⌘T opens only the field. Its Today tab is created when a page is chosen.
+    var commandBarCreatesNewTab = false
     /// The Little Arc whose window is key (nil when a browser window is).
     var keyLittleArcID: LittleArcWindow.ID?
     /// A Little Arc whose address field should start editing (⌘L, New Little Arc Window).
@@ -173,7 +173,7 @@ final class BrowserViewModel {
     var commandBarHighlightedIndex = 0
     /// The tab the command bar will navigate on submit.
     var commandBarTargetID: Tab.ID?
-    /// The tab shown before ⌘T made the bar's new tab: a ⌥↩ split pairs with it.
+    /// The tab shown before ⌘T: a ⌥↩ split pairs with it.
     var commandBarSplitAnchorID: Tab.ID?
     /// Bumped to give the command bar's field focus again (`CommandBarOverlay.focusRequest`).
     var commandBarFocusRequest = 0
@@ -185,9 +185,16 @@ final class BrowserViewModel {
     /// (Arc `queryBeforeEnteringScopedSearch`).
     @ObservationIgnored var commandBarTextBeforeSiteSearch = ""
 
+    @ObservationIgnored let commandBarResultCache = ObservedCache<[CommandBarSearch.Result]>()
+    @ObservationIgnored let commandBarCatalogCache = ObservedCache<[AppCommand]>()
+    @ObservationIgnored let commandBarDomainCache = ObservedCache<[String]>()
+    @ObservationIgnored let commandBarInlineCache = ObservedCache<String?>()
+
     var commandBarResults: [CommandBarSearch.Result] {
-        ModelSignposts.measure(ModelSignposts.model, "CommandBarResults", detail: "\(commandBarText.count) chars") {
-            computeCommandBarResults()
+        commandBarResultCache.value {
+            ModelSignposts.measure(ModelSignposts.model, "CommandBarResults", detail: "\(commandBarText.count) chars") {
+                computeCommandBarResults()
+            }
         }
     }
 
@@ -195,6 +202,8 @@ final class BrowserViewModel {
         if let engine = commandBarSiteSearch {
             return CommandBarSearch.siteSearchResults(engine, query: commandBarText)
         }
+        let (mode, needle) = CommandBarSearch.parseMode(commandBarText)
+        if mode == .blended && needle.isEmpty { return [] }
         return CommandBarSearch.results(
             for: commandBarText,
             in: store,
@@ -205,6 +214,13 @@ final class BrowserViewModel {
             tabMuteModel: tabMuteModel,
             navigationSchemes: engineHost.navigationSchemes,
             history: visitHistory,
+            commandCatalog: commandBarCatalogCache.value {
+                AppCommandRegistry.all(in: CommandBarContext(
+                    store: store, isSidebarVisible: isSidebarVisible, closedTabStack: store.closedTabStack,
+                    peekURL: peekSession?.url, focusedLittleArcID: focusedLittleArcID,
+                    mediaByTab: mediaStateByTab, tabMuteModel: tabMuteModel,
+                    navigationSchemes: engineHost.navigationSchemes, externalLinkDestination: externalLinkDestination))
+            },
             externalLinkDestination: externalLinkDestination,
             live: commandBarLive,
             searchProvider: searchProvider,
@@ -1152,21 +1168,15 @@ final class BrowserViewModel {
 
     // MARK: - Command bar
 
-    /// Cmd+T: create a fresh today tab and open the command bar into it.
+    /// Cmd+T: the field takes focus without mutating or replacing the page.
+    /// Choosing a page creates its Today tab; Escape has nothing to undo.
     func newTab() {
         PerfSignposts.interaction(.newTab)
         let previous = store.selectedTabID
-        let tab = store.addTab(kind: .today, title: "New Tab", url: URL(string: "about:blank")!)
-        store.selectTab(tab.id)
-        openCommandBar(target: tab.id, text: "")
+        openCommandBar(target: nil, text: "")
+        commandBarCreatesNewTab = true
         commandBarSplitAnchorID = previous
-        commandBarNewTabID = tab.id
-        // The page that had focus leaves with this update, taking the field's
-        // first focus with it: Arc's bar has the keyboard, so ask again.
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.isCommandBarPresented, self.commandBarNewTabID == tab.id else { return }
-            self.commandBarFocusRequest += 1
-        }
+        commandBarFocusRequest += 1
     }
 
     /// Cmd+L: open the command bar aimed at the selected tab, its URL filled
@@ -1219,13 +1229,7 @@ final class BrowserViewModel {
     }
 
     func dismissCommandBar() {
-        // Arc's ⌘T makes no tab until a result is chosen: drop ours if it stayed blank.
-        if let id = commandBarNewTabID, let tab = store.tab(withID: id), tab.url.absoluteString == "about:blank" {
-            let previous = commandBarSplitAnchorID
-            deleteTab(id)
-            if let previous, store.tab(withID: previous) != nil, store.focusTab(previous) { loadSelectedIfNeeded() }
-        }
-        commandBarNewTabID = nil
+        commandBarCreatesNewTab = false
         isCommandBarPresented = false
         cancelCommandBarLive()
         commandBarSiteSearch = nil
@@ -1342,6 +1346,10 @@ final class BrowserViewModel {
             commandBarError = "That URL scheme is not allowed"
             return
         }
+        if commandBarCreatesNewTab {
+            openInNewTab(url)
+            return
+        }
         let targetID = commandBarTargetID ?? store.selectedTabID
         if let targetID, let existing = store.tab(withID: targetID) {
             if existing.kind == .favorite {
@@ -1359,7 +1367,7 @@ final class BrowserViewModel {
     }
 
     private func openCommandBar(target: Tab.ID?, text: String) {
-        commandBarNewTabID = nil
+        commandBarCreatesNewTab = false
         commandBarSiteSearch = nil
         commandBarSplitAnchorID = nil
         commandBarTargetID = target
@@ -1367,6 +1375,7 @@ final class BrowserViewModel {
         commandBarError = nil
         isCommandBarPresented = true
         commandBarServices.commandBarWillOpen(profileID: store.activeProfileID)
+        refreshCommandBarLive()
     }
 
     // MARK: - Command bar live results

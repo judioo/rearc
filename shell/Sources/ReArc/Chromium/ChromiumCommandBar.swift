@@ -283,12 +283,14 @@ final class ChromiumCommandBarServices: CommandBarServices {
         let accumulated = Accumulator(query: text)
         let send: (String) -> Void = { [weak self] source in
             guard let self, self.token == token else { return }
+            guard accumulated.lastDelivered != accumulated.value.results else { return }
+            accumulated.lastDelivered = accumulated.value.results
             self.deliveries[source, default: 0] += 1
-            deliver(accumulated.results)
+            deliver(accumulated.value.results)
         }
         if !capabilities.searchAutocomplete {
             fallback.query(text, profileID: profileID, isPrivate: isPrivate) { results in
-                accumulated.results.suggestions = results.suggestions
+                accumulated.value.merge(.suggestions(results.suggestions))
                 send("suggest")
             }
         }
@@ -299,14 +301,14 @@ final class ChromiumCommandBarServices: CommandBarServices {
             if self.capabilities.historyQuery {
                 self.runtime.queryHistory(profile: engineID, text: text, limit: Self.historyLimit) { status, rows in
                     guard status == .rearcOK else { return }
-                    accumulated.results.history = rows.compactMap(\.record)
+                    accumulated.value.merge(.history(rows.compactMap(\.record)))
                     send("history")
                 }
             }
             guard self.capabilities.searchAutocomplete else { return }
             self.runtime.classifyInput(profile: engineID, text: text) { status, classification in
                 guard status == .rearcOK else { return }
-                accumulated.results.classification = classification
+                accumulated.value.merge(.classification(classification))
                 send("classify")
             }
             self.autocompleteProfile = engineID
@@ -319,11 +321,8 @@ final class ChromiumCommandBarServices: CommandBarServices {
                     self.autocompleteQueryID = nil
                 }
                 guard update.status == .rearcOK else { return }
-                // Chromium can carry the previous query's cached suggestions
-                // in a partial update. Keep history/classification responsive,
-                // but publish suggestions only when this query has finished.
-                guard update.done else { return }
-                accumulated.results.suggestions = ChromiumSearchMapping.suggestions(update.matches)
+                accumulated.value.merge(.suggestions(ChromiumSearchMapping.suggestions(
+                    update.matches, partialQuery: update.done ? nil : text)))
                 send("autocomplete")
             }
         }
@@ -349,8 +348,9 @@ final class ChromiumCommandBarServices: CommandBarServices {
     }
 
     private final class Accumulator {
-        var results: CommandBarLiveResults
-        init(query: String) { results = CommandBarLiveResults(query: query) }
+        var value: CommandBarLiveAccumulator
+        var lastDelivered: CommandBarLiveResults?
+        init(query: String) { value = CommandBarLiveAccumulator(query: query) }
     }
 }
 #endif
