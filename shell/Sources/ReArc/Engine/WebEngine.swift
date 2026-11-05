@@ -67,6 +67,7 @@ protocol WebEngine: AnyObject {
 
     /// Shift-click on in-page links posts the anchor href (nil disables delivery).
     var linkPeekHandler: ((URL) -> Void)? { get set }
+    var automaticPeekSourceURL: URL? { get set }
 
     func load(_ url: URL)
     /// `ignoringCache` is the hard reload (Shift+Cmd+R).

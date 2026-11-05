@@ -105,6 +105,17 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     private(set) var boostInstallCount = 0
     private(set) var navigationsDeferredForBoosts = 0
     @ObservationIgnored var onNavigationCommit: ((URL?, String?) -> Void)?
+    @ObservationIgnored var automaticPeekSourceURL: URL? {
+        didSet {
+            guard oldValue != automaticPeekSourceURL else { return }
+            if let automaticPeekSourceURL { automaticPeekScopeURL = automaticPeekSourceURL }
+            automaticPeekUpdating = runtime.capabilities.isolatedPageMessages
+            installBoosts(boostEntries)
+        }
+    }
+    @ObservationIgnored private var automaticPeekScopeURL: URL?
+    private(set) var automaticPeekUpdating = false
+    @ObservationIgnored private var boostEntries: [BoostRuntimeEntry] = []
     @ObservationIgnored var linkPeekHandler: ((URL) -> Void)? {
         didSet { reconcileLinkPeek() }
     }
@@ -684,6 +695,16 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     /// the document currently shown and be a known picker kind.
     func handlePageMessage(_ message: ChromiumPageMessage) {
         guard message.document.tabID == tabID, message.document.contentGeneration == contentGeneration else { return }
+        if message.boostID == AutomaticPeekScript.worldID {
+            guard let current = runtime.documentIdentity(tab: tabID), current.isSameDocument(as: message.document),
+                  let source = automaticPeekSourceURL,
+                  let data = message.json.data(using: .utf8),
+                  let payload = try? JSONDecoder().decode([String: String].self, from: data),
+                  let href = payload["href"], let destination = URL(string: href),
+                  AutomaticPeek.shouldOpen(kind: .pinned, source: source, destination: destination) else { return }
+            linkPeekHandler?(destination)
+            return
+        }
         guard message.boostID == ChromiumScriptWorld.editorWorldID else {
             onBoostPageMessage?(message)
             return
@@ -714,7 +735,12 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     // MARK: Boosts
 
     func installBoosts(_ entries: [BoostRuntimeEntry]) {
-        let plan = ChromiumBoostPlan.entries(from: entries)
+        boostEntries = entries
+        var plan = ChromiumBoostPlan.entries(from: entries)
+        if runtime.capabilities.isolatedPageMessages, var entry = AutomaticPeekScript.entry(for: automaticPeekScopeURL, documentURL: currentURL) {
+            entry.source = AutomaticPeekScript.source(for: automaticPeekSourceURL)
+            plan.append(entry)
+        }
         let removedScripts = !ChromiumBoostPlan.scriptIDs(in: desiredPlan)
             .subtracting(ChromiumBoostPlan.scriptIDs(in: plan)).isEmpty
         // Removed JS is never undone in the current document; reload like WKEngine.
@@ -756,6 +782,14 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     }
 
     private func planInstalled(_ plan: [ChromiumBoostPlan.Entry], tab: UInt64, status: ReArcStatus) {
+        if tab == tabID, status == .rearcOK, plan.contains(where: { $0.id == AutomaticPeekScript.worldID }) {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.automaticPeekUpdating = false }
+                _ = try? await self.evaluate(AutomaticPeekScript.source(for: self.automaticPeekSourceURL),
+                                            in: .boost(AutomaticPeekScript.id))
+            }
+        }
         guard tab == tabID else { return }
         installInFlight = false
         if status == .rearcOK {

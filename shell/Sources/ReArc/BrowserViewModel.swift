@@ -723,7 +723,7 @@ final class BrowserViewModel {
             for tab in split.tabs {
                 let pid = profileID(for: tab)
                 let engine = engineHost.engine(for: tab, profileID: pid)
-                configureLinkPeek(on: engine)
+                configureLinkPeek(on: engine, tab: tab)
                 if engine.currentURL != tab.url {
                     engine.load(tab.url)
                 }
@@ -733,7 +733,7 @@ final class BrowserViewModel {
         }
         guard let tab = store.selectedTab else { return }
         let engine = engineHost.engine(for: tab, profileID: profileID(for: tab))
-        configureLinkPeek(on: engine)
+        configureLinkPeek(on: engine, tab: tab)
         if engine.currentURL != tab.url {
             engine.load(tab.url)
         }
@@ -960,19 +960,30 @@ final class BrowserViewModel {
         nowPlaying.updateNowPlaying(state: state, tabTitle: tab.title)
     }
 
-    func configureLinkPeek(on engine: any WebEngine) {
+    var automaticPeekEnabled = UserDefaults.standard.object(forKey: "rearc.automaticPeek") as? Bool ?? true {
+        didSet {
+            externalLinkDefaults.set(automaticPeekEnabled, forKey: "rearc.automaticPeek")
+            for (id, _, engine) in engineHost.allTabEngines() {
+                configureLinkPeek(on: engine, tab: store.tab(withID: id))
+            }
+        }
+    }
+
+    func configureLinkPeek(on engine: any WebEngine, tab: Tab? = nil) {
+        engine.automaticPeekSourceURL = automaticPeekEnabled && tab?.kind != .today ? tab.map { $0.savedURL ?? $0.url } : nil
+        let profileID = tab.map { self.profileID(for: $0) }
         engine.linkPeekHandler = { [weak self] url in
-            self?.showPeek(url: url)
+            self?.showPeek(url: url, profileID: profileID)
         }
         configureLittleArcClicks(on: engine)
     }
 
     // MARK: - Peek
 
-    func showPeek(url: URL) {
+    func showPeek(url: URL, profileID: Profile.ID? = nil) {
         PerfSignposts.interaction(.peekOpen)
         dismissPeek()
-        let originProfile = store.activeProfileID
+        let originProfile = profileID ?? store.activeProfileID
         let (engineID, engine) = engineHost.ephemeralEngine(profileID: originProfile)
         engine.linkPeekHandler = nil
         engine.load(url)

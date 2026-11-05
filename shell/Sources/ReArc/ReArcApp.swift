@@ -34,6 +34,7 @@ struct ReArcApp: App {
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Set ReArc as Default Browser…") { model.setAsDefaultBrowser() }
+                Toggle("Open Off-Site Links in Peek", isOn: $model.automaticPeekEnabled)
                 Toggle("Automatic Picture in Picture", isOn: $model.automaticPictureInPicture)
                 Toggle("Video in Sidebar", isOn: $model.embedsVideoInSidebar)
                 Toggle("Show URL in Toolbar", isOn: $urlInToolbar)

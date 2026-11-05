@@ -260,6 +260,8 @@ final class WKEngine: NSObject, WebEngine {
     var mediaState: WebMediaState { mediaStateSubject.value }
     var mediaStatePublisher: AnyPublisher<WebMediaState, Never> { mediaStateSubject.eraseToAnyPublisher() }
 
+    var automaticPeekSourceURL: URL?
+
     var linkPeekHandler: ((URL) -> Void)? {
         didSet { linkPeekBridge.onURL = linkPeekHandler }
     }
@@ -740,6 +742,17 @@ extension WKEngine: WKNavigationDelegate {
             // ⌥⌘-click: the link opens in Little Arc, the page stays.
             decisionHandler(.cancel)
             littleArcLinkHandler(url)
+            return
+        }
+        if navigationAction.navigationType == .linkActivated,
+           !navigationAction.shouldPerformDownload,
+           let source = automaticPeekSourceURL, let destination = navigationAction.request.url,
+           AutomaticPeek.shouldOpen(kind: .pinned, source: source, destination: destination,
+                                    mainFrame: navigationAction.targetFrame?.isMainFrame != false,
+                                    modified: !flags.intersection([.command, .option, .shift, .control]).isEmpty),
+           let linkPeekHandler {
+            decisionHandler(.cancel)
+            linkPeekHandler(destination)
             return
         }
         decisionHandler(navigationAction.shouldPerformDownload && downloadCenter != nil ? .download : .allow)

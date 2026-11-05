@@ -1154,6 +1154,9 @@ final class ChromiumSelfTest {
         model.dismissPeek()
         try await wait("peek dismissed") { model.peekSession == nil && runtime.liveLeaseCount(forTab: peek.tabID) == 0 }
 
+        try await automaticPeekChecks(model: model, store: store, base: base, window: first)
+        model.selectTab(tabA.id)
+
         // Little Arc: its own NSWindow through BrowserWindowPresenting.
         let record = model.openLittleArc(url: URL(string: "\(base)/a")!)
         guard let littleWindow = shell.window(forLittleArc: record.id),
@@ -3682,6 +3685,45 @@ extension ChromiumSelfTest {
         try check(late == ReArcStatus(REARC_NOT_FOUND), "a second reply to the offer returned \(late.rearcName)")
         log("PASS address save offer (ABI 1.37): '\(offer.title)' \(offer.summaryLines) -> No Thanks (declined; nothing stored), "
             + "second reply -> \(late.rearcName)")
+    }
+
+    @MainActor
+    private func automaticPeekChecks(model: BrowserViewModel, store: SidebarStore, base: String, window: NSWindow) async throws {
+        let previous = model.automaticPeekEnabled
+        model.automaticPeekEnabled = true
+        defer { model.automaticPeekEnabled = previous; model.dismissPeek() }
+        let source = URL(string: "\(base)/links")!
+        let offSite = URL(string: base.replacingOccurrences(of: "127.0.0.1", with: "localhost") + "/a")!
+        for kind in [Tab.Kind.pinned, .favorite] {
+            let tab = store.addTab(kind: kind, title: "Auto Peek", url: source)
+            model.selectTab(tab.id)
+            let engine = try shellEngine(model, tab)
+            try await wait("auto Peek source loaded", timeout: 20) {
+                engine.attachmentID != nil && engine.pageTitle == "links" && !engine.isLoading
+            }
+            try await wait("auto Peek script configured") { !engine.automaticPeekUpdating }
+            let href = String(data: try JSONEncoder().encode(offSite.absoluteString), encoding: .utf8)!
+            _ = try await engine.evaluate("document.querySelector('#plain').href = \(href)", in: .page)
+            let center = try await cssCenter(of: "#plain", in: engine)
+            click(window, engine: engine, at: center)
+            try await wait("off-site \(kind) link opens Peek", timeout: 15) { model.peekSession?.url == offSite }
+            let preview = try XCTUnwrapSelfTest(model.peekSession, "automatic Peek session")
+            let previewEngine = model.engineHost.ephemeralEngine(withID: preview.engineID, profileID: preview.profileID) as? ChromiumEngine
+            try await wait("automatic Peek attached and loaded", timeout: 20) {
+                previewEngine?.attachmentID != nil && previewEngine?.pageTitle == Self.titleA && previewEngine?.isLoading == false
+            }
+            try check(engine.currentURL == source, "auto Peek navigated the source \(kind) tab")
+            try check(model.peekSession?.profileID == model.profileID(for: tab), "auto Peek used the wrong profile")
+            model.dismissPeek()
+            model.automaticPeekEnabled = false
+            try await wait("auto Peek disabled in the current document") { !engine.automaticPeekUpdating }
+            click(window, engine: engine, at: center)
+            try await wait("disabled auto Peek follows link", timeout: 15) { engine.currentURL == offSite && !engine.isLoading }
+            try check(model.peekSession == nil, "disabled auto Peek still opened a preview")
+            model.deleteTab(tab.id)
+            model.automaticPeekEnabled = true
+        }
+        log("PASS automatic Peek: off-site links from pinned tabs and favorites preserve the source and profile; toggle off navigates normally")
     }
 
     // MARK: Modified link opens (ABI 1.39)
