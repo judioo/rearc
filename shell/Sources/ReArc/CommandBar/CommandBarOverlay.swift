@@ -44,6 +44,8 @@ struct CommandBarOverlay: View {
     var spaceName: (Space.ID) -> String? = { _ in nil }
 
     static let arcWidth: CGFloat = 765
+    static let rowHeight: CGFloat = 43
+    static let rowSpacing: CGFloat = 6
     /// The bar's top sits 38 % of the way down the window.
     static let topFraction: CGFloat = 0.38
 
@@ -105,7 +107,7 @@ struct CommandBarOverlay: View {
             if !results.isEmpty {
                 Divider()
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
+                    LazyVStack(alignment: .leading, spacing: Self.rowSpacing) {
                         ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
                             CommandBarResultRow(
                                 result: result,
@@ -120,7 +122,8 @@ struct CommandBarOverlay: View {
                     }
                 }
                 .padding(.vertical, 6)
-                .frame(maxHeight: 300)
+                // As tall as its rows, up to about six (Arc's rows sit on a ≈ 49 pt pitch).
+                .frame(height: min(CGFloat(results.count) * (Self.rowHeight + Self.rowSpacing) + 12, 6 * (Self.rowHeight + Self.rowSpacing)))
                 if showsRouteHints {
                     Divider()
                     HStack(spacing: 14) {
@@ -247,7 +250,7 @@ private struct CommandBarResultRow: View {
             }
         }
         .padding(.horizontal, 10)
-        .frame(height: 34)
+        .frame(height: CommandBarOverlay.rowHeight)
         .background(isHighlighted ? selection : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .padding(.horizontal, 8)
         .onHover { isHovering = $0 }
