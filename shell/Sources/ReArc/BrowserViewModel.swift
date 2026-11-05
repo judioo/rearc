@@ -642,8 +642,11 @@ final class BrowserViewModel {
     }
 
     /// New Space: opens the creation dialog (name, icon, theme, profile).
+    /// Arc starts a new space on its built-in theme (ARC-RECORDING-ANALYSIS.md §1, row 7).
     func beginSpaceCreation(profileID: Profile.ID? = nil) {
-        spaceCreationDraft = SpaceDraft.suggested(in: store, profileID: profileID)
+        var draft = SpaceDraft.suggested(in: store, profileID: profileID)
+        draft.theme = .arcDefault
+        spaceCreationDraft = draft
     }
 
     @discardableResult
