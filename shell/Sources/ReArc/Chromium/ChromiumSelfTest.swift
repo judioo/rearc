@@ -1239,6 +1239,7 @@ final class ChromiumSelfTest {
             engineA.leaseHolder?.window === first && engineA.attachmentID != nil
         }
         try await shortcutChecks(model: model, store: store, tab: tabA, engine: engineA, base: base, window: first)
+        try await wave33UIChecks(model: model, store: store, tab: tabA, engine: engineA, other: tabB, window: first)
 
         // Private window: PrivateWindowModel on an off-the-record profile under the
         // active profile; its end closes that profile, and a new one starts empty.
@@ -4161,6 +4162,171 @@ extension ChromiumSelfTest {
 
         loadShellTab(model, store.tab(withID: tab.id) ?? tab, engine, URL(string: "\(base)/a")!)
         try await wait("tab A back on /a", timeout: 20) { engine.pageTitle == Self.titleA && !engine.isLoading }
+    }
+}
+
+// MARK: Wave 33 UI checks (THEMES-STATUS.md §5)
+
+extension ChromiumSelfTest {
+    /// Every accessibility element under `root`, breadth first.
+    @MainActor
+    private func accessibilityElements(under root: NSAccessibilityProtocol) -> [NSAccessibilityProtocol] {
+        var found: [NSAccessibilityProtocol] = [], queue = [root]
+        while !queue.isEmpty, found.count < 5000 {
+            let element = queue.removeFirst()
+            found.append(element)
+            queue.append(contentsOf: (element.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityProtocol })
+        }
+        return found
+    }
+
+    @MainActor
+    private func accessibilityElement(in window: NSWindow, labelled label: String) -> NSAccessibilityProtocol? {
+        guard let root = window.contentView else { return nil }
+        return accessibilityElements(under: root).first { ($0.accessibilityLabel() ?? "").contains(label) }
+    }
+
+    /// A left click posted at a screen point in `window`.
+    @MainActor
+    private func click(atScreen point: NSPoint, in window: NSWindow) {
+        let location = window.convertPoint(fromScreen: point)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            if let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                              windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                NSApp.postEvent(event, atStart: false)
+            }
+        }
+    }
+
+    private func popoverWindows() -> [NSWindow] {
+        NSApp.windows.filter { $0.isVisible && NSStringFromClass(Swift.type(of: $0)).contains("Popover") }
+    }
+
+    /// Wave 33's checks that need the screen: the traffic lights after ⌘S,
+    /// a peek and full screen; where the theme popover opens; the toast's
+    /// share button; the media strip around Picture in Picture.
+    @MainActor
+    func wave33UIChecks(model: BrowserViewModel, store: SidebarStore, tab: Tab, engine: ChromiumEngine, other: Tab, window: NSWindow) async throws {
+        guard await bringToFront(window, for: "wave 33 UI checks") else {
+            log("NOTE wave 33 UI checks skipped: they need the window on an unlocked screen")
+            return
+        }
+        var results: [String] = []
+        func lightsHidden() -> Bool { window.standardWindowButton(.closeButton)?.isHidden ?? true }
+        func toggle(_ visible: Bool) async throws {
+            guard model.isSidebarVisible != visible else { return }
+            model.toggleSidebar()
+            try await wait("sidebar \(visible ? "shown" : "hidden")", timeout: 5) { model.isSidebarVisible == visible && !model.isSidebarSliding }
+        }
+
+        // (2) Traffic lights: hidden with the sidebar, shown during a peek, back after ⌘S, also in full screen.
+        try await toggle(true)
+        try await wait("traffic lights shown with the sidebar", timeout: 3) { !lightsHidden() }
+        try await toggle(false)
+        try await wait("traffic lights hidden with the sidebar", timeout: 3) { lightsHidden() }
+        model.setSidebarPeeking(true)
+        try await wait("traffic lights shown during a peek", timeout: 3) { !lightsHidden() }
+        model.setSidebarPeeking(false)
+        try await wait("traffic lights hidden after the peek", timeout: 3) { lightsHidden() }
+        try await toggle(true)
+        try await wait("traffic lights back after ⌘S following a peek", timeout: 3) { !lightsHidden() }
+        window.toggleFullScreen(nil)
+        try await wait("window in full screen", timeout: 8) { window.styleMask.contains(.fullScreen) }
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        try await toggle(false)
+        try await toggle(true)
+        window.toggleFullScreen(nil)
+        try await wait("window out of full screen", timeout: 8) { !window.styleMask.contains(.fullScreen) }
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        try await wait("traffic lights back after ⌘S in full screen", timeout: 3) { !lightsHidden() }
+        results.append("(2) traffic lights hide with the sidebar, show during a peek and after ⌘S, and are back after ⌘S in full screen")
+
+        // (3) Edit Theme Color opens the editor under the space header.
+        let space = store.activeSpace
+        model.themePopoverSpaceID = space.id
+        try await wait("theme popover from Edit Theme Color", timeout: 5) { !popoverWindows().isEmpty }
+        let headerPopover = popoverWindows()[0].frame
+        let header = accessibilityElement(in: window, labelled: space.name)?.accessibilityFrame()
+        model.themePopoverSpaceID = nil
+        try await wait("theme popover closed", timeout: 5) { popoverWindows().isEmpty }
+        if let header {
+            try check(headerPopover.maxY <= header.minY + 2 && headerPopover.maxX > header.minX && headerPopover.minX < header.maxX,
+                      "the header's theme popover \(headerPopover) is not under the header \(header)")
+        }
+        let headerPlace = header.map { String(format: "top %.0f pt under the header", $0.minY - headerPopover.maxY) } ?? "header not found by accessibility"
+        // Create a Space: the Choose a Theme row's popover.
+        model.spaceCreationDraft = SpaceDraft.suggested(in: store, profileID: store.activeProfileID)
+        try await wait("Create a Space sheet", timeout: 5) { window.attachedSheet != nil }
+        let sheet = try XCTUnwrapSelfTest(window.attachedSheet, "Create a Space sheet")
+        try await wait("Choose a Theme row", timeout: 5) { self.accessibilityElement(in: sheet, labelled: "Choose a Theme") != nil }
+        let row = accessibilityElement(in: sheet, labelled: "Choose a Theme")!
+        let rowFrame = row.accessibilityFrame()
+        click(atScreen: NSPoint(x: rowFrame.midX, y: rowFrame.midY), in: sheet)
+        try await wait("Choose a Theme popover", timeout: 5) { !popoverWindows().isEmpty }
+        let rowPopover = popoverWindows()[0].frame
+        let side = rowPopover.maxX <= rowFrame.minX + 2 ? "left" : rowPopover.minX >= rowFrame.maxX - 2 ? "right" : "over"
+        try check(side != "over", "the Choose a Theme popover \(rowPopover) overlaps its row \(rowFrame)")
+        popoverWindows().forEach { $0.close() }
+        model.spaceCreationDraft = nil
+        try await wait("Create a Space sheet closed", timeout: 5) { window.attachedSheet == nil && popoverWindows().isEmpty }
+        results.append("(3) Edit Theme Color's popover opens under the header (\(headerPlace)); Create a Space's opens \(side) of the Choose a Theme row")
+
+        // (4) The copy toast's share button opens the share menu.
+        model.selectTab(tab.id)
+        try await wait("tab A on screen for the toast", timeout: 10) { engine.leaseHolder?.window === window }
+        var menuOpened = false
+        let observer = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { note in
+            menuOpened = true
+            (note.object as? NSMenu)?.cancelTracking()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let windowsBefore = Set(NSApp.windows.map(ObjectIdentifier.init))
+        model.copyURL(of: tab.id, format: .plain)
+        try await wait("copy toast", timeout: 5) { model.toast != nil }
+        try await Task.sleep(nanoseconds: 400_000_000)
+        let toast = try XCTUnwrapSelfTest(accessibilityElement(in: window, labelled: model.toast?.message ?? "Copied"), "the toast's accessibility element")
+        let toastFrame = toast.accessibilityFrame()
+        // The share button is the toast's last 22 pt, 6 pt in from its trailing edge.
+        click(atScreen: NSPoint(x: toastFrame.maxX - 6 - 11, y: toastFrame.midY), in: window)
+        let opened = await eventually(timeout: 4) {
+            menuOpened || NSApp.windows.contains { !windowsBefore.contains(ObjectIdentifier($0)) && $0.isVisible && $0 !== window }
+        }
+        for extra in NSApp.windows where !windowsBefore.contains(ObjectIdentifier(extra)) && extra.isVisible && extra !== window { extra.close() }
+        try check(opened, "the toast's share button at \(toastFrame) opened no share menu")
+        results.append("(4) the copy toast's share button opens the share \(menuOpened ? "menu" : "picker")")
+
+        // (5) Picture in Picture hides the hidden tab's media strip; closing it brings the strip back.
+        let embeds = model.embedsVideoInSidebar, automatic = model.automaticPictureInPicture
+        model.embedsVideoInSidebar = false
+        model.automaticPictureInPicture = false
+        defer {
+            model.embedsVideoInSidebar = embeds
+            model.automaticPictureInPicture = automatic
+        }
+        loadShellTab(model, tab, engine, URL(string: "\(serverBase)/pip")!)
+        try await wait("PiP fixture playing for the strip", timeout: 25) { engine.pageTitle == "pip-playing" }
+        try await wait("pip_available for the strip", timeout: 15) { model.mediaState(for: tab.id).canPictureInPicture }
+        model.selectTab(other.id)
+        try await wait("strip for the hidden playing tab", timeout: 10) { model.mediaStrips(in: nil).contains(tab.id) }
+        model.setPictureInPicture(true, tabID: tab.id)
+        try await wait("PiP open hides the strip", timeout: 10) {
+            model.isPictureInPicture(tab.id) && !model.mediaStrips(in: nil).contains(tab.id)
+        }
+        model.setPictureInPicture(false, tabID: tab.id)
+        try await wait("PiP closed brings the strip back", timeout: 10) {
+            !model.isPictureInPicture(tab.id) && model.mediaStrips(in: nil).contains(tab.id)
+        }
+        results.append("(5) PiP open hides the hidden tab's strip and closing it brings the strip back "
+            + "(\(runtime.capabilities.pipEmbedded ? "the shell's floating panel" : "Chromium's window"))")
+        model.selectTab(tab.id)
+        loadShellTab(model, tab, engine, URL(string: "\(serverBase)/a")!)
+        try await wait("tab A back on /a after the wave 33 checks", timeout: 15) { engine.pageTitle == Self.titleA && !engine.isLoading }
+        log("PASS wave 33 UI checks: " + results.joined(separator: "; "))
+    }
+
+    private func XCTUnwrapSelfTest<T>(_ value: T?, _ what: String) throws -> T {
+        guard let value else { throw Failure(description: "no \(what)") }
+        return value
     }
 }
 #endif
