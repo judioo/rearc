@@ -73,22 +73,20 @@ struct SidebarView: View {
         }
     }
 
-    /// One space's page: header, pinned, Today and the New Tab row.
+    /// One space's page: header, pinned, Today and the New Tab row. It reads
+    /// the space's outline (rows, not their values) and a lazy stack builds
+    /// the rows on screen only.
     private func spacePage(_ spaceID: Space.ID) -> some View {
         let space = model.store.space(withID: spaceID) ?? focusedSpace
-        let content = model.store.content(for: space.id)
+        let outline = model.store.outline(for: space.id)
         let collapsed = model.isPinnedSectionCollapsed(spaceID: space.id, in: window)
-        let pinned = PinnedSectionCollapseState.visibleEntries(
-            content.pinned,
-            isCollapsed: collapsed,
-            selectedID: model.store.selectedItemID(inSpace: space.id)
-        )
+        let pinned = collapsed ? collapsedPinned(outline.pinned, spaceID: space.id) : outline.pinned
         return ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 SpaceHeaderView(
                     model: model,
                     space: space,
-                    hasPinned: !content.pinned.isEmpty,
+                    hasPinned: !outline.pinned.isEmpty,
                     isPinnedCollapsed: collapsed,
                     onTogglePinned: { model.togglePinnedSection(spaceID: space.id, in: window) }
                 )
@@ -97,19 +95,19 @@ struct SidebarView: View {
                     title: nil,
                     section: .pinned,
                     spaceID: space.id,
-                    entries: pinned,
+                    nodes: pinned,
                     model: model,
                     draggedItemID: $draggedItemID,
                     dropState: $dropState
                 )
-                TodayHeaderView(model: model, spaceID: space.id, hasTabs: !content.today.isEmpty)
+                TodayHeaderView(model: model, spaceID: space.id, hasTabs: !outline.today.isEmpty)
                 // Arc's "+ New Tab" heads Today, right under the divider.
                 NewTabRowView { model.newTab() }
                 TabSectionView(
                     title: nil,
                     section: .unpinned,
                     spaceID: space.id,
-                    entries: content.today,
+                    nodes: outline.today,
                     model: model,
                     draggedItemID: $draggedItemID,
                     dropState: $dropState
@@ -117,6 +115,14 @@ struct SidebarView: View {
             }
             .padding(.horizontal, SidebarMetrics.rowInset)
         }
+    }
+
+    /// A collapsed Pinned section keeps only its selected item
+    /// (`PinnedSectionCollapseState.visibleEntries`).
+    private func collapsedPinned(_ nodes: [SidebarOutlineNode], spaceID: Space.ID) -> [SidebarOutlineNode] {
+        let leaves = SidebarOutlineNode.leaves(nodes)
+        guard let selected = model.store.selection(among: leaves.map(\.id), inSpace: spaceID) else { return [] }
+        return leaves.filter { $0.id == selected }
     }
 }
 

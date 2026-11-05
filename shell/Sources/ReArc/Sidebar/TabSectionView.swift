@@ -35,59 +35,122 @@ struct SidebarRowItem: Identifiable {
     }
 }
 
-/// One section of the sidebar (pinned or today) for the active space.
+/// One visible row of a space's outline and its folder depth, as
+/// `SidebarRowItem` lays out entries.
+struct SidebarOutlineRow: Identifiable, Equatable {
+    let node: SidebarOutlineNode
+    let depth: Int
+    var id: UUID { node.id }
+
+    static func rows(_ nodes: [SidebarOutlineNode], depth: Int = 0, expanded: Set<UUID>, selected: UUID?) -> [SidebarOutlineRow] {
+        nodes.flatMap { node -> [SidebarOutlineRow] in
+            guard node.kind == .folder else { return [SidebarOutlineRow(node: node, depth: depth)] }
+            let header = SidebarOutlineRow(node: node, depth: depth)
+            if expanded.contains(node.id) {
+                return [header] + rows(node.children, depth: depth + 1, expanded: expanded, selected: selected)
+            }
+            if let selected, let leaf = SidebarOutlineNode.leaves(node.children).first(where: { $0.id == selected }) {
+                return [header, SidebarOutlineRow(node: leaf, depth: depth + 1)]
+            }
+            return [header]
+        }
+    }
+
+    /// Rows shown only while selected: the leaves of collapsed folders.
+    static func peekCandidates(_ nodes: [SidebarOutlineNode], expanded: Set<UUID>) -> [UUID] {
+        nodes.flatMap { node -> [UUID] in
+            guard node.kind == .folder else { return [] }
+            if expanded.contains(node.id) { return peekCandidates(node.children, expanded: expanded) }
+            return SidebarOutlineNode.leaves(node.children).map(\.id)
+        }
+    }
+}
+
+/// One section of the sidebar (pinned or today) for a space. It lays out
+/// the space's outline; each row reads its own entry, selection and engine
+/// state, so a change to one tab redraws its row only. The rows are not
+/// wrapped in a stack: inside the page's lazy stack each one is built when
+/// it scrolls into view.
 struct TabSectionView: View {
     let title: String?
     let section: ItemContainerKind.SpaceSection
     let spaceID: Space.ID
-    let entries: [SidebarEntry]
+    let nodes: [SidebarOutlineNode]
     let model: BrowserViewModel
+    @Binding var draggedItemID: UUID?
+    @Binding var dropState: SidebarDropState?
+
+    var body: some View {
+        if let title, !nodes.isEmpty {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+        }
+        let expanded = model.store.expandedFolderIDs
+        let candidates = SidebarOutlineRow.peekCandidates(nodes, expanded: expanded)
+        let peeked = candidates.isEmpty ? nil : model.store.selection(among: candidates, inSpace: spaceID)
+        ForEach(SidebarOutlineRow.rows(nodes, expanded: expanded, selected: peeked)) { row in
+            SidebarEntryRow(
+                id: row.id,
+                depth: row.depth,
+                spaceID: spaceID,
+                model: model,
+                dropPosition: dropState?.targetID == row.id ? dropState?.position : nil,
+                draggedItemID: $draggedItemID,
+                dropState: $dropState
+            )
+            .equatable()
+        }
+        SectionEndDropZone(
+            destination: .section(spaceID: spaceID, section: section),
+            placeholder: nodes.isEmpty && draggedItemID != nil
+                ? (section == .pinned ? "Drop here to pin" : "Drop here to unpin")
+                : nil,
+            model: model,
+            draggedItemID: $draggedItemID,
+            dropState: $dropState
+        )
+    }
+}
+
+/// One sidebar row by id. Equal inputs skip the body, so a section that
+/// re-lays out does not rebuild its rows; the row's own reads (its entry,
+/// its selection, its engine's activity) redraw it when they change.
+struct SidebarEntryRow: View, Equatable {
+    let id: UUID
+    let depth: Int
+    let spaceID: Space.ID
+    let model: BrowserViewModel
+    /// The drag hovering this row, if any.
+    let dropPosition: SidebarDropPosition?
     @Binding var draggedItemID: UUID?
     @Binding var dropState: SidebarDropState?
     @Environment(\.sidebarWindow) private var window
 
-    /// This window's selection in this space.
-    private var selectedID: UUID? { model.store.selectedItemID(inSpace: spaceID) }
+    static func == (lhs: SidebarEntryRow, rhs: SidebarEntryRow) -> Bool {
+        lhs.id == rhs.id && lhs.depth == rhs.depth && lhs.spaceID == rhs.spaceID
+            && lhs.model === rhs.model && lhs.dropPosition == rhs.dropPosition
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if let title, !entries.isEmpty {
-                Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 8)
-            }
-            let rows = SidebarRowItem.rows(
-                entries,
-                expanded: model.store.expandedFolderIDs,
-                selected: selectedID
-            )
-            ForEach(rows) { row in
-                SidebarDropRow(
-                    entry: row.entry,
-                    model: model,
-                    draggedItemID: $draggedItemID,
-                    dropState: $dropState
-                ) {
-                    entryRow(row.entry)
-                }
-                .padding(.leading, CGFloat(row.depth) * 14)
-            }
-            SectionEndDropZone(
-                destination: .section(spaceID: spaceID, section: section),
-                placeholder: entries.isEmpty && draggedItemID != nil
-                    ? (section == .pinned ? "Drop here to pin" : "Drop here to unpin")
-                    : nil,
+        if let entry = model.store.entry(withID: id) {
+            SidebarDropRow(
+                entry: entry,
                 model: model,
+                dropPosition: dropPosition,
                 draggedItemID: $draggedItemID,
                 dropState: $dropState
-            )
+            ) {
+                entryRow(entry)
+            }
+            .padding(.leading, CGFloat(depth) * 14)
         }
     }
 
-    private func isDropInto(_ id: UUID) -> Bool {
-        dropState == SidebarDropState(targetID: id, position: .into)
-    }
+    private var isDropInto: Bool { dropPosition == .into }
+
+    private func isSelected(_ id: UUID) -> Bool { model.store.isSelected(id, inSpace: spaceID) }
 
     @ViewBuilder
     private func entryRow(_ entry: SidebarEntry) -> some View {
@@ -96,10 +159,10 @@ struct TabSectionView: View {
             TabRowView(
                 tab: tab,
                 favicon: model.favicon(for: tab),
-                isSelected: selectedID == tab.id,
+                isSelected: isSelected(tab.id),
                 showsAudibleIndicator: model.showsAudibleIndicator(for: tab.id),
                 isMuted: model.isUserMuted(tab.id),
-                isDropTarget: isDropInto(tab.id),
+                isDropTarget: isDropInto,
                 isUnloaded: model.isTabUnloaded(tab.id),
                 isInPictureInPicture: model.isPictureInPicture(tab.id),
                 activity: model.tabActivity(tab.id),
@@ -116,7 +179,7 @@ struct TabSectionView: View {
             FolderRowView(
                 folder: folder,
                 isExpanded: model.store.isFolderExpanded(folder.id),
-                isDropTarget: isDropInto(folder.id),
+                isDropTarget: isDropInto,
                 onToggle: { model.store.toggleFolderExpanded(folder.id) }
             ) {
                 FolderContextMenu(model: model, folder: folder)
@@ -126,7 +189,7 @@ struct TabSectionView: View {
                 ref: ref,
                 title: model.easelTitle(for: ref),
                 isNote: model.easelDocumentStore.document(id: ref.easelDocumentID)?.kind == .note,
-                isSelected: selectedID == ref.id,
+                isSelected: isSelected(ref.id),
                 onSelect: { model.selectEasel(ref.id) },
                 onClose: { model.deleteEaselSidebarItem(ref.id) },
                 onRename: { model.renameEasel(documentID: ref.easelDocumentID, title: $0) }
@@ -135,7 +198,7 @@ struct TabSectionView: View {
         case .split(let split):
             SplitRowView(
                 split: split,
-                isSelected: selectedID == split.id,
+                isSelected: isSelected(split.id),
                 focusedTabID: split.focusTabID,
                 themeColor: model.themeColor(in: window),
                 favicon: { model.favicon(for: $0) },
@@ -162,6 +225,8 @@ struct TabSectionView: View {
 struct SidebarDropRow<Content: View>: View {
     let entry: SidebarEntry
     let model: BrowserViewModel
+    /// The drag hovering this row, if any (from `dropState`).
+    let dropPosition: SidebarDropPosition?
     @Binding var draggedItemID: UUID?
     @Binding var dropState: SidebarDropState?
     @ViewBuilder let content: () -> Content
@@ -197,7 +262,7 @@ struct SidebarDropRow<Content: View>: View {
 
     @ViewBuilder
     private func insertionLine(_ position: SidebarDropPosition) -> some View {
-        if dropState == SidebarDropState(targetID: entry.id, position: position) {
+        if dropPosition == position {
             Capsule()
                 .fill(Color.accentColor)
                 .frame(height: 2)
