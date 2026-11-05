@@ -611,8 +611,8 @@ final class BrowserViewModel {
 
     func selectProfile(_ id: Profile.ID) {
         PerfSignposts.interaction(.profileSwitch, "select")
+        guard store.profile(withID: id) != nil, id != store.activeProfileID else { return }
         store.selectProfile(id)
-        reconcileEngineOwnership()
         loadSelectedIfNeeded()
     }
 

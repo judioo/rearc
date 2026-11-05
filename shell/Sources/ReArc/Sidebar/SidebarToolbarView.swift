@@ -51,7 +51,16 @@ struct SidebarToolbarView: View {
                 }
                 Spacer(minLength: 0)
                 if model.store.profiles.count > 1 {
-                    ProfileAvatarView(profile: profile, diameter: 18)
+                    Menu {
+                        ForEach(model.store.profiles) { candidate in
+                            Button(candidate.name) { model.selectProfile(candidate.id) }
+                        }
+                    } label: {
+                        ProfileAvatarView(profile: profile, diameter: 18)
+                    }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .accessibilityLabel("Switch Profile: \(profile.name)")
                         .opacity(0.85)
                         .padding(.trailing, 10)
                         .help(profile.name)

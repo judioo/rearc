@@ -205,3 +205,30 @@ enum ChromiumShutdownGate {
         profileCloseInFlight || (!engineJoinsTabCloses && tabClosesInFlight > 0)
     }
 }
+
+/// Serial disk work keeps cold profile selection and map writes off the UI thread.
+enum ChromiumProfileStorageIO {
+    private static let queue = DispatchQueue(label: "rearc.profile-storage", qos: .userInitiated)
+
+    static func plan(for profileID: Profile.ID, map: ChromiumProfileStorageMap, legacyOwner: Profile.ID?,
+                     engine: ChromiumProfileStoragePlan.Engine, userDataDir: URL?,
+                     directoryExists: @escaping (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+                     completion: @escaping (ChromiumProfileStoragePlan) -> Void) {
+        queue.async {
+            let plan = ChromiumProfileStoragePlan.plan(for: profileID, map: map, legacyOwner: legacyOwner, engine: engine,
+                                                       namedDirectoryExists: { name in
+                guard let userDataDir else { return false }
+                return directoryExists(userDataDir.appendingPathComponent(name).path)
+            })
+            DispatchQueue.main.async { completion(plan) }
+        }
+    }
+
+    static func save(_ map: ChromiumProfileStorageMap, to url: URL, completion: @escaping (Error?) -> Void) {
+        queue.async {
+            let error: Error?
+            do { try map.save(to: url); error = nil } catch let failure { error = failure }
+            DispatchQueue.main.async { completion(error) }
+        }
+    }
+}

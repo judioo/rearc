@@ -185,6 +185,15 @@ public final class SidebarStore {
         return profile
     }
 
+    @discardableResult
+    public func setProfileAvatar(_ avatar: ProfileAvatarDescriptor, for id: Profile.ID) -> ProfileMutationError? {
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else { return .profileNotFound }
+        guard profiles[index].avatar != avatar else { return nil }
+        profiles[index].avatar = avatar
+        notifyMutation()
+        return nil
+    }
+
     public func renameProfile(_ id: Profile.ID, to name: String) -> ProfileMutationError? {
         guard let index = profiles.firstIndex(where: { $0.id == id }) else {
             return .profileNotFound

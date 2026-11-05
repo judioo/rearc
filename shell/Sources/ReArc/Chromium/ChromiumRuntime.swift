@@ -865,16 +865,18 @@ final class ChromiumRuntime {
     /// Opens a persistent profile by its storage plan (WAVE-16-REPORT.md steps
     /// 4–6): named key, recorded directory, or the one-time Default adoption.
     private func startPersistentOpen(_ profileID: Profile.ID, finish: @escaping (ReArcStatus, UInt64, Bool) -> Void) {
-        let plan = ChromiumProfileStoragePlan.plan(
-            for: profileID,
-            map: storageMap,
-            legacyOwner: legacyDefaultOwner,
+        ChromiumProfileStorageIO.plan(
+            for: profileID, map: storageMap, legacyOwner: legacyDefaultOwner,
             engine: .init(canOpenDirectory: capabilities.profileDirectory, startupDirectory: startupDirectory),
-            namedDirectoryExists: { [userDataDir] name in
-                guard let userDataDir else { return false }
-                return FileManager.default.fileExists(atPath: userDataDir.appendingPathComponent(name).path)
-            }
-        )
+            userDataDir: userDataDir
+        ) { [self] plan in
+            guard isReady, !isStopping else { return finish(ReArcStatus(REARC_INVALID_STATE), 0, false) }
+            applyPersistentOpenPlan(plan, profileID: profileID, finish: finish)
+        }
+    }
+
+    private func applyPersistentOpenPlan(_ plan: ChromiumProfileStoragePlan, profileID: Profile.ID,
+                                         finish: @escaping (ReArcStatus, UInt64, Bool) -> Void) {
         let key = ChromiumProfileKey.persistent(profileID)
         switch plan {
         case .named(let name):
@@ -882,8 +884,7 @@ final class ChromiumRuntime {
         case .keepNamed(let name):
             profileEvent("\(key) keeps its named data; startup Default left in place")
             storageMap.legacyDefault = .keptNamed
-            saveStorageMap()
-            openNamed(name, finish: finish)
+            saveStorageMap { [self] in openNamed(name, finish: finish) }
         case .directory(let token):
             openDirectory(token, finish: finish)
         case .startupProfile:
@@ -901,9 +902,10 @@ final class ChromiumRuntime {
                     return openNamed(ChromiumProfileKey.storageKey(for: profileID), finish: finish)
                 }
                 storageMap.recordDirectory(token, for: profileID)
-                saveStorageMap()
-                profileEvent("adopted \(token) in place for \(key)\(id == defaultProfileID ? " (startup profile)" : "")")
-                finish(status, id, offTheRecord)
+                saveStorageMap { [self] in
+                    profileEvent("adopted \(token) in place for \(key)\(id == defaultProfileID ? " (startup profile)" : "")")
+                    finish(status, id, offTheRecord)
+                }
             }
         }
     }
@@ -938,12 +940,11 @@ final class ChromiumRuntime {
         userDataDir?.appendingPathComponent(ChromiumProfileStorageMap.fileName)
     }
 
-    private func saveStorageMap() {
-        guard let url = storageMapURL else { return }
-        do {
-            try storageMap.save(to: url)
-        } catch {
-            ChromiumLog.info("could not save \(url.lastPathComponent): \(error.localizedDescription)")
+    private func saveStorageMap(completion: @escaping () -> Void) {
+        guard let url = storageMapURL else { return completion() }
+        ChromiumProfileStorageIO.save(storageMap, to: url) { error in
+            if let error { ChromiumLog.info("could not save \(url.lastPathComponent): \(error.localizedDescription)") }
+            completion()
         }
     }
 

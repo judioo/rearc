@@ -230,6 +230,12 @@ private struct SpaceHeaderView: View {
                 .accessibilityLabel(isPinnedCollapsed ? "Expand Pinned Section" : "Collapse Pinned Section")
             }
             Spacer(minLength: 0)
+            if let profile = model.store.profile(withID: space.profileID) {
+                ProfileAvatarView(profile: profile, diameter: 16)
+                    .help("Profile: \(profile.name)")
+                    .accessibilityLabel("Profile: \(profile.name)")
+                    .padding(.trailing, 6)
+            }
             if isHovering {
                 Menu {
                     SpaceContextMenu(model: model, space: space)

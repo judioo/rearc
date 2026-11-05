@@ -356,6 +356,14 @@ private struct ProfileListView: View {
 
                     Menu {
                         Button("Rename…") { onRename(profile) }
+                        Menu("Avatar") {
+                            Button("Person") { model.store.setProfileAvatar(.personalDefault(), for: profile.id) }
+                            ForEach(["🌱", "💼", "🏠", "🎨", "🚀", "🦊"], id: \.self) { emoji in
+                                Button(emoji) {
+                                    model.store.setProfileAvatar(.init(kind: .emoji(emoji)), for: profile.id)
+                                }
+                            }
+                        }
                         Menu("Archive Today Tabs After") {
                             ForEach(AutoArchiveThreshold.allCases, id: \.self) { threshold in
                                 Toggle(threshold.title, isOn: Binding(
