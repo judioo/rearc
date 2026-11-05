@@ -4176,20 +4176,39 @@ extension ChromiumSelfTest {
 // MARK: Wave 33 UI checks (THEMES-STATUS.md §5)
 
 extension ChromiumSelfTest {
-    /// Every accessibility element under `root`, breadth first.
+    /// SwiftUI's virtual AccessibilityNode implements the accessibility
+    /// selectors without declaring NSAccessibilityProtocol conformance. Keep
+    /// those nodes as well as AppKit views when walking the public AX tree.
+    private struct TestAccessibilityElement {
+        let object: NSObject
+
+        func read(_ key: String) -> Any? {
+            guard object.responds(to: NSSelectorFromString(key)) else { return nil }
+            return object.value(forKey: key)
+        }
+
+        func accessibilityLabel() -> String? { read("accessibilityLabel") as? String }
+        func accessibilityFrame() -> NSRect { (read("accessibilityFrame") as? NSValue)?.rectValue ?? .zero }
+        var children: [TestAccessibilityElement] {
+            (read("accessibilityChildren") as? [NSObject] ?? []).map { TestAccessibilityElement(object: $0) }
+        }
+    }
+
     @MainActor
-    private func accessibilityElements(under root: NSAccessibilityProtocol) -> [NSAccessibilityProtocol] {
-        var found: [NSAccessibilityProtocol] = [], queue = [root]
+    private func accessibilityElements(under root: NSObject) -> [TestAccessibilityElement] {
+        var found: [TestAccessibilityElement] = [], queue = [TestAccessibilityElement(object: root)]
+        var visited = Set<ObjectIdentifier>()
         while !queue.isEmpty, found.count < 5000 {
             let element = queue.removeFirst()
+            guard visited.insert(ObjectIdentifier(element.object)).inserted else { continue }
             found.append(element)
-            queue.append(contentsOf: (element.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityProtocol })
+            queue.append(contentsOf: element.children)
         }
         return found
     }
 
     @MainActor
-    private func accessibilityElement(in window: NSWindow, labelled label: String) -> NSAccessibilityProtocol? {
+    private func accessibilityElement(in window: NSWindow, labelled label: String) -> TestAccessibilityElement? {
         guard let root = window.contentView else { return nil }
         return accessibilityElements(under: root).first { ($0.accessibilityLabel() ?? "").contains(label) }
     }
