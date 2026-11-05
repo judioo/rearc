@@ -47,8 +47,15 @@ def outside_connects(path):
     try:
         log = json.loads(text)
     except ValueError:
-        # A net log cut short at exit: fall back to addresses in the text.
-        return sorted({a for a in re.findall(r'"address":"([^"]+)"', text) if outside(a)})
+        # A net log cut short (the process died before closing it): keep every
+        # complete event and close the document, so the same rule applies.
+        cut = text.rfind("},")
+        try:
+            log = json.loads(text[:cut + 1] + "]}") if cut > 0 else None
+        except ValueError:
+            log = None
+        if log is None:
+            return sorted({a for a in re.findall(r'"address":"([^"]+)"', text) if outside(a)} or {"<unparsable net log>"})
     names = {v: k for k, v in log["constants"]["logEventTypes"].items()}
     peers, sent, tcp = {}, set(), set()
     for event in log["events"]:
