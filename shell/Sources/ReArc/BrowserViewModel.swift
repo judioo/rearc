@@ -287,6 +287,8 @@ final class BrowserViewModel {
         didSet { tabUnloadThreshold.save(to: tabUnloadDefaults) }
     }
     @ObservationIgnored var tabUnloadDefaults: UserDefaults = .standard
+    /// A mutation's engine reconcile and boost sync are queued (`scheduleMutationFollowUp`).
+    @ObservationIgnored var mutationFollowUpScheduled = false
 
     init(
         store: SidebarStore? = nil,
@@ -325,8 +327,7 @@ final class BrowserViewModel {
         engine.start()
         engineHost.linkRouter = self
         self.persistence.start(autoSave: self.store) { [weak self] in
-            self?.reconcileEngineOwnership()
-            self?.syncAllTabBoosts()
+            self?.scheduleMutationFollowUp()
         }
         if self.store.selectedItemID == nil {
             if let first = self.store.displayTabs().first {
@@ -699,6 +700,22 @@ final class BrowserViewModel {
         ModelSignposts.measure(ModelSignposts.model, "SyncAllBoosts") { syncAllTabBoostsNow() }
     }
 
+    /// After any store mutation: engine ownership and every engine's boosts,
+    /// once per main-queue turn rather than once per mutation (a tab switch
+    /// makes several). The paths that need either at once (closing tabs,
+    /// spaces and profiles, boost library edits, a navigation commit) call
+    /// them directly.
+    private func scheduleMutationFollowUp() {
+        guard !mutationFollowUpScheduled else { return }
+        mutationFollowUpScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.mutationFollowUpScheduled = false
+            self.reconcileEngineOwnership()
+            self.syncAllTabBoosts()
+        }
+    }
+
     private func syncAllTabBoostsNow() {
         for (tabID, profileID, engine) in engineHost.allTabEngines() {
             guard let tab = store.tab(withID: tabID) else { continue }
@@ -732,6 +749,10 @@ final class BrowserViewModel {
         let resolvedTitle = (title?.isEmpty == false) ? title : nil
         let fallback = store.tab(withID: tabID)?.title ?? url.host() ?? "Page"
         store.updateTab(tabID, title: resolvedTitle ?? fallback, url: url)
+        // The new URL can change which boosts apply: this tab's now, the rest with the follow-up.
+        if let tab = store.tab(withID: tabID) {
+            engineHost.installBoosts(store.activeBoostEntries(for: tab), forTabID: tabID, profileID: profileID(for: tab))
+        }
     }
 
     func handleLittleArcNavigationCommit(windowID: LittleArcWindow.ID, url: URL?, title: String?) {
