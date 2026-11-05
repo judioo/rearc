@@ -405,9 +405,13 @@ final class ChromiumBench {
             record("ui.sidebar_toggle.complete.\(suffix)", ms(t0, complete?.target), input: input, contaminated: contaminated(), warmup: warmup)
             // Wave 33: the page resizes once (at the start of a hide, the end of a show); its frame at the final size ends the content lag.
             var final = await lastResize.value()
+            var resizes = final == nil ? 0 : 1
             while let event = final, let next = await presentations.arm(timeout: contentTimeout(0.3), { $0.tabID == tabID && $0.kind == .resized && $0.requestID > event.requestID }).value() {
                 final = next
+                resizes += 1
             }
+            // Presented page frames at a new size during the toggle (wave 33: one).
+            record("ui.sidebar_toggle.resizes.\(suffix)", Double(resizes), unit: "count", input: input, contaminated: contaminated(), warmup: warmup)
             if let complete, let final {
                 record("ui.sidebar_toggle.content_lag.\(suffix)", max(0, (Double(final.presentedMicros) / 1e6 - complete.target) * 1000),
                        input: input, contaminated: contaminated(), warmup: warmup)
