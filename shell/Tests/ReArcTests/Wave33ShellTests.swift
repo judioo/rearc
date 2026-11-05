@@ -101,6 +101,16 @@ final class Wave33ShellTests: XCTestCase {
         XCTAssertEqual(paging.clickSpring, .click)
     }
 
+    // MARK: Command bar (§8)
+
+    func testCommandBarIsCentredOnTheWindowAndOnlyItsSelectedRowIsTinted() {
+        XCTAssertEqual(CommandBarOverlay.arcWidth, 765, "538 px at 0.703 px/pt")
+        XCTAssertEqual(CommandBarOverlay.topFraction, 0.38, accuracy: 0.005, "top 378 px down a 990 px window")
+        let accent = SpaceColor(hex: "#2731FF")!
+        let selected = ThemeChromeColors.selection(accent: accent)
+        XCTAssertLessThan(OKLab(selected).distance(to: OKLab(SpaceColor(hex: "#858AFF")!)), 0.01, selected.hex)
+    }
+
     // MARK: Toasts (§6)
 
     func testToastsStayAboutFiveSecondsAndCarryTheirAction() {

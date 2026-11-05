@@ -83,29 +83,13 @@ struct BrowserView: View {
                 Color.black.opacity(0.2)
                     .ignoresSafeArea()
                     .onTapGesture { model.dismissCommandBar() }
-                CommandBarOverlay(
-                    text: $model.commandBarText,
-                    inlineSuffix: model.commandBarInlineSuffix,
-                    onAcceptCompletion: { model.acceptCommandBarInlineCompletion() },
-                    onSubmitRoute: { model.submitCommandBar(route: $0) },
-                    results: model.commandBarResults,
-                    highlightedIndex: model.commandBarHighlightedIndex,
-                    errorMessage: model.commandBarError,
-                    siteSearch: model.commandBarSiteSearch,
-                    siteSearchSuggestion: model.commandBarSiteSearchSuggestion,
-                    onTab: { model.enterCommandBarSiteSearch() },
-                    onDeleteBackward: { model.exitCommandBarSiteSearch() },
-                    onDeleteHighlighted: { model.deleteHighlightedCommandBarHistoryRow() },
-                    onRowAction: { model.performCommandBarRowAction($0, on: $1) },
-                    onMoveHighlight: { model.moveCommandBarHighlight(by: $0) },
-                    onSelectIndex: { index in
-                        model.commandBarHighlightedIndex = index
-                        model.submitCommandBar()
-                    },
-                    onSubmit: { model.submitCommandBar() },
-                    onCancel: { model.dismissCommandBar() },
-                    focusRequest: model.commandBarFocusRequest
-                )
+                // Centred on the window, not the card, its top 38 % down (ARC-RECORDING-ANALYSIS.md §8).
+                GeometryReader { geometry in
+                    commandBar(width: min(CommandBarOverlay.arcWidth, geometry.size.width - 40))
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, max(20, min(geometry.size.height * CommandBarOverlay.topFraction, geometry.size.height - 440)))
+                }
+                .ignoresSafeArea()
                 .transition(.opacity.combined(with: .scale(scale: 0.97)))
             }
 
@@ -289,6 +273,34 @@ struct BrowserView: View {
                 model.pendingProfileRenameID = nil
             }
         }
+    }
+
+    private func commandBar(width: CGFloat) -> some View {
+        CommandBarOverlay(
+            text: $model.commandBarText,
+            inlineSuffix: model.commandBarInlineSuffix,
+            onAcceptCompletion: { model.acceptCommandBarInlineCompletion() },
+            onSubmitRoute: { model.submitCommandBar(route: $0) },
+            results: model.commandBarResults,
+            highlightedIndex: model.commandBarHighlightedIndex,
+            errorMessage: model.commandBarError,
+            siteSearch: model.commandBarSiteSearch,
+            siteSearchSuggestion: model.commandBarSiteSearchSuggestion,
+            onTab: { model.enterCommandBarSiteSearch() },
+            onDeleteBackward: { model.exitCommandBarSiteSearch() },
+            onDeleteHighlighted: { model.deleteHighlightedCommandBarHistoryRow() },
+            onRowAction: { model.performCommandBarRowAction($0, on: $1) },
+            onMoveHighlight: { model.moveCommandBarHighlight(by: $0) },
+            onSelectIndex: { index in
+                model.commandBarHighlightedIndex = index
+                model.submitCommandBar()
+            },
+            onSubmit: { model.submitCommandBar() },
+            onCancel: { model.dismissCommandBar() },
+            focusRequest: model.commandBarFocusRequest,
+            width: width,
+            spaceName: { model.store.space(withID: $0)?.name }
+        )
     }
 
     /// The focused space's chrome colours in its resolved appearance.

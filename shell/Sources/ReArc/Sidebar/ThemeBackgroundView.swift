@@ -136,6 +136,9 @@ struct ThemeChromeColors {
     var panel: Color
     /// Toasts: the theme's `background` role, a pale tint of the space colour.
     var toast: Color
+    /// The command bar's selected row: the accent lightened toward white
+    /// (`#2731FF` → `#858AFF` on the default theme, ARC-RECORDING-ANALYSIS.md §8).
+    var selection: Color
     /// The chrome's text roles are the dark ones (`ThemeGradient.usesDarkChrome`).
     var isDark: Bool
     /// The space is in dark appearance, whatever its chrome text uses.
@@ -158,11 +161,17 @@ struct ThemeChromeColors {
         focus = Color(semantic.focus).opacity(semantic.focusAlpha)
         panel = Color(dark ? semantic.background : semantic.backgroundExtra).opacity(dark ? 0.6 : 0.55)
         toast = Color(semantic.background)
+        selection = Color(Self.selection(accent: semantic.foregroundPrimary))
         isDark = dark
         isWindowDark = windowDark ?? dark
     }
 
     static let fallback = ThemeChromeColors(theme: .arcDefault, dark: false)
+
+    /// 43.5 % of the way to white fits #2731FF → #858AFF to a level.
+    static func selection(accent: SpaceColor) -> SpaceColor {
+        accent.mixed(with: .white, fraction: 0.435)
+    }
 }
 
 extension EnvironmentValues {
