@@ -101,6 +101,8 @@ final class BrowserViewModel {
     var defaultBrowserMessage: String?
     /// Space being edited in the Edit Space sheet (name, theme, icon).
     var spaceEditorID: Space.ID?
+    /// Edit Theme Color: the space whose header shows the theme editor popover.
+    var themePopoverSpaceID: Space.ID?
     /// The New Space dialog's fields while it is open.
     var spaceCreationDraft: SpaceDraft?
     /// Today tabs archived by the last Clear, for Undo.

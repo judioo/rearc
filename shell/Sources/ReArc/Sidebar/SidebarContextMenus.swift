@@ -159,6 +159,10 @@ struct SpaceContextMenu: View {
 
     var body: some View {
         Button("Rename Space…") { model.beginRename(.space(space.id)) }
+        Button("Edit Theme Color") {
+            if model.store.activeSpaceID != space.id { model.selectSpace(space.id) }
+            model.themePopoverSpaceID = space.id
+        }
         Button("Edit Theme and Icon…") { model.spaceEditorID = space.id }
         SpaceProfileMenu(model: model, space: space)
         Divider()

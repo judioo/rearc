@@ -34,7 +34,7 @@ struct SpaceCreationView: View {
                 .help("The space's tabs use this profile's cookies, history and favorites")
             }
 
-            SpaceStyleEditor(theme: $draft.theme)
+            ChooseThemeRow(theme: $draft.theme)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Icon").font(.headline)
@@ -77,6 +77,8 @@ struct SpaceCreationView: View {
         }
         .padding(20)
         .frame(width: 360)
+        // The window behind previews the new space's theme as it is edited.
+        .onChange(of: draft.theme) { _, theme in model.spaceCreationDraft?.theme = theme }
     }
 
     private func create() {
