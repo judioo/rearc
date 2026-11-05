@@ -486,6 +486,8 @@ extension BrowserViewModel {
         guard store.removeSpace(id) else { return }
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
+        // Arc: "Space deleted! Use ⌘Z to undo." ReArc has no undo for it yet.
+        showToast("Space deleted", systemImage: "trash")
     }
 
     var canDeleteSpaces: Bool { store.spaces.count > 1 }

@@ -2,11 +2,44 @@ import AppKit
 import SidebarModel
 import SwiftUI
 
-/// A short confirmation over the page (Arc's "Copied Current URL" toast).
+/// A short confirmation at the top right of the page card (Arc's "Copied
+/// Current URL" toast, ARC-RECORDING-ANALYSIS.md §6): tinted by the space's
+/// theme, shortcuts drawn as keycap chips, an optional action button.
 struct ShellToast: Equatable, Identifiable {
     let id = UUID()
     var message: String
     var systemImage: String
+    /// Substrings of `message` drawn as keycaps ("⌘Z").
+    var keycaps: [String] = []
+    var action: Action?
+
+    enum Action: Equatable {
+        /// Copied Current URL's trailing share button.
+        case share(URL)
+    }
+
+    /// Arc's toasts stayed 4.6 s and 5.0 s.
+    static let defaultDuration: TimeInterval = 5
+
+    struct Segment: Equatable {
+        var text: String
+        var isKeycap: Bool
+    }
+
+    /// `message` split around its keycaps, in order.
+    static func segments(_ message: String, keycaps: [String]) -> [Segment] {
+        var segments: [Segment] = []
+        var rest = Substring(message)
+        while let match = keycaps.compactMap({ key in rest.range(of: key).map { (key, $0) } }).min(by: { $0.1.lowerBound < $1.1.lowerBound }) {
+            if match.1.lowerBound > rest.startIndex { segments.append(Segment(text: String(rest[..<match.1.lowerBound]), isKeycap: false)) }
+            segments.append(Segment(text: match.0, isKeycap: true))
+            rest = rest[match.1.upperBound...]
+        }
+        if !rest.isEmpty { segments.append(Segment(text: String(rest), isKeycap: false)) }
+        return segments
+    }
+
+    var segments: [Segment] { Self.segments(message, keycaps: keycaps) }
 }
 
 /// Engines that can read the page's selected text (Copy as Quote).
@@ -97,33 +130,38 @@ extension BrowserViewModel {
         let (url, cleaned) = LinkCleaner.clean(engine?.currentURL ?? tab.url)
         let title = tab.customTitle ?? engine?.pageTitle ?? tab.title
         guard format == .quote, let reader = engine as? PageSelectionReading else {
-            writeToPasteboard(format.text(url: url, title: title), toast: format, cleaned: cleaned)
+            writeToPasteboard(format.text(url: url, title: title), toast: format, cleaned: cleaned, url: url)
             return
         }
         Task { @MainActor [weak self] in
             let selection = await reader.selectedText()
-            self?.writeToPasteboard(format.text(url: url, title: title, selection: selection), toast: format, cleaned: cleaned)
+            self?.writeToPasteboard(format.text(url: url, title: title, selection: selection), toast: format, cleaned: cleaned, url: url)
         }
     }
 
     /// The last text a copy command wrote (the self-test reads it back).
-    private func writeToPasteboard(_ text: String, toast format: PageLinkCopyFormat, cleaned: Bool) {
+    private func writeToPasteboard(_ text: String, toast format: PageLinkCopyFormat, cleaned: Bool, url: URL) {
         linkPasteboard.clearContents()
         linkPasteboard.setString(text, forType: .string)
         lastCopiedLinkText = text
+        // Arc's Copied Current URL toast carries a share button (§6).
         if cleaned, format != .quote {
-            showToast(PageLinkCopyFormat.cleanConfirmation, systemImage: "checkmark.shield.fill")
+            showToast(PageLinkCopyFormat.cleanConfirmation, systemImage: "checkmark.shield.fill", action: .share(url))
         } else {
-            showToast(format.confirmation, systemImage: format == .quote ? "quote.bubble.fill" : "link")
+            showToast(format.confirmation, systemImage: format == .quote ? "quote.bubble.fill" : "link",
+                      action: format == .quote ? nil : .share(url))
         }
     }
 
-    func showToast(_ message: String, systemImage: String, duration: TimeInterval = 1.6) {
-        let toast = ShellToast(message: message, systemImage: systemImage)
-        withAnimation(.easeOut(duration: 0.15)) { self.toast = toast }
+    /// Shows `message` for about 5 s. It scales in over a frame or two and
+    /// out in one (§6).
+    func showToast(_ message: String, systemImage: String, keycaps: [String] = [], action: ShellToast.Action? = nil,
+                   duration: TimeInterval = ShellToast.defaultDuration) {
+        let toast = ShellToast(message: message, systemImage: systemImage, keycaps: keycaps, action: action)
+        withAnimation(ShellToast.inAnimation) { self.toast = toast }
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
             guard let self, self.toast?.id == toast.id else { return }
-            withAnimation(.easeIn(duration: 0.2)) { self.toast = nil }
+            withAnimation(ShellToast.outAnimation) { self.toast = nil }
         }
     }
 

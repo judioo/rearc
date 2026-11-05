@@ -134,6 +134,8 @@ struct ThemeChromeColors {
     /// Floating panels over the window (command bar, Peek): the theme's
     /// `backgroundExtra` / dark `background` washed over the material.
     var panel: Color
+    /// Toasts: the theme's `background` role, a pale tint of the space colour.
+    var toast: Color
     /// The chrome's text roles are the dark ones (`ThemeGradient.usesDarkChrome`).
     var isDark: Bool
     /// The space is in dark appearance, whatever its chrome text uses.
@@ -155,6 +157,7 @@ struct ThemeChromeColors {
         rowHover = Color(semantic.backgroundExtra).opacity(dark ? 0.08 : 0.42)
         focus = Color(semantic.focus).opacity(semantic.focusAlpha)
         panel = Color(dark ? semantic.background : semantic.backgroundExtra).opacity(dark ? 0.6 : 0.55)
+        toast = Color(semantic.background)
         isDark = dark
         isWindowDark = windowDark ?? dark
     }
