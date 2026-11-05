@@ -285,6 +285,7 @@ final class BrowserViewModel {
     var visitHistory: VisitHistory
     @ObservationIgnored let historyFileURL: URL?
     @ObservationIgnored var historySaveWorkItem: DispatchWorkItem?
+    @ObservationIgnored let historySaveQueue = DispatchQueue(label: "net.rearc.history.persistence", qos: .utility)
     /// Last URL recorded per tab: a commit and its load-stop report the same visit.
     @ObservationIgnored var lastRecordedVisit: [Tab.ID: String] = [:]
     /// The page in HTML fullscreen, and what to restore when it leaves.

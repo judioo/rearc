@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import XCTest
 @testable import ReArc
 @testable import SidebarModel
@@ -67,7 +68,13 @@ final class Wave17ShellTests: XCTestCase {
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { expectation.fulfill() }
         wait(for: [expectation], timeout: 2)
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
-        XCTAssertNotNil(FaviconStore(directory: directory).image(for: URL(string: "https://site.test")!), "reloads from disk")
+        let reloaded = FaviconStore(directory: directory)
+        let loaded = self.expectation(description: "icon loaded off main")
+        withObservationTracking {
+            XCTAssertNil(reloaded.image(for: URL(string: "https://site.test")!), "first render never waits for disk")
+        } onChange: { loaded.fulfill() }
+        wait(for: [loaded], timeout: 2)
+        XCTAssertNotNil(reloaded.image(for: URL(string: "https://site.test")!), "reloads from disk")
         XCTAssertEqual(FaviconStore.fileName(for: "a/b:c"), "a_b_c.icon")
     }
 

@@ -72,7 +72,11 @@ extension BrowserViewModel {
 
     func scheduleVisitHistorySave() {
         historySaveWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.saveVisitHistory() }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.historySaveWorkItem = nil
+            self.enqueueVisitHistorySave()
+        }
         historySaveWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
     }
@@ -80,11 +84,22 @@ extension BrowserViewModel {
     func saveVisitHistory() {
         historySaveWorkItem?.cancel()
         historySaveWorkItem = nil
+        enqueueVisitHistorySave()
+        // Explicit flush is used at shutdown (and by persistence tests).
+        // Ordinary visits never wait for encoding or disk. All writes share
+        // one serial queue, so an older snapshot cannot overwrite a new one.
+        historySaveQueue.sync {}
+    }
+
+    private func enqueueVisitHistorySave() {
         guard let historyFileURL else { return }
-        do {
-            try VisitHistoryFile.save(visitHistory, to: historyFileURL)
-        } catch {
-            FileHandle.standardError.write(Data("[ReArc] could not save \(historyFileURL.lastPathComponent): \(error.localizedDescription)\n".utf8))
+        let snapshot = visitHistory
+        historySaveQueue.async {
+            do {
+                try VisitHistoryFile.save(snapshot, to: historyFileURL)
+            } catch {
+                FileHandle.standardError.write(Data("[ReArc] could not save \(historyFileURL.lastPathComponent): \(error.localizedDescription)\n".utf8))
+            }
         }
     }
 
