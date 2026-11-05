@@ -104,6 +104,8 @@ struct ShellToastView: View {
             .font(.system(size: 13, weight: .medium))
             .foregroundStyle(chrome.title)
             .lineLimit(1)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(toast.message)
             if case .share(let url) = toast.action {
                 ShareLink(item: url) {
                     Image(systemName: "square.and.arrow.up")
@@ -114,6 +116,7 @@ struct ShellToastView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(chrome.title)
                 .help("Share")
+                .accessibilityLabel("Share copied link")
             }
         }
         .padding(.leading, 10)
@@ -122,8 +125,7 @@ struct ShellToastView: View {
         .background(chrome.toast, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(chrome.title.opacity(0.1)))
         .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isStaticText)
+        .accessibilityElement(children: .contain)
     }
 }
 

@@ -4311,10 +4311,10 @@ extension ChromiumSelfTest {
         model.copyURL(of: tab.id, format: .plain)
         try await wait("copy toast", timeout: 5) { model.toast != nil }
         try await Task.sleep(nanoseconds: 400_000_000)
-        let toast = try XCTUnwrapSelfTest(accessibilityElement(in: window, labelled: model.toast?.message ?? "Copied"), "the toast's accessibility element")
+        let toast = try XCTUnwrapSelfTest(accessibilityElement(in: window, labelled: "Share copied link"), "the toast's share button")
         let toastFrame = toast.accessibilityFrame()
-        // The share button is the toast's last 22 pt, 6 pt in from its trailing edge.
-        click(atScreen: NSPoint(x: toastFrame.maxX - 6 - 11, y: toastFrame.midY), in: window)
+        // Target the independent share control, not the combined toast label.
+        click(atScreen: NSPoint(x: toastFrame.midX, y: toastFrame.midY), in: window)
         let opened = await eventually(timeout: 4) {
             menuOpened || NSApp.windows.contains { !windowsBefore.contains(ObjectIdentifier($0)) && $0.isVisible && $0 !== window }
         }
