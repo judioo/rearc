@@ -771,6 +771,37 @@ on its minor and flag (`devtools`, `client_certificates`).
     or closing the tab removes the video. Back to tab ends the session through
     the engine (PiP phase 2) and selects the tab.
 
+### ABI 1.44 adoption and the bench (perf-0)
+
+`perf_metrics` (ABI 1.44) is measurement only, and only `--rearc-bench`
+installs its callbacks (`Chromium/ChromiumPerfMetrics.swift`): page timing
+(FCP, LCP, load) per navigation, presentation feedback for shown and resized
+views, histogram snapshots and the process list with footprints.
+
+- **Signposts** are always compiled in (`Perf/PerfSignposts.swift`,
+  `SidebarModel/ModelSignposts.swift`, subsystem `net.rearc.shell`):
+  `interaction` intervals at the model entry points, `launch` events,
+  `engine-calls` around the ABI calls on the interaction paths, `model` and
+  `persistence` intervals. The engine adds `net.rearc.engine`. Record them
+  with Instruments or `log stream --signpost`.
+- **`--rearc-bench`** (`Chromium/ChromiumBench.swift`) drives the real
+  `ChromiumShell` over a seeded `BenchFixture` sidebar and the loopback page
+  set (`BenchPages`). It reuses the self-test's fixture server
+  (`LoopbackFixtureServer`) and input driver (`ShellInput`), never its
+  anti-throttling switches. Each measurement ends on an event: a presented
+  frame (`Perf/PresentationProbe.swift`, markers in `Perf/ProbeMarkers.swift`),
+  an engine event, or an animation's completion. Each sample records whether
+  its input was posted to AppKit or went to the shortcut handler's entry
+  point.
+- **Scripts:** `scripts/bench.sh` (load guards, the input lock, display kept
+  awake, cold launches, `--chrome` reference), `scripts/bench_finalize.py`
+  (bench.json, statistics, net-log audit), `scripts/bench-gate.py`
+  (regression gate), `scripts/bench_chrome.py`. Budgets are in
+  `bench/budgets.json`, baselines in `bench/baselines/`, and results go to
+  `bench/results/` (git-ignored).
+- Results and how to read them: docs/PERF-BASELINE.md.
+
+
 ### Self-test
 
 The self-test:
