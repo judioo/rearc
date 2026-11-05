@@ -4350,6 +4350,7 @@ extension ChromiumSelfTest {
         }
         defer { NotificationCenter.default.removeObserver(observer) }
         let windowsBefore = Set(NSApp.windows.map(ObjectIdentifier.init))
+        let pickersBefore = ToastSharePicker.shownCount
         model.copyURL(of: tab.id, format: .plain)
         try await wait("copy toast", timeout: 5) { model.toast != nil }
         try await Task.sleep(nanoseconds: 400_000_000)
@@ -4358,7 +4359,7 @@ extension ChromiumSelfTest {
         // Target the independent share control, not the combined toast label.
         click(atScreen: NSPoint(x: toastFrame.midX, y: toastFrame.midY), in: window)
         let opened = await eventually(timeout: 4) {
-            menuOpened || NSApp.windows.contains { !windowsBefore.contains(ObjectIdentifier($0)) && $0.isVisible && $0 !== window }
+            menuOpened || ToastSharePicker.shownCount > pickersBefore || NSApp.windows.contains { !windowsBefore.contains(ObjectIdentifier($0)) && $0.isVisible && $0 !== window }
         }
         for extra in NSApp.windows where !windowsBefore.contains(ObjectIdentifier(extra)) && extra.isVisible && extra !== window { extra.close() }
         try check(opened, "the toast's share button at \(toastFrame) opened no share menu")

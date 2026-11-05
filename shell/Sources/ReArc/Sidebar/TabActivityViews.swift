@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import SidebarModel
 
@@ -81,6 +82,7 @@ extension ShellToast {
 struct ShellToastView: View {
     let toast: ShellToast
     @Environment(\.themeChrome) private var chrome
+    @State private var shareAnchor: NSView?
 
     var body: some View {
         HStack(spacing: 8) {
@@ -107,13 +109,16 @@ struct ShellToastView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(toast.message)
             if case .share(let url) = toast.action {
-                ShareLink(item: url) {
+                Button {
+                    if let shareAnchor { ToastSharePicker.show(url, under: shareAnchor) }
+                } label: {
                     Image(systemName: "square.and.arrow.up")
                         .font(.system(size: 11, weight: .semibold))
                         .frame(width: 22, height: 20)
                         .background(chrome.title.opacity(0.08), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .background(AnchorReader { shareAnchor = $0 })
                 .foregroundStyle(chrome.title)
                 .help("Share")
                 .accessibilityLabel("Share copied link")
@@ -126,6 +131,18 @@ struct ShellToastView: View {
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(chrome.title.opacity(0.1)))
         .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
         .accessibilityElement(children: .contain)
+    }
+}
+
+/// The toast's share menu: AppKit's picker under the button. ShareLink's
+/// picker runs in a view service, so nothing in the app could see it open.
+enum ToastSharePicker {
+    /// Times the picker was shown (the self-test checks this).
+    @MainActor static private(set) var shownCount = 0
+
+    @MainActor static func show(_ url: URL, under anchor: NSView) {
+        NSSharingServicePicker(items: [url]).show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        shownCount += 1
     }
 }
 
