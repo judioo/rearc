@@ -224,11 +224,16 @@ final class ChromiumBench {
         if let first = store.content(for: fixture.spaceIDs[0]).todayLeaves.first?.id { store.selectTab(first) }
         runtime.legacyDefaultOwner = store.profiles.first?.id
         let sidebarFile = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-bench-sidebar-\(UUID().uuidString).json")
+        let modelStart = ProcessInfo.processInfo.systemUptime
         model = BrowserViewModel(store: store, persistence: SidebarFilePersistence(fileURL: sidebarFile),
-                                 syncEngine: LocalSyncEngine(), faviconStore: FaviconStore(directory: nil))
+                                 syncEngine: LocalSyncEngine(), faviconStore: FaviconStore(directory: nil), deferStartup: true)
+        LaunchTimeline.modelLoaded = ProcessInfo.processInfo.systemUptime
+        if options.suites.contains(.launchChild) { record("launch.model_init", ms(modelStart, LaunchTimeline.modelLoaded)) }
         model.onShellAnimationComplete = { [animations] in animations.send($0) }
         shell = ChromiumShell(runtime: runtime, autosavesFrames: false)
+        let shellStart = ProcessInfo.processInfo.systemUptime
         shell.start(model: model)
+        if options.suites.contains(.launchChild) { record("launch.shell_start", ms(shellStart, ProcessInfo.processInfo.systemUptime)) }
         guard let window = shell.browserWindows.first else { throw Failure(description: "ChromiumShell opened no browser window") }
         self.window = window
         place(window)
@@ -472,11 +477,13 @@ final class ChromiumBench {
             let started = Int64(ProcessInfo.processInfo.systemUptime * 1e6)
             let content = presentations.arm(timeout: contentTimeout(2)) { $0.kind == .shown && $0.startMicros >= started }
             probe.startRecording()
+            let rest = probe.arm("pager", timeout: 10) { $0 == "rest" }
             let t0 = press("\(number)", keyCode: number == 1 ? 18 : 19, .control)
+            record("ui.space_switch.model.ctrl_n", ms(t0, ProcessInfo.processInfo.systemUptime), input: input, contaminated: contaminated(), warmup: warmup)
             let acked = await ack.value()
             var settled = acked
             if await moving.value() != nil {
-                settled = await probe.arm("pager", timeout: 3) { $0 == "rest" }.value()
+                settled = await rest.value()
             }
             let shown = await content.value()
             frameStats("ui.space_switch", from: acked?.callback, to: settled?.callback, input: input, contaminated: contaminated(), warmup: warmup)
@@ -501,6 +508,7 @@ final class ChromiumBench {
             let content = presentations.arm(timeout: contentTimeout(3)) { $0.kind == .shown && $0.startMicros >= started }
             let t0 = ProcessInfo.processInfo.systemUptime
             model.selectSpace(target)
+            record("ui.profile_switch.warm.model", ms(t0, ProcessInfo.processInfo.systemUptime), input: .direct, contaminated: contaminated(), warmup: warmup)
             let presented = await sidebar.value()
             let shown = await content.value()
             record("ui.profile_switch.warm.sidebar", ms(t0, presented?.target), input: .direct, contaminated: contaminated(), warmup: warmup)
@@ -526,7 +534,8 @@ final class ChromiumBench {
             let sidebar = probe.arm("space", accepts: { $0.hasPrefix(space.id.uuidString) })
             let fcp = pageTimings.arm(timeout: contentTimeout(10)) { $0.kind == .firstContentfulPaint && $0.url == url.absoluteString }
             let t0 = ProcessInfo.processInfo.systemUptime
-            model.selectSpace(space.id)
+            model.selectProfile(profile.id)
+            record("ui.profile_switch.cold.model", ms(t0, ProcessInfo.processInfo.systemUptime), input: .direct, contaminated: contaminated(), warmup: warmup)
             let presented = await sidebar.value()
             var opened: TimeInterval?
             if let engine = engine(for: tab.id), await engine.waitForTab() { opened = ProcessInfo.processInfo.systemUptime }
@@ -705,6 +714,7 @@ final class ChromiumBench {
             let fcp = pageTimings.arm(timeout: contentTimeout(5)) { $0.kind == .firstContentfulPaint && $0.url == url.absoluteString }
             let t0 = ProcessInfo.processInfo.systemUptime
             model.showPeek(url: url)
+            record("ui.peek_open.model", ms(t0, ProcessInfo.processInfo.systemUptime), input: .direct, contaminated: contaminated(), warmup: warmup)
             let acked = await ack.value()
             let painted = await fcp.value()
             record("ui.peek_open.ack", ms(t0, acked?.target), input: .direct, contaminated: contaminated(), warmup: warmup)
@@ -734,6 +744,7 @@ final class ChromiumBench {
             let fcp = pageTimings.arm(timeout: contentTimeout(8)) { $0.kind == .firstContentfulPaint && $0.url == url.absoluteString }
             let t1 = ProcessInfo.processInfo.systemUptime
             _ = model.openLittleArc(url: url)
+            record("ui.little_arc_open.model", ms(t1, ProcessInfo.processInfo.systemUptime), input: .direct, contaminated: contaminated(), warmup: warmup)
             let shown = await frame.value()
             let painted = await fcp.value()
             record("ui.little_arc_open.window", ms(t1, shown?.target), input: .direct, contaminated: contaminated(), warmup: warmup)
@@ -898,6 +909,9 @@ final class ChromiumBench {
         let visible = await probe.nextFrame(after: window)
         PerfSignposts.launchEvent("FirstSidebarFrame")
         record("launch.window_visible", ms(start, visible?.target))
+        record("launch.cached_chrome_commit", ms(start, LaunchTimeline.cachedChromeCommitted))
+        record("launch.services_start", ms(start, LaunchTimeline.servicesStarted))
+        report.notes.append("Launch fixture construction is measured separately; launch.model_init excludes persisted-store disk reads. Normal launches overlap PreparedBrowserStartup with ChromeMain; trace StoreLoadStarted/Finished for that path.")
         let bar = probe.arm("commandbar", accepts: { $0.hasPrefix("open") })
         _ = press("l", keyCode: 37, .command)
         let usable = await bar.value()
@@ -907,6 +921,25 @@ final class ChromiumBench {
         if !contentCanPresent { _ = contentTimeout(0) }
         PerfSignposts.launchEvent("FirstPageFrame")
         record("launch.first_page_frame", ms(start, micros: painted?.valueMicros))
+        // Isolated disk/apply phases on the deterministic sidebar. Fixture
+        // encoding is deliberately outside these samples and not cold-start I/O.
+        let snapshotData = try JSONEncoder().encode(model.store.makeSnapshot())
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-bench-startup-\(UUID())/sidebar.json")
+        let prepared: PreparedBrowserStartup = try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+                    try snapshotData.write(to: file)
+                    continuation.resume(returning: PreparedBrowserStartup.load(from: file))
+                } catch { continuation.resume(throwing: error) }
+            }
+        }
+        for (phase, seconds) in prepared.loadSeconds { record("launch.store.\(phase)", seconds * 1000) }
+        let applying = ProcessInfo.processInfo.systemUptime
+        let restored = SidebarFilePersistence(fileURL: file).restoreStore(from: prepared.sidebar)
+        record("launch.store_apply", ms(applying, ProcessInfo.processInfo.systemUptime))
+        report.notes.append("launch.store.* and store_apply are isolated warm-cache fixture measurements after first usable, not cumulative cold launch milestones; restored \(restored.spaces.count) spaces.")
         report.status = "complete"
     }
 }
@@ -915,6 +948,9 @@ final class ChromiumBench {
 enum LaunchTimeline {
     nonisolated(unsafe) static var main: TimeInterval = ProcessInfo.processInfo.systemUptime
     nonisolated(unsafe) static var engineReady: TimeInterval?
+    nonisolated(unsafe) static var modelLoaded: TimeInterval?
+    nonisolated(unsafe) static var cachedChromeCommitted: TimeInterval?
+    nonisolated(unsafe) static var servicesStarted: TimeInterval?
 
     /// The process's start (kinfo_proc p_starttime), moved onto the uptime clock.
     static var processStart: TimeInterval? {

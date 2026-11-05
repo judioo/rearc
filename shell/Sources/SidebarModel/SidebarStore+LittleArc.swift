@@ -18,6 +18,7 @@ extension SidebarStore {
 
     @discardableResult
     public func createLittleArcWindow(
+        id: LittleArcWindow.ID = UUID(),
         url: URL,
         title: String? = nil,
         profileID: Profile.ID? = nil,
@@ -26,6 +27,7 @@ extension SidebarStore {
         let resolvedTitle = title ?? url.host() ?? url.absoluteString
         let originProfile = profileID ?? activeProfileID
         let window = LittleArcWindow(
+            id: id,
             url: url,
             title: resolvedTitle,
             profileID: originProfile,

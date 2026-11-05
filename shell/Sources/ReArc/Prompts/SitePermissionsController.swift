@@ -11,9 +11,9 @@ final class SitePermissionsController {
     private(set) var store: SitePermissionStore
     @ObservationIgnored private let fileURL: URL?
 
-    init(fileURL: URL?) {
+    init(fileURL: URL?, prepared: SitePermissionStore? = nil) {
         self.fileURL = fileURL
-        store = fileURL.map(SitePermissionStore.load(from:)) ?? SitePermissionStore()
+        store = prepared ?? fileURL.map(SitePermissionStore.load(from:)) ?? SitePermissionStore()
     }
 
     func record(_ decision: PermissionDecision, remembered: Bool, request: PermissionPromptRequest, scope: String) {

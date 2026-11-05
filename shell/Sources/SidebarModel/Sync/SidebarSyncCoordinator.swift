@@ -103,12 +103,13 @@ public final class SidebarSyncCoordinator {
         transport: SidebarSyncTransport,
         stateStore: SidebarSyncStateStoring,
         deviceID: String,
-        now: @escaping () -> Date = { Date() }
+        now: @escaping () -> Date = { Date() },
+        initialState: SidebarSyncState? = nil
     ) {
         self.transport = transport
         self.stateStore = stateStore
         self.now = now
-        let state = stateStore.load()
+        let state = initialState ?? stateStore.load()
         self.state = state
         self.clock = HybridLogicalClock(device: deviceID, last: state.clock)
         self.details = SyncStatusDetails(

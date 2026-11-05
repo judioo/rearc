@@ -1,6 +1,7 @@
 #if REARC_CHROMIUM
 import AppKit
 import Foundation
+import QuartzCore
 import SidebarModel
 import SwiftUI
 
@@ -77,7 +78,11 @@ enum ChromiumHost {
                 exit(probe.exitCode(runResult: runtime.run(arguments: arguments, keychain: keychain)))
             }
             let shell = ChromiumShell(runtime: runtime)
-            runtime.onReady = { shell.start(model: ChromiumShell.makeModel(runtime: runtime)) }
+            // Overlap JSON I/O/decoding with ChromeMain. Neither path waits on
+            // the main queue: whichever finishes last starts the cached shell.
+            let startup = ChromiumShellStartup(runtime: runtime, shell: shell)
+            startup.prepare()
+            runtime.onReady = { startup.engineReady() }
             exit(runtime.run(arguments: arguments, keychain: keychain))
         }
         ReArcMain.unavailableChromium(options, reason: reason)
@@ -116,6 +121,44 @@ enum ChromiumHost {
     }
 }
 
+/// Main-thread rendezvous: cached state and ABI readiness arrive independently.
+@MainActor
+private final class ChromiumShellStartup {
+    private let runtime: ChromiumRuntime
+    private let shell: ChromiumShell
+    private var prepared: PreparedBrowserStartup?
+    private var ready = false
+
+    init(runtime: ChromiumRuntime, shell: ChromiumShell) {
+        self.runtime = runtime
+        self.shell = shell
+    }
+
+    func prepare() {
+        let file = SidebarFilePersistence.defaultFileURL
+        DispatchQueue.global(qos: .userInitiated).async {
+            let prepared = PreparedBrowserStartup.load(from: file)
+            DispatchQueue.main.async { self.didPrepare(prepared) }
+        }
+    }
+
+    private func didPrepare(_ prepared: PreparedBrowserStartup) {
+        self.prepared = prepared
+        startIfReady()
+    }
+
+    func engineReady() {
+        ready = true
+        startIfReady()
+    }
+
+    private func startIfReady() {
+        guard ready, let prepared else { return }
+        self.prepared = nil
+        shell.start(model: ChromiumShell.makeModel(runtime: runtime, prepared: prepared))
+    }
+}
+
 /// The normal Chromium-path UI. There are no SwiftUI scenes on this path, so
 /// the shell owns its NSWindows: any number of browser windows sharing one
 /// `BrowserViewModel` (as the WebKit path's WindowGroup does), Little Arc
@@ -141,6 +184,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     /// ReArc > iCloud Sync… (Settings… is Chromium's own WebUI on this path).
     private var syncSettingsWindow: NSWindow?
     private var airTrafficControlWindow: NSWindow?
+    /// One never-shown window, with no page or user state. Consumed once.
+    private var preparedLittleArcWindow: NSWindow?
     private var terminating = false
     private let menuTarget = ChromiumMenuTarget()
     /// The tray's Chromium side; the controller only holds it weakly.
@@ -166,14 +211,15 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
 
     /// Loads the sidebar and names its first profile the owner of the startup
     /// Default directory (ABI 1.13; decided once, then persisted) before any
-    /// tab exists: creating the model loads the selected tab, which opens its
-    /// engine profile.
+    /// tab exists. The model defers page/profile creation until the cached
+    /// window chrome has committed.
     @MainActor
-    static func makeModel(runtime: ChromiumRuntime) -> BrowserViewModel {
+    static func makeModel(runtime: ChromiumRuntime, prepared: PreparedBrowserStartup? = nil) -> BrowserViewModel {
         let persistence = SidebarFilePersistence()
-        let store = SidebarFilePersistence.loadStore(persistence: persistence)
+        let store = prepared.map { persistence.restoreStore(from: $0.sidebar) }
+            ?? SidebarFilePersistence.loadStore(persistence: persistence)
         runtime.legacyDefaultOwner = store.profiles.first?.id
-        let model = BrowserViewModel(store: store, persistence: persistence)
+        let model = BrowserViewModel(store: store, persistence: persistence, preparedStartup: prepared, deferStartup: true)
         // Profile opens complete asynchronously; each gets this policy before its first tab.
         runtime.downloadDirectory = model.downloads.directory
         PerfSignposts.launchEvent("ModelLoaded")
@@ -270,6 +316,17 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             object: nil
         )
         NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async { [weak self] in self?.prepareLittleArcWindow() }
+    }
+
+    @MainActor
+    private func prepareLittleArcWindow() {
+        guard model != nil, !terminating, preparedLittleArcWindow == nil else { return }
+        preparedLittleArcWindow = makeWindow(
+            size: NSSize(width: 520, height: 420), title: "Little Arc",
+            content: NSHostingView(rootView: AnyView(Color.clear))
+        )
+        preparedLittleArcWindow?.isExcludedFromWindowsMenu = true
     }
 
     /// Dock click / app switch with no windows left: reopen a browser window.
@@ -312,7 +369,16 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         }
         track(window, .browser)
         window.makeKeyAndOrderFront(nil)
-        if first { PerfSignposts.launchEvent("WindowOrderedFront") }
+        if first {
+            PerfSignposts.launchEvent("WindowOrderedFront")
+            // Commit the cached chrome before services create any page engines.
+            // ABI ready has already run; named profiles/pages may still be cold.
+            window.displayIfNeeded()
+            CATransaction.flush()
+            LaunchTimeline.cachedChromeCommitted = ProcessInfo.processInfo.systemUptime
+            PerfSignposts.launchEvent("CachedChromeCommitted")
+            DispatchQueue.main.async { [weak model] in model?.finishStartup() }
+        }
         return window
     }
 
@@ -359,14 +425,23 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
                 return
             }
             guard let model, !terminating else { return }
-            let window = makeWindow(
-                size: NSSize(width: 520, height: 420),
-                title: "Little Arc",
-                content: NSHostingView(rootView: LittleArcWindowView(model: model, windowID: id))
-            )
+            let window: NSWindow
+            if let prepared = preparedLittleArcWindow,
+               let host = prepared.contentView as? NSHostingView<AnyView> {
+                preparedLittleArcWindow = nil
+                host.rootView = AnyView(LittleArcWindowView(model: model, windowID: id).id(id))
+                window = prepared
+                window.isExcludedFromWindowsMenu = false
+            } else {
+                window = makeWindow(
+                    size: NSSize(width: 520, height: 420), title: "Little Arc",
+                    content: NSHostingView(rootView: LittleArcWindowView(model: model, windowID: id))
+                )
+            }
             cascade(window, offset: 40)
             track(window, .littleArc(id))
             window.makeKeyAndOrderFront(nil)
+            DispatchQueue.main.async { [weak self] in self?.prepareLittleArcWindow() }
         }
     }
 

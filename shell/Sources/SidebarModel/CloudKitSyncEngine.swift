@@ -56,7 +56,7 @@ public enum CloudKitSyncAvailability {
 
     /// The app's sync engine: inert `UnavailableSyncEngine` unless entitled.
     @MainActor
-    public static func makeEngine(stateFileURL: URL? = nil, deviceID: UUID = SyncDeviceIdentity.persistedDeviceID) -> SyncEngine {
+    public static func makeEngine(stateFileURL: URL? = nil, deviceID: UUID = SyncDeviceIdentity.persistedDeviceID, initialState: SidebarSyncState? = nil) -> SyncEngine {
         switch current {
         case .unavailable(let reason):
             return UnavailableSyncEngine(reason: reason)
@@ -67,7 +67,8 @@ public enum CloudKitSyncAvailability {
             let coordinator = SidebarSyncCoordinator(
                 transport: CloudKitSyncTransport(containerIdentifier: container),
                 stateStore: SidebarSyncStateFile(fileURL: fileURL),
-                deviceID: deviceID.uuidString.lowercased()
+                deviceID: deviceID.uuidString.lowercased(),
+                initialState: initialState
             )
             return SidebarSyncScheduler(coordinator: coordinator)
             #else

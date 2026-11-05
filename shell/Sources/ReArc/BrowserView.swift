@@ -283,7 +283,7 @@ struct BrowserView: View {
     private var themeChrome: ThemeChromeColors {
         let theme = model.space(in: windowID).theme
         let dark = theme.appearance.isDark(systemDark: SystemAppearance.isDark(colorScheme))
-        return ThemeChromeColors(theme: theme, dark: ThemeGradient.usesDarkChrome(theme: theme, dark: dark), windowDark: dark)
+        return model.themeColors.colors(for: model.space(in: windowID).id, theme: theme, dark: dark)
     }
 
     /// This window shows a page in HTML fullscreen: only the page, edge to edge.
@@ -425,7 +425,9 @@ struct BrowserView: View {
 
     @ViewBuilder
     private var contentArea: some View {
-        if let section = model.librarySection(in: windowID) {
+        if model.startupDeferred {
+            Color.clear.accessibilityLabel("Loading page")
+        } else if let section = model.librarySection(in: windowID) {
             LibraryView(model: model, window: windowID, section: section)
         } else if let ref = model.selectedEaselRef(in: windowID),
            let document = model.easelDocument(forSidebarItem: ref.id) {

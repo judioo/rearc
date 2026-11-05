@@ -65,6 +65,29 @@ public final class SidebarFilePersistence: SidebarPersisting {
         return fallback()
     }
 
+    /// Read/decode on a worker before constructing a main-thread-owned store.
+    /// The result carries corruption recovery state as well as the snapshot;
+    /// consuming it must not re-read or accidentally enable autosave.
+    public struct PreparedLoad {
+        public let snapshot: SidebarSnapshot?
+        public let outcome: SidebarLoadOutcome
+    }
+
+    public static func prepareLoad(from fileURL: URL) -> PreparedLoad {
+        let persistence = SidebarFilePersistence(fileURL: fileURL)
+        let snapshot = persistence.loadSnapshot()
+        return PreparedLoad(snapshot: snapshot, outcome: persistence.loadOutcome)
+    }
+
+    public func restoreStore(from prepared: PreparedLoad) -> SidebarStore {
+        loadOutcome = prepared.outcome
+        autosaveEnabled = prepared.outcome != .recoveredFromCorruptFile
+        guard let snapshot = prepared.snapshot else { return SidebarStore.sample() }
+        let store = SidebarStore()
+        store.applySnapshot(snapshot)
+        return store
+    }
+
     public func loadSnapshot() -> SidebarSnapshot? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             loadOutcome = .missingFile

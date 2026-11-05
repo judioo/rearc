@@ -174,6 +174,34 @@ struct ThemeChromeColors {
     }
 }
 
+/// Two appearance variants per space. Theme edits replace only that space's
+/// entry; selecting a tab or animating the pager does no gamut mapping.
+final class SpaceThemeColorCache {
+    private struct Entry {
+        var theme: SpaceTheme
+        var light: ThemeChromeColors?
+        var dark: ThemeChromeColors?
+    }
+    private var entries: [Space.ID: Entry] = [:]
+    private(set) var buildCount = 0
+
+    func colors(for spaceID: Space.ID, theme: SpaceTheme, dark: Bool) -> ThemeChromeColors {
+        if let entry = entries[spaceID], entry.theme == theme,
+           let colors = dark ? entry.dark : entry.light { return colors }
+        var entry = entries[spaceID].flatMap { $0.theme == theme ? $0 : nil } ?? Entry(theme: theme)
+        let colors = ThemeChromeColors(theme: theme, dark: ThemeGradient.usesDarkChrome(theme: theme, dark: dark), windowDark: dark)
+        buildCount += 1
+        if dark { entry.dark = colors } else { entry.light = colors }
+        entries[spaceID] = entry
+        return colors
+    }
+
+    func retain(spaces: [Space]) {
+        let ids = Set(spaces.map(\.id))
+        entries = entries.filter { ids.contains($0.key) }
+    }
+}
+
 extension EnvironmentValues {
     @Entry var themeChrome: ThemeChromeColors = .fallback
 }

@@ -73,10 +73,10 @@ final class DownloadsController {
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
     }
 
-    init(fileURL: URL?, workspace: NSWorkspace = .shared) {
+    init(fileURL: URL?, workspace: NSWorkspace = .shared, prepared: DownloadListFile.Contents? = nil) {
         self.fileURL = fileURL
         self.workspace = workspace
-        let contents = fileURL.map(DownloadListFile.load(from:)) ?? DownloadListFile.Contents()
+        let contents = prepared ?? fileURL.map(DownloadListFile.load(from:)) ?? DownloadListFile.Contents()
         var list = contents.list
         list.markStaleTransfersInterrupted()
         list.trim()

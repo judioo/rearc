@@ -73,11 +73,31 @@ struct SidebarView: View {
         }
     }
 
-    /// One space's page: header, pinned, Today and the New Tab row. It reads
-    /// the space's outline (rows, not their values) and a lazy stack builds
-    /// the rows on screen only.
     private func spacePage(_ spaceID: Space.ID) -> some View {
-        let space = model.store.space(withID: spaceID) ?? focusedSpace
+        SidebarSpacePage(model: model, spaceID: spaceID, draggedItemID: $draggedItemID, dropState: $dropState,
+                         draggedID: draggedItemID, drop: dropState)
+            .equatable()
+    }
+}
+
+/// Offset changes belong to SpacePagesView. A frame of the pager does not
+/// rebuild an unchanged outline; this view observes its own space and rows.
+private struct SidebarSpacePage: View, Equatable {
+    let model: BrowserViewModel
+    let spaceID: Space.ID
+    @Binding var draggedItemID: UUID?
+    @Binding var dropState: SidebarDropState?
+    @Environment(\.sidebarWindow) private var window
+    let draggedID: UUID?
+    let drop: SidebarDropState?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.model === rhs.model && lhs.spaceID == rhs.spaceID
+            && lhs.draggedID == rhs.draggedID && lhs.drop == rhs.drop
+    }
+
+    var body: some View {
+        let space = model.store.space(withID: spaceID) ?? model.space(in: window)
         let outline = model.store.outline(for: space.id)
         let collapsed = model.isPinnedSectionCollapsed(spaceID: space.id, in: window)
         let pinned = collapsed ? collapsedPinned(outline.pinned, spaceID: space.id) : outline.pinned

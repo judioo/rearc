@@ -29,6 +29,30 @@ final class EngineHost {
     @ObservationIgnored private let engineCells = ObservationCells<EngineCell>()
     private var ephemeralEngines: [EphemeralEngineKey: any WebEngine] = [:]
     private var littleArcEngines: [LittleArcEngineKey: any WebEngine] = [:]
+    /// Blank, never-navigated contents only. At most one spare per transient
+    /// role for the active profile; closing a used page always destroys it.
+    @ObservationIgnored private var preparedPeek: (profileID: Profile.ID, id: UUID, engine: any WebEngine)?
+    @ObservationIgnored private var preparedLittleArc: (profileID: Profile.ID, id: UUID, engine: any WebEngine)?
+
+    func prepareTransientEngines(profileID: Profile.ID) {
+        if preparedPeek?.profileID != profileID {
+            let id = UUID()
+            preparedPeek = (profileID, id, makeEngine(context: EngineProfileContext(profileID: profileID), role: .peek, shellID: id))
+        }
+        if preparedLittleArc?.profileID != profileID {
+            let id = UUID()
+            preparedLittleArc = (profileID, id, makeEngine(context: EngineProfileContext(profileID: profileID), role: .littleArc, shellID: id))
+        }
+    }
+
+    /// Move the spare, including its ABI shell identity, into live ownership.
+    func takePreparedLittleArc(profileID: Profile.ID) -> UUID? {
+        guard let prepared = preparedLittleArc, prepared.profileID == profileID else { return nil }
+        preparedLittleArc = nil
+        littleArcEngines[LittleArcEngineKey(id: prepared.id, profileID: profileID)] = prepared.engine
+        return prepared.id
+    }
+
     /// WebKit engines hand their downloads to the tray (Chromium reports its own).
     @ObservationIgnored weak var downloadCenter: WebKitDownloadCenter?
     /// Where page prompts open links (the browser view model).
@@ -171,6 +195,8 @@ final class EngineHost {
 
     /// Drops every engine (tabs, peeks, Little Arc) that used the given profile.
     func evictEngines(forProfileID id: Profile.ID) {
+        if preparedPeek?.profileID == id { preparedPeek = nil }
+        if preparedLittleArc?.profileID == id { preparedLittleArc = nil }
         removeTabEngines { $0.profileID == id }
         if ephemeralEngines.keys.contains(where: { $0.profileID == id }) {
             ephemeralEngines = ephemeralEngines.filter { $0.key.profileID != id }
@@ -198,9 +224,16 @@ final class EngineHost {
 
     /// Ephemeral engine for peek overlays; discarded when the peek closes.
     func ephemeralEngine(profileID: Profile.ID) -> (id: UUID, engine: any WebEngine) {
-        let id = UUID()
-        let context = EngineProfileContext(profileID: profileID)
-        let engine = makeEngine(context: context, role: .peek, shellID: id)
+        let id: UUID
+        let engine: any WebEngine
+        if let prepared = preparedPeek, prepared.profileID == profileID {
+            preparedPeek = nil
+            id = prepared.id
+            engine = prepared.engine
+        } else {
+            id = UUID()
+            engine = makeEngine(context: EngineProfileContext(profileID: profileID), role: .peek, shellID: id)
+        }
         ephemeralEngines[EphemeralEngineKey(id: id, profileID: profileID)] = engine
         return (id, engine)
     }

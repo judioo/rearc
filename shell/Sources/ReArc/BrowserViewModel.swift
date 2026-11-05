@@ -22,6 +22,7 @@ final class BrowserViewModel {
     }
     let store: SidebarStore
     let engineHost = EngineHost()
+    @ObservationIgnored let themeColors = SpaceThemeColorCache()
     let easelStore = EaselDocumentStore()
     let captureFileStore = CaptureFileStore()
     let faviconStore: FaviconStore
@@ -315,15 +316,20 @@ final class BrowserViewModel {
         didSet { tabUnloadThreshold.save(to: tabUnloadDefaults) }
     }
     @ObservationIgnored var tabUnloadDefaults: UserDefaults = .standard
+    private(set) var startupDeferred = false
+    @ObservationIgnored private var didFinishStartup = false
     /// A mutation's engine reconcile and boost sync are queued (`scheduleMutationFollowUp`).
     @ObservationIgnored var mutationFollowUpScheduled = false
+    @ObservationIgnored private var transientWarmupScheduled = false
 
     init(
         store: SidebarStore? = nil,
         persistence: SidebarFilePersistence? = nil,
         nowPlaying: MediaKeyRouting? = nil,
         syncEngine: SyncEngine? = nil,
-        faviconStore: FaviconStore? = nil
+        faviconStore: FaviconStore? = nil,
+        preparedStartup: PreparedBrowserStartup? = nil,
+        deferStartup: Bool = false
     ) {
         let persistence = persistence ?? SidebarFilePersistence()
         self.persistence = persistence
@@ -333,14 +339,14 @@ final class BrowserViewModel {
         self.sidebarRecoveredFromCorruption = persistence.loadOutcome == .recoveredFromCorruptFile
         let historyFile = Self.siblingFile(VisitHistoryFile.fileName, of: persistence.fileURL)
         self.historyFileURL = historyFile
-        self.visitHistory = VisitHistoryFile.load(from: historyFile)
-        self.downloads = DownloadsController(fileURL: Self.siblingFile(DownloadListFile.fileName, of: persistence.fileURL))
+        self.visitHistory = preparedStartup?.history ?? VisitHistoryFile.load(from: historyFile)
+        self.downloads = DownloadsController(fileURL: Self.siblingFile(DownloadListFile.fileName, of: persistence.fileURL), prepared: preparedStartup?.downloads)
         engineHost.downloadCenter = downloads.webKit
-        self.sitePermissions = SitePermissionsController(fileURL: Self.siblingFile(SitePermissionStore.fileName, of: persistence.fileURL))
+        self.sitePermissions = SitePermissionsController(fileURL: Self.siblingFile(SitePermissionStore.fileName, of: persistence.fileURL), prepared: preparedStartup?.permissions)
         engineHost.sitePermissions = sitePermissions
         self.nowPlaying = nowPlaying ?? NowPlayingController()
         let engine = syncEngine ?? MainActor.assumeIsolated {
-            CloudKitSyncAvailability.makeEngine(stateFileURL: Self.siblingFile(SidebarSyncStateFile.fileName, of: persistence.fileURL))
+            CloudKitSyncAvailability.makeEngine(stateFileURL: Self.siblingFile(SidebarSyncStateFile.fileName, of: persistence.fileURL), initialState: preparedStartup?.syncState)
         }
         self.syncEngine = engine
         self.syncPipeline = SyncOutboundPipeline(journal: self.store.mutationJournal, engine: engine)
@@ -352,7 +358,6 @@ final class BrowserViewModel {
         self.store.mutationJournal.onAppend = { [weak self] entry in
             self?.syncPipeline.handleJournalEntry(entry)
         }
-        engine.start()
         engineHost.linkRouter = self
         self.persistence.start(autoSave: self.store) { [weak self] in
             self?.scheduleMutationFollowUp()
@@ -364,11 +369,28 @@ final class BrowserViewModel {
                 self.store.selectEasel(easel.id)
             }
         }
+        startupDeferred = deferStartup
+        if !deferStartup { finishStartup() }
+    }
+
+    /// The cached sidebar can render before page/profile creation, archive,
+    /// sync and media setup. Idempotent so multiple windows cannot start twice.
+    func finishStartup() {
+        guard !didFinishStartup else { return }
+        didFinishStartup = true
+        let wasDeferred = startupDeferred
+        startupDeferred = false
+        #if REARC_CHROMIUM
+        LaunchTimeline.servicesStarted = ProcessInfo.processInfo.systemUptime
+        #endif
+        PerfSignposts.launchEvent("ServicesStarting")
+        syncEngine.start()
         observeSearchProvider()
         wireMediaKeyHandlers()
         runAutoArchive()
         startAutoArchiveTimer()
         loadSelectedIfNeeded()
+        if wasDeferred { restoreLittleArcWindowsIfNeeded() }
         MainActor.assumeIsolated { livePanel.track() }
     }
 
@@ -715,6 +737,8 @@ final class BrowserViewModel {
     /// Loads the selected tab's URL into its engine if the engine isn't
     /// already showing it (fresh engine or URL changed in the model).
     func loadSelectedIfNeeded() {
+        guard !startupDeferred else { return }
+        scheduleTransientWarmup()
         library.closeStale { [unowned self] in selectedItemID(in: $0) }
         applyAutoPiPOnTabSwitch()
         noteVisibleTabsShown()
@@ -727,6 +751,7 @@ final class BrowserViewModel {
                 if engine.currentURL != tab.url {
                     engine.load(tab.url)
                 }
+                wireMediaObserver(for: tab)
                 syncBoosts(for: tab)
             }
             return
@@ -738,8 +763,22 @@ final class BrowserViewModel {
             engine.load(tab.url)
         }
         (engine as? PageZoomRefreshing)?.refreshZoomFactor()
-        wireMediaObserversForKnownTabs()
+        wireMediaObserver(for: tab)
         syncBoosts(for: tab)
+    }
+
+    /// Off the input turn. No URL is loaded, and the pool never contains
+    /// visited pages, so history, callbacks and prompts cannot leak to a new UI.
+    private func scheduleTransientWarmup() {
+        #if REARC_CHROMIUM
+        guard ChromiumRuntime.active != nil, !transientWarmupScheduled else { return }
+        transientWarmupScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.transientWarmupScheduled = false
+            self.engineHost.prepareTransientEngines(profileID: self.store.activeProfileID)
+        }
+        #endif
     }
 
     func syncAllTabBoosts() {
@@ -779,6 +818,7 @@ final class BrowserViewModel {
     }
 
     private func wireNavigationCommit(for tab: Tab, profileID: Profile.ID) {
+        wireMediaObserver(for: tab)
         observeFavicon(of: engineHost.engine(for: tab, profileID: profileID), tabID: tab.id)
         observePageTitle(of: engineHost.engine(for: tab, profileID: profileID), tabID: tab.id)
         guard let wk = engineHost.engine(for: tab, profileID: profileID) as? NavigationCommitReporting else { return }
@@ -805,14 +845,6 @@ final class BrowserViewModel {
         guard let url else { return }
         let resolvedTitle = (title?.isEmpty == false) ? title : nil
         store.updateLittleArcWindow(id: windowID, title: resolvedTitle, url: url)
-    }
-
-    private func wireMediaObserversForKnownTabs() {
-        for space in store.spaces {
-            for tab in store.displayTabs(in: space.id) {
-                wireMediaObserver(for: tab)
-            }
-        }
     }
 
     /// Subscribes to tabs that already have an engine. Creating one here would
@@ -850,6 +882,7 @@ final class BrowserViewModel {
     }
 
     private func reconcileEngineOwnershipNow() {
+        themeColors.retain(spaces: store.spaces)
         var tabKeys = Set<EngineHost.TabEngineKey>()
         for space in store.spaces {
             for tab in store.displayTabs(in: space.id) {
@@ -987,6 +1020,7 @@ final class BrowserViewModel {
         let (engineID, engine) = engineHost.ephemeralEngine(profileID: originProfile)
         engine.linkPeekHandler = nil
         engine.load(url)
+        scheduleTransientWarmup()
         peekSession = PeekSession(
             url: url,
             title: url.host() ?? url.absoluteString,
@@ -1085,7 +1119,7 @@ final class BrowserViewModel {
     // MARK: - Little Arc
 
     func restoreLittleArcWindowsIfNeeded() {
-        guard !didRestoreLittleArcWindows else { return }
+        guard !startupDeferred, !didRestoreLittleArcWindows else { return }
         didRestoreLittleArcWindows = true
         for window in store.littleArcLiveWindows {
             requestLittleArcWindow(window.id)
@@ -1095,7 +1129,10 @@ final class BrowserViewModel {
     @discardableResult
     func openLittleArc(url: URL, title: String? = nil, profileID: Profile.ID? = nil) -> LittleArcWindow {
         PerfSignposts.interaction(.littleArcOpen)
-        let record = store.createLittleArcWindow(url: url, title: title, profileID: profileID)
+        let originProfile = profileID ?? store.activeProfileID
+        let preparedID = engineHost.takePreparedLittleArc(profileID: originProfile)
+        let record = store.createLittleArcWindow(id: preparedID ?? UUID(), url: url, title: title, profileID: originProfile)
+        scheduleTransientWarmup()
         requestLittleArcWindow(record.id)
         loadLittleArcIfNeeded(record.id)
         return record
