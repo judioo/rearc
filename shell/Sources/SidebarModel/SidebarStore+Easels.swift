@@ -3,12 +3,8 @@ import Foundation
 extension SidebarStore {
 
     public func easelRef(withSidebarID id: UUID) -> SidebarEaselRef? {
-        for space in spaces {
-            for entry in content(for: space.id).pinned + content(for: space.id).today {
-                if case .easel(let ref) = entry, ref.id == id { return ref }
-            }
-        }
-        return nil
+        guard let item = indexed(id), case .easel(let ref) = item.entry, case .tree(_, _, nil) = item.place else { return nil }
+        return ref
     }
 
     public func easelRef(forDocumentID documentID: UUID) -> SidebarEaselRef? {
@@ -99,16 +95,8 @@ extension SidebarStore {
     }
 
     public func locateEasel(_ sidebarItemID: UUID) -> (spaceID: Space.ID, section: ItemContainerKind.SpaceSection)? {
-        for space in spaces {
-            let content = content(for: space.id)
-            if content.pinned.contains(where: { $0.id == sidebarItemID }) {
-                return (space.id, .pinned)
-            }
-            if content.today.contains(where: { $0.id == sidebarItemID }) {
-                return (space.id, .unpinned)
-            }
-        }
-        return nil
+        guard let item = indexed(sidebarItemID), case .tree(let spaceID, let section, nil) = item.place else { return nil }
+        return (spaceID, section)
     }
 
     // MARK: - Captures (indexed in sidebar snapshot)

@@ -8,6 +8,7 @@ extension SidebarStore {
             if let mutation {
                 mutationJournal.record(mutation)
             }
+            settlePendingSelection()
             onDidMutate?()
         }
     }

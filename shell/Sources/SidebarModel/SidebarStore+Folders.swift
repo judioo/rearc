@@ -6,10 +6,10 @@ import Foundation
 extension SidebarStore {
 
     public func folder(withID id: UUID) -> SidebarFolder? {
-        for space in spaces {
-            if let folder = SidebarTree.folder(id, in: content(for: space.id).pinned) { return folder }
-        }
-        return nil
+        guard let item = indexed(id), case .folder(let folder) = item.entry,
+              case .tree(let spaceID, .pinned, _) = item.place else { return nil }
+        observation.access(.spaceContent(spaceID))
+        return folder
     }
 
     /// Folders of a space in sidebar order with their nesting depth (0 = section level).
