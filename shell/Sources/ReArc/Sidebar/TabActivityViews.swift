@@ -118,7 +118,10 @@ struct ShellToastView: View {
                         .background(chrome.title.opacity(0.08), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .background(AnchorReader { shareAnchor = $0 })
+                .background(AnchorReader { anchor in
+                    shareAnchor = anchor
+                    ToastSharePicker.anchor = anchor
+                })
                 .foregroundStyle(chrome.title)
                 .help("Share")
                 .accessibilityLabel("Share copied link")
@@ -139,10 +142,13 @@ struct ShellToastView: View {
 enum ToastSharePicker {
     /// Times the picker was shown (the self-test checks this).
     @MainActor static private(set) var shownCount = 0
+    /// The share button's view, so the self-test can click where it is.
+    @MainActor static weak var anchor: NSView?
 
     @MainActor static func show(_ url: URL, under anchor: NSView) {
-        NSSharingServicePicker(items: [url]).show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        // Counted first: an AppKit menu picker tracks inside `show`.
         shownCount += 1
+        NSSharingServicePicker(items: [url]).show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
     }
 }
 

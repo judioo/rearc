@@ -4267,6 +4267,25 @@ extension ChromiumSelfTest {
         }
     }
 
+    /// A left click through the window server at a screen point, as a mouse
+    /// gives it: SwiftUI buttons ignore clicks posted to the app's queue.
+    /// The pointer is moved there first and given time to settle: the first
+    /// click after it jumps across the screen is dropped.
+    @MainActor
+    private func systemClick(atScreen point: NSPoint) async throws {
+        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        let location = CGPoint(x: point.x, y: top - point.y)
+        let source = CGEventSource(stateID: .hidSystemState)
+        for _ in 0..<2 {
+            CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: location, mouseButton: .left)?.post(tap: .cghidEventTap)
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        for type in [CGEventType.leftMouseDown, .leftMouseUp] {
+            CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: location, mouseButton: .left)?.post(tap: .cghidEventTap)
+            try await Task.sleep(nanoseconds: 60_000_000)
+        }
+    }
+
     private func popoverWindows() -> [NSWindow] {
         NSApp.windows.filter { $0.isVisible && NSStringFromClass(Swift.type(of: $0)).contains("Popover") }
     }
@@ -4354,16 +4373,32 @@ extension ChromiumSelfTest {
         model.copyURL(of: tab.id, format: .plain)
         try await wait("copy toast", timeout: 5) { model.toast != nil }
         try await Task.sleep(nanoseconds: 400_000_000)
-        let toast = try XCTUnwrapSelfTest(accessibilityElement(in: window, labelled: "Share copied link"), "the toast's share button")
-        let toastFrame = toast.accessibilityFrame()
-        // Target the independent share control, not the combined toast label.
-        click(atScreen: NSPoint(x: toastFrame.midX, y: toastFrame.midY), in: window)
-        let opened = await eventually(timeout: 4) {
-            menuOpened || ToastSharePicker.shownCount > pickersBefore || NSApp.windows.contains { !windowsBefore.contains(ObjectIdentifier($0)) && $0.isVisible && $0 !== window }
+        // Aim at the button's own view: SwiftUI's accessibility frame for
+        // the overlay need not match where the control is drawn.
+        try await wait("the toast's share button", timeout: 3) { ToastSharePicker.anchor?.window === window }
+        let anchor = try XCTUnwrapSelfTest(ToastSharePicker.anchor, "the toast's share button")
+        let toastFrame = window.convertToScreen(anchor.convert(anchor.bounds, to: nil))
+        let center = NSPoint(x: toastFrame.midX, y: toastFrame.midY)
+        // A SwiftUI button ignores the click that only makes its window key.
+        window.makeKeyAndOrderFront(nil)
+        try await wait("the window key for the share click", timeout: 3) { window.isKeyWindow }
+        func pickerOpened() -> Bool {
+            menuOpened || ToastSharePicker.shownCount > pickersBefore
+                || NSApp.windows.contains { !windowsBefore.contains(ObjectIdentifier($0)) && $0.isVisible && $0 !== window }
+        }
+        // The first window-server click after the pointer jumps here is
+        // dropped before it reaches the app (no hover, no tap), so a second
+        // one is allowed and reported.
+        try await systemClick(atScreen: center)
+        var opened = await eventually(timeout: 1.5) { pickerOpened() }
+        let clicks = opened ? 1 : 2
+        if !opened {
+            try await systemClick(atScreen: center)
+            opened = await eventually(timeout: 4) { pickerOpened() }
         }
         for extra in NSApp.windows where !windowsBefore.contains(ObjectIdentifier(extra)) && extra.isVisible && extra !== window { extra.close() }
         try check(opened, "the toast's share button at \(toastFrame) opened no share menu")
-        results.append("(4) the copy toast's share button opens the share \(menuOpened ? "menu" : "picker")")
+        results.append("(4) the copy toast's share button opens the share \(menuOpened ? "menu" : "picker") (\(clicks == 1 ? "first click" : "second click; the first was dropped"))")
 
         // (5) Picture in Picture hides the hidden tab's media strip; closing it brings the strip back.
         let embeds = model.embedsVideoInSidebar, automatic = model.automaticPictureInPicture
