@@ -113,6 +113,20 @@ final class Wave33ShellTests: XCTestCase {
 
     // MARK: Toasts (§6)
 
+    func testTitlebarDoesNotInterceptTheToastOrPageToolbar() {
+        let frame = TrafficLightPositioner.titlebarFrame(windowSize: NSSize(width: 1280, height: 820))
+        XCTAssertEqual(frame.height, 47)
+        XCTAssertEqual(frame.maxX, 84)
+        for index in 0..<3 {
+            let center = NSPoint(x: TrafficLightPositioner.firstCentreX + CGFloat(index) * TrafficLightPositioner.pitch,
+                                 y: 820 - TrafficLightPositioner.centreY)
+            XCTAssertTrue(frame.contains(center))
+        }
+        // Logged failing Share frame: (1535, 920, 22, 20), window origin (299, 140).
+        XCTAssertFalse(frame.contains(NSPoint(x: 1546 - 299, y: 930 - 140)))
+        XCTAssertFalse(frame.contains(NSPoint(x: 100, y: 790)), "sidebar toggle also stays clickable")
+    }
+
     func testToastsStayAboutFiveSecondsAndCarryTheirAction() {
         XCTAssertEqual(ShellToast.defaultDuration, 5, accuracy: 0.5, "on screen 4.6–5.0 s")
         let model = makeModel()

@@ -144,6 +144,12 @@ struct TrafficLightPositioner: NSViewRepresentable {
     static let centreY: CGFloat = 23.5
     /// The title bar area tall enough to hold the buttons at that centre.
     static let titlebarHeight: CGFloat = 47
+    static let titlebarWidth: CGFloat = 84
+
+    static func titlebarFrame(windowSize: NSSize) -> NSRect {
+        NSRect(x: 0, y: windowSize.height - titlebarHeight,
+               width: min(titlebarWidth, windowSize.width), height: titlebarHeight)
+    }
 
     /// The sidebar is hidden: so are the buttons, as in Arc.
     var isHidden = false
@@ -188,12 +194,10 @@ struct TrafficLightPositioner: NSViewRepresentable {
                   let close = window.standardWindowButton(.closeButton),
                   let titlebar = close.superview, let container = titlebar.superview else { return }
             let height = TrafficLightPositioner.titlebarHeight
-            var frame = container.frame
-            if frame.height != height {
-                frame.size.height = height
-                frame.origin.y = window.frame.height - height
-                container.frame = frame
-            }
+            // The titlebar container intercepts clicks even where it is transparent.
+            // Keep it over the traffic lights, leaving the page toolbar and toast clickable.
+            let frame = TrafficLightPositioner.titlebarFrame(windowSize: window.frame.size)
+            if container.frame != frame { container.frame = frame }
             titlebar.frame = NSRect(x: 0, y: 0, width: container.bounds.width, height: height)
             let kinds: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
             for (index, kind) in kinds.enumerated() {
