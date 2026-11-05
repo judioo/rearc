@@ -3,8 +3,9 @@
 
 Serves the bench's dumped page set (bench.sh --chrome) on 127.0.0.1 and
 loads each page in a separate Chrome instance: its own temporary
---user-data-dir, --no-first-run, the same loopback-only resolver rules as the
-ReArc bench and no anti-throttling switches. Driven over
+--user-data-dir, --no-first-run, --use-mock-keychain (the user's Keychain item is never read),
+the same loopback-only resolver rules as the ReArc bench and no
+anti-throttling switches. Driven over
 --remote-debugging-pipe (no network port). Only this instance is closed
 (Browser.close, then its own pid); the user's Chrome is never touched.
 Records the page's own Performance entries (TTFB, FCP, DCL, load), Chrome's
@@ -173,6 +174,8 @@ def main():
     netlog = pathlib.Path(args.out).with_name("netlog-chrome.json")
     chrome = Pipe([CHROME, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
                    "--remote-debugging-pipe", "--disable-background-networking", "--disable-component-update",
+                   # Never read the user's "Chrome Safe Storage" Keychain item.
+                   "--use-mock-keychain",
                    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost",
                    "--window-size=1440,900", "--window-position=20,40", f"--log-net-log={netlog}", "about:blank"])
     result = {"browser": "Google Chrome", "version": version, "pages": {}, "memory": {}, "histograms": {},
