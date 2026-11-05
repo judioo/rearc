@@ -175,6 +175,8 @@ def main():
             "contaminated_iterations": contaminated,
             "contaminated_fraction": contaminated / total if total else 0,
             "cpu_other_share": {k: round(sum(v) / len(v), 3) for k, v in (raw.get("cpuOtherShare") or {}).items() if v},
+            "cpu_other_at_rest": raw.get("restingOtherCPU"),
+            "contamination_limit": raw.get("contaminationLimit"),
             "network_outside_loopback": outside,
             "net_logs": [p.name for p in netlogs],
         },

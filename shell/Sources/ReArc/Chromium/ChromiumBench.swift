@@ -53,6 +53,10 @@ final class ChromiumBench {
     private let hangs = HangWatchdog()
     private var cpu = CPUMeter()
     private var scenario = "setup"
+    /// Other processes' CPU share at rest, before the shell starts (§2.2): an
+    /// iteration is contaminated above max(maxOtherCPU, resting + 0.10).
+    private var restingOtherCPU = 0.0
+    private var contaminationLimit: Double { max(options.maxOtherCPU, restingOtherCPU + 0.10) }
 
     init(runtime: ChromiumRuntime, options: EngineLaunchOptions.BenchOptions) {
         self.runtime = runtime
@@ -126,6 +130,15 @@ final class ChromiumBench {
             abiMinor: Int(runtime.capabilities.abiMinorVersion ?? 0), bridge: String(cString: ReArcEngineBridgeVersion()),
             chromium: String(cString: ReArcEngineVersion()))
         hangs.start { [weak self] in self?.scenario ?? "-" }
+        // Our own processes (browser, GPU, utilities, renderers) are not "other".
+        let ours = await metrics.processes().map(\.pid)
+        let rest = cpu.sample(pids: ours)
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        restingOtherCPU = cpu.otherShare(since: rest, pids: ours)
+        report.restingOtherCPU = restingOtherCPU
+        report.contaminationLimit = contaminationLimit
+        log(String(format: "other processes at rest: %.1f%% of the CPU; contamination limit %.1f%%",
+                   restingOtherCPU * 100, contaminationLimit * 100))
 
         // Generate the page set before the first request (first visits must not pay for it).
         _ = (BenchPages.images.count, BenchPages.spaScript.count, BenchPages.article.count, BenchPages.list.count)
@@ -302,7 +315,7 @@ final class ChromiumBench {
             var share: Double?
             try await body(index, index < options.warmups) {
                 if share == nil { share = self.cpu.otherShare(since: before, pids: pids) }
-                return (share ?? 0) > self.options.maxOtherCPU
+                return (share ?? 0) > self.contaminationLimit
             }
             if share == nil { share = cpu.otherShare(since: before, pids: pids) }
             report.noteCPU(name, share ?? 0)
@@ -720,7 +733,7 @@ final class ChromiumBench {
         guard let scroll = sidebarScrollView() else { return report.notes.append("ui.sidebar_scroll: no sidebar NSScrollView found") }
         let rows = BenchFixture.layout(BenchFixture.Size(rawValue: options.fixture) ?? .items500).firstSpaceRows
         let id = "ui.sidebar_scroll.items\(rows >= 450 && rows < 600 ? 500 : rows)"
-        try await iterate(id, count: max(10, options.iterations / 4)) { index, warmup, contaminated in
+        try await iterate(id, count: max(options.iterations / 4, min(10, options.iterations))) { index, warmup, contaminated in
             let clip = scroll.contentView
             let range = max(0, (scroll.documentView?.frame.height ?? 0) - clip.bounds.height)
             let down = index % 2 == 0
@@ -762,7 +775,7 @@ final class ChromiumBench {
     /// events; then the page's own Performance entries as a cross-check.
     private func pageSuite() async throws {
         for page in BenchPages.names {
-            try await iterate("page.\(page)", count: max(10, options.iterations / 4)) { index, warmup, contaminated in
+            try await iterate("page.\(page)", count: max(options.iterations / 4, min(10, options.iterations))) { index, warmup, contaminated in
                 let state = index == 0 ? "first" : "warm"
                 let url = URL(string: "\(base)/bench/\(page)?n=\(index)")!
                 let fcp = pageTimings.arm(timeout: contentTimeout(15)) { $0.kind == .firstContentfulPaint && $0.url == url.absoluteString }
@@ -1092,6 +1105,8 @@ struct BenchReport: Encodable {
     var inputDelivery: String?
     var metrics: [String: Metric] = [:]
     var cpuOtherShare: [String: [Double]] = [:]
+    var restingOtherCPU: Double?
+    var contaminationLimit: Double?
     var hangs: [HangWatchdog.Hang] = []
     var notes: [String] = []
     var elapsedSeconds: Double = 0
