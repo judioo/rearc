@@ -403,7 +403,7 @@ final class ChromiumBench {
             frameStats("ui.sidebar_toggle", from: acked?.callback, to: complete?.callback, input: input, contaminated: contaminated(), warmup: warmup)
             record("ui.sidebar_toggle.ack.\(suffix)", ms(t0, acked?.target), input: input, contaminated: contaminated(), warmup: warmup)
             record("ui.sidebar_toggle.complete.\(suffix)", ms(t0, complete?.target), input: input, contaminated: contaminated(), warmup: warmup)
-            // The page resizes during the animation; its last frame at the final size ends the content lag.
+            // Wave 33: the page resizes once (at the start of a hide, the end of a show); its frame at the final size ends the content lag.
             var final = await lastResize.value()
             while let event = final, let next = await presentations.arm(timeout: contentTimeout(0.3), { $0.tabID == tabID && $0.kind == .resized && $0.requestID > event.requestID }).value() {
                 final = next
