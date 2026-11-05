@@ -3978,9 +3978,15 @@ extension ChromiumSelfTest {
         try await wait("⌘L opened the command bar") { model.isCommandBarPresented }
         let url = store.tab(withID: tab.id)?.url.absoluteString ?? ""
         try check(model.commandBarText == url, "⌘L filled '\(model.commandBarText)', not '\(url)'")
-        try await wait("the command bar's URL is selected") {
+        guard await eventually(timeout: 10, {
             guard let field = window.firstResponder as? NSTextView else { return false }
             return field.string == url && field.selectedRange() == NSRange(location: 0, length: (url as NSString).length)
+        }) else {
+            let field = window.firstResponder as? NSTextView
+            throw Failure(description: "the command bar's URL is not selected: first responder "
+                + "\(window.firstResponder.map { String(describing: Swift.type(of: $0)) } ?? "none"), field '\(field?.string ?? "")' "
+                + "selection \(field.map { NSStringFromRange($0.selectedRange()) } ?? "-"), model '\(model.commandBarText)', "
+                + "bar shown \(model.isCommandBarPresented), live rows \(model.commandBarResults.count)")
         }
         try await escapeCommandBar("⌘L")
         results.append("⌘L opened the command bar on '\(url)' fully selected; Esc returned focus to the page")
@@ -3995,20 +4001,22 @@ extension ChromiumSelfTest {
         results.append("⇧⌘C put '\(base)/keys' on the pasteboard (utm_source stripped, toast '\(PageLinkCopyFormat.cleanConfirmation)'), "
             + "⌥⇧⌘C '[keys](\(base)/keys)'")
 
-        // ⌘T: the command bar on a new tab; Esc leaves no tab behind.
+        // ⌘T: the command bar for a new tab, made only when a page is chosen
+        // (perf-2); tab A stays selected and Esc leaves no tab behind.
         let rows = store.displayTabs().count
         press("t", keyCode: 17, .command, in: window)
-        try await wait("⌘T opened the command bar on a new tab") {
-            model.isCommandBarPresented && store.selectedTab?.url.absoluteString == "about:blank"
+        try await wait("⌘T opened the command bar for a new tab") {
+            model.isCommandBarPresented && model.commandBarCreatesNewTab && model.commandBarText.isEmpty
         }
+        try check(store.displayTabs().count == rows && store.selectedTabID == tab.id, "⌘T made a tab before a page was chosen")
         try await waitForCommandBarField("⌘T")
         try await pressEscape("⌘T")
-        try await wait("Esc after ⌘T left no tab and reselected tab A") {
+        try await wait("Esc after ⌘T left no tab and kept tab A") {
             !model.isCommandBarPresented && store.displayTabs().count == rows && store.selectedTabID == tab.id
         }
-        try await wait("tab A shown again after ⌘T") { engine.leaseHolder?.window === window && engine.attachmentID != nil }
+        try await wait("tab A shown after ⌘T") { engine.leaseHolder?.window === window && engine.attachmentID != nil }
         try await wait("the page has focus again after ⌘T") { pageFocused() }
-        results.append("⌘T opened the command bar (field focused) on a new tab; Esc removed it and refocused tab A")
+        results.append("⌘T opened the command bar (field focused) without making a tab; Esc left none and refocused tab A")
 
         // ⌘D: pin and unpin with Arc's toasts.
         press("d", keyCode: 2, .command, in: window)

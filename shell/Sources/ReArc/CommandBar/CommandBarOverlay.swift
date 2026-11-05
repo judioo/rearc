@@ -151,7 +151,10 @@ struct CommandBarOverlay: View {
                 .strokeBorder(Color.primary.opacity(0.12))
         )
         .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
-        .onAppear { isFieldFocused = true }
+        .onAppear {
+            isFieldFocused = true
+            reclaimFocusFromPage()
+        }
         .onChange(of: focusRequest) { _, _ in
             isFieldFocused = false
             DispatchQueue.main.async { isFieldFocused = true }
@@ -164,6 +167,19 @@ struct CommandBarOverlay: View {
         .onKeyPress(.downArrow) {
             onMoveHighlight(1)
             return .handled
+        }
+    }
+
+    /// On appear the field can be outside the window still, and a focused page
+    /// (⌘L, ⌘T over web content) then keeps the keyboard: ask again while the
+    /// page holds it. It never runs while the field has the keyboard, so typing
+    /// in the field is never interrupted.
+    private func reclaimFocusFromPage(attempts: Int = 5) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+            guard attempts > 0, ShortcutRouter.isWebContent(NSApp.keyWindow?.firstResponder) else { return }
+            isFieldFocused = false
+            DispatchQueue.main.async { isFieldFocused = true }
+            reclaimFocusFromPage(attempts: attempts - 1)
         }
     }
 
