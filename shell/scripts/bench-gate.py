@@ -13,7 +13,8 @@ non-alphanumerics replaced by '-'.
 
 A metric fails when the bootstrap 95% CI of the p50 difference lies entirely
 above max(5% of the baseline p50, floor), or p95 regressed by more than
-max(10%, floor). Floors: 1 ms, 1 frame, 0.5 ms/s, 2 MB. A budget miss
+max(10%, floor); with fewer than 5 samples (memory) the p50 difference
+against max(10%, floor). Floors: 1 ms, 1 frame, 0.5 ms/s, 2 MB. A budget miss
 (budgets.json) is a warning until the metric has met its budget once in a
 baseline; after that it fails. Metrics marked unstable in the baseline are
 reported, never gated. Exit 0 pass, 1 regression, 2 refused.
@@ -106,10 +107,15 @@ def main():
         if not metric.get("n") or not before or not before.get("n"):
             continue
         floor = FLOORS.get(metric["unit"], 0.0)
-        low, high = ci_of_difference(metric["samples"], before["samples"])
-        threshold = max(0.05 * abs(before["p50"]), floor)
-        p95_limit = before["p95"] + max(0.10 * abs(before["p95"]), floor)
-        regressed = low > threshold or metric["p95"] > p95_limit
+        if min(metric["n"], before["n"]) < 5:
+            # Too few samples for a CI (memory: one median of three): p50 against 10%.
+            low = high = metric["p50"] - before["p50"]
+            regressed = low > max(0.10 * abs(before["p50"]), floor)
+        else:
+            low, high = ci_of_difference(metric["samples"], before["samples"])
+            threshold = max(0.05 * abs(before["p50"]), floor)
+            p95_limit = before["p95"] + max(0.10 * abs(before["p95"]), floor)
+            regressed = low > threshold or metric["p95"] > p95_limit
         verdict = "unstable" if key in unstable else ("FAIL" if regressed else "ok")
         rows.append(f"{key:52s} p50 {before['p50']:9.2f} -> {metric['p50']:9.2f}  p95 {before['p95']:9.2f} -> {metric['p95']:9.2f}  "
                     f"CI(diff) [{low:+.2f}, {high:+.2f}]  {verdict}")
