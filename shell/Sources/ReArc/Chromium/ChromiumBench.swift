@@ -335,6 +335,7 @@ final class ChromiumBench {
             }
             if share == nil { share = cpu.otherShare(since: before, pids: pids) }
             report.noteCPU(name, share ?? 0)
+            report.noteVisibility(name, visible: contentCanPresent)
         }
         writeReport()
     }
@@ -347,8 +348,8 @@ final class ChromiumBench {
         if contentCanPresent { return normal }
         if !notedOcclusion {
             notedOcclusion = true
-            report.notes.append("window occluded (screen locked): Chromium does not present or paint hidden pages, so content "
-                + "metrics (tab switch content, FCP, LCP, resize presentation) time out; shell frames are still presented")
+            report.notes.append("window occluded (screen locked) during \(scenario): content waits shortened to 0.5 s; Chromium "
+                + "does not paint occluded pages (no FCP/LCP), shell frames are still presented")
         }
         return 0.5
     }
@@ -462,7 +463,8 @@ final class ChromiumBench {
             let number = target.id == spaces[0].id ? 1 : 2
             let input = delivery
             let ack = probe.arm("space", accepts: { $0.hasPrefix(target.id.uuidString) })
-            let moving = probe.arm("pager", timeout: 1) { $0 == "moving" }
+            // As long as the ack's wait: a stalled switch presents "moving" late, not never.
+            let moving = probe.arm("pager", timeout: 10) { $0 == "moving" }
             let started = Int64(ProcessInfo.processInfo.systemUptime * 1e6)
             let content = presentations.arm(timeout: contentTimeout(2)) { $0.kind == .shown && $0.startMicros >= started }
             probe.startRecording()
@@ -1140,6 +1142,14 @@ struct BenchReport: Encodable {
             metric.timeouts += 1
         }
         metrics[id] = metric
+    }
+
+    /// Iterations whose window was visible (not occluded), per scenario.
+    var windowVisible: [String: [Int]] = [:]
+    mutating func noteVisibility(_ scenario: String, visible: Bool) {
+        var counts = windowVisible[scenario] ?? [0, 0]
+        counts[visible ? 0 : 1] += 1
+        windowVisible[scenario] = counts
     }
 
     mutating func noteCPU(_ scenario: String, _ share: Double) {

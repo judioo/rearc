@@ -81,7 +81,7 @@ guards() {
   pgrep -f 'run_(c_abi|.*_gates|abi_stress)[.]py' >/dev/null && busy+=" engine-gates"
   pgrep -x swift-frontend >/dev/null && busy+=" swift-frontend"
   pgrep -x clang >/dev/null && busy+=" clang"
-  pgrep -x clang++ >/dev/null && busy+=" clang++"
+  pgrep -x 'clang[+][+]' >/dev/null && busy+=" clang++"
   pgrep -f 'xcodebuil[d]' >/dev/null && busy+=" xcodebuild"
   pgrep -f 'ReArc --rearc-benc[h]' >/dev/null && busy+=" another-bench"
   [[ -z $busy ]] || refuse "busy:$busy"
