@@ -113,3 +113,27 @@ final class Wave33ColorPadTests: XCTestCase {
         XCTAssertEqual(HSBColor(SpaceColor(hex: "#FF00FF")!).hue, 300)
     }
 }
+
+/// Wave 33: dark appearance keeps the gradient (ARC-RECORDING-ANALYSIS.md §2.7).
+final class Wave33DarkThemeTests: XCTestCase {
+    func testTheDefaultThemeInDarkIsNavy() {
+        let gradient = ThemeGradient(theme: .arcDefault, dark: true)
+        XCTAssertEqual(gradient.color(u: 0, v: 0).hex, "#202032")
+        XCTAssertEqual(gradient.color(u: 1, v: 1).hex, "#2A1E30", "the right margin past 75 %")
+        // Frame 2365, bottom left of the sidebar: #261D2F.
+        XCTAssertLessThan(OKLab(gradient.color(u: 0, v: 1)).distance(to: OKLab(SpaceColor(hex: "#261D2F")!)), 0.02)
+        XCTAssertTrue(ThemeGradient.usesDarkChrome(theme: .arcDefault, dark: true), "light text on navy")
+    }
+
+    func testAColouredThemeInDarkIsTheSameStopsOverGrey() {
+        // Frames 942 → 943: the sidebar went #D7B0AC → #C39B98 (−20 per channel) at intensity 0.8.
+        let light = SpaceColor(hex: "#D7B0AC")!
+        let stop = SpaceColor(red: (light.red - 0.2) / 0.8, green: (light.green - 0.2) / 0.8, blue: (light.blue - 0.2) / 0.8)
+        let theme = SpaceTheme(red: stop.red, green: stop.green, blue: stop.blue)
+        XCTAssertEqual(ThemeGradient(theme: theme, dark: false).color(u: 0.1, v: 0.5).hex, "#D7B0AC")
+        let dark = ThemeGradient(theme: theme, dark: true).color(u: 0.1, v: 0.5)
+        XCTAssertLessThan(OKLab(dark).distance(to: OKLab(SpaceColor(hex: "#C39B98")!)), 0.01, dark.hex)
+        XCTAssertFalse(ThemeGradient.usesDarkChrome(theme: theme, dark: true), "Arc keeps dark text on it")
+        XCTAssertFalse(ThemeGradient.usesDarkChrome(theme: .arcDefault, dark: false))
+    }
+}

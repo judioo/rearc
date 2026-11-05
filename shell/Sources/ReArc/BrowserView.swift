@@ -290,7 +290,8 @@ struct BrowserView: View {
     /// The focused space's chrome colours in its resolved appearance.
     private var themeChrome: ThemeChromeColors {
         let theme = model.space(in: windowID).theme
-        return ThemeChromeColors(theme: theme, dark: theme.appearance.isDark(systemDark: SystemAppearance.isDark(colorScheme)))
+        let dark = theme.appearance.isDark(systemDark: SystemAppearance.isDark(colorScheme))
+        return ThemeChromeColors(theme: theme, dark: ThemeGradient.usesDarkChrome(theme: theme, dark: dark), windowDark: dark)
     }
 
     /// This window shows a page in HTML fullscreen: only the page, edge to edge.
@@ -419,10 +420,10 @@ struct BrowserView: View {
     static let cardRadius: CGFloat = 8
 
     /// About 70 % white over the theme in light (`#F6F4FA` → `#FAF7F7` on the
-    /// default); a near-black wash over it in dark (Arc's dark card is
-    /// unobserved, §8).
+    /// default). In dark the card has no wash: an empty page shows the
+    /// gradient at full strength (ARC-RECORDING-ANALYSIS.md §2.7, frame 1000).
     private var cardFill: Color {
-        themeChrome.isDark ? Color(white: 0.1).opacity(0.85) : Color.white.opacity(0.7)
+        themeChrome.isWindowDark ? Color.clear : Color.white.opacity(0.7)
     }
 
     @ViewBuilder

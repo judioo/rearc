@@ -104,7 +104,7 @@ final class Wave31ThemeTests: XCTestCase {
         full.intensity = 1
         XCTAssertEqual(ThemeGradient(theme: full, dark: false).color(u: 0, v: 0).red, color.red, accuracy: 1e-6)
         let dark = ThemeGradient(theme: theme, dark: true).color(u: 0.3, v: 0.6)
-        XCTAssertLessThan(OKLab(dark).l, 0.4, "dark appearance darkens the stops over black")
+        XCTAssertEqual(dark.red, color.red * 0.8 + 0.2 * 155 / 255, accuracy: 1e-6, "wave 33: dark lays the stops over grey")
     }
 
     func testThirdColourFadesInFromClearAlongTheOtherDiagonal() {
