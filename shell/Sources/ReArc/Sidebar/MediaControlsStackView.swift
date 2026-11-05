@@ -128,9 +128,10 @@ struct MediaStripStack: View {
 }
 
 /// One strip card. Collapsed it is Arc's 33 pt row of five equal slots:
-/// favicon (go to tab), previous, play/pause, next and volume. Expanded it
-/// grows upward by a title row with the close button, and its controls row
-/// groups the transport and adds "Open Picture in Picture".
+/// favicon (go to tab), previous, play/pause, next and volume. Hovered it
+/// grows upward by a title row: the media title, a pop-out (Picture in
+/// Picture) button and ×. The controls row keeps its five cells
+/// (ARC-RECORDING-ANALYSIS.md §7, frames 2691–2692).
 struct MediaStripCard: View {
     let model: BrowserViewModel
     let info: MediaStripInfo
@@ -140,11 +141,9 @@ struct MediaStripCard: View {
     var body: some View {
         VStack(spacing: 0) {
             if isExpanded {
-                titleRow.transition(.opacity.animation(.easeOut(duration: 0.15).delay(0.05)))
-                controlsRow
-            } else {
-                MediaStripRow(model: model, info: info)
+                titleRow.transition(.opacity.animation(.easeOut(duration: 0.15)))
             }
+            MediaStripRow(model: model, info: info)
         }
         .background(MediaStripBackground())
         .accessibilityElement(children: .contain)
@@ -152,57 +151,31 @@ struct MediaStripCard: View {
     }
 
     private var titleRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 2) {
             Button { model.goToMediaTab(info.id) } label: {
-                HStack(spacing: 8) {
-                    SiteIconView(image: info.favicon, token: info.faviconToken, size: 16)
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(info.title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                            .foregroundStyle(chrome.isDark ? Color.white : Color.black.opacity(0.85))
-                        Text(info.site).font(.system(size: 11)).lineLimit(1)
-                            .foregroundStyle(MediaStripMetrics.glyph(dark: chrome.isDark))
-                    }
-                    Spacer(minLength: 0)
-                }
-                .contentShape(Rectangle())
+                Text(info.title)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundStyle(chrome.isDark ? Color.white.opacity(0.9) : Color.black.opacity(0.8))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Back to Tab")
-            MediaStripButton(systemName: "xmark", size: 10, help: "Close Mini Player") { model.closeMediaStrip(info.id) }
-                .frame(width: 24)
-        }
-        .padding(.horizontal, 10)
-        .frame(height: MediaStripMetrics.height)
-    }
-
-    private var controlsRow: some View {
-        HStack(spacing: 0) {
-            Spacer(minLength: 0)
-            MediaStripButton(systemName: "backward.end.fill", size: 11, help: "Previous", enabled: info.canPreviousTrack) {
-                model.mediaPreviousTrack(info.id)
-            }
-            .frame(width: 36)
-            MediaStripButton(systemName: info.isPlaying ? "pause.fill" : "play.fill", size: 12,
-                             help: info.isPlaying ? "Pause" : "Play") { model.mediaTogglePlayPause(info.id) }
-                .frame(width: 36)
-                .accessibilityIdentifier(info.isPlaying ? "mediaControlsPauseButton" : "mediaControlsPlayButton")
-            MediaStripButton(systemName: "forward.end.fill", size: 11, help: "Next", enabled: info.canNextTrack) {
-                model.mediaNextTrack(info.id)
-            }
-            .frame(width: 36)
-            Spacer(minLength: 0)
             if info.offersPictureInPicture {
-                MediaStripButton(systemName: "pip.enter", size: 12, help: "Open Picture in Picture") {
+                // Two overlapping rectangles; the strip leaves while PiP is open.
+                MediaStripButton(systemName: "rectangle.on.rectangle", size: 11, help: "Open Picture in Picture") {
                     model.openPictureInPicture(info.id)
                 }
-                .frame(width: 32)
+                .frame(width: 26)
             }
-            MediaStripButton(systemName: info.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill", size: 13,
-                             help: "Adjust Tab Volume") { model.toggleMute(info.id) }
-                .frame(width: 32)
+            MediaStripButton(systemName: "xmark", size: 10, help: "Close Mini Player") { model.closeMediaStrip(info.id) }
+                .frame(width: 26)
         }
-        .padding(.horizontal, 4)
-        .frame(height: MediaStripMetrics.height)
+        .padding(.leading, 12)
+        .padding(.trailing, 4)
+        .frame(height: MediaStripMetrics.height - 4)
     }
 }
 
