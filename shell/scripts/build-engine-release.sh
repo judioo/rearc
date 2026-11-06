@@ -7,12 +7,16 @@
 #   dcheck_always_on=false   non-official Chromium builds default DCHECKs on
 #   enable_dsyms=true        Chromium Framework.dSYM etc. for symbolicating crash reports
 #   enable_stripping=true    strip the shipped binaries (symbols live in the dSYMs)
-#   branding_file_path       shell/scripts/release/BRANDING: the dev BRANDING plus the real
-#                            MAC_TEAM_ID (PACKAGING-MAC.md requires it for production)
+#   branding_file_path       shell/scripts/release/BRANDING (the dev BRANDING) plus your
+#                            MAC_TEAM_ID (PACKAGING-MAC.md requires it for production),
+#                            written to .build-release/BRANDING at build time
+# The Team ID is never committed: REARC_TEAM_ID comes from the environment or the
+# git-ignored shell/signing.local.env.
 # Not is_official_build: see RELEASE.md (ThinLTO/PGO cost, no Google-only behavior needed).
 #
 # Usage: scripts/build-engine-release.sh [--target-cpu=arm64|x64] [--jobs=N] [--gen-only]
 #   REARC_RELEASE_OUT  output dir relative to engine/chromium/src (default out/ReArc-release-<cpu>)
+#   REARC_TEAM_ID      your ten-character Apple Team ID (or set it in shell/signing.local.env)
 set -euo pipefail
 
 SHELL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,8 +49,15 @@ OUT_DIR="${REARC_RELEASE_OUT:-out/ReArc-release-$TARGET_CPU}"
 [[ "$(uname -s)" == Darwin ]] || die 'requires macOS'
 [[ -f "$ENGINE_DIR/chromium/.rearc-hooks-complete" ]] || die 'run engine/scripts/fetch.sh, then fetch.sh --runhooks first'
 [[ -f "$BRANDING" ]] || die "missing $BRANDING"
-team="$(sed -n 's/^MAC_TEAM_ID=//p' "$BRANDING")"
-[[ "$team" =~ ^[A-Z0-9]{10}$ ]] || die "MAC_TEAM_ID in $BRANDING must be a ten-character Team ID"
+team="${REARC_TEAM_ID:-}"
+if [[ -z "$team" && -f "$SHELL_DIR/signing.local.env" ]]; then
+  team="$(sed -n 's/^REARC_TEAM_ID="\{0,1\}\([A-Z0-9]*\)"\{0,1\}$/\1/p' "$SHELL_DIR/signing.local.env" | tail -1)"
+fi
+[[ "$team" =~ ^[A-Z0-9]{10}$ ]] || die "set REARC_TEAM_ID (environment or shell/signing.local.env) to your ten-character Team ID"
+! grep -q '^MAC_TEAM_ID=' "$BRANDING" || die "$BRANDING must not carry a MAC_TEAM_ID; set REARC_TEAM_ID instead"
+GENERATED_BRANDING="$SHELL_DIR/.build-release/BRANDING"
+mkdir -p "$(dirname "$GENERATED_BRANDING")"
+{ cat "$BRANDING"; printf 'MAC_TEAM_ID=%s\n' "$team"; } > "$GENERATED_BRANDING"
 bundle_id="$(sed -n 's/^MAC_BUNDLE_ID=//p' "$BRANDING")"
 dev_bundle_id="$(sed -n 's/^MAC_BUNDLE_ID=//p' "$CHROMIUM_SRC/chrome/app/theme/chromium/BRANDING")"
 [[ "$bundle_id" == "$dev_bundle_id" ]] || die "release MAC_BUNDLE_ID $bundle_id differs from the overlay's $dev_bundle_id"
@@ -68,7 +79,7 @@ GN_ARGS=(
   'chrome_pgo_phase=0' 'symbol_level=1' 'treat_warnings_as_errors=false'
   'is_debug=false' 'is_component_build=false' 'dcheck_always_on=false'
   'enable_dsyms=true' 'enable_stripping=true'
-  "branding_file_path=\"$BRANDING\""
+  "branding_file_path=\"$GENERATED_BRANDING\""
 )
 printf '=== gn gen %s (overlay %s) ===\nargs: %s\n' "$OUT_DIR" "$(git rev-parse --short=10 HEAD)" "${GN_ARGS[*]}"
 gn gen "$OUT_DIR" --fail-on-unused-args --args="${GN_ARGS[*]}"
