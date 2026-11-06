@@ -215,7 +215,7 @@ private final class PreparedStartupSlot: @unchecked Sendable {
 /// engine invalidates the closing one.
 final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private enum WindowRole {
-        case browser
+        case browser(SidebarWindowID)
         case littleArc(LittleArcWindow.ID)
         case privateBrowsing(PrivateWindowModel)
         case devTools(Tab.ID)
@@ -245,18 +245,29 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private var wantsNativeFullscreen: Bool?
     private var fullscreenTransitioning = false
     private var userLeavingFullscreen = false
-    /// The self-test runs this shell on a throwaway sidebar and must not move
-    /// the user's saved window frame.
+    /// The self-test and benches run this shell on a throwaway sidebar and
+    /// must neither restore nor save the user's window session.
     private let autosavesFrames: Bool
+    /// Where the browser-window session is kept (nil: not kept).
+    private let sessionFileURL: URL?
+    private var sessionRecorder: WindowSessionRecorder?
+    /// The session read at launch, until its windows are open.
+    private var launchSession: WindowSessionSnapshot?
+    private var launchSessionLoaded = false
+    /// The browser window closed last: a window opened with none left goes there.
+    private var lastClosedBrowserWindow: SavedBrowserWindow?
 
-    /// The first browser window's saved frame. A launch on `REARC_DATA_DIR`
-    /// keeps its own, so a test launch leaves the user's frame alone.
+    /// AppKit's frame autosave name before the window session (read once, to
+    /// migrate). A launch on `REARC_DATA_DIR` had its own.
     static let mainWindowFrameName = ShellDataLocation.isOverridden
         ? "ReArcChromiumMainWindow.isolated" : "ReArcChromiumMainWindow"
 
-    init(runtime: ChromiumRuntime, autosavesFrames: Bool = true) {
+    /// `sessionFile` overrides where the window session lives; by default it is
+    /// `WindowSessionFile.defaultFileURL`, and nothing when `autosavesFrames` is off.
+    init(runtime: ChromiumRuntime, autosavesFrames: Bool = true, sessionFile: URL? = nil) {
         self.runtime = runtime
         self.autosavesFrames = autosavesFrames
+        self.sessionFileURL = sessionFile ?? (autosavesFrames ? WindowSessionFile.defaultFileURL : nil)
     }
 
     /// Loads the sidebar and names its first profile the owner of the startup
@@ -375,6 +386,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             }
         }
         runtime.onTerminateRequested = { [weak self, weak model] in
+            // Saved before any window closes, so quitting keeps them all.
+            MainActor.assumeIsolated { self?.finishWindowSession() }
             self?.terminating = true
             model?.prepareForQuit()
         }
@@ -386,6 +399,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         } else {
             openBrowserWindow()
         }
+        // The launch window's saved siblings open behind it once the engine is up.
+        DispatchQueue.main.async { [weak self] in self?.restoreOtherSessionWindows() }
         ExternalLinkRouter.shared.attach(model)
         NotificationCenter.default.addObserver(
             self,
@@ -425,28 +440,50 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
 
     var browserWindowCount: Int { browserWindows.count }
 
+    /// The per-window sidebar identity of a browser window.
+    func sidebarWindowID(of window: NSWindow) -> SidebarWindowID? {
+        if case .browser(let id) = windows[ObjectIdentifier(window)]?.role { return id } else { return nil }
+    }
+
     var windowCount: Int { windows.count }
 
     // MARK: Windows
 
+    /// A browser window. The first one with none open goes where the saved
+    /// session's key window was (or the last closed one); New Window cascades.
+    /// `saved` places it explicitly, with its ReArc space and macOS desktop;
+    /// `below` orders it in behind that window instead of making it key.
     @MainActor
     @discardableResult
-    func openBrowserWindow() -> NSWindow? {
+    func openBrowserWindow(restoring saved: SavedBrowserWindow? = nil, below: NSWindow? = nil) -> NSWindow? {
         guard let model, !terminating else { return nil }
         let first = browserWindowCount == 0
+        let saved = saved ?? (first ? firstWindowPlacement() : nil)
+        let windowID = SidebarWindowID()
+        let spaceID = saved.flatMap { model.store.restoredSpaceID(saved: $0.spaceID, profileID: $0.profileID) }
+        // Registered before the view exists, so its first frame shows its own space.
+        if let spaceID { model.store.registerWindow(windowID, spaceID: spaceID) }
         let window = makeWindow(
             size: NSSize(width: 1280, height: 820),
             title: "ReArc",
-            content: NSHostingView(rootView: BrowserView(model: model))
+            content: NSHostingView(rootView: BrowserView(model: model, windowID: windowID, initialSpaceID: spaceID))
         )
-        if first, autosavesFrames {
-            window.setFrameAutosaveName(Self.mainWindowFrameName)
-            if !window.setFrameUsingName(Self.mainWindowFrameName) { window.center() }
+        if let saved {
+            // Placed before the first order-in: the early window goes up where it was, with no jump.
+            window.applySavedPlacement(saved)
+        } else if first {
+            window.center()
         } else {
             cascade(window, offset: 0)
         }
-        track(window, .browser)
-        window.makeKeyAndOrderFront(nil)
+        track(window, .browser(windowID))
+        if let below {
+            window.order(.below, relativeTo: below.windowNumber)
+        } else {
+            window.makeKeyAndOrderFront(nil)
+        }
+        sessionRecorderIfNeeded()?.observe(window)
+        if saved?.isFullScreen == true { restoreFullScreen(window) }
         if first {
             PerfSignposts.launchEvent("WindowOrderedFront")
             // Commit the cached chrome before services create any page engines.
@@ -648,7 +685,17 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow,
-              let entry = windows.removeValue(forKey: ObjectIdentifier(window)) else { return }
+              let entry = windows[ObjectIdentifier(window)] else { return }
+        if case .browser(let windowID) = entry.role, !terminating {
+            MainActor.assumeIsolated {
+                lastClosedBrowserWindow = sessionRecorder?.record(window, isKey: false, space: model?.store.focusedSpace(in: windowID))
+            }
+        }
+        windows[ObjectIdentifier(window)] = nil
+        MainActor.assumeIsolated {
+            sessionRecorder?.forget(window)
+            if !terminating { sessionRecorder?.changed() }
+        }
         ChromiumHostView.dismantleAll(in: window)
         // Quitting keeps Little Arc records for restore, and engine shutdown owns
         // every profile; a user close archives the record or ends the private session.
@@ -663,6 +710,122 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             // Tears down the SwiftUI hierarchy (onDisappear runs, engines drop).
             window.contentView = nil
         }
+    }
+
+    // MARK: Window session (docs/WINDOW-RESTORE.md)
+
+    @MainActor
+    private func sessionRecorderIfNeeded() -> WindowSessionRecorder? {
+        guard let sessionFileURL else { return nil }
+        if let sessionRecorder { return sessionRecorder }
+        let recorder = WindowSessionRecorder(fileURL: sessionFileURL) { [weak self] in
+            MainActor.assumeIsolated {
+                // Until the launch's other windows are open, a save would drop them.
+                guard let self, self.launchSession == nil else { return nil }
+                return self.windowSession()
+            }
+        }
+        sessionRecorder = recorder
+        return recorder
+    }
+
+    /// The saved session, read once per launch: the window file, else the
+    /// frame AppKit autosaved before it existed.
+    @MainActor
+    private func loadLaunchSession() -> WindowSessionSnapshot? {
+        guard !launchSessionLoaded else { return launchSession }
+        launchSessionLoaded = true
+        guard let sessionFileURL else { return nil }
+        if let saved = WindowSessionFile.load(from: sessionFileURL) {
+            launchSession = saved
+        } else if sessionFileURL == WindowSessionFile.defaultFileURL,
+                  let string = UserDefaults.standard.string(forKey: "NSWindow Frame \(Self.mainWindowFrameName)"),
+                  let legacy = SavedBrowserWindow(appKitFrameString: string) {
+            launchSession = WindowSessionSnapshot(windows: [legacy])
+        }
+        return launchSession
+    }
+
+    /// Where the first window with none open goes: at launch the session's key
+    /// window, later the one closed last.
+    @MainActor
+    private func firstWindowPlacement() -> SavedBrowserWindow? {
+        if !launchSessionLoaded { return loadLaunchSession()?.launchWindow }
+        return lastClosedBrowserWindow
+    }
+
+    /// At ready: the other saved windows, each behind the one before it, so the
+    /// launch window stays key and the z-order comes back.
+    @MainActor
+    private func restoreOtherSessionWindows() {
+        guard let session = launchSession, !terminating else { return }
+        launchSession = nil
+        var above = browserWindows.first
+        for saved in session.otherWindows {
+            guard let window = openBrowserWindow(restoring: saved, below: above) else { break }
+            above = window
+        }
+    }
+
+    /// Re-enters full screen once the window is up, unless AppKit's restored
+    /// state already did.
+    @MainActor
+    private func restoreFullScreen(_ window: NSWindow) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self, weak window] in
+            MainActor.assumeIsolated {
+                guard let self, let window, window.isVisible, !self.terminating,
+                      !window.styleMask.contains(.fullScreen),
+                      self.sessionRecorder?.transitioning.contains(ObjectIdentifier(window)) != true else { return }
+                window.toggleFullScreen(nil)
+            }
+        }
+    }
+
+    /// The browser windows now, front to back; the key one is the store's key window.
+    @MainActor
+    func windowSession() -> WindowSessionSnapshot {
+        let order = NSApp.orderedWindows.enumerated().reduce(into: [ObjectIdentifier: Int]()) { $0[ObjectIdentifier($1.element)] = $1.offset }
+        let entries = windows.values.compactMap { entry -> (NSWindow, SidebarWindowID)? in
+            if case .browser(let id) = entry.role { return (entry.window, id) } else { return nil }
+        }.sorted { (order[ObjectIdentifier($0.0)] ?? .max) < (order[ObjectIdentifier($1.0)] ?? .max) }
+        let keyID = model?.store.keyWindowID
+        let hasKey = entries.contains { $0.1 == keyID }
+        let saved = entries.enumerated().compactMap { index, entry in
+            sessionRecorder?.record(entry.0, isKey: hasKey ? entry.1 == keyID : index == 0,
+                                    space: model?.store.focusedSpace(in: entry.1))
+        }
+        return WindowSessionSnapshot(windows: saved, lastClosed: lastClosedBrowserWindow)
+    }
+
+    /// Writes the session now (quit, and the self-test's save path).
+    @MainActor
+    func saveWindowSession() {
+        sessionRecorderIfNeeded()?.saveNow()
+    }
+
+    @MainActor
+    private func finishWindowSession() {
+        guard !terminating else { return }
+        sessionRecorder?.finish()
+        sessionRecorder = nil
+    }
+
+    /// The self-test's restore path: opens every window of the saved session as
+    /// a launch would (key window first and key, the rest behind it).
+    @MainActor
+    @discardableResult
+    func restoreWindowSession() -> [NSWindow] {
+        launchSessionLoaded = false
+        launchSession = nil
+        guard let session = loadLaunchSession(), let launch = session.launchWindow,
+              let first = openBrowserWindow(restoring: launch) else { return [] }
+        var opened = [first]
+        for saved in session.otherWindows {
+            guard let window = openBrowserWindow(restoring: saved, below: opened.last) else { break }
+            opened.append(window)
+        }
+        launchSession = nil
+        return opened
     }
 
     // MARK: HTML fullscreen (ABI 1.27)

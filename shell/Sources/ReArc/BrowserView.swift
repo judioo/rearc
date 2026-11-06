@@ -12,13 +12,21 @@ struct BrowserView: View {
     @Bindable var model: BrowserViewModel
     @Environment(\.openWindow) private var openWindow
     /// This window's identity for its own focused space (Arc `focusedSpaceID`).
-    @State private var windowID = SidebarWindowID()
+    @State private var windowID: SidebarWindowID
+    /// The space a restored window opens on (nil: the key window's).
+    private let initialSpaceID: Space.ID?
     /// This window's space paging (swipe and animated switches).
     @State private var pager = SpacePagerController()
     /// The sidebar item being dragged, if any (content edges then offer split drop zones).
     @State private var draggedItemID: UUID?
     @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
     @Environment(\.colorScheme) private var colorScheme
+
+    init(model: BrowserViewModel, windowID: SidebarWindowID = SidebarWindowID(), initialSpaceID: Space.ID? = nil) {
+        self.model = model
+        _windowID = State(initialValue: windowID)
+        self.initialSpaceID = initialSpaceID
+    }
 
     var body: some View {
         ZStack {
@@ -173,7 +181,7 @@ struct BrowserView: View {
             ExternalLinkRouter.shared.attach(model)
             model.installTabSwitcherMonitor()
             model.startLittleArcHotkey()
-            model.store.registerWindow(windowID)
+            model.store.registerWindow(windowID, spaceID: initialSpaceID)
             stripCloseWindowShortcut()
             model.restoreLittleArcWindowsIfNeeded()
         }
