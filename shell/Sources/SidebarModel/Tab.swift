@@ -21,6 +21,7 @@ public struct Tab: Identifiable, Hashable, Codable {
     public var title: String
     /// User rename (Arc "Rename Current Item"); survives page title changes.
     public var customTitle: String?
+    public var customIcon: SidebarItemIcon?
     public var url: URL
     /// Letter glyph drawn when the shell has no site icon for this tab yet.
     /// Real icons come from the engine (Chromium `ReArcFaviconGet`, WebKit
@@ -77,12 +78,14 @@ public struct Tab: Identifiable, Hashable, Codable {
         customTitle: String? = nil,
         lastActiveAt: Date? = Date(),
         savedURL: URL? = nil,
-        savedTitle: String? = nil
+        savedTitle: String? = nil,
+        customIcon: SidebarItemIcon? = nil
     ) {
         self.id = id
         self.kind = kind
         self.title = title
         self.customTitle = customTitle
+        self.customIcon = customIcon
         self.url = url
         self.faviconToken = faviconToken ?? Tab.makeFaviconToken(for: url)
         self.isUnread = isUnread
@@ -95,7 +98,7 @@ public struct Tab: Identifiable, Hashable, Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, title, customTitle, url, faviconToken, isUnread, sortRank, lastActiveAt, savedURL, savedTitle
+        case id, kind, title, customTitle, customIcon, url, faviconToken, isUnread, sortRank, lastActiveAt, savedURL, savedTitle
     }
 
     public init(from decoder: Decoder) throws {
@@ -109,6 +112,7 @@ public struct Tab: Identifiable, Hashable, Codable {
         isUnread = try c.decodeIfPresent(Bool.self, forKey: .isUnread) ?? false
         sortRank = try c.decodeIfPresent(String.self, forKey: .sortRank) ?? ""
         customTitle = try c.decodeIfPresent(String.self, forKey: .customTitle)
+        customIcon = try c.decodeIfPresent(SidebarItemIcon.self, forKey: .customIcon)
         lastActiveAt = try c.decodeIfPresent(Date.self, forKey: .lastActiveAt)
         if kind == .pinned {
             // Pinned tabs saved before wave 19 keep the URL they had.
@@ -127,6 +131,7 @@ public struct Tab: Identifiable, Hashable, Codable {
         try c.encode(isUnread, forKey: .isUnread)
         try c.encode(sortRank, forKey: .sortRank)
         try c.encodeIfPresent(customTitle, forKey: .customTitle)
+        try c.encodeIfPresent(customIcon, forKey: .customIcon)
         try c.encodeIfPresent(lastActiveAt, forKey: .lastActiveAt)
         try c.encodeIfPresent(savedURL, forKey: .savedURL)
         try c.encodeIfPresent(savedTitle, forKey: .savedTitle)

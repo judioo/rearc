@@ -7,16 +7,18 @@ public struct SidebarFolderRecord: Equatable, Codable {
     public var title: String
     public var childIDs: [UUID]
     public var sortRank: String
+    public var customIcon: SidebarItemIcon?
 
-    public init(id: UUID, title: String, childIDs: [UUID], sortRank: String) {
+    public init(id: UUID, title: String, childIDs: [UUID], sortRank: String, customIcon: SidebarItemIcon? = nil) {
         self.id = id
         self.title = title
         self.childIDs = childIDs
         self.sortRank = sortRank
+        self.customIcon = customIcon
     }
 
     public init(_ folder: SidebarFolder) {
-        self.init(id: folder.id, title: folder.title, childIDs: folder.children.map(\.id), sortRank: folder.sortRank)
+        self.init(id: folder.id, title: folder.title, childIDs: folder.children.map(\.id), sortRank: folder.sortRank, customIcon: folder.customIcon)
     }
 }
 
@@ -24,7 +26,8 @@ public struct SidebarFolderRecord: Equatable, Codable {
 /// backends exchange snapshots; `SidebarStore` command APIs stay unchanged.
 ///
 /// Schema 10 adds folders, favorites keyed by profile, folder expansion, the
-/// tab archive and per-profile auto-archive thresholds.
+/// tab archive and per-profile auto-archive thresholds. Optional customIcon
+/// fields are additive; older schema 10 files decode them as nil.
 public struct SidebarSnapshot: Equatable, Codable {
     public static let schemaVersion = 10
 

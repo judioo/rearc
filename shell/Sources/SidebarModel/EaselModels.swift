@@ -175,15 +175,17 @@ public struct SidebarEaselRef: Identifiable, Equatable, Codable {
     public let id: UUID
     public var easelDocumentID: UUID
     public var sortRank: String
+    public var customIcon: SidebarItemIcon?
 
-    public init(id: UUID = UUID(), easelDocumentID: UUID, sortRank: String = "") {
+    public init(id: UUID = UUID(), easelDocumentID: UUID, sortRank: String = "", customIcon: SidebarItemIcon? = nil) {
         self.id = id
         self.easelDocumentID = easelDocumentID
         self.sortRank = sortRank
+        self.customIcon = customIcon
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, easelDocumentID, sortRank
+        case id, easelDocumentID, sortRank, customIcon
     }
 
     public init(from decoder: Decoder) throws {
@@ -191,6 +193,7 @@ public struct SidebarEaselRef: Identifiable, Equatable, Codable {
         id = try c.decode(UUID.self, forKey: .id)
         easelDocumentID = try c.decode(UUID.self, forKey: .easelDocumentID)
         sortRank = try c.decodeIfPresent(String.self, forKey: .sortRank) ?? ""
+        customIcon = try c.decodeIfPresent(SidebarItemIcon.self, forKey: .customIcon)
     }
 }
 

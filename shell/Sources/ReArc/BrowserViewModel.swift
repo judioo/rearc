@@ -178,6 +178,8 @@ final class BrowserViewModel {
     var themePopoverSpaceID: Space.ID?
     /// The New Space dialog's fields while it is open.
     var spaceCreationDraft: SpaceDraft?
+    var profileEditorRequest: ProfileEditorRequest?
+    var itemIconEditorID: UUID?
     /// Today tabs archived by the last Clear, for Undo.
     var lastClearedTabIDs: [Tab.ID] = []
     var pendingRename: SidebarRenameRequest?
@@ -739,15 +741,6 @@ final class BrowserViewModel {
         PerfSignposts.interaction(.spaceSwitch, "index \(index)")
         guard store.selectSpace(atIndex: index) else { return }
         loadSelectedIfNeeded()
-    }
-
-    @discardableResult
-    func addProfile() -> Profile {
-        let index = store.profiles.count
-        let profile = store.addProfile(name: "Profile \(index + 1)")
-        store.selectProfile(profile.id)
-        loadSelectedIfNeeded()
-        return profile
     }
 
     /// Creates the suggested next space directly (no dialog).
@@ -1650,7 +1643,7 @@ final class BrowserViewModel {
         case .moveSpaceToProfile(let profileID):
             requestSpaceProfileChange(store.activeSpaceID, to: profileID)
         case .createProfile:
-            _ = addProfile()
+            beginProfileCreation()
         case .renameActiveProfile:
             pendingProfileRenameID = store.activeProfileID
             pendingProfileRenameName = store.activeProfile.name

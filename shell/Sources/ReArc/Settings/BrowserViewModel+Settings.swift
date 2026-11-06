@@ -157,12 +157,6 @@ extension BrowserViewModel {
         return count == 1 ? "1 Space" : "\(count) Spaces"
     }
 
-    /// Settings › Profiles › +: a new profile, without switching to it.
-    @discardableResult
-    func addProfileFromSettings() -> Profile {
-        store.addProfile(name: "Profile \(store.profiles.count + 1)")
-    }
-
     /// Settings › Links › Archive Little Arcs after: run with the tab
     /// auto-archive. The key window stays; an archived window closes.
     func runLittleArcAutoArchive(now: Date = Date()) {

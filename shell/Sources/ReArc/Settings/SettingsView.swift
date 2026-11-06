@@ -223,6 +223,7 @@ struct GeneralSettingsPane: View {
 
 struct ProfilesSettingsPane: View {
     @Bindable var model: BrowserViewModel
+    @State private var editor: ProfileEditorRequest?
     @State private var selection: Profile.ID?
     @State private var renaming: Profile.ID?
     @State private var renameDraft = ""
@@ -241,6 +242,13 @@ struct ProfilesSettingsPane: View {
             }
             if let profile = selected {
                 profileSettings(profile)
+            }
+        }
+        .sheet(item: $editor) { request in
+            ProfileEditorView(draft: request.draft, isCreating: request.profileID == nil) { draft in
+                guard let profile = model.saveProfile(draft, id: request.profileID, selecting: false) else { return false }
+                selection = profile.id
+                return true
             }
         }
         .alert("Rename Profile", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
@@ -286,7 +294,7 @@ struct ProfilesSettingsPane: View {
             .listStyle(.bordered(alternatesRowBackgrounds: false))
             .frame(height: min(CGFloat(model.store.profiles.count) * 28 + 8, 150))
             HStack(spacing: 0) {
-                Button { selection = model.addProfileFromSettings().id } label: { Image(systemName: "plus") }
+                Button { editor = ProfileEditorRequest() } label: { Image(systemName: "plus") }
                     .help("Add Profile")
                 Divider().frame(height: 14)
                 Button { deleting = selected?.id } label: { Image(systemName: "minus") }
@@ -307,6 +315,11 @@ struct ProfilesSettingsPane: View {
 
     @ViewBuilder
     private func profileSettings(_ profile: Profile) -> some View {
+        SettingsBox(title: "Appearance") {
+            SettingsRow(label: "Avatar and color") {
+                Button("Edit…") { editor = ProfileEditorRequest(profile: profile) }
+            }
+        }
         if let search = model.activeSearchEngineSettings {
             SettingsBox(title: profile.name) {
                 SettingsRow(label: "Search engine") {

@@ -17,6 +17,7 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
     /// Where member tabs return on unsplit (section + index at split creation).
     public var memberPlacements: [Tab.ID: TabPlacement]
     public var sortRank: String
+    public var customIcon: SidebarItemIcon?
 
     public init(
         id: UUID = UUID(),
@@ -25,7 +26,8 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
         widthFactors: [Tab.ID: Double] = [:],
         tabs: [Tab],
         memberPlacements: [Tab.ID: TabPlacement] = [:],
-        sortRank: String = ""
+        sortRank: String = "",
+        customIcon: SidebarItemIcon? = nil
     ) {
         precondition((2 ... 4).contains(tabs.count))
         self.id = id
@@ -40,10 +42,11 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
             self.widthFactors = SplitViewItem.normalizedFactors(widthFactors, tabIDs: tabs.map(\.id))
         }
         self.sortRank = sortRank
+        self.customIcon = customIcon
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, orientation, focusTabID, widthFactors, tabs, memberPlacements, sortRank
+        case id, orientation, focusTabID, widthFactors, tabs, memberPlacements, sortRank, customIcon
     }
 
     public init(from decoder: Decoder) throws {
@@ -56,6 +59,7 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
         widthFactors = try c.decodeIfPresent([Tab.ID: Double].self, forKey: .widthFactors) ?? [:]
         memberPlacements = try c.decodeIfPresent([Tab.ID: TabPlacement].self, forKey: .memberPlacements) ?? [:]
         sortRank = try c.decodeIfPresent(String.self, forKey: .sortRank) ?? ""
+        customIcon = try c.decodeIfPresent(SidebarItemIcon.self, forKey: .customIcon)
         if widthFactors.isEmpty {
             let equal = 1.0 / Double(tabs.count)
             widthFactors = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, equal) })
@@ -73,6 +77,7 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
         try c.encode(tabs, forKey: .tabs)
         try c.encode(memberPlacements, forKey: .memberPlacements)
         try c.encode(sortRank, forKey: .sortRank)
+        try c.encodeIfPresent(customIcon, forKey: .customIcon)
     }
 
     public static func normalizedFactors(
@@ -104,12 +109,14 @@ public struct SidebarFolder: Identifiable, Equatable, Codable {
     public var title: String
     public var children: [SidebarEntry]
     public var sortRank: String
+    public var customIcon: SidebarItemIcon?
 
-    public init(id: UUID = UUID(), title: String, children: [SidebarEntry] = [], sortRank: String = "") {
+    public init(id: UUID = UUID(), title: String, children: [SidebarEntry] = [], sortRank: String = "", customIcon: SidebarItemIcon? = nil) {
         self.id = id
         self.title = title
         self.children = children
         self.sortRank = sortRank
+        self.customIcon = customIcon
     }
 }
 
@@ -126,6 +133,25 @@ public enum SidebarEntry: Identifiable, Equatable, Codable {
         case .split(let split): return split.id
         case .easel(let ref): return ref.id
         case .folder(let folder): return folder.id
+        }
+    }
+
+    public var customIcon: SidebarItemIcon? {
+        get {
+            switch self {
+            case .tab(let tab): return tab.customIcon
+            case .folder(let folder): return folder.customIcon
+            case .split(let split): return split.customIcon
+            case .easel(let ref): return ref.customIcon
+            }
+        }
+        set {
+            switch self {
+            case .tab(var tab): tab.customIcon = newValue; self = .tab(tab)
+            case .folder(var folder): folder.customIcon = newValue; self = .folder(folder)
+            case .split(var split): split.customIcon = newValue; self = .split(split)
+            case .easel(var ref): ref.customIcon = newValue; self = .easel(ref)
+            }
         }
     }
 

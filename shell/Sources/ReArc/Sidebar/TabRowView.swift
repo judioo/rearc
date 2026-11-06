@@ -48,7 +48,7 @@ struct TabRowView<Menu: View>: View {
         // near-white roles.
         HStack(spacing: SidebarMetrics.iconToText) {
             TabActivityIcon(activity: activity) {
-                SiteIconView(image: favicon, token: tab.faviconToken, size: SidebarMetrics.iconSize)
+                SiteIconView(image: favicon, token: tab.faviconToken, size: SidebarMetrics.iconSize, customIcon: tab.customIcon)
                     .saturation(isUnloaded ? 0 : 1)
                     .opacity(isUnloaded ? 0.4 : 1)
             }

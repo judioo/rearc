@@ -75,7 +75,7 @@ struct ArchiveView: View {
 
     private func row(_ record: ArchivedTabRecord) -> some View {
         HStack(spacing: 10) {
-            SiteIconView(image: model.faviconStore.image(for: record.tab.url), token: record.tab.faviconToken, size: 16)
+            SiteIconView(image: model.faviconStore.image(for: record.tab.url), token: record.tab.faviconToken, size: 16, customIcon: record.tab.customIcon)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
                 Text(record.tab.displayTitle).lineLimit(1)

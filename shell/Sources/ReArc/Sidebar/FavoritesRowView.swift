@@ -132,7 +132,7 @@ private struct FavoriteIconView: View {
 
     var body: some View {
         TabActivityIcon(activity: activity) {
-            SiteIconView(image: favicon, token: tab.faviconToken, size: favicon == nil ? 22 : 18)
+            SiteIconView(image: favicon, token: tab.faviconToken, size: favicon == nil ? 22 : 18, customIcon: tab.customIcon)
                 .saturation(isUnloaded ? 0 : 1)
                 .opacity(isUnloaded ? 0.4 : 1)
         }

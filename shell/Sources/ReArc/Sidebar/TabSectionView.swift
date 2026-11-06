@@ -121,6 +121,7 @@ struct SidebarEntryRow: View, Equatable {
             .contextMenu { SectionItemContextMenu(model: model, entry: entry) }
         case .split(let split):
             SplitRowView(
+                model: model,
                 split: split,
                 isSelected: isSelected(split.id),
                 focusedTabID: split.focusTabID,

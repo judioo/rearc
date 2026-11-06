@@ -219,9 +219,9 @@ final class Wave35ShellTests: XCTestCase {
     func testProfilesPaneAddsWithoutSwitchingAndCountsSpaces() {
         let model = makeModel()
         let active = model.store.activeProfileID
-        let added = model.addProfileFromSettings()
+        let added = model.saveProfile(ProfileDraft(name: "Work"), id: nil, selecting: false)!
         XCTAssertEqual(model.store.activeProfileID, active, "Settings' + does not switch profile")
-        XCTAssertEqual(added.name, "Profile 2")
+        XCTAssertEqual(added.name, "Work")
         XCTAssertEqual(model.spaceCountText(for: added.id), "1 Space")
         model.store.createSpace(from: SpaceDraft.suggested(in: model.store, profileID: added.id))
         XCTAssertEqual(model.spaceCountText(for: added.id), "2 Spaces")
@@ -229,7 +229,7 @@ final class Wave35ShellTests: XCTestCase {
 
     func testBoostsSwitchCoversEveryProfile() {
         let model = makeModel()
-        let second = model.addProfileFromSettings()
+        let second = model.saveProfile(ProfileDraft(name: "Other"), id: nil, selecting: false)!
         XCTAssertTrue(model.boostsEnabledInAllProfiles)
         model.store.setBoostMasterEnabled(false, profileID: second.id)
         XCTAssertFalse(model.boostsEnabledInAllProfiles, "on only when every profile has them on")

@@ -230,6 +230,7 @@ struct BrowserView: View {
                 SpaceEditorView(model: model, spaceID: id)
             }
         }
+        .modifier(SidebarPersonalizationSheets(model: model, isOwner: isKeyWindowSheetOwner))
         .sheet(isPresented: Binding(
             get: { model.spaceCreationDraft != nil && isKeyWindowSheetOwner },
             set: { if !$0 { model.spaceCreationDraft = nil } }
