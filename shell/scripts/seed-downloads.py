@@ -23,6 +23,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sqlite3
 import stat
 import sys
@@ -83,6 +84,12 @@ def seed_history(history, source):
     columns = db.execute("PRAGMA table_info(downloads)").fetchall()
     if not columns:
         sys.exit("seed-downloads: no downloads table (launch ReArc on the profile once first)")
+    names = [column[1] for column in columns]
+    if not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) for name in names):
+        sys.exit("seed-downloads: unexpected column names in the downloads table")
+    # Column names come from the table itself; every value is bound.
+    insert = "INSERT INTO downloads ({}) VALUES ({})".format(
+        ",".join(f'"{name}"' for name in names), ",".join("?" * len(names)))
     next_id = (db.execute("SELECT MAX(id) FROM downloads").fetchone()[0] or 0) + 1
     for offset, record in enumerate(records):
         values = {}
@@ -94,9 +101,7 @@ def seed_history(history, source):
                       target_path=record["targetPath"], start_time=start, end_time=start, last_access_time=start,
                       received_bytes=record["receivedBytes"], total_bytes=record["totalBytes"], state=1,
                       site_url="https://example.com/", tab_url=record["url"], http_method="GET")
-        names = [column[1] for column in columns]
-        db.execute(f"INSERT INTO downloads ({','.join(names)}) VALUES ({','.join('?' * len(names))})",
-                   [values[name] for name in names])
+        db.execute(insert, [values[name] for name in names])
         db.execute("INSERT INTO downloads_url_chains (id, chain_index, url) VALUES (?, 0, ?)", (next_id + offset, record["url"]))
     db.commit()
     db.close()
