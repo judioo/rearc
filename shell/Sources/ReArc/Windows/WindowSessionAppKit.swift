@@ -216,14 +216,29 @@ final class WindowSessionRecorder {
 extension NSWindow {
     /// Before the first order-in: the placed frame, and the window's desktop.
     @MainActor
-    func applySavedPlacement(_ saved: SavedBrowserWindow, displays: [DisplayDescriptor]? = nil) {
+    func applySavedPlacement(_ saved: SavedBrowserWindow, displays: [DisplayDescriptor]? = nil,
+                             trace: (String) -> Void = { NSLog("ReArc window restore: %@", $0) }) {
         let placement = WindowPlacement.resolve(saved, displays: displays ?? DisplayDescriptor.current())
         let placed = placement.frame
+        trace("window=\(windowNumber) match=\(placement.match) saved=\(saved.frame) placed=\(placed) before=\(frame) savedKey=\(saved.isKey) display=\(placement.display?.uuid ?? "none")")
         setFrame(placed, display: false)
+        trace("window=\(windowNumber) afterSetFrame=\(frame)")
         if placement.restoresDesktop, let state = saved.appKitState {
             WindowDesktopState.restore(self, from: state)
+            trace("window=\(windowNumber) afterRestoreState=\(frame) key=\(isKeyWindow)")
             // The archive carries AppKit's frame too, which may be on a display that is gone.
             if frame != placed { setFrame(placed, display: false) }
+        }
+        trace("window=\(windowNumber) finalPlacement=\(frame)")
+    }
+
+    @MainActor
+    func traceRestoredOrder(_ saved: SavedBrowserWindow, below: NSWindow?) {
+        let detail = "window=\(windowNumber) saved=\(saved.frame) savedKey=\(saved.isKey) below=\(below?.windowNumber ?? -1)"
+        NSLog("ReArc window restore: %@ ordered frame=%@ key=%d onActiveSpace=%d", detail, NSStringFromRect(frame), isKeyWindow, isOnActiveSpace)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            NSLog("ReArc window restore: %@ nextTurn frame=%@ key=%d onActiveSpace=%d", detail, NSStringFromRect(self.frame), self.isKeyWindow, self.isOnActiveSpace)
         }
     }
 }
