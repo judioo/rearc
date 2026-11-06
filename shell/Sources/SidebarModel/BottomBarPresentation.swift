@@ -268,9 +268,22 @@ public enum RecentDownloads {
     /// Arc's hover stack shows four rows.
     public static let limit = 4
 
-    /// The latest finished downloads whose file is on disk, newest first.
+    /// The latest finished downloads whose file is on disk, newest first
+    /// (rows updated at the same moment keep their list order). One pass
+    /// that keeps only `limit` rows: the bar asks on every redraw, and the
+    /// list holds all of Chromium's download history.
     public static func latest(_ records: [DownloadRecord], limit: Int = RecentDownloads.limit) -> [DownloadRecord] {
-        Array(records.filter(\.hasFileOnDisk).sorted { $0.updatedAt > $1.updatedAt }.prefix(limit))
+        guard limit > 0 else { return [] }
+        var picked: [Int] = []
+        picked.reserveCapacity(limit + 1)
+        for index in records.indices where records[index].hasFileOnDisk {
+            let updated = records[index].updatedAt
+            if picked.count == limit, updated <= records[picked[limit - 1]].updatedAt { continue }
+            let place = picked.firstIndex { updated > records[$0].updatedAt } ?? picked.endIndex
+            picked.insert(index, at: place)
+            if picked.count > limit { picked.removeLast() }
+        }
+        return picked.map { records[$0] }
     }
 
     /// "24 minutes ago", or "Just now" in the first minute.

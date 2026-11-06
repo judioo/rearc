@@ -142,4 +142,42 @@ final class DownloadsAtScaleTests: XCTestCase {
         records.append(record("c", path: "/d/final-2.txt"))
         XCTAssertEqual(index.matching(records, query: "final").map(\.id), ["a", "c"])
     }
+
+    // MARK: Quick view
+
+    /// The pick before the one-pass version: filter, sort newest first, take the first.
+    private func sortedLatest(_ records: [DownloadRecord], limit: Int) -> [DownloadRecord] {
+        Array(records.filter(\.hasFileOnDisk).sorted { $0.updatedAt > $1.updatedAt }.prefix(limit))
+    }
+
+    func testLatestPicksTheNewestFinishedRowsWithFiles() {
+        let records = [
+            record("old", updated: 10),
+            record("live", state: .inProgress, updated: 100),
+            record("cancelled", state: .cancelled, updated: 90),
+            record("nofile", path: "", updated: 80),
+            record("new", updated: 50),
+            record("newer", updated: 60),
+            record("oldest", updated: 1),
+            record("mid", updated: 30),
+        ]
+        XCTAssertEqual(RecentDownloads.latest(records).map(\.id), ["newer", "new", "mid", "old"])
+        XCTAssertEqual(RecentDownloads.latest(records, limit: 1).map(\.id), ["newer"])
+        XCTAssertEqual(RecentDownloads.latest(records, limit: 0), [])
+        XCTAssertEqual(RecentDownloads.latest(Array(records.prefix(2))).map(\.id), ["old"])
+    }
+
+    func testLatestMatchesTheSortedPickIncludingTies() {
+        var generator = SystemRandomNumberGenerator()
+        for round in 0 ..< 200 {
+            let records = (0 ..< 40).map { index in
+                record("r\(round)-\(index)", path: Bool.random(using: &generator) ? "/tmp/x" : "",
+                       state: [.complete, .complete, .inProgress, .interrupted].randomElement(using: &generator)!,
+                       updated: Double(Int.random(in: 0 ..< 8, using: &generator)))
+            }
+            for limit in [1, 4, 7] {
+                XCTAssertEqual(RecentDownloads.latest(records, limit: limit).map(\.id), sortedLatest(records, limit: limit).map(\.id))
+            }
+        }
+    }
 }
