@@ -42,7 +42,12 @@ final class ChromiumHistorySwipe {
         if event.phase.contains(.mayBegin) || (event.phase.contains(.began) && !awaitingBegan) {
             guard host.bounds.contains(point), let content = host.window?.contentView,
                   let target = content.hitTest(content.convert(event.locationInWindow, from: nil)),
-                  target.isDescendant(of: host) else { return event }
+                  target.isDescendant(of: host) else {
+                // A gesture that ends without momentum never clears `gesture`; one
+                // starting elsewhere (the sidebar) must not be taken for the page's.
+                gesture = false
+                return event
+            }
             awaitingBegan = event.phase.contains(.mayBegin)
             begin(event, point: point, host: host)
             return nil
