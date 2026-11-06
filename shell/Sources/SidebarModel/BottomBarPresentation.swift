@@ -41,6 +41,107 @@ public enum SpaceDots {
     }
 }
 
+/// What a bottom-bar hover chip says: a name and the shortcut that does the
+/// same, when one is bound (Arc's "View Library" chip, §5.1). A space dot's
+/// chip names its space; the dot itself only ever shows the icon.
+public struct BarChipLabel: Equatable, Sendable {
+    public var title: String
+    public var shortcut: String?
+
+    public init(_ title: String, shortcut: String? = nil) {
+        self.title = title
+        self.shortcut = shortcut
+    }
+
+    /// "Work ⌃2".
+    public var text: String {
+        shortcut.map { "\(title) \($0)" } ?? title
+    }
+
+    /// The space at `index` in its profile: its name and Go to Space N
+    /// (⌃1…⌃9, or the user's own chord). Spaces past the ninth have no key.
+    public static func space(named name: String, at index: Int, overrides: ShortcutOverrides = ShortcutOverrides()) -> BarChipLabel {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shortcut = (0 ..< 9).contains(index) ? overrides.chord(for: "goToSpace\(index + 1)")?.display : nil
+        return BarChipLabel(trimmed.isEmpty ? "Space \(index + 1)" : trimmed, shortcut: shortcut)
+    }
+
+    public static func library(overrides: ShortcutOverrides = ShortcutOverrides()) -> BarChipLabel {
+        BarChipLabel("View Library", shortcut: overrides.chord(for: "viewLibrary")?.display)
+    }
+
+    /// The Library's ← (the recording shows no shortcut; Esc also leaves).
+    public static let exitLibrary = BarChipLabel("Exit Library")
+    /// The + menu; no key opens it.
+    public static let new = BarChipLabel("New")
+}
+
+/// When a hover chip shows: once the pointer has rested `showDelay` on its
+/// target, or at once when a chip in the same group was showing a moment ago,
+/// so moving along the dots hands the label from dot to dot. Leaving hides
+/// it at once. Time is passed in.
+public struct HoverChipTiming<ID: Hashable & Sendable>: Equatable, Sendable {
+    public var showDelay: TimeInterval
+    /// How long after a chip hides the next target still shows its own at once.
+    public var handOff: TimeInterval
+    public private(set) var hovered: ID?
+    public private(set) var shown: ID?
+    /// When the pending chip is due.
+    public private(set) var deadline: TimeInterval?
+    private var hiddenAt: TimeInterval?
+
+    public init(showDelay: TimeInterval = 0.5, handOff: TimeInterval = 0.3) {
+        self.showDelay = showDelay
+        self.handOff = handOff
+    }
+
+    public mutating func setHovering(_ hovering: Bool, _ id: ID, at now: TimeInterval) {
+        if hovering {
+            hovered = id
+            if shown != nil || hiddenAt.map({ now - $0 <= handOff }) == true {
+                shown = id
+                deadline = nil
+            } else {
+                deadline = now + showDelay
+            }
+        } else {
+            // A late exit from the previous target leaves the new one alone.
+            guard hovered == id else { return }
+            hovered = nil
+            if shown != nil { hiddenAt = now }
+            shown = nil
+            deadline = nil
+        }
+    }
+
+    /// Shows the chip that is due by `now`. Returns whether `shown` changed.
+    @discardableResult
+    public mutating func advance(to now: TimeInterval) -> Bool {
+        guard let due = deadline, now >= due, let hovered else { return false }
+        deadline = nil
+        shown = hovered
+        return true
+    }
+
+    /// Hides at once, as a click does; the next target waits the full delay.
+    public mutating func dismiss() {
+        shown = nil
+        deadline = nil
+        hiddenAt = nil
+    }
+}
+
+public enum BarChipPlacement {
+    /// The leading x of a chip `width` wide centred on `anchorMidX`, slid to
+    /// stay `margin` inside `0…containerWidth` (a dot at the row's end must
+    /// not push its chip off the sidebar). A chip wider than the room keeps
+    /// its leading margin.
+    public static func centredX(anchorMidX: Double, width: Double, containerWidth: Double, margin: Double = 8) -> Double {
+        let x = min(anchorMidX - width / 2, containerWidth - margin - width)
+        return max(x, margin)
+    }
+}
+
 /// Hover-to-reveal timing for the Library button's downloads stack (§5.1):
 /// it shows once the pointer has rested about 0.5 s and hides when it has
 /// left both the button and the stack. A short grace on leaving lets the

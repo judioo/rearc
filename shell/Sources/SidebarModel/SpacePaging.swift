@@ -255,6 +255,14 @@ public struct SpacePaging: Sendable {
 /// Decides whether a two-finger scroll on the sidebar is a horizontal space
 /// swipe or ordinary vertical scrolling, from its first few points of travel.
 public struct SwipeAxisLock: Equatable, Sendable {
+    /// A horizontal scroll delta as content travel (negative shows the next
+    /// space). The page follows the fingers whatever the scroll direction
+    /// setting, as macOS's page swipes do: only natural scrolling
+    /// (`invertedFromDevice`) already reports the fingers' way.
+    public static func contentDelta(_ scrollingDeltaX: Double, invertedFromDevice: Bool) -> Double {
+        invertedFromDevice ? scrollingDeltaX : -scrollingDeltaX
+    }
+
     public enum Axis: Equatable, Sendable { case undecided, horizontal, vertical }
 
     public private(set) var axis: Axis = .undecided
