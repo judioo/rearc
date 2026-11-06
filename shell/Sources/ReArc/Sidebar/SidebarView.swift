@@ -99,8 +99,28 @@ private struct SidebarSpacePage: View, Equatable {
     }
 
     var body: some View {
+        let showsThemeEditor = model.themePopoverSpaceID == spaceID && model.isKeyBrowserWindow(window)
         SidebarListHost(tint: model.themeColor(in: window)) {
             SidebarSpaceList(model: model, spaceID: spaceID, draggedItemID: $draggedItemID, dropState: $dropState)
+        }
+        // Edit Theme Color hangs the editor under the header
+        // (ARC-RECORDING-ANALYSIS.md §2.1). It is presented from here, over
+        // the header's slot: a popover did not open from the list's own
+        // hosting view.
+        .overlay(alignment: .top) {
+            Color.clear
+                .frame(height: SidebarMetrics.headerHeight)
+                .padding(.horizontal, SidebarMetrics.rowInset)
+                .allowsHitTesting(false)
+                .popover(isPresented: Binding(
+                    get: { showsThemeEditor },
+                    set: { if !$0 { model.themePopoverSpaceID = nil } }
+                ), arrowEdge: .bottom) {
+                    SpaceStyleEditor(theme: Binding(
+                        get: { model.store.space(withID: spaceID)?.theme ?? .default },
+                        set: { model.store.setSpaceTheme(spaceID, theme: $0) }
+                    ))
+                }
         }
     }
 }
@@ -241,7 +261,6 @@ private struct SpaceHeaderView: View {
     @Environment(\.sidebarWindow) private var window
 
     var body: some View {
-        let showsThemeEditor = model.themePopoverSpaceID == space.id && model.isKeyBrowserWindow(window)
         // Arc: an 18 pt icon at x 17, the name in 13 pt semibold grey at x 45.
         HStack(spacing: 0) {
             SpaceIconView(iconName: space.iconName, size: 15)
@@ -292,18 +311,6 @@ private struct SpaceHeaderView: View {
         }
         .frame(height: SidebarMetrics.headerHeight)
         .contentShape(Rectangle())
-        // Edit Theme Color hangs the editor under the header (ARC-RECORDING-ANALYSIS.md §2.1).
-        // Read in the body, not only in the binding: the list's graph is
-        // its own (`SidebarListHost`), so only this body's reads update it.
-        .popover(isPresented: Binding(
-            get: { showsThemeEditor },
-            set: { if !$0 { model.themePopoverSpaceID = nil } }
-        ), arrowEdge: .bottom) {
-            SpaceStyleEditor(theme: Binding(
-                get: { model.store.space(withID: space.id)?.theme ?? .default },
-                set: { model.store.setSpaceTheme(space.id, theme: $0) }
-            ))
-        }
         .onTapGesture(count: 2) { model.beginRename(.space(space.id)) }
         .onHover { isHovering = $0 }
         .contextMenu {
