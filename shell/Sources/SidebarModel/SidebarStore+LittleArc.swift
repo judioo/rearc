@@ -66,9 +66,25 @@ extension SidebarStore {
         return archived
     }
 
-    /// Promotes a live or archived Little Arc into a today tab in the active space.
+    /// Where Open in <Space> puts a Little Arc's page (Arc's toolbar names it):
+    /// the active space, which follows the last focused browser window, when it
+    /// shares the Little Arc's profile; otherwise that profile's last space.
+    public func littleArcTargetSpace(for id: LittleArcWindow.ID) -> Space? {
+        guard let profileID = littleArcWindows.first(where: { $0.id == id })?.profileID
+            ?? archivedLittleArcWindows.first(where: { $0.window.id == id })?.window.profileID else { return nil }
+        if activeSpace.profileID == profileID { return activeSpace }
+        let candidates = spaces(in: profileID)
+        if let remembered = lastActiveSpaceByProfile[profileID],
+           let space = candidates.first(where: { $0.id == remembered }) {
+            return space
+        }
+        return candidates.first
+    }
+
+    /// Promotes a live or archived Little Arc into a today tab in `spaceID`
+    /// (a space of the window's profile), or in the target space above.
     @discardableResult
-    public func promoteLittleArcToTab(id: LittleArcWindow.ID) -> Tab? {
+    public func promoteLittleArcToTab(id: LittleArcWindow.ID, into spaceID: Space.ID? = nil) -> Tab? {
         let window: LittleArcWindow
         if let live = littleArcWindows.first(where: { $0.id == id }) {
             window = live
@@ -80,6 +96,9 @@ extension SidebarStore {
         }
         if window.profileID != activeProfileID {
             selectProfile(window.profileID)
+        }
+        if let spaceID, space(withID: spaceID)?.profileID == window.profileID {
+            selectSpace(spaceID)
         }
         let tab = addTab(kind: .today, title: window.title, url: window.url, in: activeSpaceID)
         selectTab(tab.id)

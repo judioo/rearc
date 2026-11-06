@@ -1171,10 +1171,10 @@ final class BrowserViewModel {
         if focusedLittleArcID == id { focusedLittleArcID = nil }
     }
 
-    func promoteLittleArcWindow(_ id: LittleArcWindow.ID) {
+    func promoteLittleArcWindow(_ id: LittleArcWindow.ID, into spaceID: Space.ID? = nil) {
         let originProfile = store.littleArcWindow(withID: id)?.profileID
             ?? store.archivedLittleArcWindows.first(where: { $0.id == id })?.window.profileID
-        guard store.promoteLittleArcToTab(id: id) != nil else { return }
+        guard store.promoteLittleArcToTab(id: id, into: spaceID) != nil else { return }
         if let originProfile {
             engineHost.removeLittleArc(id, profileID: originProfile)
         }

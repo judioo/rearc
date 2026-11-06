@@ -3,7 +3,7 @@ import SidebarModel
 
 /// Minimal standalone window (PEEK-LITTLE-BROWSER §2): a compact toolbar
 /// with back, forward and reload, the address placeholder that opens its
-/// mini command bar, the profile indicator and Open in ReArc; then the page.
+/// mini command bar, the profile indicator and Open in <Space> (⌘O) with a menu of other spaces; then the page.
 struct LittleArcWindowView: View {
     @Bindable var model: BrowserViewModel
     @Environment(\.dismissWindow) private var dismissWindow
@@ -90,12 +90,7 @@ struct LittleArcWindowView: View {
             }
             address(for: record, engine: engine)
             profileMenu(for: record)
-            Button("Open in ReArc") {
-                model.promoteLittleArcWindow(windowID)
-                dismiss()
-            }
-            .controlSize(.small)
-            .help("Move this page into a tab in your current space")
+            openInButton(for: record)
             Button {
                 model.closeLittleArcWindow(windowID)
                 dismiss()
@@ -109,6 +104,63 @@ struct LittleArcWindowView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(.bar)
+    }
+
+    /// Arc's "Open in <Space> ⌘O ⌄": the space of the last focused browser
+    /// window, in its theme colour, and a menu of the profile's other spaces.
+    @ViewBuilder
+    private func openInButton(for record: LittleArcWindow) -> some View {
+        let target = model.store.littleArcTargetSpace(for: windowID)
+        let others = model.store.spaces(in: record.profileID).filter { $0.id != target?.id }
+        HStack(spacing: 0) {
+            Button {
+                open(into: target?.id)
+            } label: {
+                HStack(spacing: 4) {
+                    Text("Open in").foregroundStyle(.secondary)
+                    Text(target?.name ?? "ReArc")
+                        .fontWeight(.medium)
+                        .foregroundStyle(target.map { Color(red: $0.theme.red, green: $0.theme.green, blue: $0.theme.blue) } ?? .primary)
+                    Text("⌘O")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 3).fill(Color.primary.opacity(0.08)))
+                }
+                .font(.system(size: 12))
+                .padding(.horizontal, 8)
+                .frame(height: 22)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Move this page into a tab in \(target?.name ?? "your current space")")
+            .accessibilityLabel("Open in \(target?.name ?? "ReArc")")
+            if !others.isEmpty {
+                Divider().frame(height: 14)
+                Menu {
+                    ForEach(others) { space in
+                        Button(space.name) { open(into: space.id) }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .padding(.horizontal, 6)
+                .help("Open in another space")
+                .accessibilityLabel("Open in another space")
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.1)))
+    }
+
+    private func open(into spaceID: Space.ID?) {
+        model.promoteLittleArcWindow(windowID, into: spaceID)
+        dismiss()
     }
 
     private func navButton(_ symbol: String, _ help: String, enabled: Bool, action: @escaping () -> Void) -> some View {

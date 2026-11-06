@@ -76,6 +76,26 @@ final class LittleArcTests: XCTestCase {
         XCTAssertEqual(store.content(for: store.activeSpaceID).today.count, 2)
     }
 
+    /// Arc's "Open in <Space>": the last focused browser window's space by
+    /// default, or a space picked from the menu.
+    func testOpenInTargetsTheKeyWindowsSpaceOrAPickedOne() {
+        let store = SidebarStore(spaces: [Space(name: "One")])
+        let two = store.addSpace(name: "Two")
+        let window = SidebarWindowID()
+        store.selectSpace(two.id)
+        store.windowBecameKey(window)
+        let little = store.createLittleArcWindow(url: url("https://target.test"), title: "T")
+        XCTAssertEqual(store.littleArcTargetSpace(for: little.id)?.id, two.id)
+        let first = store.promoteLittleArcToTab(id: little.id)
+        XCTAssertEqual(store.content(for: two.id).today.map(\.id), [first?.id])
+
+        let one = store.spaces.first { $0.name == "One" }!
+        let picked = store.createLittleArcWindow(url: url("https://picked.test"), title: "P")
+        let second = store.promoteLittleArcToTab(id: picked.id, into: one.id)
+        XCTAssertEqual(store.activeSpaceID, one.id)
+        XCTAssertEqual(store.content(for: one.id).today.map(\.id), [second?.id])
+    }
+
     func testCreateLittleArcRecordsActiveProfile() {
         let store = SidebarStore(spaces: [Space(name: "One")])
         let work = store.addProfile(name: "Work")
