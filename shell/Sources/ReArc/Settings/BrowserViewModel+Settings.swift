@@ -14,13 +14,19 @@ struct SearchEngineChoice: Identifiable, Hashable {
 }
 
 /// Reads and sets a profile's default search engine for Settings › Profiles.
-/// Chromium has no engine call for it yet (another wave adds one): until a
-/// conformer is set on `BrowserViewModel.searchEngineSettings` the pane shows
-/// Search Settings… only. WebKit's choice is app-wide (`webKitSearchPreference`).
+/// Chromium's comes from `search_engines` (ABI 1.46, per profile); WebKit's
+/// choice is app-wide (`webKitSearchPreference`). Without a source the pane
+/// shows Search Settings… only.
 protocol SearchEngineSettings: AnyObject {
-    var engines: [SearchEngineChoice] { get }
+    func engines(for profileID: Profile.ID) -> [SearchEngineChoice]
     func defaultEngine(for profileID: Profile.ID) -> SearchEngineChoice.ID?
     func setDefaultEngine(_ id: SearchEngineChoice.ID, for profileID: Profile.ID)
+    /// False while policy manages the default.
+    func isEditable(for profileID: Profile.ID) -> Bool
+}
+
+extension SearchEngineSettings {
+    func isEditable(for profileID: Profile.ID) -> Bool { true }
 }
 
 /// The WebKit path's provider preference, the same for every profile.
@@ -29,7 +35,9 @@ final class WebKitSearchEngineSettings: SearchEngineSettings {
 
     init(model: BrowserViewModel) { self.model = model }
 
-    var engines: [SearchEngineChoice] { SearchProvider.builtIn.map { SearchEngineChoice(id: $0.id, name: $0.name) } }
+    func engines(for profileID: Profile.ID) -> [SearchEngineChoice] {
+        SearchProvider.builtIn.map { SearchEngineChoice(id: $0.id, name: $0.name) }
+    }
 
     func defaultEngine(for profileID: Profile.ID) -> SearchEngineChoice.ID? {
         model?.webKitSearchPreference?.providerID

@@ -250,7 +250,7 @@ final class Wave35ShellTests: XCTestCase {
         let model = makeModel()
         final class Stub: SearchEngineSettings {
             var chosen: [Profile.ID: String] = [:]
-            var engines: [SearchEngineChoice] { [SearchEngineChoice(id: "g", name: "Google")] }
+            func engines(for profileID: Profile.ID) -> [SearchEngineChoice] { [SearchEngineChoice(id: "g", name: "Google")] }
             func defaultEngine(for profileID: Profile.ID) -> String? { chosen[profileID] }
             func setDefaultEngine(_ id: String, for profileID: Profile.ID) { chosen[profileID] = id }
         }
@@ -263,7 +263,7 @@ final class Wave35ShellTests: XCTestCase {
             let stored = UserDefaults.standard.object(forKey: SearchProviderPreference.providerKey)
             defer { UserDefaults.standard.set(stored, forKey: SearchProviderPreference.providerKey) }
             let webKit = model.activeSearchEngineSettings
-            XCTAssertEqual(webKit?.engines.map(\.id), SearchProvider.builtIn.map(\.id))
+            XCTAssertEqual(webKit?.engines(for: model.store.activeProfileID).map(\.id), SearchProvider.builtIn.map(\.id))
             webKit?.setDefaultEngine(SearchProvider.google.id, for: model.store.activeProfileID)
             XCTAssertEqual(model.webKitSearchPreference?.providerID, SearchProvider.google.id)
         }

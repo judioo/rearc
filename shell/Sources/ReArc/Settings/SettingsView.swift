@@ -314,9 +314,10 @@ struct ProfilesSettingsPane: View {
                         get: { search.defaultEngine(for: profile.id) ?? "" },
                         set: { search.setDefaultEngine($0, for: profile.id) }
                     )) {
-                        ForEach(search.engines) { Text($0.name).tag($0.id) }
+                        ForEach(search.engines(for: profile.id)) { Text($0.name).tag($0.id) }
                     }
                     .labelsHidden().fixedSize()
+                    .disabled(!search.isEditable(for: profile.id))
                 }
                 if model.canOpenBrowserPage(.searchSettings) {
                     SettingsRow(label: "Manage search") { Button("Search Settings…") { open(.searchSettings, in: profile) } }

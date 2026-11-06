@@ -305,6 +305,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         self.model = model
         model.windowPresenter = self
+        if runtime.capabilities.searchEngines {
+            model.searchEngineSettings = ChromiumSearchEngineSettings(runtime: runtime)
+        }
     }
 
     /// At ready. `model` must come from `makeModel` (or name the Default owner
