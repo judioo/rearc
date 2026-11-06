@@ -29,6 +29,8 @@ public enum CommandBarSearch {
         public var destinationURL: URL?
         public var commandAction: AppCommandAction?
         public var commandID: String?
+        public var menuCommandID: String?
+        public var keyEquivalent: String?
 
         public init(
             id: String,
@@ -39,7 +41,9 @@ public enum CommandBarSearch {
             spaceID: Space.ID? = nil,
             destinationURL: URL? = nil,
             commandAction: AppCommandAction? = nil,
-            commandID: String? = nil
+            commandID: String? = nil,
+            menuCommandID: String? = nil,
+            keyEquivalent: String? = nil
         ) {
             self.id = id
             self.kind = kind
@@ -50,6 +54,8 @@ public enum CommandBarSearch {
             self.destinationURL = destinationURL
             self.commandAction = commandAction
             self.commandID = commandID
+            self.menuCommandID = menuCommandID
+            self.keyEquivalent = keyEquivalent
         }
     }
 
@@ -83,6 +89,7 @@ public enum CommandBarSearch {
         history: VisitHistory = VisitHistory(),
         historyIndex: VisitHistorySearchIndex? = nil,
         commandCatalog: [AppCommand]? = nil,
+        menuCommands: [MenuCommand] = [],
         externalLinkDestination: ExternalLinkDestination = .littleArc,
         live: CommandBarLiveResults? = nil,
         searchProvider: SearchProvider = .duckDuckGo,
@@ -102,9 +109,14 @@ public enum CommandBarSearch {
             externalLinkDestination: externalLinkDestination
         )
 
+        let catalog = commandCatalog ?? AppCommandRegistry.all(in: context)
+        let menus = MenuCommandSearch.matches(menuCommands, query: needle, registered: catalog).map {
+            Result(id: "menu-\($0.id)", kind: .command, title: $0.title, subtitle: $0.path,
+                   menuCommandID: $0.id, keyEquivalent: $0.keyEquivalent)
+        }
         switch mode {
         case .commandsOnly:
-            return commandResults(matching: needle, catalog: commandCatalog ?? AppCommandRegistry.all(in: context), store: store, allowEmpty: true)
+            return commandResults(matching: needle, catalog: catalog, store: store, allowEmpty: true) + menus
         case .blended:
             guard !needle.isEmpty else { return [] }
             let tabs = tabResults(for: needle, in: store)
@@ -154,7 +166,8 @@ public enum CommandBarSearch {
             output.append(contentsOf: historyRows)
             historyRows.compactMap { $0.destinationURL.flatMap(VisitHistory.key(for:)) }.forEach { shown.insert($0) }
             output.append(contentsOf: suggestionResults(current?.suggestions ?? [], query: query, excluding: shown, fallback: resolved))
-            output.append(contentsOf: commandResults(matching: needle, catalog: commandCatalog ?? AppCommandRegistry.all(in: context), store: store, allowEmpty: false))
+            output.append(contentsOf: commandResults(matching: needle, catalog: catalog, store: store, allowEmpty: false))
+            output.append(contentsOf: menus)
             if direct == nil, let searchURL = resolved {
                 output.append(Result(
                     id: "search-\(searchURL.absoluteString)",

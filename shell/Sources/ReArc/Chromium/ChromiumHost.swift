@@ -494,6 +494,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         } else {
             window.makeKeyAndOrderFront(nil)
         }
+        if let saved { window.traceRestoredOrder(saved, below: below) }
         sessionRecorderIfNeeded()?.observe(window)
         if saved?.isFullScreen == true { restoreFullScreen(window) }
         if first {

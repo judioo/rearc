@@ -223,8 +223,8 @@ struct SidebarRowDropDelegate: DropDelegate {
     @Binding var dropState: SidebarDropState?
 
     private func position(for info: DropInfo) -> SidebarDropPosition? {
-        if draggedItemID == nil, SidebarURLDropLoader.hasLinks(info) {
-            // A link from a page or another app: a new tab next to this row.
+        if draggedItemID == nil, SidebarDragPayload.hasItem(info) || SidebarURLDropLoader.hasLinks(info) {
+            // Another window’s item or an external link lands next to this row.
             return info.location.y / max(rowHeight, 1) < 0.5 ? .before : .after
         }
         guard let draggedItemID, draggedItemID != target.id,
@@ -252,7 +252,7 @@ struct SidebarRowDropDelegate: DropDelegate {
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        draggedItemID != nil || SidebarURLDropLoader.hasLinks(info)
+        draggedItemID != nil || SidebarDragPayload.hasItem(info) || SidebarURLDropLoader.hasLinks(info)
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -262,7 +262,7 @@ struct SidebarRowDropDelegate: DropDelegate {
         }
         let state = SidebarDropState(targetID: target.id, position: position)
         if dropState != state { dropState = state }
-        return DropProposal(operation: draggedItemID == nil ? .copy : .move)
+        return DropProposal(operation: draggedItemID != nil || SidebarDragPayload.hasItem(info) ? .move : .copy)
     }
 
     func dropExited(info: DropInfo) {
@@ -277,6 +277,11 @@ struct SidebarRowDropDelegate: DropDelegate {
         }
         if draggedItemID == nil, let position = position(for: info) {
             let target = target.id, model = model
+            if SidebarDragPayload.hasItem(info) {
+                return SidebarDragPayload.load(info) { id in
+                    model.moveItem(id, relativeTo: target, after: position == .after)
+                }
+            }
             return SidebarURLDropLoader.load(info) { urls in
                 model.openDroppedURLs(urls, relativeTo: target, after: position == .after)
             }
@@ -341,7 +346,7 @@ struct SectionEndDropZone: View {
         @Binding var isTargeted: Bool
 
         func validateDrop(info: DropInfo) -> Bool {
-            zone.draggedItemID != nil || SidebarURLDropLoader.hasLinks(info)
+            zone.draggedItemID != nil || SidebarDragPayload.hasItem(info) || SidebarURLDropLoader.hasLinks(info)
         }
 
         func dropEntered(info: DropInfo) {
@@ -350,7 +355,9 @@ struct SectionEndDropZone: View {
         }
 
         func dropUpdated(info: DropInfo) -> DropProposal? {
-            if zone.draggedItemID == nil { return DropProposal(operation: SidebarURLDropLoader.hasLinks(info) ? .copy : .forbidden) }
+            if zone.draggedItemID == nil, !SidebarDragPayload.hasItem(info) {
+                return DropProposal(operation: SidebarURLDropLoader.hasLinks(info) ? .copy : .forbidden)
+            }
             return DropProposal(operation: .move)
         }
 
@@ -361,6 +368,13 @@ struct SectionEndDropZone: View {
             defer { zone.draggedItemID = nil }
             guard let dragged = zone.draggedItemID else {
                 let model = zone.model, destination = zone.destination
+                if SidebarDragPayload.hasItem(info) {
+                    return SidebarDragPayload.load(info) { id in
+                        let parent = model.store.resolvedParent(destination)
+                        let count = model.store.entries(in: parent).filter { $0.id != id }.count
+                        model.moveItem(id, to: destination, index: count)
+                    }
+                }
                 return SidebarURLDropLoader.load(info) { urls in model.openDroppedURLs(urls, appendingTo: destination) }
             }
             let store = zone.model.store
@@ -376,7 +390,7 @@ struct SectionEndDropZone: View {
 /// Reads links and files dropped on the sidebar from pages and other apps.
 enum SidebarURLDropLoader {
     /// Sidebar drags carry their UUID as plain text (and `SidebarDragType`).
-    static let acceptedTypes: [UTType] = [.plainText, .url, .fileURL]
+    static let acceptedTypes: [UTType] = [.plainText, .url, .fileURL, SidebarDragPayload.contentType]
 
     static func hasLinks(_ info: DropInfo) -> Bool {
         info.hasItemsConforming(to: [.url, .fileURL])
