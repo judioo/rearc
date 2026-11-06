@@ -4609,6 +4609,22 @@ extension ChromiumSelfTest {
         return nil
     }
 
+    /// The + New Tab row, from the sidebar table's own rows: the SwiftUI cells
+    /// in the table don't reach the accessibility tree the self-test walks.
+    private func sidebarNewTabRowFrame(in window: NSWindow) -> NSRect? {
+        var stack: [NSView] = window.contentView.map { [$0] } ?? []
+        while let view = stack.popLast() {
+            if let table = view as? NSTableView, let controller = table.delegate as? SidebarListController,
+               !table.visibleRect.isEmpty, let index = controller.rows.firstIndex(of: .newTab) {
+                let rect = table.rect(ofRow: index)
+                guard table.visibleRect.intersects(rect) else { return nil }
+                return window.convertToScreen(table.convert(rect, to: nil))
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return nil
+    }
+
     /// The hover ✕ of a tab row: 8 pt in from the highlight's trailing edge, 16 pt wide.
     private func closeButtonPoint(in row: NSRect) -> NSPoint {
         NSPoint(x: row.maxX - SidebarMetrics.rowInset - 16, y: row.midY)
@@ -4672,7 +4688,7 @@ extension ChromiumSelfTest {
         // Opens a Today tab from the sidebar's + New Tab and the command bar.
         func openFromNewTab(_ query: String, title: String) async throws -> Tab {
             let before = Set(store.content(for: homeSpace).today.map(\.id))
-            let newTab = try XCTUnwrapSelfTest(accessibilityElement(in: window, labelled: "New Tab"), "+ New Tab row").accessibilityFrame()
+            let newTab = try XCTUnwrapSelfTest(sidebarNewTabRowFrame(in: window), "+ New Tab row")
             let clicked = try await systemClick(atScreen: NSPoint(x: newTab.midX, y: newTab.midY)) { model.isCommandBarPresented }
             try check(clicked, "+ New Tab at \(newTab) opened no command bar")
             model.commandBarText = "\(serverBase)/nav?\(query)"
