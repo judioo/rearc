@@ -67,7 +67,7 @@ struct BottomBarView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Exit Library")
+                .modifier(BarButtonChip(label: .exitLibrary))
                 .accessibilityLabel("Exit Library")
                 Spacer(minLength: 0)
             } else {
@@ -76,6 +76,7 @@ struct BottomBarView: View {
         }
         .padding(.horizontal, 17)
         .frame(height: Self.height)
+        .coordinateSpace(.named(BarChip.coordinateSpace))
         .alert("Rename Profile", isPresented: Binding(
             get: { renamingProfileID != nil },
             set: { if !$0 { renamingProfileID = nil } }
@@ -112,8 +113,9 @@ struct BottomBarView: View {
         }
         .buttonStyle(.plain)
         .onHover { setLibraryHover($0, .trigger) }
-        .help("View Library: Spaces, Downloads, Media, Easels & Notes, Archive and Boosts")
+        .modifier(BarButtonChip(label: .library(overrides: model.shortcutOverrides)))
         .accessibilityLabel("Library")
+        .accessibilityHint("View Library: Spaces, Downloads, Media, Easels & Notes, Archive and Boosts")
         .popover(isPresented: $showingProfileList, arrowEdge: .top) {
             ProfileListView(
                 model: model,
@@ -122,6 +124,8 @@ struct BottomBarView: View {
                 onDelete: attemptDelete
             )
         }
+        // Its chip lies over the dots.
+        .zIndex(1)
 
         Spacer(minLength: 6)
 
@@ -158,8 +162,9 @@ struct BottomBarView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("New Space, Folder, Easel, Boost, Split or Tab")
+        .modifier(BarButtonChip(label: .new, placement: .above, isEnabled: !showingPlusMenu))
         .accessibilityLabel(showingPlusMenu ? "Close Menu" : "New")
+        .accessibilityHint("New Space, Folder, Easel, Boost, Split or Tab")
         .popover(isPresented: $showingPlusMenu, arrowEdge: .top) {
             PlusMenuPanel(sections: plusMenu(current: current, profile: profile)) { showingPlusMenu = false }
         }
@@ -243,12 +248,16 @@ struct BottomBarView: View {
 /// The space dots. Hover lives here so moving along the row redraws only the
 /// row: the hovered dot morphs into its space's icon and the current space's
 /// icon falls back to its larger dot, so one icon shows at a time (§5.2).
+/// After a rest a chip above the dot names the space and its ⌃N, in the
+/// space's own colours; it moves straight to the next dot along the row.
 private struct SpaceDotRow: View {
     let model: BrowserViewModel
     let current: Space
     @Binding var draggedItemID: UUID?
     @Binding var draggedSpaceID: Space.ID?
     @State private var hoveredSpaceID: Space.ID?
+    @State private var chip = HoverChipTiming<Space.ID>()
+    @State private var chipTask: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -262,6 +271,7 @@ private struct SpaceDotRow: View {
                         space: space,
                         index: index,
                         appearance: appearances[index],
+                        isLabelled: chip.shown == space.id,
                         onHover: { hover(space.id, $0) },
                         draggedItemID: $draggedItemID,
                         draggedSpaceID: $draggedSpaceID
@@ -271,15 +281,43 @@ private struct SpaceDotRow: View {
         }
         .frame(maxWidth: 140)
         .fixedSize(horizontal: true, vertical: false)
+        // Outside the scroll view, so the chip is not clipped to the row.
+        .overlayPreferenceValue(SpaceDotChipAnchor.self) { anchor in
+            if let anchor, let index = spaces.firstIndex(where: { $0.id == chip.shown }) {
+                GeometryReader { proxy in
+                    let row = proxy.frame(in: .named(BarChip.coordinateSpace))
+                    BarChipAboveLayout(anchor: proxy[anchor], minX: -row.minX, maxX: model.sidebarWidth - row.minX) {
+                        spaceChip(spaces[index], index: index)
+                    }
+                }
+                .transition(.opacity)
+            }
+        }
     }
 
     /// The row reflows in the same transaction as the morph.
     private func hover(_ id: Space.ID, _ hovering: Bool) {
+        hoverChip($chip, $chipTask, hovering: hovering, id: id)
         let next = hovering ? id : (hoveredSpaceID == id ? nil : hoveredSpaceID)
         guard next != hoveredSpaceID else { return }
         withAnimation(SidebarMotion.spring(response: SpaceIconButton.morphResponse, reduceMotion: reduceMotion)) {
             hoveredSpaceID = next
         }
+    }
+
+    private func spaceChip(_ space: Space, index: Int) -> BarChip {
+        let dark = space.theme.appearance.isDark(systemDark: SystemAppearance.isSystemDark)
+        let colors = model.themeColors.colors(for: space.id, theme: space.theme, dark: dark)
+        return BarChip(label: .space(named: space.name, at: index, overrides: model.shortcutOverrides),
+                       fill: colors.toast, text: colors.title, secondary: colors.secondaryText, swatch: Color(space.theme))
+    }
+}
+
+/// The bounds of the dot whose chip shows.
+private struct SpaceDotChipAnchor: PreferenceKey {
+    static let defaultValue: Anchor<CGRect>? = nil
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = value ?? nextValue()
     }
 }
 
@@ -292,6 +330,7 @@ private struct SpaceIconButton: View {
     let space: Space
     let index: Int
     let appearance: SpaceDotAppearance
+    let isLabelled: Bool
     let onHover: (Bool) -> Void
     @Binding var draggedItemID: UUID?
     @Binding var draggedSpaceID: Space.ID?
@@ -325,8 +364,9 @@ private struct SpaceIconButton: View {
         }
         .buttonStyle(.plain)
         .onHover(perform: onHover)
-        .help("\(space.name) (⌃\(index + 1)) — drop a tab here to move it to this space")
+        .anchorPreference(key: SpaceDotChipAnchor.self, value: .bounds) { isLabelled ? $0 : nil }
         .accessibilityLabel(space.name)
+        .accessibilityHint("Drop a tab here to move it to this space")
         .contextMenu { SpaceContextMenu(model: model, space: space) }
         .onDrag {
             draggedSpaceID = space.id
