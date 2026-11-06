@@ -25,17 +25,16 @@ struct BrowserView: View {
             // ⌘S pushes the sidebar with the card's leading edge; the card
             // is laid out beside it only at rest (`isSidebarLaidOut`).
             ZStack(alignment: .topLeading) {
-                contentCard
+                BrowserContentCard(model: model, windowID: windowID, draggedItemID: $draggedItemID)
                 if model.isSidebarVisible || model.isSidebarSliding, !isPageFullscreen {
-                    SidebarView(model: model, draggedItemID: $draggedItemID)
-                        .offset(x: (model.sidebarReveal - 1) * model.sidebarWidth)
+                    SlidingSidebar(model: model, draggedItemID: $draggedItemID)
                 }
             }
             // The sidebar and card run up under the title bar: the traffic
             // lights sit on the theme like the rest of the sidebar (§4.5).
             .ignoresSafeArea(.container, edges: .top)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .topTrailing) { if !isPageFullscreen { zoomBadge } }
+            .overlay(alignment: .topTrailing) { if !isPageFullscreen { ZoomBadge(model: model, windowID: windowID) } }
             .background(SpaceThemeBackground(model: model, window: windowID, pager: pager).ignoresSafeArea())
 
             if !model.isSidebarVisible, model.isSidebarPeeking, !isPageFullscreen {
@@ -147,7 +146,6 @@ struct BrowserView: View {
             )
             .frame(width: 0, height: 0)
         )
-        .navigationTitle(contentTitle)
         .sheet(isPresented: $model.isCapturePreviewPresented) {
             if let record = model.lastCapturePreview {
                 CapturePreviewSheet(record: record, model: model)
@@ -176,11 +174,6 @@ struct BrowserView: View {
             model.store.registerWindow(windowID)
             stripCloseWindowShortcut()
             model.restoreLittleArcWindowsIfNeeded()
-        }
-        // Any other item shown in this window (a shortcut, a space switch)
-        // closes its Library for good.
-        .onChange(of: model.selectedItemID(in: windowID)) { _, _ in
-            model.library.closeStale { model.selectedItemID(in: $0) }
         }
         .onChange(of: model.littleArcOpenRequests) { _, requests in
             for id in requests {
@@ -300,16 +293,6 @@ struct BrowserView: View {
         model.store.keyWindowID == nil || model.store.keyWindowID == windowID
     }
 
-    private var contentTitle: String {
-        if let section = model.librarySection(in: windowID) {
-            return section.title
-        }
-        if let ref = model.selectedEaselRef(in: windowID) {
-            return model.easelTitle(for: ref)
-        }
-        return model.selectedTab(in: windowID)?.displayTitle ?? "ReArc"
-    }
-
     /// Removes ⌘W from File > Close Window so the Tabs menu's Close Tab
     /// command is the only ⌘W in the app. The window can still be closed
     /// with the red traffic-light button.
@@ -323,21 +306,6 @@ struct BrowserView: View {
                 && item.action == NSSelectorFromString("performClose:") {
                 item.keyEquivalent = ""
             }
-        }
-    }
-
-    /// Shown while the focused tab is not at 100%; clicking resets it (Cmd+0).
-    @ViewBuilder
-    private var zoomBadge: some View {
-        if let engine = model.focusedEngine(in: windowID), !PageZoom.isDefault(engine.zoomFactor) {
-            Button("\(PageZoom.percent(engine.zoomFactor))%") { model.zoom(.reset) }
-                .buttonStyle(.plain)
-                .font(.caption.monospacedDigit().weight(.semibold))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(.ultraThinMaterial, in: Capsule())
-                .padding(10)
-                .help("Page zoom — click to reset to 100% (⌘0)")
         }
     }
 
@@ -360,6 +328,44 @@ struct BrowserView: View {
 
             BoostEditorDrawerView(model: model, draft: draft)
         }
+    }
+
+}
+
+/// The page card and what it shows (perf-4). Selection, the attached page,
+/// the window title and the card's slide are read here, so a tab switch or
+/// a ⌘S frame updates this view, not `BrowserView`'s whole body.
+private struct BrowserContentCard: View {
+    let model: BrowserViewModel
+    let windowID: SidebarWindowID
+    @Binding var draggedItemID: UUID?
+    @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
+    @Environment(\.themeChrome) private var themeChrome
+
+    var body: some View {
+        contentCard
+            .navigationTitle(contentTitle)
+            // Any other item shown in this window (a shortcut, a space switch)
+            // closes its Library for good.
+            .onChange(of: model.selectedItemID(in: windowID)) { _, _ in
+                model.library.closeStale { model.selectedItemID(in: $0) }
+            }
+    }
+
+    private var isPageFullscreen: Bool { model.isHTMLFullscreen(in: windowID) }
+
+    private var isKeyWindowSheetOwner: Bool {
+        model.store.keyWindowID == nil || model.store.keyWindowID == windowID
+    }
+
+    private var contentTitle: String {
+        if let section = model.librarySection(in: windowID) {
+            return section.title
+        }
+        if let ref = model.selectedEaselRef(in: windowID) {
+            return model.easelTitle(for: ref)
+        }
+        return model.selectedTab(in: windowID)?.displayTitle ?? "ReArc"
     }
 
     /// The page as a rounded card inset on the theme background (Arc's
@@ -467,6 +473,38 @@ struct BrowserView: View {
                 .accessibilityLabel("No tab selected. Press ⌘T to open one.")
         }
     }
+}
+
+/// The docked sidebar, offset by ⌘S's reveal: its frames update this view only.
+private struct SlidingSidebar: View {
+    let model: BrowserViewModel
+    @Binding var draggedItemID: UUID?
+
+    var body: some View {
+        SidebarView(model: model, draggedItemID: $draggedItemID)
+            .offset(x: (model.sidebarReveal - 1) * model.sidebarWidth)
+    }
+}
+
+/// The zoom badge reads the focused page's zoom, so it updates on its own.
+private struct ZoomBadge: View {
+    let model: BrowserViewModel
+    let windowID: SidebarWindowID
+
+    /// Shown while the focused tab is not at 100%; clicking resets it (Cmd+0).
+    var body: some View {
+        if let engine = model.focusedEngine(in: windowID), !PageZoom.isDefault(engine.zoomFactor) {
+            Button("\(PageZoom.percent(engine.zoomFactor))%") { model.zoom(.reset) }
+                .buttonStyle(.plain)
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.ultraThinMaterial, in: Capsule())
+                .padding(10)
+                .help("Page zoom — click to reset to 100% (⌘0)")
+        }
+    }
+
 }
 
 /// The card's shadow without its shape: black 22 %, radius 3, 1.25 pt down,
