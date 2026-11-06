@@ -4690,7 +4690,15 @@ extension ChromiumSelfTest {
             let before = Set(store.content(for: homeSpace).today.map(\.id))
             let newTab = try XCTUnwrapSelfTest(sidebarNewTabRowFrame(in: window), "+ New Tab row")
             let clicked = try await systemClick(atScreen: NSPoint(x: newTab.midX, y: newTab.midY)) { model.isCommandBarPresented }
-            try check(clicked, "+ New Tab at \(newTab) opened no command bar")
+            if !clicked {
+                // What the click met: the key window, the window under the point and the view hit there.
+                let point = NSPoint(x: newTab.midX, y: newTab.midY)
+                let under = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0)
+                let hit = window.contentView?.hitTest(window.contentView!.convert(window.convertPoint(fromScreen: point), from: nil))
+                throw Failure(description: "+ New Tab at \(newTab) opened no command bar (key \(NSApp.keyWindow?.title ?? "none"), "
+                    + "window under the point \(under) vs sidebar \(window.windowNumber) '\(NSApp.window(withWindowNumber: under)?.title ?? "?")', "
+                    + "hit \(hit.map { String(describing: type(of: $0)) } ?? "nil"))")
+            }
             model.commandBarText = "\(serverBase)/nav?\(query)"
             model.submitCommandBar()
             guard let tab = store.selectedTab, !before.contains(tab.id), store.kind(of: tab.id) == .today else {
