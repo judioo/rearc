@@ -332,6 +332,7 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
             onHeight: measures ? { [weak self] in self?.measuredHeight($0, for: item.id) } : nil
         )
         if let cell = tableView.makeView(withIdentifier: Self.cellID, owner: nil) as? SidebarListCellView {
+            SidebarListCellCounters.configures += 1
             cell.hosting.rootView = root
             return cell
         }
@@ -370,12 +371,27 @@ private final class SidebarTableRowView: NSTableRowView {
     }
 }
 
+/// How often the cells' hosting views lay out and are handed a new row.
+/// The bench's scroll scenario reads and resets them per iteration (perf-6):
+/// a scroll step should lay out only the newly configured cells.
+enum SidebarListCellCounters {
+    @MainActor static var layouts = 0
+    @MainActor static var configures = 0
+}
+
+private final class SidebarListCellHostingView: NSHostingView<SidebarListCell> {
+    override func layout() {
+        SidebarListCellCounters.layouts += 1
+        super.layout()
+    }
+}
+
 /// A reusable cell: one hosting view filling it.
 private final class SidebarListCellView: NSView {
     let hosting: NSHostingView<SidebarListCell>
 
     init(root: SidebarListCell) {
-        hosting = NSHostingView(rootView: root)
+        hosting = SidebarListCellHostingView(rootView: root)
         super.init(frame: .zero)
         hosting.sizingOptions = []
         hosting.autoresizingMask = [.width, .height]

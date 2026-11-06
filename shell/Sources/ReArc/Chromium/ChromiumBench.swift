@@ -849,6 +849,8 @@ final class ChromiumBench {
             probe.startRecording()
             var first: Double?, last: Double?
             var frames = 0
+            SidebarListCellCounters.layouts = 0
+            SidebarListCellCounters.configures = 0
             await probe.eachFrame(of: window) { link in
                 if first == nil { first = link.timestamp }
                 last = link.timestamp
@@ -859,6 +861,10 @@ final class ChromiumBench {
                 return frames < 120
             }
             frameStats(id, from: first, to: last, input: .direct, contaminated: contaminated(), warmup: warmup)
+            if !warmup {
+                report.notes.append("\(id): \(frames) frames, cell layouts \(SidebarListCellCounters.layouts), "
+                    + "cells configured \(SidebarListCellCounters.configures)")
+            }
         }
     }
 
