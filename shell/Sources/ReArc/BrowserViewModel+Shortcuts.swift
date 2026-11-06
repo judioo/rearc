@@ -44,7 +44,8 @@ extension BrowserViewModel {
     /// left; a tab the bar's ⌘T replaced re-attaches first, so it retries briefly.
     func restorePageFocus(attempts: Int = 10) {
         DispatchQueue.main.asyncAfter(deadline: .now() + (attempts == 10 ? 0 : 0.1)) { [weak self] in
-            guard let self, !self.isCommandBarPresented else { return }
+            // A rename the command bar started keeps its row's field focused.
+            guard let self, !self.isCommandBarPresented, self.inlineRename == nil else { return }
             if self.focusShownPage() || attempts <= 1 { return }
             self.restorePageFocus(attempts: attempts - 1)
         }

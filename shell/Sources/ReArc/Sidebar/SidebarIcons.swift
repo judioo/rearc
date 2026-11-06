@@ -66,6 +66,8 @@ struct FolderRowView<Menu: View>: View {
     let folder: SidebarFolder
     let isExpanded: Bool
     let isDropTarget: Bool
+    /// Set while the title is being renamed in place.
+    var rename: SidebarRowRename? = nil
     let onToggle: () -> Void
     @ViewBuilder let menu: () -> Menu
 
@@ -78,27 +80,33 @@ struct FolderRowView<Menu: View>: View {
                 .foregroundStyle(chrome.accent)
                 .frame(width: SidebarMetrics.iconSize + 3, height: SidebarMetrics.iconSize + 3)
                 .padding(.leading, -1.5)
-            Text(folder.title)
-                .font(.system(size: SidebarMetrics.titleSize, weight: .semibold))
-                .foregroundStyle(chrome.title)
-                .lineLimit(1)
+            if let rename {
+                rename.field(weight: .semibold)
+            } else {
+                Text(folder.title)
+                    .font(.system(size: SidebarMetrics.titleSize, weight: .semibold))
+                    .foregroundStyle(chrome.title)
+                    .lineLimit(1)
+            }
             Spacer(minLength: 0)
         }
         .padding(.leading, SidebarMetrics.iconLeading)
         .padding(.trailing, 8)
         .frame(height: SidebarMetrics.rowHeight)
         .background(
-            isDropTarget ? Color.accentColor.opacity(0.22) : chrome.rowHover.opacity(isHovering ? 1 : 0),
-            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            isDropTarget ? Color.accentColor.opacity(0.22)
+                : rename != nil ? chrome.rowSelected : chrome.rowHover.opacity(isHovering ? 1 : 0),
+            in: RoundedRectangle(cornerRadius: rename == nil ? 8 : SidebarRowRename.cornerRadius, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: 8))
         .padding(.vertical, (SidebarMetrics.rowPitch - SidebarMetrics.rowHeight) / 2)
-        .onTapGesture {
+        // Off while renaming, so clicks in the field place the caret.
+        .gesture(TapGesture().onEnded {
             withAnimation(.easeInOut(duration: 0.15)) { onToggle() }
-        }
+        }, including: rename == nil ? .all : .subviews)
         .onHover { isHovering = $0 }
         .contextMenu { menu() }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: rename == nil ? .combine : .contain)
         .accessibilityAddTraits(.isButton)
         .accessibilityValue(isExpanded ? "expanded" : "collapsed")
     }
