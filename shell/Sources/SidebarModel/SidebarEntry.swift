@@ -18,6 +18,9 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
     public var memberPlacements: [Tab.ID: TabPlacement]
     public var sortRank: String
     public var customIcon: SidebarItemIcon?
+    /// The collection's name (Arc's split `customInfo` title); nil shows
+    /// "N Tabs". Optional and written only when set, so older snapshots load.
+    public var title: String?
 
     public init(
         id: UUID = UUID(),
@@ -27,7 +30,8 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
         tabs: [Tab],
         memberPlacements: [Tab.ID: TabPlacement] = [:],
         sortRank: String = "",
-        customIcon: SidebarItemIcon? = nil
+        customIcon: SidebarItemIcon? = nil,
+        title: String? = nil
     ) {
         precondition((2 ... 4).contains(tabs.count))
         self.id = id
@@ -43,10 +47,11 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
         }
         self.sortRank = sortRank
         self.customIcon = customIcon
+        self.title = title
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, orientation, focusTabID, widthFactors, tabs, memberPlacements, sortRank, customIcon
+        case id, orientation, focusTabID, widthFactors, tabs, memberPlacements, sortRank, customIcon, title
     }
 
     public init(from decoder: Decoder) throws {
@@ -60,6 +65,7 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
         memberPlacements = try c.decodeIfPresent([Tab.ID: TabPlacement].self, forKey: .memberPlacements) ?? [:]
         sortRank = try c.decodeIfPresent(String.self, forKey: .sortRank) ?? ""
         customIcon = try c.decodeIfPresent(SidebarItemIcon.self, forKey: .customIcon)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
         if widthFactors.isEmpty {
             let equal = 1.0 / Double(tabs.count)
             widthFactors = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, equal) })
@@ -78,6 +84,7 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
         try c.encode(memberPlacements, forKey: .memberPlacements)
         try c.encode(sortRank, forKey: .sortRank)
         try c.encodeIfPresent(customIcon, forKey: .customIcon)
+        try c.encodeIfPresent(title, forKey: .title)
     }
 
     public static func normalizedFactors(

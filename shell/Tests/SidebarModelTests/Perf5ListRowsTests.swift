@@ -137,15 +137,14 @@ struct Perf5ListRowsTests {
         #expect(heights.fixed(item(.tab)) == 41)
         #expect(heights.fixed(item(.folder)) == 41)
         #expect(heights.fixed(.sectionEnd(.pinned, isEmpty: false)) == 10)
-        #expect(heights.fixed(item(.split)) == nil)
+        #expect(heights.fixed(item(.split)) == 41, "a split stacks in one row")
         #expect(heights.fixed(item(.easel)) == nil)
         #expect(heights.fixed(.sectionEnd(.unpinned, isEmpty: true)) == nil)
 
-        #expect(heights.height(item(.split), measured: nil) == heights.splitEstimate)
         #expect(heights.height(item(.easel), measured: nil) == heights.easelEstimate)
         #expect(heights.height(.sectionEnd(.pinned, isEmpty: true), measured: nil) == heights.placeholderEstimate)
-        #expect(heights.height(item(.split), measured: 97) == 97)
-        #expect(heights.height(item(.split), measured: 0) == heights.splitEstimate, "a row is never 0 tall")
+        #expect(heights.height(item(.easel), measured: 97) == 97)
+        #expect(heights.height(item(.easel), measured: 0) == heights.easelEstimate, "a row is never 0 tall")
         #expect(heights.height(item(.tab), measured: 12) == 41, "a fixed row ignores a measurement")
     }
 }
