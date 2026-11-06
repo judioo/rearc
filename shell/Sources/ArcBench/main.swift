@@ -101,7 +101,7 @@ func dryRun(_ options: Options) -> Int32 {
                 + (sidebar.hasPrefix("hidden") ? "; a run shows it with ⌘S, checks the pixels, hides it again" : "")
                 + "; --arc-sidebar visible|hidden overrides")
             print("  plan:")
-            describe(ScenarioCatalog.plan(layout, groups: options.groups, regions: options.regions)).forEach { print($0) }
+            describe(ScenarioCatalog.plan(layout, groups: options.groups, regions: options.regions, reserved: MacShortcuts.reserved)).forEach { print($0) }
         } else if arc.spacesError == nil {
             print("  no space named \"\(options.arcSpace)\": a real run refuses (--arc-space)")
         }
@@ -115,7 +115,7 @@ func dryRun(_ options: Options) -> Int32 {
         if rearc.others > 0 { print("  \(rearc.others) ReArc instance(s) already running: left alone (input goes to the new instance's window only)") }
         if options.matchArcSize, let arcWindow { print("  its window is set to Arc's: \(Int(arcWindow.bounds.width))×\(Int(arcWindow.bounds.height)) pt") }
         print("  plan:")
-        describe(ScenarioCatalog.plan(ReArcTarget.layout, groups: options.groups, regions: options.regions)).forEach { print($0) }
+        describe(ScenarioCatalog.plan(ReArcTarget.layout, groups: options.groups, regions: options.regions, reserved: ReArcTarget.reserved)).forEach { print($0) }
     }
     print("each scenario: \(options.warmups) warm-ups + \(options.iterations) iterations, \(options.pauseMs) ms pause, "
         + "window still for \(options.preQuietMs) ms before each key")
@@ -178,10 +178,10 @@ func realRun(_ options: Options) async -> Int32 {
             do {
                 try await runner.run(target)
             } catch {
-                await target.finish()
+                if let note = await target.finish() { runner.report.notes.append(note) }
                 throw error
             }
-            await target.finish()
+            if let note = await target.finish() { runner.report.notes.append(note) }
         } catch let error as GateClosed {
             runner.report.notes.append("\(app.title): \(error); stopped")
             stderr("arc-vs-rearc: \(error); stopping")

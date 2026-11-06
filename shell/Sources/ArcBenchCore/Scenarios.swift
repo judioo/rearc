@@ -79,11 +79,16 @@ public struct Step: Equatable, Codable, Sendable {
     /// Post only when the key window is the window the previous step opened
     /// (⌘W must close Little Arc, never a tab of the browser window).
     public var requiresOpenedWindow: Bool
+    /// May go to a panel of the app over its browser window, which the
+    /// previous key opened (Arc's command bar is its own window and takes key
+    /// status): the app must still be frontmost.
+    public var toOwnPanel: Bool
 
-    public init(_ chord: KeyChord, _ measure: Measure = .none, requiresOpenedWindow: Bool = false) {
+    public init(_ chord: KeyChord, _ measure: Measure = .none, requiresOpenedWindow: Bool = false, toOwnPanel: Bool = false) {
         self.chord = chord
         self.measure = measure
         self.requiresOpenedWindow = requiresOpenedWindow
+        self.toOwnPanel = toOwnPanel
     }
 }
 
@@ -163,8 +168,11 @@ public enum ScenarioCatalog {
     }
 
     /// The scenarios for one app. `regions` overrides a group's diff region
-    /// (default: the whole window).
-    public static func plan(_ layout: SpaceLayout, groups selected: [String] = groups, regions: [String: Region] = [:]) -> Plan {
+    /// (default: the whole window). A scenario with a key macOS or another
+    /// app takes first (`reserved`, SystemShortcuts) is skipped: the key would
+    /// never reach the app (⌃n would move the macOS desktop instead).
+    public static func plan(_ layout: SpaceLayout, groups selected: [String] = groups, regions: [String: Region] = [:],
+                            reserved: [ReservedShortcut] = []) -> Plan {
         var scenarios: [Scenario] = []
         var skipped: [String] = []
         func region(_ group: String) -> Region { regions[group] ?? .window }
@@ -216,12 +224,12 @@ public enum ScenarioCatalog {
             case "new_tab":
                 scenarios.append(Scenario(id: "new_tab", group: group, iteration: [
                     Step(.commandT, .frames(base: "ui.new_tab", suffix: nil, content: false)),
-                    Step(.escape, .frames(base: "ui.new_tab.dismiss", suffix: nil, content: false)),
+                    Step(.escape, .frames(base: "ui.new_tab.dismiss", suffix: nil, content: false), toOwnPanel: true),
                 ], region: region(group)))
             case "open_location":
                 scenarios.append(Scenario(id: "open_location", group: group, iteration: [
                     Step(.commandL, .frames(base: "ui.open_location", suffix: nil, content: false)),
-                    Step(.escape, .frames(base: "ui.open_location.dismiss", suffix: nil, content: false)),
+                    Step(.escape, .frames(base: "ui.open_location.dismiss", suffix: nil, content: false), toOwnPanel: true),
                 ], region: region(group)))
             case "little_arc":
                 scenarios.append(Scenario(id: "little_arc", group: group, iteration: [
@@ -231,6 +239,14 @@ public enum ScenarioCatalog {
             default:
                 break
             }
+        }
+        scenarios.removeAll { scenario in
+            for step in scenario.setup + scenario.iteration {
+                guard let shortcut = reserved.first(where: { $0.matches(step.chord) }) else { continue }
+                skipped.append("\(scenario.id): \(step.chord.label) is \(shortcut.name), so the key never reaches the app")
+                return true
+            }
+            return false
         }
         return Plan(scenarios: scenarios, skipped: skipped)
     }

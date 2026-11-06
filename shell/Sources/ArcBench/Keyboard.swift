@@ -18,6 +18,14 @@ enum HostClock {
     static var now: Double { seconds(mach_absolute_time()) }
 }
 
+/// The keys macOS takes for itself (SystemShortcuts), read once.
+enum MacShortcuts {
+    static let reserved: [ReservedShortcut] = {
+        guard let keys = CFPreferencesCopyAppValue("AppleSymbolicHotKeys" as CFString, SystemShortcuts.domain as CFString) as? [String: Any] else { return [] }
+        return SystemShortcuts.reserved(hotKeys: keys)
+    }()
+}
+
 /// Keystrokes posted to the HID event tap, as a keyboard would send them:
 /// each modifier down, the key down and up, the modifiers up.
 enum Keyboard {

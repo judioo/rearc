@@ -47,9 +47,60 @@ enum AX {
         value(app(pid), kAXFocusedWindowAttribute, as: AXUIElement.self).flatMap(windowID)
     }
 
+    private typealias GetFrontProcess = @convention(c) (UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
+    private typealias GetProcessPID = @convention(c) (UnsafePointer<ProcessSerialNumber>, UnsafeMutablePointer<pid_t>) -> OSStatus
+    private static let processManager: (front: GetFrontProcess, pid: GetProcessPID)? = {
+        guard let handle = dlopen(nil, RTLD_NOW), let front = dlsym(handle, "GetFrontProcess"), let pid = dlsym(handle, "GetProcessPID") else { return nil }
+        return (unsafeBitCast(front, to: GetFrontProcess.self), unsafeBitCast(pid, to: GetProcessPID.self))
+    }()
+
+    /// The frontmost app's pid, asked of the window server each time
+    /// (`GetFrontProcess`, deprecated but exported; `lsappinfo front` agrees).
+    /// `NSWorkspace.frontmostApplication` changes only when the main run loop
+    /// runs, which the harness's waits do not, so it lags; Accessibility's
+    /// system-wide focused application fails while that app does not answer.
+    static var frontmostPID: pid_t? {
+        var psn = ProcessSerialNumber()
+        var pid: pid_t = 0
+        if let processManager, processManager.front(&psn) == noErr, processManager.pid(&psn, &pid) == noErr { return pid }
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+
     /// Frontmost app is `pid` and its key window is `windowID`.
     static func isKey(_ pid: pid_t, windowID: CGWindowID) -> Bool {
-        NSWorkspace.shared.frontmostApplication?.processIdentifier == pid && focusedWindowID(pid) == windowID
+        frontmostPID == pid && focusedWindowID(pid) == windowID
+    }
+
+    /// Frontmost app is `pid` and its key window is `windowID` or a panel of
+    /// the app over it (Arc's command bar), not another browser window.
+    static func isKeyOrOwnPanel(_ pid: pid_t, windowID: CGWindowID) -> Bool {
+        guard frontmostPID == pid else { return false }
+        guard let focused = focusedWindowID(pid), focused != windowID else { return true }
+        return !WindowList.normal(pid: pid).contains { $0.id == focused && WindowList.isBrowserSized($0) }
+    }
+
+    /// What has focus instead of `windowID`, for a "not key" failure: the
+    /// frontmost app's bundle id, and the app's focused and main windows by
+    /// id, size, layer and subrole (never a title).
+    static func describeFocus(_ pid: pid_t, expected: CGWindowID) -> String {
+        let front = frontmostPID
+        let frontName = front.map { $0 == pid ? "the target" : (NSRunningApplication(processIdentifier: $0)?.bundleIdentifier ?? "pid \($0)") } ?? "none"
+        let listed = WindowList.onScreen(pid: pid)
+        func describe(_ element: AXUIElement?) -> String {
+            guard let element else { return "none" }
+            let id = windowID(element)
+            let subrole = value(element, kAXSubroleAttribute, as: String.self) ?? "?"
+            let entry = id.flatMap { id in listed.first { $0.id == id } }
+            let size = entry.map { "\(Int($0.bounds.width))×\(Int($0.bounds.height)) layer \($0.layer)" } ?? "not on screen"
+            return "\(id.map(String.init) ?? "?") (\(subrole), \(size))"
+        }
+        let application = app(pid)
+        let focused = value(application, kAXFocusedWindowAttribute, as: AXUIElement.self)
+        let main = value(application, kAXMainWindowAttribute, as: AXUIElement.self)
+        let others = listed.filter { $0.id != expected }.map { "\($0.id) \(Int($0.bounds.width))×\(Int($0.bounds.height)) layer \($0.layer)" }
+        return "frontmost: \(frontName); focused window \(describe(focused)); main \(describe(main)); expected \(expected) "
+            + (listed.contains { $0.id == expected } ? "on screen" : "NOT on screen")
+            + (others.isEmpty ? "" : "; its other windows: \(others.joined(separator: ", "))")
     }
 
     /// Makes `pid` frontmost and `windowID` its main, key window.
@@ -62,7 +113,8 @@ enum AX {
             AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         }
         NSRunningApplication(processIdentifier: pid)?.activate()
-        for _ in 0 ..< 20 where !isKey(pid, windowID: windowID) { Thread.sleep(forTimeInterval: 0.05) }
+        // Up to 3 s: a window on another macOS desktop comes on screen after the desktop slides over.
+        for _ in 0 ..< 60 where !isKey(pid, windowID: windowID) { Thread.sleep(forTimeInterval: 0.05) }
         return isKey(pid, windowID: windowID)
     }
 

@@ -41,7 +41,7 @@ final class Runner {
         metricOrder = []
         noisyPresses = 0
         pendingNotes = []
-        let plan = ScenarioCatalog.plan(target.layout, groups: options.groups, regions: options.regions)
+        let plan = ScenarioCatalog.plan(target.layout, groups: options.groups, regions: options.regions, reserved: target.reserved)
         target.notes += plan.skipped.map { "skipped \($0)" }
         let refreshHz = Display.refreshHz(for: target.window.bounds)
         let frameMs = 1000 / Double(refreshHz)
@@ -54,7 +54,7 @@ final class Runner {
         }
         log(target, "window \(target.window.id) \(Int(target.window.bounds.width))×\(Int(target.window.bounds.height)) pt on "
             + "\(Display.name(for: target.window.bounds)) at \(refreshHz) Hz; \(plan.scenarios.count) scenarios")
-        guard try ensureKey(target) else { throw Failure("\(target.app.title)'s browser window is not key") }
+        guard try ensureKey(target) else { throw notKey(target) }
         let capture = WindowCapture(windowID: target.window.id, regions: regions, diff: options.diff, keepFrames: keep)
         try await capture.start(refreshHz: refreshHz, scale: options.captureScale)
         do {
@@ -102,17 +102,35 @@ final class Runner {
         var aborted: String?
         for scenario in plan.scenarios {
             log(target, "scenario \(scenario.id): \(options.warmups) warm-ups + \(options.iterations) iterations")
-            guard try ensureKey(target) else { throw Failure("\(target.app.title)'s browser window is not key") }
+            guard try ensureKey(target) else { throw notKey(target) }
             try await waitQuiet(capture)
             let before = state(target, capture)
+            iterationSamples = []
             do {
                 for step in scenario.setup { _ = try await perform(step, scenario: scenario, target: target, capture: capture, frameMs: frameMs, record: false) }
-                for index in 0 ..< options.warmups + options.iterations {
+                var index = 0
+                var measured = 0
+                var repeated = 0
+                while measured < options.iterations {
+                    let record = index >= options.warmups
+                    focusLost = false
                     for step in scenario.iteration {
                         _ = try await perform(step, scenario: scenario, target: target, capture: capture, frameMs: frameMs,
-                                              record: index >= options.warmups, label: "\(scenario.id)-\(index)")
+                                              record: record, label: "\(scenario.id)-\(index)")
                     }
+                    index += 1
+                    guard record else { iterationSamples = []; continue }
+                    if focusLost, repeated < options.iterations {
+                        // Another app took focus during a press: its pixels include the window losing key status.
+                        repeated += 1
+                        iterationSamples = []
+                        log(target, "\(scenario.id)-\(index - 1): another app took focus during the iteration; repeating it")
+                        continue
+                    }
+                    commitIteration()
+                    measured += 1
                 }
+                if repeated > 0 { pendingNotes.append("\(scenario.id): \(repeated) iteration(s) repeated because another app took focus during them") }
             } catch let error as GateClosed {
                 _ = await restore(target, to: before, scenario: scenario, capture: capture)
                 throw error
@@ -147,7 +165,7 @@ final class Runner {
         if step.requiresOpenedWindow {
             // ⌘W goes only to the window ⌥⌘N opened, never to the browser window.
             guard let opened = openedWindow,
-                  NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid,
+                  AX.frontmostPID == target.pid,
                   AX.focusedWindowID(target.pid) == opened else {
                 if let opened = openedWindow {
                     pendingNotes.append("\(scenario.id): the window ⌥⌘N opened was not key: closed with its close button, not ⌘W")
@@ -156,8 +174,10 @@ final class Runner {
                 for id in step.measure.metricIDs { add(id, scenario: scenario, method: .windowList, value: nil, resolutionMs: 0, record: record) }
                 return false
             }
+        } else if step.toOwnPanel, AX.isKeyOrOwnPanel(target.pid, windowID: target.window.id) {
+            // Esc for Arc's command bar, which is its own key window over the browser window.
         } else {
-            guard try ensureKey(target) else { throw Failure("\(target.app.title)'s browser window is not key") }
+            guard try ensureKey(target) else { throw notKey(target) }
         }
         switch step.measure {
         case let .frames(base, suffix, content):
@@ -171,12 +191,16 @@ final class Runner {
                 main = Detector.detect(capture.samples(regionName), postTime: posted, now: HostClock.now, settings: options.detection)
             }
             capture.disarm()
+            noteFocus(target)
             let tail = suffix.map { ".\($0)" } ?? ""
             switch main {
             case let .measured(ack, settled):
                 add("\(base).ack\(tail)", scenario: scenario, method: .pixels, value: ack * 1000, resolutionMs: frameMs, record: record)
                 add("\(base).settled\(tail)", scenario: scenario, method: .pixels, value: settled.map { $0 * 1000 }, resolutionMs: frameMs, record: record)
             default:
+                let seen = capture.samples(regionName).filter { $0.time > posted }
+                log(target, String(format: "%@ %@: no change within %.0f ms (%d frames, largest change %.2f %%)", label, step.chord.label,
+                                   options.detection.timeout * 1000, seen.count, (seen.map(\.fromBaseline).max() ?? 0) * 100))
                 add("\(base).ack\(tail)", scenario: scenario, method: .pixels, value: nil, resolutionMs: frameMs, record: record)
                 add("\(base).settled\(tail)", scenario: scenario, method: .pixels, value: nil, resolutionMs: frameMs, record: record)
             }
@@ -191,6 +215,7 @@ final class Runner {
             let before = Set(WindowList.normal(pid: target.pid).map(\.id))
             let posted = Keyboard.press(step.chord)
             let seen = await poll(pid: target.pid, before: before, closing: nil)
+            noteFocus(target)
             openedWindow = seen?.window
             add(id, scenario: scenario, method: .windowList, value: seen.map { ($0.time - posted) * 1000 },
                 resolutionMs: (seen?.period ?? 0) * 1000, record: record)
@@ -242,11 +267,16 @@ final class Runner {
         }
     }
 
-    /// The target is frontmost with its browser window key; activates it once if not.
+    private func notKey(_ target: Target) -> Failure {
+        Failure("\(target.app.title)'s browser window is not key (\(AX.describeFocus(target.pid, expected: target.window.id)))")
+    }
+
+    /// The target is frontmost with its browser window key; activates it (up to twice) if not.
     private func ensureKey(_ target: Target) throws -> Bool {
         guard InputGuard.gateOpen else { throw GateClosed() }
         if AX.isKey(target.pid, windowID: target.window.id) { return true }
-        return AX.activate(target.pid, windowID: target.window.id)
+        // Twice: another app may take focus back right after the first (an app that activates itself).
+        return AX.activate(target.pid, windowID: target.window.id) || AX.activate(target.pid, windowID: target.window.id)
     }
 
     // MARK: State
@@ -257,11 +287,16 @@ final class Runner {
         var windows: Set<CGWindowID>
         var title: String?
         var frame: Frame?
+        /// The app's own word for its selected tab and space, when it has one (Arc's AppleScript).
+        var tab: String?
+        var space: String?
     }
 
     private func state(_ target: Target, _ capture: WindowCapture) -> AppState {
-        AppState(windows: Set(WindowList.normal(pid: target.pid).map(\.id)),
-                 title: AX.window(target.pid, id: target.window.id).flatMap(AX.title), frame: capture.latestFrame)
+        // Tooltip-sized windows are left out: a help tag under the pointer comes and goes on its own.
+        AppState(windows: Set(WindowList.normal(pid: target.pid).filter { $0.bounds.width >= 200 && $0.bounds.height >= 100 }.map(\.id)),
+                 title: AX.window(target.pid, id: target.window.id).flatMap(AX.title), frame: capture.latestFrame,
+                 tab: target.selectedTab(), space: target.activeSpace())
     }
 
     /// The sidebar column differs from `before` (a tab, space or the sidebar
@@ -273,7 +308,9 @@ final class Runner {
 
     private func cameBack(_ before: AppState, _ now: AppState) -> Bool {
         let titleBack = (before.title ?? "").isEmpty || now.title == before.title
-        return titleBack && sidebarMoved(before, now) <= Self.restoreThreshold
+        let tabBack = before.tab == nil || now.tab == before.tab
+        let spaceBack = before.space == nil || now.space == before.space
+        return titleBack && tabBack && spaceBack && sidebarMoved(before, now) <= Self.restoreThreshold
     }
 
     static let restoreThreshold = 0.005
@@ -302,9 +339,23 @@ final class Runner {
             await press(.commandS)
         }
         if !cameBack(before, now), scenario.group == "space_switch" {
+            let moved = sidebarMoved(before, now)
             _ = await target.returnHome()
             try? await Task.sleep(nanoseconds: 300_000_000)
             now = state(target, capture)
+            if !cameBack(before, now), now.space == nil, sidebarMoved(before, now) > moved {
+                // ReArc's return home is a toggle (Previous Space): it was home already, so toggle back.
+                _ = await target.returnHome()
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                now = state(target, capture)
+            }
+        }
+        if !cameBack(before, now), scenario.movesTab || scenario.group == "space_switch", let tab = before.tab {
+            // The app can select its starting tab itself (Arc's AppleScript), wherever it is in the sidebar.
+            if await target.selectTab(tab) {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                now = state(target, capture)
+            }
         }
         if !cameBack(before, now), scenario.movesTab || scenario.group == "space_switch" {
             // The plain tabs' ⌘n until the starting tab is back (by title and the sidebar's pixels).
@@ -332,8 +383,31 @@ final class Runner {
 
     // MARK: Results
 
+    /// Measured iteration's samples, kept until the iteration ends without losing focus.
+    private var iterationSamples: [(id: String, scenario: Scenario, method: TimingMethod, value: Double?, resolutionMs: Double)] = []
+    /// Another app was frontmost when a press of this iteration was timed.
+    private var focusLost = false
+
     private func add(_ id: String, scenario: Scenario, method: TimingMethod, value: Double?, resolutionMs: Double, record: Bool) {
         guard record else { return }
+        iterationSamples.append((id, scenario, method, value, resolutionMs))
+    }
+
+    /// Marks the iteration when another app is frontmost after a timed press, and says which (bundle id).
+    private func noteFocus(_ target: Target) {
+        guard let front = AX.frontmostPID, front != target.pid else { return }
+        focusLost = true
+        log(target, "frontmost after the press: \(NSRunningApplication(processIdentifier: front)?.bundleIdentifier ?? "pid \(front)")")
+    }
+
+    private func commitIteration() {
+        for sample in iterationSamples {
+            commit(sample.id, scenario: sample.scenario, method: sample.method, value: sample.value, resolutionMs: sample.resolutionMs)
+        }
+        iterationSamples = []
+    }
+
+    private func commit(_ id: String, scenario: Scenario, method: TimingMethod, value: Double?, resolutionMs: Double) {
         if metrics[id] == nil {
             metrics[id] = Accumulator(scenario: scenario.id, method: method, resolutionMs: resolutionMs)
             metricOrder.append(id)
