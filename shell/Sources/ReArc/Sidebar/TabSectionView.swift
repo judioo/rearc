@@ -92,7 +92,10 @@ struct SidebarEntryRow: View, Equatable {
                 onMute: { model.toggleMute(tab.id) },
                 onPictureInPicture: { model.setPictureInPicture(false, tabID: tab.id) },
                 onCloseOption: { model.unsplitTabIfInSplit(tab.id) },
-                onReset: tab.isAwayFromSavedURL ? { model.resetTabToSavedURL(tab.id) } : nil
+                onReset: tab.isAwayFromSavedURL ? { model.resetTabToSavedURL(tab.id) } : nil,
+                subtitle: model.renameHintSubtitle(for: tab.id),
+                closeKind: model.closeKind(of: tab.id),
+                onRename: { model.beginRename(.tab(tab.id)) }
             ) {
                 TabContextMenu(model: model, tab: tab)
             }

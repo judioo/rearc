@@ -26,6 +26,10 @@ struct TabRowView<Menu: View>: View {
     var onReset: (() -> Void)? = nil
     /// A second line under the title (Arc's "3 Recent"), 11 pt grey.
     var subtitle: String? = nil
+    /// What the ✕ does here: it names the button and its tooltip.
+    var closeKind: TabCloseKind = .archive
+    /// Double-click: the rename the context menu's Rename… starts.
+    var onRename: (() -> Void)? = nil
     @ViewBuilder let menu: () -> Menu
 
     @State private var isHovering = false
@@ -61,8 +65,10 @@ struct TabRowView<Menu: View>: View {
                         .font(.system(size: SidebarMetrics.subtitleSize))
                         .foregroundStyle(chrome.secondaryText)
                         .lineLimit(1)
+                        .transition(.opacity)
                 }
             }
+            .animation(.easeOut(duration: 0.3), value: subtitle)
 
             if tab.isUnread {
                 Circle()
@@ -124,9 +130,8 @@ struct TabRowView<Menu: View>: View {
                         .frame(width: 16, height: 16)
                 }
                 .buttonStyle(.plain)
-                .help(tab.kind == .pinned
-                    ? "Unload Tab: it stays pinned and goes back to its pinned URL (⌘W)"
-                    : "Close Tab (⌥-click to unsplit when in a split)")
+                .help("\(closeKind.buttonLabel)  ⌘W\n⌥-click to unsplit when in a split")
+                .accessibilityLabel(closeKind.buttonLabel)
             }
         }
         .padding(.leading, SidebarMetrics.iconLeading)
@@ -146,6 +151,9 @@ struct TabRowView<Menu: View>: View {
         .contentShape(RoundedRectangle(cornerRadius: 8))
         .padding(.vertical, (SidebarMetrics.rowPitch - SidebarMetrics.rowHeight) / 2)
         .onTapGesture(perform: onSelect)
+        // Simultaneous, so a single click selects at once rather than
+        // waiting to see whether a second follows.
+        .simultaneousGesture(TapGesture(count: 2).onEnded { onRename?() })
         .onHover { isHovering = $0 }
         .contextMenu { menu() }
         .help(tooltip)

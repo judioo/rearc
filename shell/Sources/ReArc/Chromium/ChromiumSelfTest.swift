@@ -1256,6 +1256,7 @@ final class ChromiumSelfTest {
         }
         try await shortcutChecks(model: model, store: store, tab: tabA, engine: engineA, base: base, window: first)
         try await wave33UIChecks(model: model, store: store, tab: tabA, engine: engineA, other: tabB, window: first)
+        try await pinnedLifecycleChecks(model: model, store: store, home: tabA, homeEngine: engineA, window: first)
 
         // Private window: PrivateWindowModel on an off-the-record profile under the
         // active profile; its end closes that profile, and a new one starts empty.
@@ -4520,6 +4521,184 @@ extension ChromiumSelfTest {
     private func XCTUnwrapSelfTest<T>(_ value: T?, _ what: String) throws -> T {
         guard let value else { throw Failure(description: "no \(what)") }
         return value
+    }
+}
+
+// MARK: Wave 34 pinned lifecycle (ARC-RECORDING-2026-11-06.md §4 item 3)
+
+extension ChromiumSelfTest {
+    /// The plain sidebar cell drawing `id` on screen in `window`, as a screen rect.
+    @MainActor
+    private func sidebarRowFrame(_ id: UUID, in window: NSWindow) -> NSRect? {
+        var stack: [NSView] = window.contentView.map { [$0] } ?? []
+        while let view = stack.popLast() {
+            if let cell = view as? SidebarPlainRowCell, cell.rowID == id, !cell.visibleRect.isEmpty {
+                return window.convertToScreen(cell.convert(cell.bounds, to: nil))
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return nil
+    }
+
+    /// The hover ✕ of a tab row: 8 pt in from the highlight's trailing edge, 16 pt wide.
+    private func closeButtonPoint(in row: NSRect) -> NSPoint {
+        NSPoint(x: row.maxX - SidebarMetrics.rowInset - 16, y: row.midY)
+    }
+
+    /// A real click, and a second one if the first was dropped (see `systemClick`).
+    @MainActor
+    private func systemClick(atScreen point: NSPoint, until condition: () -> Bool) async throws -> Bool {
+        try await systemClick(atScreen: point)
+        if await eventually(timeout: 1.5, condition) { return true }
+        try await systemClick(atScreen: point)
+        return await eventually(timeout: 4, condition)
+    }
+
+    /// A mouse drag through the window server, slow enough for SwiftUI's
+    /// drag to begin and its drop target to settle before the release.
+    @MainActor
+    private func systemDrag(from start: NSPoint, to end: NSPoint) async throws {
+        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        func flipped(_ point: NSPoint) -> CGPoint { CGPoint(x: point.x, y: top - point.y) }
+        let source = CGEventSource(stateID: .hidSystemState)
+        func post(_ type: CGEventType, _ point: NSPoint) {
+            CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: flipped(point), mouseButton: .left)?.post(tap: .cghidEventTap)
+        }
+        for _ in 0..<2 {
+            post(.mouseMoved, start)
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        post(.leftMouseDown, start)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let steps = 24
+        for step in 1...steps {
+            let t = CGFloat(step) / CGFloat(steps)
+            post(.leftMouseDragged, NSPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t))
+            try await Task.sleep(nanoseconds: 30_000_000)
+        }
+        try await Task.sleep(nanoseconds: 400_000_000)
+        post(.leftMouseUp, end)
+        try await Task.sleep(nanoseconds: 300_000_000)
+    }
+
+    /// Arc's pinned-tab lifecycle with real input: + New Tab, ✕ archives it;
+    /// a second tab dragged into Pinned, ✕ unloads it and the row stays;
+    /// a click loads its saved URL; three space switches keep the same page
+    /// (the /nav fixture counts loads in its title).
+    @MainActor
+    func pinnedLifecycleChecks(model: BrowserViewModel, store: SidebarStore, home: Tab, homeEngine: ChromiumEngine,
+                               window: NSWindow) async throws {
+        guard await bringToFront(window, for: "pinned lifecycle checks") else {
+            log("NOTE pinned lifecycle checks skipped: they need the window on an unlocked screen")
+            return
+        }
+        if !model.isSidebarVisible {
+            model.toggleSidebar()
+            try await wait("sidebar shown for the lifecycle checks", timeout: 5) { model.isSidebarVisible && !model.isSidebarSliding }
+        }
+        var results: [String] = []
+        let homeSpace = store.activeSpaceID
+        let anchor = store.addTab(kind: .pinned, title: "Lifecycle anchor", url: URL(string: "\(serverBase)/a")!)
+
+        // Opens a Today tab from the sidebar's + New Tab and the command bar.
+        func openFromNewTab(_ query: String, title: String) async throws -> Tab {
+            let before = Set(store.content(for: homeSpace).today.map(\.id))
+            let newTab = try XCTUnwrapSelfTest(accessibilityElement(in: window, labelled: "New Tab"), "+ New Tab row").accessibilityFrame()
+            let clicked = try await systemClick(atScreen: NSPoint(x: newTab.midX, y: newTab.midY)) { model.isCommandBarPresented }
+            try check(clicked, "+ New Tab at \(newTab) opened no command bar")
+            model.commandBarText = "\(serverBase)/nav?\(query)"
+            model.submitCommandBar()
+            guard let tab = store.selectedTab, !before.contains(tab.id), store.kind(of: tab.id) == .today else {
+                throw Failure(description: "+ New Tab opened no Today tab")
+            }
+            let engine = try shellEngine(model, tab)
+            try await wait("new tab '\(query)' loaded", timeout: 20) { engine.pageTitle?.hasPrefix("nav:") == true && !engine.isLoading }
+            // A title of its own, so its row is found by id and its label is unique.
+            store.renameTab(tab.id, to: title)
+            return tab
+        }
+
+        // (1) + New Tab, then ✕: the row is gone and the tab is in the archive.
+        let first = try await openFromNewTab("lifecycle=1", title: "Lifecycle Today")
+        try await wait("Today row on screen", timeout: 5) { self.sidebarRowFrame(first.id, in: window) != nil }
+        let firstRow = try XCTUnwrapSelfTest(sidebarRowFrame(first.id, in: window), "Today row")
+        try check(model.closeKind(of: first.id) == .archive, "the Today row's ✕ is not Archive")
+        let archived = try await systemClick(atScreen: closeButtonPoint(in: firstRow)) {
+            store.tab(withID: first.id) == nil && store.archivedTabs.contains { $0.id == first.id }
+        }
+        try check(archived, "✕ on the Today row at \(firstRow) did not archive it")
+        results.append("(1) + New Tab opened a Today tab; its ✕ (\(TabCloseKind.archive.buttonLabel)) archived it")
+
+        // (2) A second tab dragged into Pinned, below the anchor.
+        let second = try await openFromNewTab("lifecycle=2", title: "Lifecycle Pin")
+        try await wait("both rows on screen", timeout: 5) {
+            self.sidebarRowFrame(second.id, in: window) != nil && self.sidebarRowFrame(anchor.id, in: window) != nil
+        }
+        let secondRow = try XCTUnwrapSelfTest(sidebarRowFrame(second.id, in: window), "second Today row")
+        let anchorRow = try XCTUnwrapSelfTest(sidebarRowFrame(anchor.id, in: window), "pinned anchor row")
+        // The anchor's bottom fifth: after it, not into a new folder.
+        try await systemDrag(from: NSPoint(x: secondRow.midX, y: secondRow.midY),
+                             to: NSPoint(x: anchorRow.midX, y: anchorRow.minY + anchorRow.height * 0.15))
+        let dragged = await eventually(timeout: 3) { store.kind(of: second.id) == .pinned }
+        if !dragged {
+            log("NOTE the window-server drag did not pin the tab; pinning it through the same model call the drop makes")
+            model.moveItem(second.id, relativeTo: anchor.id, after: true)
+        }
+        try check(store.kind(of: second.id) == .pinned, "the tab is not pinned after the drop")
+        let saved = try XCTUnwrapSelfTest(store.tab(withID: second.id)?.savedURL, "saved URL after pinning")
+        try check(model.renameHintSubtitle(for: second.id) == "Double-click to rename", "no rename hint after the pin")
+        results.append("(2) the tab \(dragged ? "dragged" : "moved (drag NOTE)") into Pinned saved \(saved.path)?\(saved.query ?? "") "
+            + "and shows \"Double-click to rename\"")
+
+        // (3) ✕ on the pinned row: it stays, unloaded and dimmed.
+        model.selectTab(second.id)
+        try await wait("pinned row on screen", timeout: 5) { self.sidebarRowFrame(second.id, in: window) != nil }
+        let pinnedRow = try XCTUnwrapSelfTest(sidebarRowFrame(second.id, in: window), "pinned row")
+        try check(model.closeKind(of: second.id) == .unloadPinned, "the pinned row's ✕ is not an unload")
+        let unloaded = try await systemClick(atScreen: closeButtonPoint(in: pinnedRow)) { model.isTabUnloaded(second.id) }
+        try check(unloaded && store.kind(of: second.id) == .pinned && store.selectedTabID != second.id,
+                  "✕ on the pinned row: unloaded \(model.isTabUnloaded(second.id)), kind \(String(describing: store.kind(of: second.id)))")
+        results.append("(3) ✕ on the pinned row unloaded it and the row stayed")
+
+        // (4) A click on the row loads the saved URL.
+        let rowAgain = try XCTUnwrapSelfTest(sidebarRowFrame(second.id, in: window), "unloaded pinned row")
+        let selected = try await systemClick(atScreen: NSPoint(x: rowAgain.midX, y: rowAgain.midY)) { store.selectedTabID == second.id }
+        try check(selected, "a click on the unloaded pinned row did not select it")
+        try await wait("pinned tab reloaded on its saved URL", timeout: 20) {
+            guard let engine = try? self.shellEngine(model, second) else { return false }
+            return engine.currentURL == saved && engine.pageTitle?.hasPrefix("nav:") == true && !engine.isLoading
+                && engine.attachmentID != nil && !model.isTabUnloaded(second.id)
+        }
+        let engine = try shellEngine(model, second)
+        let loadedTitle = engine.pageTitle ?? ""
+        results.append("(4) a click loaded \(saved.path)?\(saved.query ?? "") ('\(loadedTitle)')")
+
+        // (5) Away to another space and back, three times: same engine, no reload.
+        let away = store.addSpace(name: "Lifecycle Away")
+        for round in 1...3 {
+            model.selectSpace(away.id)
+            try await wait("space switch \(round) away", timeout: 5) { store.activeSpaceID == away.id }
+            try await Task.sleep(nanoseconds: 400_000_000)
+            try check(!model.isTabUnloaded(second.id), "round \(round): the pinned tab unloaded while its space was away")
+            model.selectSpace(homeSpace)
+            try await wait("space switch \(round) back", timeout: 10) {
+                store.activeSpaceID == homeSpace && store.selectedTabID == second.id && engine.attachmentID != nil
+            }
+            let now = try shellEngine(model, second)
+            try check(now === engine, "round \(round): the pinned tab has a new engine")
+            try check(engine.pageTitle == loadedTitle && engine.currentURL == saved,
+                      "round \(round): the page reloaded ('\(loadedTitle)' -> '\(engine.pageTitle ?? "")')")
+        }
+        results.append("(5) three space switches kept the same engine and '\(loadedTitle)' (no reload)")
+
+        model.deleteTab(second.id)
+        model.deleteTab(anchor.id)
+        _ = store.removeSpace(away.id)
+        model.selectTab(home.id)
+        try await wait("tab A back after the lifecycle checks", timeout: 15) {
+            homeEngine.attachmentID != nil && homeEngine.leaseHolder?.window === window
+        }
+        log("PASS pinned lifecycle: " + results.joined(separator: "; "))
     }
 }
 #endif

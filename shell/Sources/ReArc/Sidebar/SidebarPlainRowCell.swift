@@ -396,7 +396,7 @@ struct PlainRowState: Equatable {
     var isUnread = false
     var isExpanded = false
     /// Something only the SwiftUI row draws (a loading ring, a crash glyph,
-    /// an audio or Picture in Picture badge).
+    /// an audio or Picture in Picture badge, the rename hint).
     var needsHosting = false
     var chrome = ThemeChromeColors(theme: .default, dark: false)
 
@@ -414,6 +414,7 @@ struct PlainRowState: Equatable {
             state.needsHosting = model.tabActivity(tab.id) != .idle
                 || model.showsAudibleIndicator(for: tab.id)
                 || model.isPictureInPicture(tab.id)
+                || model.renameHint?.tabID == tab.id
         case .folder(let folder):
             state.title = folder.title
             state.isExpanded = model.store.isFolderExpanded(folder.id)

@@ -1131,13 +1131,21 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         main.addSubmenu(view, title: "View")
 
         let tabs = NSMenu(title: "Tabs")
-        tabs.addItem(target.item("Close Tab", "w") { [weak self] in
+        let close = target.item("Close Tab", "w") { [weak self] in
             // A private or Little Arc window has one page: Cmd+W closes the window.
             if let window = NSApp.keyWindow, let entry = self?.windows[ObjectIdentifier(window)] {
                 if case .browser = entry.role {} else { return self?.closeWindow(window) ?? () }
             }
             model.closeSelectedTab()
-        })
+        }
+        // Named for what it does to the selected tab ("Archive Tab" in Today).
+        target.setLiveTitle(of: close) { [weak self] in
+            if let window = NSApp.keyWindow, let entry = self?.windows[ObjectIdentifier(window)] {
+                if case .browser = entry.role {} else { return "Close Tab" }
+            }
+            return model.closeTabMenuTitle
+        }
+        tabs.addItem(close)
         tabs.addItem(.separator())
         target.add(ShellMenus.tabNavigation(model), to: tabs)
         target.add(ShellMenus.tabSwitcher(model), to: tabs)
@@ -1175,6 +1183,12 @@ final class ChromiumMenuTarget: NSObject, NSMenuItemValidation {
         let item = item(title, "", [], action: action)
         checks[item.tag] = isOn
         return item
+    }
+
+    /// A title read each time the menu opens; it never hides the item.
+    func setLiveTitle(of item: NSMenuItem, _ title: @escaping () -> String) {
+        titles[item.tag] = title
+        item.title = title()
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
