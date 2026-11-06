@@ -108,9 +108,8 @@ struct ExtensionIcon: View {
 }
 
 /// Arc's toolbar popover (ARC-RECORDING-ANALYSIS.md §9, frame 3380): a row
-/// of square Share / Boost / Capture buttons, then an "Extensions" grid of
-/// rounded tiles, four to a row, pinned ones with a blue pin badge, and a +
-/// tile last. Right-click a tile to pin or unpin it.
+/// of square Share / Boost / Capture buttons, then the site controls'
+/// Extensions grid (pinned first, with the pin badge; right-click pins).
 private struct ExtensionsMenu: View {
     let model: BrowserViewModel
     let engine: (any WebEngine)?
@@ -118,10 +117,7 @@ private struct ExtensionsMenu: View {
     let dismiss: () -> Void
     @Environment(\.sidebarWindow) private var window
 
-    private let columns = Array(repeating: GridItem(.fixed(48), spacing: 8), count: 4)
-
     var body: some View {
-        let actions = model.extensions.actions(for: engine)
         let url = engine?.currentURL
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -137,52 +133,13 @@ private struct ExtensionsMenu: View {
             Text("Extensions")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
-                ForEach(actions) { action in
-                    let pinned = model.extensions.pins.isPinned(action.id)
-                    Button { run(action.id) } label: {
-                        ExtensionIcon(action: action, size: 22)
-                            .frame(width: 48, height: 48)
-                            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .overlay(alignment: .topTrailing) {
-                                if pinned {
-                                    Image(systemName: "pin.fill")
-                                        .font(.system(size: 7, weight: .bold))
-                                        .foregroundStyle(.white)
-                                        .frame(width: 14, height: 14)
-                                        .background(Color.blue, in: Circle())
-                                        .offset(x: 4, y: -4)
-                                }
-                            }
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!action.isEnabled)
-                    .help(action.tooltip)
-                    .accessibilityLabel(action.name)
-                    .contextMenu {
-                        Button(pinned ? "Unpin \(action.name)" : "Pin \(action.name)") { model.extensions.togglePin(action.id) }
-                    }
-                }
-                Button {
-                    dismiss()
-                    model.openChromeWebStore()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 48, height: 48)
-                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Chrome Web Store")
-                .accessibilityLabel("Add Extensions")
-                .contextMenu { Button("Manage Extensions") { model.openBrowserPage(.extensions) } }
+            SiteControlsExtensionGrid(model: model, engine: engine, run: run) {
+                dismiss()
+                model.openChromeWebStore()
             }
         }
         .padding(12)
-        .frame(width: 4 * 48 + 3 * 8 + 24)
+        .frame(width: SiteControlCenterView.width + 24)
     }
 
     private func squareLabel(_ title: String, _ symbol: String) -> some View {

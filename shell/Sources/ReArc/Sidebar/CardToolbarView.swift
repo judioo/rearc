@@ -11,6 +11,7 @@ struct CardToolbarView: View {
     @Environment(\.sidebarWindow) private var window
     @Environment(\.themeChrome) private var chrome
     @State private var showsSiteControls = false
+    @State private var siteControlsAnchor: NSView?
     @State private var isHoveringURL = false
     @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
 
@@ -70,11 +71,14 @@ struct CardToolbarView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(quietInk)
                 .disabled(site == nil || engine == nil)
+                .background(AnchorReader { siteControlsAnchor = $0 })
                 .help(site.map { "Site controls for \($0.host)" } ?? "Site controls")
                 .accessibilityLabel("Site controls")
                 .popover(isPresented: $showsSiteControls, arrowEdge: .bottom) {
                     if let engine, let site {
-                        SiteControlCenterView(model: model, engine: engine, site: site) { showsSiteControls = false }
+                        SiteControlCenterView(model: model, engine: engine, site: site, anchor: siteControlsAnchor) {
+                            showsSiteControls = false
+                        }
                     }
                 }
                 Button { model.addSplitView(orientation: .horizontal) } label: {
