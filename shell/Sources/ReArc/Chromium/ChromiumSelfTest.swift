@@ -4616,10 +4616,11 @@ extension ChromiumSelfTest {
         while let view = stack.popLast() {
             if let table = view as? NSTableView, let controller = table.delegate as? SidebarListController,
                !table.visibleRect.isEmpty, let index = controller.rows.firstIndex(of: .newTab) {
-                // The cell the table shows for that row, not the row's rect: the rows can be mid-update.
-                guard let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false),
-                      !cell.visibleRect.isEmpty else {
-                    log("NOTE + New Tab is row \(index) of \(controller.rows.count) (table \(table.numberOfRows)) with no cell on screen")
+                // Only once the table has caught up with its rows: right after a tab is
+                // added, row `index` is still the old row (a tab) on screen.
+                guard table.numberOfRows == controller.rows.count,
+                      let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false),
+                      !(cell is SidebarPlainRowCell), !cell.visibleRect.isEmpty else {
                     return nil
                 }
                 return window.convertToScreen(cell.convert(cell.bounds, to: nil))
@@ -4692,6 +4693,7 @@ extension ChromiumSelfTest {
         // Opens a Today tab from the sidebar's + New Tab and the command bar.
         func openFromNewTab(_ query: String, title: String) async throws -> Tab {
             let before = Set(store.content(for: homeSpace).today.map(\.id))
+            try await wait("+ New Tab row on screen", timeout: 5) { self.sidebarNewTabRowFrame(in: window) != nil }
             let newTab = try XCTUnwrapSelfTest(sidebarNewTabRowFrame(in: window), "+ New Tab row")
             var downs: [String] = []
             let monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
