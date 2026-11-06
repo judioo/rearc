@@ -4578,7 +4578,8 @@ extension ChromiumSelfTest {
             throw Failure(description: "Choose a Theme at \(rowFrame) opened no popover (key \(NSApp.keyWindow?.title ?? "none"), hit \(hit))")
         }
         let rowPopover = popoverWindows()[0].frame
-        let side = rowPopover.maxX <= rowFrame.minX + 2 ? "left" : rowPopover.minX >= rowFrame.maxX - 2 ? "right" : "over"
+        // The popover's window includes its arrow, whose tip reaches back over the row's edge.
+        let side = rowPopover.maxX <= rowFrame.minX + 16 ? "left" : rowPopover.minX >= rowFrame.maxX - 16 ? "right" : "over"
         try check(side == "right", "the Choose a Theme popover \(rowPopover) must be right of its row \(rowFrame), got \(side)")
         popoverWindows().forEach { $0.close() }
         model.cancelSpaceCreation()
