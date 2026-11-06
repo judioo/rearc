@@ -52,6 +52,8 @@ struct ChromiumCapabilities: Equatable {
     static let pipEmbeddedFeature = "pip_embedded"
     static let perfMetricsFeature = "perf_metrics"
     static let earlyWindowFeature = "early_window"
+    static let mediaCaptureFeature = "media_capture"
+    static let searchEnginesFeature = "search_engines"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -100,6 +102,8 @@ struct ChromiumCapabilities: Equatable {
         pipEmbeddedFeature: 43,
         perfMetricsFeature: 44,
         earlyWindowFeature: 45,
+        mediaCaptureFeature: 46,
+        searchEnginesFeature: 46,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -200,6 +204,12 @@ struct ChromiumCapabilities: Equatable {
     /// `ReArcEngineSetEarlyWindowCallback`: the shell puts up its cached window
     /// when the application exists, before browser threads and profiles (launch).
     var earlyWindow: Bool
+    /// Per-tab camera/microphone/screen capture and the page's own camera and mic
+    /// state (`ReArcEngineSetMediaCaptureCallback`), with `ReArcTabSetCaptureMuted`
+    /// through the page's media session toggles (the call card).
+    var mediaCapture: Bool
+    /// The profile's default-search choices and `ReArcSearchSetDefaultEngine` (Settings).
+    var searchEngines: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -254,6 +264,8 @@ struct ChromiumCapabilities: Equatable {
         pipEmbedded = pictureInPicture && adopted(Self.pipEmbeddedFeature)
         perfMetrics = adopted(Self.perfMetricsFeature)
         earlyWindow = adopted(Self.earlyWindowFeature)
+        mediaCapture = adopted(Self.mediaCaptureFeature)
+        searchEngines = adopted(Self.searchEnginesFeature)
     }
 
     /// Inspect in the page menu: the shell opens a hosted frontend itself
@@ -327,6 +339,8 @@ struct ChromiumCapabilities: Equatable {
             (Self.pipEmbeddedFeature, pipEmbedded),
             (Self.perfMetricsFeature, perfMetrics),
             (Self.earlyWindowFeature, earlyWindow),
+            (Self.mediaCaptureFeature, mediaCapture),
+            (Self.searchEnginesFeature, searchEngines),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

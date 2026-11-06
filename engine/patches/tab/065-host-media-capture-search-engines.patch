@@ -1,0 +1,660 @@
+From 5732005123929ce3b61f58d9c1038e4237b2101e Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Fri, 6 Nov 2026 19:57:06 +0400
+Subject: [PATCH] P-TAB-001 call card and settings: media capture state and
+ search engine choice for the host
+
+The shell's call card needs to know when a tab uses the camera or the
+microphone and to mute them, and its Settings window needs the profile's
+default search choices. ABI 1.46 (media_capture, search_engines, bridge
+0.48.0) adds both.
+
+Media capture: every registry tab gets a watcher when its services attach.
+capturing_video / capturing_audio / capturing_display come from
+MediaStreamCaptureIndicator (Chrome's tab recording indicators); camera and
+microphone are the page's own report from its media session
+(setCameraActive / setMicrophoneActive), with can_toggle_* from the
+session's toggle actions. ReArcEngineSetMediaCaptureCallback delivers one
+posted event per change, never after tab.closed, and replays non-idle tabs
+on registration; ReArcTabGetMediaCapture reads the state.
+ReArcTabSetCaptureMuted runs the page's togglecamera / togglemicrophone
+handler through content::MediaSession, as Chrome's video-conferencing PiP
+buttons do; the engine never disables or stops a track itself.
+
+Search engines: ReArcSearchListEngines returns the engines Chrome's settings
+offer as default (TemplateURLService::ShowInDefaultList) with TemplateURLID,
+name, keyword, resolved search URL, favicon URL and default / prepopulated /
+can-make-default flags; ReArcSearchSetDefaultEngine makes one the
+user-selected default. framework.exports and framework.order list the five
+new functions. Existing ABI layouts remain unchanged.
+
+Last rebased: 2026-11-06 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/app/framework.exports                  |   5 +
+ chrome/app/framework.order                    |   5 +
+ chrome/browser/BUILD.gn                       |   1 +
+ .../browser/rearc_bridge/rearc_abi_internal.h |   3 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  75 ++++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   2 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_media_capture.cc       | 310 ++++++++++++++++++
+ .../browser/rearc_bridge/rearc_search_abi.cc  |  83 +++++
+ .../rearc_bridge/rearc_services_abi.cc        |   2 +
+ 10 files changed, 486 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_media_capture.cc
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index cf27c5168e..95c9462ebf 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -43,6 +43,11 @@ _ReArcEngineSetViewPresentationCallback
+ _ReArcMetricsGetHistogram
+ _ReArcEngineGetProcesses
+ _ReArcEngineSetEarlyWindowCallback
++_ReArcEngineSetMediaCaptureCallback
++_ReArcTabGetMediaCapture
++_ReArcTabSetCaptureMuted
++_ReArcSearchListEngines
++_ReArcSearchSetDefaultEngine
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 349e6351c4..cc9bd71d39 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -50,6 +50,11 @@ _ReArcEngineSetViewPresentationCallback
+ _ReArcMetricsGetHistogram
+ _ReArcEngineGetProcesses
+ _ReArcEngineSetEarlyWindowCallback
++_ReArcEngineSetMediaCaptureCallback
++_ReArcTabGetMediaCapture
++_ReArcTabSetCaptureMuted
++_ReArcSearchListEngines
++_ReArcSearchSetDefaultEngine
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 6beb031e43..316ae195e9 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1493,6 +1493,7 @@ source_set("core") {
+       "rearc_bridge/rearc_fullscreen.h",
+       "rearc_bridge/rearc_key_equivalents.cc",
+       "rearc_bridge/rearc_key_equivalents.h",
++      "rearc_bridge/rearc_media_capture.cc",
+       "rearc_bridge/rearc_perf.cc",
+       "rearc_bridge/rearc_perf.h",
+       "rearc_bridge/rearc_perf_metrics.cc",
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 8142ab4dc8..0e9d74b762 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -39,5 +39,8 @@ void ABICancelHistory(uint64_t profile_id);
+ void ABICancelSearch(uint64_t profile_id);
+ bool ABIHasVisibilityIntent(uint64_t tab_id);
+ bool ABIDiscardServicesBusy(uint64_t tab_id);
++// ABI 1.46 media capture (rearc_media_capture.cc), driven by the services hooks.
++void ABIAttachMediaCapture(uint64_t tab_id);
++void ABIDetachMediaCapture(uint64_t tab_id);
+ }  // namespace rearc
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 017fed11b9..812220c6c8 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 45, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 46, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -264,6 +264,38 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcAutocompleteStart(
+     uint64_t profile_id, const char* text, uint32_t options,
+     ReArcAutocompleteCallback completion, void* context, uint64_t* query_id);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcAutocompleteStop(uint64_t profile_id);
++// Search engine choice (search_engines, ABI 1.46): the engines Chrome's
++// settings offer as the default (the current default, prepopulated and
++// policy-provided engines), in TemplateURLService order. id is Chromium's
++// TemplateURLID, stable for the profile. search_url as above; favicon_url
++// empty when unknown. can_make_default is false for every row when the default
++// is policy-managed (default_is_managed). Same loading, deferral and OTR rules
++// as the calls above; the list is borrowed for the callback.
++typedef struct ReArcSearchEngine {
++  int64_t id;
++  const char* name;
++  const char* keyword;
++  const char* search_url;
++  const char* favicon_url;
++  bool is_default, is_prepopulated, can_make_default;
++} ReArcSearchEngine;
++typedef struct ReArcSearchEngineList {
++  const ReArcSearchEngine* engines;
++  size_t count;
++  bool default_is_managed;
++} ReArcSearchEngineList;
++typedef void (*ReArcSearchEngineListCallback)(
++    void* context, ReArcStatus status, uint64_t profile_id,
++    const ReArcSearchEngineList* list);
++REARC_ENGINE_EXPORT ReArcStatus ReArcSearchListEngines(
++    uint64_t profile_id, ReArcSearchEngineListCallback completion,
++    void* context);
++// Makes an engine of the list the user-selected default (Chromium persists
++// it). id <= 0: invalid_argument; unknown id: not_found; policy-managed
++// default or an engine that cannot be default: invalid_state; OTR: unsupported.
++REARC_ENGINE_EXPORT ReArcStatus ReArcSearchSetDefaultEngine(
++    uint64_t profile_id, int64_t engine_id, ReArcCompletion completion,
++    void* context);
+ 
+ // ABI 1.15 (history_recording, password_autofill): every tab carries Chromium's
+ // HistoryTabHelper (non-OTR profiles), autofill client and
+@@ -556,6 +588,47 @@ typedef void (*ReArcVideoOverlayPixelCallback)(void* context,
+                                                uint32_t rgba);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcVideoOverlayReadPixel(
+     uint64_t overlay_id, ReArcVideoOverlayPixelCallback callback, void* context);
++// Media capture (media_capture, ABI 1.46), per registry tab. capturing_video
++// and capturing_audio say the page holds a live camera / microphone stream,
++// capturing_display a screen, window or tab share; all three come from
++// Chromium's MediaStreamCaptureIndicator, the source of Chrome's tab recording
++// indicators. camera and microphone are the page's own on/off state from its
++// media session (navigator.mediaSession.setCameraActive/setMicrophoneActive):
++// REARC_CAPTURE_DEVICE_*; unknown when the page reports nothing. A stream can
++// stay live while the page reports the device off (a muted microphone), and a
++// page may stop the camera's stream when it turns it off. can_toggle_* say the
++// page handles the "togglecamera" / "togglemicrophone" media session actions.
++enum {
++  REARC_CAPTURE_DEVICE_UNKNOWN = 0,
++  REARC_CAPTURE_DEVICE_ON = 1,
++  REARC_CAPTURE_DEVICE_OFF = 2
++};
++typedef struct ReArcMediaCaptureState {
++  uint64_t profile_id, tab_id, content_generation;
++  bool capturing_video, capturing_audio, capturing_display;
++  uint32_t camera, microphone;
++  bool can_toggle_camera, can_toggle_microphone;
++} ReArcMediaCaptureState;
++// Posted on main after any field changes, at most once per change, never after
++// tab.closed. Setting a callback first posts the current state of every tab
++// that is not idle (idle: all false, both unknown). Null clears.
++typedef void (*ReArcMediaCaptureCallback)(void* context,
++                                          const ReArcMediaCaptureState* state);
++REARC_ENGINE_EXPORT void ReArcEngineSetMediaCaptureCallback(
++    ReArcMediaCaptureCallback callback, void* context);
++// Current state, synchronously. null state: invalid_argument.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetMediaCapture(
++    uint64_t tab_id, ReArcMediaCaptureState* state);
++// device: 0 camera, 1 microphone; muted=true asks for it off. Mute is the
++// page's: the engine sends the page's togglecamera/togglemicrophone action,
++// as Chrome's video-conferencing PiP buttons do, and the page turns its own
++// device off (it may disable or stop the track; the engine never touches the
++// track, and a page can ignore the action). OK when sent or already in that
++// state; the new state arrives as an event when the page reports it. No page
++// handler: unsupported. Handler but unknown state: invalid_state.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetCaptureMuted(uint64_t tab_id,
++                                                        uint32_t device,
++                                                        bool muted);
+ // Output is +1 malloc PNG, free with ReArcBufferFree. Bound to tab/profile.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcFaviconGet(uint64_t tab_id,
+                                                 const char* icon_ref,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index b176373985..add66455f4 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -581,6 +581,8 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "key_equivalent_events" ||
+          std::string(feature) == "perf_metrics" ||
+          std::string(feature) == "early_window" ||
++         std::string(feature) == "media_capture" ||
++         std::string(feature) == "search_engines" ||
+          std::string(feature) == "pip_embedded" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index aaa99b2a4e..65fe53d35c 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.47.0";
++  return "0.48.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_media_capture.cc b/chrome/browser/rearc_bridge/rearc_media_capture.cc
+new file mode 100644
+index 0000000000..37d5aa0a4b
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_media_capture.cc
+@@ -0,0 +1,310 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <pthread.h>
++
++#include <algorithm>
++#include <optional>
++#include <set>
++#include <vector>
++
++#include "base/check.h"
++#include "base/containers/flat_map.h"
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
++#include "chrome/browser/media/webrtc/media_stream_capture_indicator.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "content/public/browser/media_session.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "mojo/public/cpp/bindings/receiver.h"
++#include "services/media_session/public/cpp/media_image.h"
++#include "services/media_session/public/cpp/media_metadata.h"
++#include "services/media_session/public/cpp/media_position.h"
++#include "services/media_session/public/mojom/media_session.mojom.h"
++
++namespace rearc {
++namespace {
++using media_session::mojom::CameraState;
++using media_session::mojom::MediaSessionAction;
++using media_session::mojom::MicrophoneState;
++
++ReArcMediaCaptureCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0;
++
++MediaStreamCaptureIndicator* Indicator() {
++  return MediaCaptureDevicesDispatcher::GetInstance()
++      ->GetMediaStreamCaptureIndicator()
++      .get();
++}
++
++class CaptureWatch;
++std::set<CaptureWatch*>& Watches() {
++  static base::NoDestructor<std::set<CaptureWatch*>> watches;
++  return *watches;
++}
++
++// One indicator observer for every watched tab. It is registered only while a
++// tab is watched: the indicator's observer list must be empty when the
++// dispatcher singleton releases it at exit, and every registry tab is closed
++// (and unwatched) before then.
++class IndicatorObserver : public MediaStreamCaptureIndicator::Observer {
++ public:
++  void OnIsCapturingVideoChanged(content::WebContents* contents,
++                                 bool) override {
++    Refresh(contents);
++  }
++  void OnIsCapturingAudioChanged(content::WebContents* contents,
++                                 bool) override {
++    Refresh(contents);
++  }
++  void OnIsCapturingTabChanged(content::WebContents* contents,
++                               bool) override {
++    Refresh(contents);
++  }
++  void OnIsCapturingWindowChanged(content::WebContents* contents,
++                                  bool) override {
++    Refresh(contents);
++  }
++  void OnIsCapturingDisplayChanged(content::WebContents* contents,
++                                   bool) override {
++    Refresh(contents);
++  }
++
++ private:
++  static void Refresh(content::WebContents* contents);
++};
++IndicatorObserver& IndicatorWatcher() {
++  static base::NoDestructor<IndicatorObserver> observer;
++  return *observer;
++}
++
++void Deliver(uint64_t expected, ReArcMediaCaptureState state) {
++  if (!host || expected != epoch) return;
++  // Nothing after tab.closed, nor for a replaced content generation.
++  TabSession* session = TabRegistry::Get().FindSession(state.tab_id);
++  if (!session || session->content_generation() != state.content_generation) {
++    return;
++  }
++  host(host_context, &state);
++}
++
++// Capture devices from MediaStreamCaptureIndicator (Chrome's tab recording
++// indicators); camera and microphone state from the tab's media session, as
++// the page reports it with navigator.mediaSession.setCameraActive() and
++// setMicrophoneActive() (Chrome's video-conferencing PiP reads the same).
++class CaptureWatch : public content::WebContentsUserData<CaptureWatch>,
++                     public media_session::mojom::MediaSessionObserver {
++ public:
++  ~CaptureWatch() override {
++    Watches().erase(this);
++    if (Watches().empty()) Indicator()->RemoveObserver(&IndicatorWatcher());
++  }
++
++  ReArcMediaCaptureState State() {
++    ReArcMediaCaptureState state{};
++    state.profile_id = profile_id_;
++    state.tab_id = tab_id_;
++    state.content_generation = generation_;
++    content::WebContents* contents = &GetWebContents();
++    MediaStreamCaptureIndicator* indicator = Indicator();
++    state.capturing_video = indicator->IsCapturingVideo(contents);
++    state.capturing_audio = indicator->IsCapturingAudio(contents);
++    state.capturing_display = indicator->IsCapturingTab(contents) ||
++                              indicator->IsCapturingWindow(contents) ||
++                              indicator->IsCapturingDisplay(contents);
++    state.camera = camera_;
++    state.microphone = microphone_;
++    state.can_toggle_camera = Has(MediaSessionAction::kToggleCamera);
++    state.can_toggle_microphone = Has(MediaSessionAction::kToggleMicrophone);
++    return state;
++  }
++
++  // Posts the state when it differs from the last one reported. Without a
++  // host the state is still remembered, so a later host hears only changes;
++  // ReArcEngineSetMediaCaptureCallback replays the live non-idle tabs.
++  void Publish() {
++    ReArcMediaCaptureState state = State();
++    if (Same(state, sent_)) return;
++    sent_ = state;
++    if (host) ABIPost(base::BindOnce(&Deliver, epoch, state));
++  }
++  void Replay() {
++    sent_ = State();
++    if (!Same(sent_, ReArcMediaCaptureState{})) {
++      ABIPost(base::BindOnce(&Deliver, epoch, sent_));
++    }
++  }
++
++  // device: 0 camera, 1 microphone.
++  ReArcStatus SetMuted(uint32_t device, bool muted) {
++    const bool camera = device == 0;
++    if (!Has(camera ? MediaSessionAction::kToggleCamera
++                    : MediaSessionAction::kToggleMicrophone)) {
++      return REARC_UNSUPPORTED;
++    }
++    const uint32_t now = camera ? camera_ : microphone_;
++    if (now == REARC_CAPTURE_DEVICE_UNKNOWN) return REARC_INVALID_STATE;
++    if ((now == REARC_CAPTURE_DEVICE_OFF) == muted) return REARC_OK;
++    auto* session = content::MediaSession::GetIfExists(&GetWebContents());
++    if (!session) return REARC_INVALID_STATE;
++    if (camera) {
++      session->ToggleCamera();
++    } else {
++      session->ToggleMicrophone();
++    }
++    return REARC_OK;
++  }
++
++  // media_session::mojom::MediaSessionObserver:
++  void MediaSessionInfoChanged(
++      media_session::mojom::MediaSessionInfoPtr info) override {
++    camera_ = REARC_CAPTURE_DEVICE_UNKNOWN;
++    microphone_ = REARC_CAPTURE_DEVICE_UNKNOWN;
++    if (info) {
++      if (info->camera_state == CameraState::kTurnedOn) {
++        camera_ = REARC_CAPTURE_DEVICE_ON;
++      } else if (info->camera_state == CameraState::kTurnedOff) {
++        camera_ = REARC_CAPTURE_DEVICE_OFF;
++      }
++      if (info->microphone_state == MicrophoneState::kUnmuted) {
++        microphone_ = REARC_CAPTURE_DEVICE_ON;
++      } else if (info->microphone_state == MicrophoneState::kMuted) {
++        microphone_ = REARC_CAPTURE_DEVICE_OFF;
++      }
++    }
++    Publish();
++  }
++  void MediaSessionMetadataChanged(
++      const std::optional<media_session::MediaMetadata>&) override {}
++  void MediaSessionActionsChanged(
++      const std::vector<MediaSessionAction>& actions) override {
++    actions_ = actions;
++    Publish();
++  }
++  void MediaSessionImagesChanged(
++      const base::flat_map<media_session::mojom::MediaSessionImageType,
++                           std::vector<media_session::MediaImage>>&) override {
++  }
++  void MediaSessionPositionChanged(
++      const std::optional<media_session::MediaPosition>&) override {}
++
++ private:
++  friend class content::WebContentsUserData<CaptureWatch>;
++  CaptureWatch(content::WebContents* contents,
++               uint64_t profile_id,
++               uint64_t tab_id,
++               uint64_t generation)
++      : content::WebContentsUserData<CaptureWatch>(*contents),
++        profile_id_(profile_id),
++        tab_id_(tab_id),
++        generation_(generation) {
++    if (Watches().empty()) Indicator()->AddObserver(&IndicatorWatcher());
++    Watches().insert(this);
++    content::MediaSession::Get(contents)->AddObserver(
++        receiver_.BindNewPipeAndPassRemote());
++    // Unretained is scoped to the receiver, a member destroyed first.
++    receiver_.set_disconnect_handler(base::BindOnce(
++        &CaptureWatch::OnDisconnected, base::Unretained(this)));
++  }
++
++  static bool Same(const ReArcMediaCaptureState& a,
++                   const ReArcMediaCaptureState& b) {
++    return a.capturing_video == b.capturing_video &&
++           a.capturing_audio == b.capturing_audio &&
++           a.capturing_display == b.capturing_display &&
++           a.camera == b.camera && a.microphone == b.microphone &&
++           a.can_toggle_camera == b.can_toggle_camera &&
++           a.can_toggle_microphone == b.can_toggle_microphone;
++  }
++  bool Has(MediaSessionAction action) const {
++    return std::find(actions_.begin(), actions_.end(), action) !=
++           actions_.end();
++  }
++  void OnDisconnected() {
++    receiver_.reset();
++    actions_.clear();
++    camera_ = microphone_ = REARC_CAPTURE_DEVICE_UNKNOWN;
++    Publish();
++  }
++
++  const uint64_t profile_id_, tab_id_, generation_;
++  uint32_t camera_ = REARC_CAPTURE_DEVICE_UNKNOWN;
++  uint32_t microphone_ = REARC_CAPTURE_DEVICE_UNKNOWN;
++  std::vector<MediaSessionAction> actions_;
++  ReArcMediaCaptureState sent_{};
++  mojo::Receiver<media_session::mojom::MediaSessionObserver> receiver_{this};
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(CaptureWatch);
++
++void IndicatorObserver::Refresh(content::WebContents* contents) {
++  if (auto* watch = CaptureWatch::FromWebContents(contents)) watch->Publish();
++}
++
++CaptureWatch* FindWatch(uint64_t tab_id) {
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  return session && session->web_contents()
++             ? CaptureWatch::FromWebContents(session->web_contents())
++             : nullptr;
++}
++}  // namespace
++
++void ABIAttachMediaCapture(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (!session || !session->web_contents() ||
++      CaptureWatch::FromWebContents(session->web_contents())) {
++    return;
++  }
++  CaptureWatch::CreateForWebContents(session->web_contents(),
++                                     session->profile_id(), tab_id,
++                                     session->content_generation());
++  CaptureWatch::FromWebContents(session->web_contents())->Publish();
++}
++
++void ABIDetachMediaCapture(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (session && session->web_contents()) {
++    session->web_contents()->RemoveUserData(CaptureWatch::UserDataKey());
++  }
++}
++}  // namespace rearc
++
++void ReArcEngineSetMediaCaptureCallback(ReArcMediaCaptureCallback callback,
++                                        void* context) {
++  CHECK(pthread_main_np());
++  ++rearc::epoch;
++  rearc::host = callback;
++  rearc::host_context = context;
++  if (!callback) return;
++  for (rearc::CaptureWatch* watch : rearc::Watches()) watch->Replay();
++}
++
++ReArcStatus ReArcTabGetMediaCapture(uint64_t tab_id,
++                                    ReArcMediaCaptureState* state) {
++  rearc::TabSession* session;
++  if (auto status = rearc::ABICheckTab(tab_id, &session)) return status;
++  if (!state) return REARC_INVALID_ARGUMENT;
++  rearc::CaptureWatch* watch = rearc::FindWatch(tab_id);
++  if (!watch) return REARC_INVALID_STATE;
++  *state = watch->State();
++  return REARC_OK;
++}
++
++ReArcStatus ReArcTabSetCaptureMuted(uint64_t tab_id,
++                                    uint32_t device,
++                                    bool muted) {
++  rearc::TabSession* session;
++  if (auto status = rearc::ABICheckTab(tab_id, &session)) return status;
++  if (device > 1) return REARC_INVALID_ARGUMENT;
++  rearc::CaptureWatch* watch = rearc::FindWatch(tab_id);
++  if (!watch) return REARC_INVALID_STATE;
++  return watch->SetMuted(device, muted);
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_search_abi.cc b/chrome/browser/rearc_bridge/rearc_search_abi.cc
+index 5291cce1fd..ac7495771c 100644
+--- a/chrome/browser/rearc_bridge/rearc_search_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_search_abi.cc
+@@ -470,3 +470,86 @@ ReArcStatus ReArcAutocompleteStop(uint64_t profile_id) {
+   state->Cancel();
+   return REARC_OK;
+ }
++
++ReArcStatus ReArcSearchListEngines(uint64_t profile_id,
++                                   ReArcSearchEngineListCallback completion,
++                                   void* context) {
++  rearc::State* state;
++  if (auto status = rearc::Lookup(profile_id, &state)) return status;
++  if (!completion) return REARC_INVALID_ARGUMENT;
++  return state->WhenLoaded(base::BindOnce(
++      [](uint64_t id, ReArcSearchEngineListCallback completion, void* context,
++         ReArcStatus status) {
++        struct Engine {
++          int64_t id;
++          std::string name, keyword, search, favicon;
++          bool is_default, prepopulated, can_make_default;
++        };
++        std::vector<Engine> engines;
++        bool managed = false;
++        if (!status) {
++          TemplateURLService* urls = rearc::States().at(id)->service();
++          const TemplateURL* current = urls->GetDefaultSearchProvider();
++          managed = urls->is_default_search_managed();
++          // Chrome's settings pop-up: the default plus prepopulated and
++          // policy-provided engines, in the service's order.
++          for (TemplateURL* url : urls->GetTemplateURLs()) {
++            if (!urls->ShowInDefaultList(url)) continue;
++            engines.push_back(
++                {url->id(), base::UTF16ToUTF8(url->short_name()),
++                 base::UTF16ToUTF8(url->keyword()),
++                 rearc::Resolve(url->url_ref(), urls->search_terms_data()),
++                 url->favicon_url().is_valid() ? url->favicon_url().spec()
++                                               : std::string(),
++                 url == current, url->prepopulate_id() > 0,
++                 !managed && urls->CanMakeDefault(url)});
++          }
++        }
++        rearc::ABIPost(base::BindOnce(
++            [](uint64_t id, ReArcSearchEngineListCallback completion,
++               void* context, ReArcStatus status, bool managed,
++               std::vector<Engine> engines) {
++              std::vector<ReArcSearchEngine> rows;
++              for (const Engine& e : engines) {
++                rows.push_back({e.id, e.name.c_str(), e.keyword.c_str(),
++                                e.search.c_str(), e.favicon.c_str(),
++                                e.is_default, e.prepopulated,
++                                e.can_make_default});
++              }
++              ReArcSearchEngineList list{rows.empty() ? nullptr : rows.data(),
++                                         rows.size(), managed};
++              completion(context, status, id, status ? nullptr : &list);
++            },
++            id, completion, context, status, managed, std::move(engines)));
++      },
++      profile_id, completion, context));
++}
++
++ReArcStatus ReArcSearchSetDefaultEngine(uint64_t profile_id,
++                                        int64_t engine_id,
++                                        ReArcCompletion completion,
++                                        void* context) {
++  rearc::State* state;
++  if (auto status = rearc::Lookup(profile_id, &state)) return status;
++  // OTR shares (redirects to) its original's keywords; never mutate them.
++  if (state->profile()->IsOffTheRecord()) return REARC_UNSUPPORTED;
++  if (!completion || engine_id <= 0) return REARC_INVALID_ARGUMENT;
++  return state->WhenLoaded(base::BindOnce(
++      [](uint64_t id, int64_t engine_id, ReArcCompletion completion,
++         void* context, ReArcStatus status) {
++        if (!status) {
++          TemplateURLService* urls = rearc::States().at(id)->service();
++          TemplateURL* url = urls->GetTemplateURLForId(engine_id);
++          if (!url) {
++            status = REARC_NOT_FOUND;
++          } else if (urls->is_default_search_managed() ||
++                     !urls->CanMakeDefault(url)) {
++            status = REARC_INVALID_STATE;
++          } else {
++            urls->SetUserSelectedDefaultSearchProvider(url);
++          }
++        }
++        rearc::ABIPost(base::BindOnce(completion, context, status, false));
++      },
++      profile_id, engine_id, completion, context));
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index aa3ff0fc3f..4557529825 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -1099,6 +1099,7 @@ void ABIAttachServices(uint64_t id) {
+   AttachSecurityAdapter(id);
+   Pages().emplace(id, std::make_unique<PageServices>(*s));
+   ABIAttachFind(id);
++  ABIAttachMediaCapture(id);
+ }
+ void ABIDetachServices(uint64_t id) {
+   CHECK(pthread_main_np());
+@@ -1113,6 +1114,7 @@ void ABIDetachServices(uint64_t id) {
+   ABICancelFileChooser(id);
+   ABICancelJavaScriptDialogs(id);
+   ABIDetachFind(id);
++  ABIDetachMediaCapture(id);
+   Pages().erase(id);
+ }
+ bool ABIHasServiceFeature(const char* feature) {
+-- 
+2.54.0 (Apple Git-157)
+

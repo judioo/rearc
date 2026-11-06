@@ -722,6 +722,8 @@ final class ChromiumRuntime {
         registerExtensionChannels(context: context)
         registerAutofillChannels(context: context)
         registerClientCertificateChannel(context: context)
+        // ABI 1.46: camera and microphone use for the call card, before any tab.
+        registerMediaCaptureChannel(context: context)
         if capabilities.htmlFullscreen {
             ReArcEngineSetFullscreenCallback(fullscreenCallback, context)
         }

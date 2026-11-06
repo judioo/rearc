@@ -138,6 +138,8 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     @ObservationIgnored private(set) var contextMenuRequestID: UInt64?
 
     @ObservationIgnored private let mediaStateSubject = CurrentValueSubject<WebMediaState, Never>(.silent)
+    /// Camera and microphone use for the call card (ABI 1.46 `media_capture`; idle without it).
+    @ObservationIgnored let mediaCaptureSubject = CurrentValueSubject<MediaCaptureState, Never>(.idle)
     /// The host holding this tab's single attachment lease.
     @ObservationIgnored private weak var host: ChromiumHostView?
     /// Every host currently showing this tab (windows, panes); only `host` is attached.
@@ -343,6 +345,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
             pagePrompts.withdrawAll()
             // tab.closed is final: no later media event will report the session ended.
             if mediaState != .silent { mediaStateSubject.send(.silent) }
+            if mediaCaptureSubject.value != .idle { mediaCaptureSubject.send(.idle) }
         }
     }
 
@@ -521,6 +524,35 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
         defer { if let bytes { ReArcBufferFree(bytes) } }
         guard status == .rearcOK, let bytes, size > 0 else { return (status, nil) }
         return (status, Data(bytes: bytes, count: size))
+    }
+
+    // MARK: Media capture (ABI 1.46)
+
+    var mediaCapture: MediaCaptureState { mediaCaptureSubject.value }
+    var mediaCapturePublisher: AnyPublisher<MediaCaptureState, Never> { mediaCaptureSubject.eraseToAnyPublisher() }
+
+    func handleMediaCapture(_ event: ChromiumMediaCaptureEvent) {
+        guard event.tabID == tabID, event.state != mediaCapture else { return }
+        mediaCaptureSubject.send(event.state)
+    }
+
+    /// `ReArcTabSetCaptureMuted`: asks the page to turn its camera or microphone
+    /// off (or on) through its media session action. The page decides; the new
+    /// state comes back as an event. False when the engine refused: no
+    /// handler (unsupported) or no reported state (invalid_state).
+    @discardableResult
+    func setCaptureMuted(_ device: MediaCaptureState.Device, muted: Bool) -> Bool {
+        guard runtime.capabilities.mediaCapture, tabID != 0 else { return false }
+        let status = ReArcTabSetCaptureMuted(tabID, device.rawValue, muted)
+        ChromiumLog.info("tab \(tabID) capture \(device) muted \(muted) -> \(status.rearcName)")
+        return status == .rearcOK
+    }
+
+    /// The call card's toggle: flips what the card shows, when the page lets it.
+    @discardableResult
+    func toggleCapture(_ device: MediaCaptureState.Device) -> Bool {
+        guard let muted = mediaCapture.toggleRequest(device) else { return false }
+        return setCaptureMuted(device, muted: muted)
     }
 
     // MARK: Media

@@ -68,6 +68,7 @@ tab/061-host-key-equivalent-events.patch # P-TAB-001 wave 30: page key-equivalen
 tab/062-embedded-video-overlay.patch # P-TAB-001 wave 32: embedded video PiP overlay and media actions
 tab/063-host-perf-metrics.patch # P-TAB-001 perf-0: page timing, presentation feedback, histograms, processes
 tab/064-host-early-window.patch # P-TAB-001 launch: early window callback at PreCreateThreads, before ready
+tab/065-host-media-capture-search-engines.patch # P-TAB-001 ABI 1.46: tab media capture state and mute, search engine list
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:

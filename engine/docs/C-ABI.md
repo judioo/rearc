@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.41** (major remains 1 for existing hosts), bridge **0.43.0**, compiled Chromium **156.0.8078.74**. Public header:
+ABI **1.46** (major remains 1 for existing hosts), bridge **0.48.0**, compiled Chromium **156.0.8078.74**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -195,8 +195,9 @@ Advertised features: `native_view`, `navigation`, `navigation_extended`, `media_
 `autofill_suggestions` (1.34), `password_leak_detection` (1.35),
 `extension_windows` (1.36), `autofill_save_prompts` (1.37), `http_auth`
 (1.38), `link_open_requests` (1.39), `devtools` (1.40),
-`client_certificates` (1.41), `key_equivalent_events` (1.42) and
-`pip_embedded` (1.43). `pip_control`, `pip_native`
+`client_certificates` (1.41), `key_equivalent_events` (1.42),
+`pip_embedded` (1.43), `perf_metrics` (1.44), `early_window` (1.45),
+`media_capture` and `search_engines` (1.46). `pip_control`, `pip_native`
 and `script_opener` remain unadvertised names. Unknown optional operations are unsupported.
 
 | Function | Semantics |
@@ -1836,3 +1837,74 @@ upstream file besides `framework.exports` and `framework.order`, which list
 the new function after `_ReArcEngineGetProcesses`. The `abi` signpost
 category has an `EarlyWindow` interval around the callback. Native host:
 `c_abi_launch_host.mm`.
+
+## Media capture and search engines (1.46)
+
+Patch `tab/065-host-media-capture-search-engines`, bridge 0.48.0, features
+`media_capture` and `search_engines`. No struct from an earlier ABI changed
+(`engine/tests/check_abi146_imports.py` compares every 1.45 layout).
+`framework.exports` and `framework.order` list the five new functions after
+`_ReArcEngineSetEarlyWindowCallback`.
+
+**Media capture** (`rearc_media_capture.cc`). Every registry tab gets a
+watcher when its services attach (`ABIAttachServices`), removed before
+teardown (`ABIDetachServices`). `ReArcMediaCaptureState` carries:
+
+| Field | Source |
+|---|---|
+| `capturing_video`, `capturing_audio` | `MediaStreamCaptureIndicator::IsCapturingVideo/Audio`: the page holds a live camera / microphone stream. The indicator is the one behind Chrome's tab recording indicators; registry tabs reach it because their media requests go through `MediaCaptureDevicesDispatcher` (permission_prompts, 1.20). |
+| `capturing_display` | `IsCapturingTab`, `IsCapturingWindow` or `IsCapturingDisplay` (getDisplayMedia). |
+| `camera`, `microphone` | `MediaSessionInfo::camera_state` / `microphone_state`: what the page reports with `navigator.mediaSession.setCameraActive()` / `setMicrophoneActive()`. `REARC_CAPTURE_DEVICE_UNKNOWN` (0) when the page reports nothing, 1 on, 2 off. |
+| `can_toggle_camera`, `can_toggle_microphone` | The session's actions include `kToggleCamera` / `kToggleMicrophone`: the page set "togglecamera" / "togglemicrophone" handlers. |
+
+The two sources are independent. A page that mutes its microphone usually
+keeps the stream live (`capturing_audio` true, `microphone` off); a page
+that turns its camera off may stop that stream (`capturing_video` false,
+`camera` off). Neither was observed against a real call in this change. One indicator observer is registered while any tab is watched, so the
+indicator's `check_empty` list is empty when the dispatcher singleton
+releases it at exit.
+
+`ReArcEngineSetMediaCaptureCallback` registers the host. Events are posted on
+main, one per change of any field (deduplicated per tab), dropped when the
+tab is gone or its content generation changed, so none follows `tab.closed`.
+Registering (or replacing) the callback first posts the current state of
+every tab that is not idle; replaced registrations get nothing further.
+`ReArcTabGetMediaCapture(tab, &state)` reads the current state
+synchronously; a tab whose services are not attached is `invalid_state`.
+
+**What mute means.** `ReArcTabSetCaptureMuted(tab, device, muted)` (device 0
+camera, 1 microphone) is a request to the page, not a track operation. When
+the requested state differs from the reported one, the engine calls
+`content::MediaSession::ToggleCamera()` / `ToggleMicrophone()`, which runs the
+page's own "togglecamera" / "togglemicrophone" action handler, the same path
+as Chrome's video-conferencing Picture-in-Picture buttons. What happens next
+is the page's decision: a conferencing page typically disables or stops its
+own track and reports the new state with setMicrophoneActive/setCameraActive,
+which arrives as an event. The engine never disables, mutes or stops a
+`MediaStreamTrack` itself, and a page can ignore the action. Results: OK when
+sent or already in the requested state; `unsupported` without a page handler;
+`invalid_state` with a handler but no reported state (toggling an unknown
+state could invert it); `invalid_argument` for device > 1. Pages without
+media session handlers (most getUserMedia demos) cannot be muted through
+this call. Stopping capture outright (`MediaStreamCaptureIndicator::
+StopMediaCapturing`) and content-layer pause of device streams were
+considered and left out: the first is irreversible, the second covers
+display capture only.
+
+**Search engines** (`rearc_search_abi.cc`, next to 1.26). Same rules as the
+1.26 calls: live bridge profile, wait for TemplateURLService loading (at most
+64 waiting calls, `busy`), deferred completion exactly once, profile release
+completes waiting calls `cancelled`.
+
+| Function | Contract |
+|---|---|
+| `ReArcSearchListEngines(profile, cb, ctx)` | The engines Chrome's settings offer as default (`TemplateURLService::ShowInDefaultList`: the current default, prepopulated and default-policy engines), in the service's order. Each row: `id` (TemplateURLID, stable for the profile), name, keyword, `search_url` (resolved, `%s` for the terms), `favicon_url` (empty when unknown), `is_default`, `is_prepopulated`, `can_make_default` (`CanMakeDefault`, and false on every row while `default_is_managed`). OTR IDs list their original's engines. |
+| `ReArcSearchSetDefaultEngine(profile, id, completion, ctx)` | `SetUserSelectedDefaultSearchProvider` on that engine (Chromium persists it). id <= 0 `invalid_argument`; unknown id `not_found`; policy-managed default or an engine that cannot be default `invalid_state`; OTR `unsupported`. |
+
+`ReArcSearchGetDefaultProvider` and `ReArcSearchSetDefaultProvider` (1.26)
+are unchanged; the new pair selects among existing engines by ID instead of
+adding one from templates.
+
+Not run here: no native host exercises these calls yet (the hosts take over
+the screen). Built and checked: the dev engine, `check_c_abi_exports.py`
+(127 symbols, loaded ABI 1.46 / bridge 0.48.0) and `check_abi146_imports.py`.
