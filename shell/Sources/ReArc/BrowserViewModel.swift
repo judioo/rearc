@@ -168,6 +168,8 @@ final class BrowserViewModel {
     var isAirTrafficControlPresented = false
     /// Set by the Chromium shell, which owns its windows.
     @ObservationIgnored var presentAirTrafficControl: (() -> Void)?
+    /// File › Import from Arc, Chrome or Brave… (both engines).
+    @ObservationIgnored var browserImportWindow: BrowserImportWindowController?
     /// Bumped by the Site Controls command; the key window's URL field opens its panel.
     var siteControlCenterRequest = 0
     @ObservationIgnored var defaultBrowser: any DefaultBrowserSetting = SystemDefaultBrowser()
@@ -1731,6 +1733,8 @@ final class BrowserViewModel {
             BoostFilePanels.importBoosts(model: self)
         case .importBookmarksFile:
             importBookmarksFile()
+        case .importFromBrowser:
+            showBrowserImport()
         case .pickElementToEdit:
             if boostEditorDraft != nil {
                 startBoostPicker()
