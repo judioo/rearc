@@ -4423,10 +4423,10 @@ extension ChromiumSelfTest {
         model.themePopoverSpaceID = space.id
         try await wait("theme popover from Edit Theme Color", timeout: 5) { !popoverWindows().isEmpty }
         let headerPopover = popoverWindows()[0].frame
-        // The topmost element with the space's name: the bottom bar's space dots carry it too.
+        // Only the window's top half: the bottom bar's space dots carry the space's name too.
         let header = window.contentView.flatMap { root in
             accessibilityElements(under: root)
-                .filter { ($0.accessibilityLabel() ?? "").contains(space.name) }
+                .filter { ($0.accessibilityLabel() ?? "").contains(space.name) && $0.accessibilityFrame().minY > window.frame.midY }
                 .max { $0.accessibilityFrame().maxY < $1.accessibilityFrame().maxY }
         }?.accessibilityFrame()
         model.themePopoverSpaceID = nil
