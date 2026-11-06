@@ -50,6 +50,8 @@ struct LittleArcWindowView: View {
             consumeFocusRequest()
         }
         .onChange(of: model.littleArcFocusRequest) { _, _ in consumeFocusRequest() }
+        // Archived elsewhere (Settings › Links › Archive Little Arcs after): the window goes too.
+        .onChange(of: record == nil) { _, gone in if gone { dismiss() } }
         .onDisappear {
             if model.focusedLittleArcID == windowID {
                 model.focusedLittleArcID = nil

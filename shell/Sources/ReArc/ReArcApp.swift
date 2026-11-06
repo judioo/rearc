@@ -4,11 +4,15 @@ import SwiftUI
 /// WebKit-path SwiftUI app; launched by `ReArcMain`.
 struct ReArcApp: App {
     @State private var model = BrowserViewModel()
-    @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
 
     var body: some Scene {
         WindowGroup("ReArc") {
             BrowserView(model: model)
+                .onAppear {
+                    // The Settings scene opens through AppKit's action (macOS 14).
+                    model.presentSettings = { _ in NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) }
+                    if model.appIcon != .standard { model.appIcon.apply() }
+                }
         }
         .windowStyle(.hiddenTitleBar)
 
@@ -32,33 +36,18 @@ struct ReArcApp: App {
         }
         .defaultSize(width: 1000, height: 720)
         .commands {
+            // The rest of the old ReArc menu's switches are in Settings (wave 35).
             CommandGroup(after: .appInfo) {
                 Button("Set ReArc as Default Browser…") { model.setAsDefaultBrowser() }
-                Toggle("Open Off-Site Links in Peek", isOn: $model.automaticPeekEnabled)
-                Toggle("Automatic Picture in Picture", isOn: $model.automaticPictureInPicture)
-                Toggle("Video in Sidebar", isOn: $model.embedsVideoInSidebar)
-                Toggle("Show URL in Toolbar", isOn: $urlInToolbar)
-                Picker("External Links", selection: $model.externalLinkDestination) {
-                    ForEach(ExternalLinkDestination.allCases, id: \.self) { destination in
-                        Text(destination.menuTitle).tag(destination)
-                    }
-                }
-                Toggle("Open Little Arc from Anywhere (\(LittleArcHotkeyPreference.display))", isOn: $model.isLittleArcHotkeyEnabled)
                 Button("Air Traffic Control…") { model.showAirTrafficControl() }
-                if let preference = model.webKitSearchPreference {
-                    Picker("Search Engine", selection: Binding(
-                        get: { preference.providerID },
-                        set: { model.webKitSearchPreference?.providerID = $0 }
-                    )) {
-                        ForEach(SearchProvider.builtIn, id: \.id) { provider in
-                            Text(provider.name).tag(provider.id)
-                        }
-                    }
-                    Toggle("Search Suggestions", isOn: Binding(
-                        get: { preference.suggestionsEnabled },
-                        set: { model.webKitSearchPreference?.suggestionsEnabled = $0 }
-                    ))
+            }
+            // Warn before quitting: only ⌘Q asks.
+            CommandGroup(replacing: .appTermination) {
+                Button("Quit ReArc") {
+                    let open = NSApp.windows.filter { $0.isVisible && $0.canBecomeMain && !($0 is NSPanel) }.count
+                    if model.confirmQuit(browserWindows: open) { NSApp.terminate(nil) }
                 }
+                .keyboardShortcut("q")
             }
             // Cmd+T — new tab, replacing File > New (window).
             CommandGroup(replacing: .newItem) {
@@ -71,12 +60,12 @@ struct ReArcApp: App {
                 Button("Open Command Bar") { model.focusLocation() }
                     .keyboardShortcut("l")
                 Divider()
-                ShellMenuButtons(groups: ShellMenus.documents(model))
+                ShellMenuButtons(groups: ShellMenus.documents(model), overrides: model.shortcutOverrides)
             }
             // Arc keeps Copy URL in the Edit menu.
             CommandGroup(after: .pasteboard) {
                 Divider()
-                ShellMenuButtons(groups: ShellMenus.copyLink(model))
+                ShellMenuButtons(groups: ShellMenus.copyLink(model), overrides: model.shortcutOverrides)
             }
             // Cmd+S — toggle the sidebar, replacing File > Save.
             CommandGroup(replacing: .saveItem) {
@@ -86,27 +75,27 @@ struct ReArcApp: App {
                 .keyboardShortcut("s")
             }
             CommandGroup(replacing: .importExport) {
-                ShellMenuButtons(groups: ShellMenus.importing(model, chromiumImporter: false))
+                ShellMenuButtons(groups: ShellMenus.importing(model, chromiumImporter: false), overrides: model.shortcutOverrides)
             }
             CommandGroup(replacing: .printItem) {
-                ShellMenuButtons(groups: ShellMenus.capture(model))
+                ShellMenuButtons(groups: ShellMenus.capture(model), overrides: model.shortcutOverrides)
                 Divider()
-                ShellMenuButtons(groups: ShellMenus.printing(model))
+                ShellMenuButtons(groups: ShellMenus.printing(model), overrides: model.shortcutOverrides)
             }
             // Edit > Find: the page's find bar replaces the text-field finder.
             CommandGroup(replacing: .textEditing) {
-                ShellMenuButtons(groups: ShellMenus.find(model))
+                ShellMenuButtons(groups: ShellMenus.find(model), overrides: model.shortcutOverrides)
             }
             CommandGroup(after: .toolbar) {
-                ShellMenuButtons(groups: ShellMenus.navigation(model))
+                ShellMenuButtons(groups: ShellMenus.navigation(model), overrides: model.shortcutOverrides)
                 Divider()
-                ShellMenuButtons(groups: ShellMenus.downloads(model))
+                ShellMenuButtons(groups: ShellMenus.downloads(model), overrides: model.shortcutOverrides)
                 Divider()
-                ShellMenuButtons(groups: ShellMenus.library(model))
+                ShellMenuButtons(groups: ShellMenus.library(model), overrides: model.shortcutOverrides)
                 Divider()
-                ShellMenuButtons(groups: ShellMenus.pictureInPicture(model))
+                ShellMenuButtons(groups: ShellMenus.pictureInPicture(model), overrides: model.shortcutOverrides)
                 Divider()
-                ShellMenuButtons(groups: ShellMenus.zoom(model))
+                ShellMenuButtons(groups: ShellMenus.zoom(model), overrides: model.shortcutOverrides)
             }
             CommandMenu("Tabs") {
                 // Cmd+W — close the selected tab. There is no replaceable
@@ -118,17 +107,17 @@ struct ReArcApp: App {
                 Button("Reopen Closed Tab") { model.reopenClosedTab() }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
                 Divider()
-                ShellMenuButtons(groups: ShellMenus.tabNavigation(model))
-                ShellMenuButtons(groups: ShellMenus.tabSwitcher(model))
+                ShellMenuButtons(groups: ShellMenus.tabNavigation(model), overrides: model.shortcutOverrides)
+                ShellMenuButtons(groups: ShellMenus.tabSwitcher(model), overrides: model.shortcutOverrides)
                 Divider()
-                ShellMenuButtons(groups: ShellMenus.split(model))
+                ShellMenuButtons(groups: ShellMenus.split(model), overrides: model.shortcutOverrides)
                 Divider()
-                ShellMenuButtons(groups: ShellMenus.tabPositions(model))
+                ShellMenuButtons(groups: ShellMenus.tabPositions(model), overrides: model.shortcutOverrides)
                 Divider()
-                ShellMenuButtons(groups: ShellMenus.sidebarItems(model))
+                ShellMenuButtons(groups: ShellMenus.sidebarItems(model), overrides: model.shortcutOverrides)
             }
             CommandMenu("Spaces") {
-                ShellMenuButtons(groups: ShellMenus.spaces(model))
+                ShellMenuButtons(groups: ShellMenus.spaces(model), overrides: model.shortcutOverrides)
             }
         }
 
@@ -138,7 +127,7 @@ struct ReArcApp: App {
         .windowResizability(.contentSize)
 
         Settings {
-            SyncSettingsView(model: model)
+            SettingsTabsView(model: model)
         }
     }
 }

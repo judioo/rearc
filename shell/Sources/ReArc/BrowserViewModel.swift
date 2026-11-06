@@ -76,6 +76,61 @@ final class BrowserViewModel {
         didSet { externalLinkDefaults.set(automaticPictureInPicture, forKey: Self.automaticPictureInPictureKey) }
     }
 
+    // MARK: Settings window (wave 35)
+
+    /// Settings › Shortcuts: the user's changes to Arc's bindings. The menu
+    /// bar's key equivalents and `shortcutRouter` read them.
+    var shortcutOverrides: ShortcutOverrides = .load(from: .standard) {
+        didSet {
+            guard shortcutOverrides != oldValue else { return }
+            shortcutOverrides.save(to: externalLinkDefaults)
+            onShortcutOverridesChanged?()
+        }
+    }
+    /// The Chromium shell re-applies its menu key equivalents.
+    @ObservationIgnored var onShortcutOverridesChanged: (() -> Void)?
+    /// Settings › Links: Shift-click on a link opens it in Peek (Arc's default).
+    var peekOnShiftClick = UserDefaults.standard.object(forKey: BrowserViewModel.peekOnShiftClickKey) as? Bool ?? true {
+        didSet {
+            externalLinkDefaults.set(peekOnShiftClick, forKey: Self.peekOnShiftClickKey)
+            reconfigureLinkPeek()
+        }
+    }
+    /// Settings › Links: ⌥⌘-click on a link opens it in Little Arc (Arc's default).
+    var littleArcOnModifiedClick = UserDefaults.standard.object(forKey: BrowserViewModel.littleArcOnModifiedClickKey) as? Bool ?? true {
+        didSet {
+            externalLinkDefaults.set(littleArcOnModifiedClick, forKey: Self.littleArcOnModifiedClickKey)
+            reconfigureLinkPeek()
+        }
+    }
+    /// Settings › Links › Archive Little Arcs after; checked with the tab auto-archive.
+    var littleArcArchiveAfter: AutoArchiveThreshold = LittleArcArchivePreference.load(from: .standard) {
+        didSet { LittleArcArchivePreference.save(littleArcArchiveAfter, to: externalLinkDefaults) }
+    }
+    /// Settings › General › Warn before quitting (⌘Q only).
+    var warnBeforeQuitting = QuitWarning.isEnabled(in: .standard) {
+        didSet { externalLinkDefaults.set(warnBeforeQuitting, forKey: QuitWarning.defaultsKey) }
+    }
+    /// Settings › Advanced: reopen every window of the last session at launch.
+    var restoresWindows = WindowRestorePreference.isEnabled(in: .standard) {
+        didSet { externalLinkDefaults.set(restoresWindows, forKey: WindowRestorePreference.defaultsKey) }
+    }
+    /// The Settings window's pane; it opens on the one shown last.
+    var settingsPane: SettingsPane = .load(from: .standard) {
+        didSet { settingsPane.save(to: externalLinkDefaults) }
+    }
+    /// Settings › Icon.
+    var appIcon: AppIconChoice = .load(from: .standard) {
+        didSet {
+            appIcon.save(to: externalLinkDefaults)
+            appIcon.apply()
+        }
+    }
+    /// Opens the Settings window (the Chromium shell's; the WebKit app opens its scene).
+    @ObservationIgnored var presentSettings: ((SettingsPane?) -> Void)?
+    /// Settings › Profiles › Search engine, once the engine can read and set it.
+    @ObservationIgnored var searchEngineSettings: (any SearchEngineSettings)?
+
     var isSidebarVisible = true
     /// The page is laid out beside the sidebar. It goes wide at the start of
     /// a hide and narrow at the end of a show, so Chromium resizes once per
@@ -154,7 +209,13 @@ final class BrowserViewModel {
     /// ⌘T opens only the field. Its Today tab is created when a page is chosen.
     var commandBarCreatesNewTab = false
     /// The Little Arc whose window is key (nil when a browser window is).
-    var keyLittleArcID: LittleArcWindow.ID?
+    var keyLittleArcID: LittleArcWindow.ID? {
+        didSet {
+            // Focus in and out counts as use, so a window in use never looks idle to the auto-archive.
+            guard keyLittleArcID != oldValue else { return }
+            for id in [oldValue, keyLittleArcID].compactMap({ $0 }) { store.touchLittleArcWindow(id: id) }
+        }
+    }
     /// A Little Arc whose address field should start editing (⌘L, New Little Arc Window).
     var littleArcFocusRequest: LittleArcWindow.ID?
     var littleArcHotkeyPreference = LittleArcHotkeyPreference()
@@ -369,6 +430,9 @@ final class BrowserViewModel {
             self?.syncPipeline.handleJournalEntry(entry)
         }
         engineHost.linkRouter = self
+        shortcutRouter.binding = { [weak self] key, modifiers in
+            (self?.shortcutOverrides ?? ShortcutOverrides()).binding(for: key, modifiers: modifiers)
+        }
         self.persistence.start(autoSave: self.store) { [weak self] in
             self?.scheduleMutationFollowUp()
         }
@@ -1022,9 +1086,7 @@ final class BrowserViewModel {
     var automaticPeekEnabled = UserDefaults.standard.object(forKey: "rearc.automaticPeek") as? Bool ?? true {
         didSet {
             externalLinkDefaults.set(automaticPeekEnabled, forKey: "rearc.automaticPeek")
-            for (id, _, engine) in engineHost.allTabEngines() {
-                configureLinkPeek(on: engine, tab: store.tab(withID: id))
-            }
+            reconfigureLinkPeek()
         }
     }
 
@@ -1034,7 +1096,15 @@ final class BrowserViewModel {
         engine.linkPeekHandler = { [weak self] url in
             self?.showPeek(url: url, profileID: profileID)
         }
+        (engine as? ShiftClickPeekConfigurable)?.shiftClickPeekEnabled = peekOnShiftClick
         configureLittleArcClicks(on: engine)
+    }
+
+    /// After a Links setting changes: every tab's engine again.
+    func reconfigureLinkPeek() {
+        for (id, _, engine) in engineHost.allTabEngines() {
+            configureLinkPeek(on: engine, tab: store.tab(withID: id))
+        }
     }
 
     // MARK: - Peek
@@ -1233,7 +1303,7 @@ final class BrowserViewModel {
 
     func prepareForQuit() {
         autoArchiveTimer?.invalidate()
-        store.autoArchiveIdleLittleArcWindows()
+        store.autoArchiveIdleLittleArcWindows(threshold: littleArcArchiveAfter.interval, keeping: Set([keyLittleArcID].compactMap { $0 }))
         boostLiveDebounceWorkItem?.cancel()
         for (_, draft) in boostEditorDraftByTab {
             _ = store.updateBoostStyleCSS(packageID: draft.packageID, css: draft.draftCSS)

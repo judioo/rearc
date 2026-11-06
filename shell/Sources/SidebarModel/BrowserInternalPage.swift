@@ -16,6 +16,12 @@ public enum BrowserInternalPage: String, CaseIterable, Hashable, Sendable {
     case downloads
     case passwords
     case extensions
+    /// Settings window rows (ARC-RECORDING-2026-11-06 §6.3): subpages of the
+    /// admitted `settings` host, so they need `trustedWebUI` only.
+    case searchSettings
+    case downloadSettings
+    case payments
+    case notifications
 
     public var url: URL {
         switch self {
@@ -29,6 +35,10 @@ public enum BrowserInternalPage: String, CaseIterable, Hashable, Sendable {
         case .downloads: return URL(string: "chrome://downloads/")!
         case .passwords: return URL(string: "chrome://password-manager/")!
         case .extensions: return URL(string: "chrome://extensions/")!
+        case .searchSettings: return URL(string: "chrome://settings/search")!
+        case .downloadSettings: return URL(string: "chrome://settings/downloads")!
+        case .payments: return URL(string: "chrome://settings/payments")!
+        case .notifications: return URL(string: "chrome://settings/content/notifications")!
         }
     }
 
@@ -44,6 +54,10 @@ public enum BrowserInternalPage: String, CaseIterable, Hashable, Sendable {
         case .downloads: return "Downloads"
         case .passwords: return "Passwords"
         case .extensions: return "Extensions"
+        case .searchSettings: return "Search Engine"
+        case .downloadSettings: return "Download Settings"
+        case .payments: return "Payment Methods"
+        case .notifications: return "Notifications"
         }
     }
 

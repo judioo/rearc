@@ -25,6 +25,12 @@ public struct WindowSessionSnapshot: Codable, Equatable, Sendable {
         windows.first(where: \.isKey) ?? windows.first ?? lastClosed
     }
 
+    /// Restore turned off (`WindowRestorePreference`): the launch window alone,
+    /// where it was.
+    public var launchWindowOnly: WindowSessionSnapshot {
+        WindowSessionSnapshot(windows: launchWindow.map { [$0] } ?? [])
+    }
+
     /// Every other saved window, front to back.
     public var otherWindows: [SavedBrowserWindow] {
         guard let launch = windows.firstIndex(where: \.isKey) ?? (windows.isEmpty ? nil : 0) else { return [] }

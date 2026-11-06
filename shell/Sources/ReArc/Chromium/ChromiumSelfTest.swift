@@ -1255,6 +1255,7 @@ final class ChromiumSelfTest {
             engineA.leaseHolder?.window === first && engineA.attachmentID != nil
         }
         try await shortcutChecks(model: model, store: store, tab: tabA, engine: engineA, base: base, window: first)
+        try await settingsWindowChecks(model: model, shell: shell, window: first)
         try await wave33UIChecks(model: model, store: store, tab: tabA, engine: engineA, other: tabB, window: first)
         try await pinnedLifecycleChecks(model: model, store: store, home: tabA, homeEngine: engineA, window: first)
 
@@ -3313,10 +3314,11 @@ extension ChromiumSelfTest {
     fileprivate func wave27ShellChecks(model: BrowserViewModel, store: SidebarStore, shell: ChromiumShell, tab: Tab,
                                        engine: ChromiumEngine, base: String, window: NSWindow) async throws {
         if runtime.capabilities.passwordLeakDetection {
-            let items = NSApp.mainMenu?.items.first?.submenu?.items.map(\.title) ?? []
-            try check(items.contains("Check Passwords for Leaks"), "the ReArc menu has no Check Passwords for Leaks (\(items))")
-            try check(!runtime.leakDetectionEnabled, "the toggle does not show the self-test's off value")
-            log("PASS ReArc > Check Passwords for Leaks reads the profile's value (off in the self-test)")
+            // Wave 35: the switch moved from the ReArc menu to Settings › Advanced.
+            let leakCheck = shell.settingsCapabilities().passwordLeakCheck
+            try check(leakCheck != nil, "Settings › Advanced has no password leak switch")
+            try check(leakCheck?.wrappedValue == false, "the switch does not show the self-test's off value")
+            log("PASS Settings › Advanced password leak switch reads the profile's value (off in the self-test)")
         }
         try await extensionChecks(model: model, store: store, shell: shell, tab: tab, engine: engine)
         try await autofillChecks(model: model, store: store, tab: tab, engine: engine, base: base, window: window)
@@ -3961,6 +3963,68 @@ extension ChromiumSelfTest {
     @MainActor
     private func moveMouse(to point: NSPoint, in window: NSWindow) {
         ShellInput.moveMouse(to: point, in: window)
+    }
+
+    /// Wave 35 (ARC-RECORDING-2026-11-06 §6.4 item 9): ⌘, opens ReArc's own
+    /// Settings window, not a chrome://settings tab; every pane shows under its
+    /// toolbar item with its name as the title; a switch and a recorded shortcut
+    /// reach the menu bar and are saved where the next launch reads them. The
+    /// step writes to a throwaway defaults suite, never the user's.
+    @MainActor
+    private func settingsWindowChecks(model: BrowserViewModel, shell: ChromiumShell, window: NSWindow) async throws {
+        let suite = "rearc-selftest-settings-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else { throw Failure(description: "no defaults suite for Settings") }
+        let realDefaults = model.externalLinkDefaults
+        let saved = (pane: model.settingsPane, warn: model.warnBeforeQuitting, overrides: model.shortcutOverrides)
+        model.externalLinkDefaults = defaults
+        defer {
+            shell.settingsWindowForTesting?.close()
+            model.shortcutOverrides = saved.overrides
+            model.warnBeforeQuitting = saved.warn
+            model.settingsPane = saved.pane
+            model.externalLinkDefaults = realDefaults
+            defaults.removePersistentDomain(forName: suite)
+        }
+        let tabsBefore = model.store.displayTabs().count
+        guard let comma = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                                           windowNumber: window.windowNumber, context: nil, characters: ",",
+                                           charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43) else {
+            throw Failure(description: "no ⌘, event")
+        }
+        try check(NSApp.mainMenu?.performKeyEquivalent(with: comma) == true, "⌘, ran no menu item")
+        try await wait("Settings window after ⌘,") { shell.settingsWindowForTesting?.isVisible == true }
+        try check(model.store.displayTabs().count == tabsBefore, "⌘, opened a tab (chrome://settings) instead of the window")
+        guard let settings = shell.settingsWindowForTesting else { throw Failure(description: "no Settings window") }
+        let toolbar = settings.toolbar?.items.map(\.itemIdentifier.rawValue) ?? []
+        try check(toolbar == SettingsPane.allCases.map(\.rawValue), "Settings toolbar \(toolbar)")
+        try check(settings.frame.width < 520, "Settings is \(settings.frame.width) pt wide, not about 400")
+        var heights: [String] = []
+        for pane in SettingsPane.allCases {
+            model.settingsPane = pane
+            try await wait("Settings pane \(pane.title)") {
+                settings.title == pane.title && settings.toolbar?.selectedItemIdentifier?.rawValue == pane.rawValue
+            }
+            settings.contentView?.layoutSubtreeIfNeeded()
+            let height = settings.contentView?.fittingSize.height ?? 0
+            try check(height > 60, "the \(pane.title) pane laid out \(height) pt")
+            heights.append("\(pane.title) \(Int(height))")
+        }
+        // A switch and a shortcut, set as the panes set them.
+        model.warnBeforeQuitting.toggle()
+        let chord = ShortcutChord(.character("y"), [.control, .option, .command])
+        model.shortcutOverrides.set(chord, for: "newTab")
+        let file = NSApp.mainMenu?.items.first { $0.title == "File" }?.submenu
+        guard let newTab = file?.items.first(where: { $0.title == "New Tab" }) else { throw Failure(description: "no File > New Tab") }
+        try check(newTab.keyEquivalent == "y" && newTab.keyEquivalentModifierMask == [.control, .option, .command],
+                  "File > New Tab shows \(newTab.keyEquivalent) \(newTab.keyEquivalentModifierMask.rawValue), not ⌃⌥⌘Y")
+        // What the next launch reads (each setting loads from these keys at model init).
+        try check(QuitWarning.isEnabled(in: defaults) == model.warnBeforeQuitting, "Warn before quitting was not saved")
+        try check(ShortcutOverrides.load(from: defaults).chord(for: "newTab") == chord, "the recorded shortcut was not saved")
+        try check(SettingsPane.load(from: defaults) == SettingsPane.allCases.last, "the last pane was not remembered")
+        model.shortcutOverrides.resetAll()
+        try check(newTab.keyEquivalent == "t" && newTab.keyEquivalentModifierMask == .command, "Reset All left New Tab on \(newTab.keyEquivalent)")
+        log("PASS Settings window (wave 35): ⌘, opens it with no tab, \(SettingsPane.allCases.count) panes (\(heights.joined(separator: ", "))), "
+            + "Warn before quitting and a recorded ⌃⌥⌘Y for New Tab saved for the next launch and on the menu bar; Reset All restores ⌘T")
     }
 
     /// Wave 30: Arc's shortcuts with page content focused, as real key events

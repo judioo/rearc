@@ -83,7 +83,7 @@ extension BrowserViewModel {
 
     /// True once for a Chromium-created tab that a ⌥⌘-click made in the last two seconds.
     func takeLittleArcClick(now: Date = Date()) -> Bool {
-        guard let click = lastMouseDown, now.timeIntervalSince(click.at) < 2 else { return false }
+        guard littleArcOnModifiedClick, let click = lastMouseDown, now.timeIntervalSince(click.at) < 2 else { return false }
         let flags = click.modifiers
         guard LittleArcChrome.clickOpensLittleArc(
             command: flags.contains(.command), option: flags.contains(.option),
@@ -94,7 +94,12 @@ extension BrowserViewModel {
     }
 
     /// ⌥⌘-click in a sidebar tab's page: Little Arc in the current profile.
+    /// Off in Settings › Links: the click follows the link as usual.
     func configureLittleArcClicks(on engine: any WebEngine) {
+        guard littleArcOnModifiedClick else {
+            (engine as? LittleArcLinkOpening)?.littleArcLinkHandler = nil
+            return
+        }
         (engine as? LittleArcLinkOpening)?.littleArcLinkHandler = { [weak self] url in
             self?.openLittleArc(url: url)
         }

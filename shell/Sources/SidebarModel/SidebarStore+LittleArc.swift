@@ -108,8 +108,13 @@ extension SidebarStore {
 
     /// Auto-archives idle live windows; returns ids archived.
     @discardableResult
-    public func autoArchiveIdleLittleArcWindows(referenceDate: Date = Date()) -> [LittleArcWindow.ID] {
-        let ids = LittleArcPolicy.windowsEligibleForAutoArchive(live: littleArcWindows, referenceDate: referenceDate)
+    public func autoArchiveIdleLittleArcWindows(
+        referenceDate: Date = Date(),
+        threshold: TimeInterval = LittleArcPolicy.autoArchiveIdleThreshold,
+        keeping: Set<LittleArcWindow.ID> = []
+    ) -> [LittleArcWindow.ID] {
+        let ids = LittleArcPolicy.windowsEligibleForAutoArchive(
+            live: littleArcWindows, referenceDate: referenceDate, threshold: threshold, keeping: keeping)
         for id in ids {
             archiveLittleArcWindow(id: id, at: referenceDate, reason: .auto)
         }

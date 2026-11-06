@@ -77,12 +77,30 @@ public enum LittleArcPolicy {
     /// INFERRED: Arc syncs a configurable threshold; 24h is a reasonable default for idle Little Arcs.
     public static let autoArchiveIdleThreshold: TimeInterval = 24 * 60 * 60
 
-    /// Archives live windows idle longer than `autoArchiveIdleThreshold` at `referenceDate`.
+    /// Archives live windows idle longer than `threshold` at `referenceDate`;
+    /// `keeping` (the key window) stays whatever its age.
     public static func windowsEligibleForAutoArchive(
         live: [LittleArcWindow],
-        referenceDate: Date
+        referenceDate: Date,
+        threshold: TimeInterval = autoArchiveIdleThreshold,
+        keeping: Set<LittleArcWindow.ID> = []
     ) -> [LittleArcWindow.ID] {
-        live.filter { referenceDate.timeIntervalSince($0.lastActiveAt) > autoArchiveIdleThreshold }
+        live.filter { !keeping.contains($0.id) && referenceDate.timeIntervalSince($0.lastActiveAt) > threshold }
             .map(\.id)
+    }
+}
+
+/// Settings › Links › Archive Little Arcs after (Arc's pop-up; ReArc's
+/// default stays the 24 hours it used before the setting existed).
+public enum LittleArcArchivePreference {
+    public static let defaultsKey = "rearc.littleArcArchiveAfter"
+    public static let defaultValue: AutoArchiveThreshold = .oneDay
+
+    public static func load(from defaults: UserDefaults) -> AutoArchiveThreshold {
+        defaults.string(forKey: defaultsKey).flatMap(AutoArchiveThreshold.init(rawValue:)) ?? defaultValue
+    }
+
+    public static func save(_ threshold: AutoArchiveThreshold, to defaults: UserDefaults) {
+        defaults.set(threshold.rawValue, forKey: defaultsKey)
     }
 }

@@ -61,6 +61,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ReArc"
 cp "$SHELL_DIR/Resources/ReArc.icns" "$APP/Contents/Resources/ReArc.icns"
+# Settings › Icon's alternates (AppIconChoice).
+cp -R "$SHELL_DIR/Resources/AppIcons" "$APP/Contents/Resources/AppIcons"
 PLIST="$APP/Contents/Info.plist"
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

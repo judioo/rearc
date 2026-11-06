@@ -387,14 +387,16 @@ enum ShellMenus {
 /// Renders menu groups as SwiftUI menu buttons (WebKit path).
 struct ShellMenuButtons: View {
     let groups: [[ShellMenuItem]]
+    /// Settings › Shortcuts.
+    var overrides = ShortcutOverrides()
 
     var body: some View {
         ForEach(groups.indices, id: \.self) { index in
             if index > 0 { Divider() }
             ForEach(groups[index].filter { !$0.isAlternate && $0.shownTitle != nil }) { item in
-                if let key = item.keyEquivalent {
+                if let shortcut = item.keyboardShortcut(with: overrides) {
                     Button(item.shownTitle ?? item.title, action: item.action)
-                        .keyboardShortcut(key, modifiers: item.eventModifiers)
+                        .keyboardShortcut(shortcut)
                 } else {
                     Button(item.shownTitle ?? item.title, action: item.action)
                 }

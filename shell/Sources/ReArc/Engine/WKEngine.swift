@@ -263,7 +263,11 @@ final class WKEngine: NSObject, WebEngine {
     var automaticPeekSourceURL: URL?
 
     var linkPeekHandler: ((URL) -> Void)? {
-        didSet { linkPeekBridge.onURL = linkPeekHandler }
+        didSet { linkPeekBridge.onURL = shiftClickPeekEnabled ? linkPeekHandler : nil }
+    }
+    /// Settings › Links: off stops Shift-click delivery; automatic Peek keeps the handler.
+    @ObservationIgnored var shiftClickPeekEnabled = true {
+        didSet { linkPeekBridge.onURL = shiftClickPeekEnabled ? linkPeekHandler : nil }
     }
 
     init(context: EngineProfileContext) {
@@ -903,6 +907,7 @@ private struct WebViewRepresentable: NSViewRepresentable {
 }
 
 extension WKEngine: LittleArcLinkOpening {}
+extension WKEngine: ShiftClickPeekConfigurable {}
 
 /// Site Control Center: the site's records in this view's data store.
 @MainActor

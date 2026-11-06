@@ -31,6 +31,8 @@ final class ShortcutRouter {
     var isEnabled = true
     /// The prompt for a consumed website-first key.
     var onPrompt: ((ArcShortcut) -> Void)?
+    /// The binding a key runs now: Arc's table with the user's overrides (`ShortcutOverrides`).
+    var binding: (ShortcutKey, ShortcutModifiers) -> ArcShortcut? = { ArcShortcuts.binding(for: $0, modifiers: $1) }
     /// Runs a key's menu item; tests replace it.
     var performMenuKey: (NSEvent) -> Bool = { NSApp.mainMenu?.performKeyEquivalent(with: $0) ?? false }
     /// Whether a page has keyboard focus in the event's window; tests replace it.
@@ -49,7 +51,7 @@ final class ShortcutRouter {
     func handleKeyDown(_ event: NSEvent, now: Date = Date()) -> Bool {
         guard isEnabled, event.type == .keyDown, let (key, modifiers) = Self.combination(for: event),
               modifiers.contains(.command) || modifiers.contains(.control), pageHasFocus(event) else { return false }
-        let shortcut = ArcShortcuts.binding(for: key, modifiers: modifiers)
+        let shortcut = binding(key, modifiers)
         let armed = shortcut.map { arming.isArmed($0.id, now: now) } ?? false
         switch ShortcutRouting.route(shortcut, armed: armed) {
         case .browser:
