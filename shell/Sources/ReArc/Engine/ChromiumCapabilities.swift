@@ -54,6 +54,7 @@ struct ChromiumCapabilities: Equatable {
     static let earlyWindowFeature = "early_window"
     static let mediaCaptureFeature = "media_capture"
     static let searchEnginesFeature = "search_engines"
+    static let extensionSidePanelsFeature = "extension_side_panels"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -104,6 +105,7 @@ struct ChromiumCapabilities: Equatable {
         earlyWindowFeature: 45,
         mediaCaptureFeature: 46,
         searchEnginesFeature: 46,
+        extensionSidePanelsFeature: 47,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -210,6 +212,9 @@ struct ChromiumCapabilities: Equatable {
     var mediaCapture: Bool
     /// The profile's default-search choices and `ReArcSearchSetDefaultEngine` (Settings).
     var searchEngines: Bool
+    /// chrome.sidePanel panels as hosted tabs beside the page (`ReArcTabOpenSidePanel`,
+    /// `ReArcEngineSetSidePanelCallback`); requires `extensionActions` (toolbar clicks).
+    var extensionSidePanels: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -266,6 +271,7 @@ struct ChromiumCapabilities: Equatable {
         earlyWindow = adopted(Self.earlyWindowFeature)
         mediaCapture = adopted(Self.mediaCaptureFeature)
         searchEngines = adopted(Self.searchEnginesFeature)
+        extensionSidePanels = extensionActions && adopted(Self.extensionSidePanelsFeature)
     }
 
     /// Inspect in the page menu: the shell opens a hosted frontend itself
@@ -341,6 +347,7 @@ struct ChromiumCapabilities: Equatable {
             (Self.earlyWindowFeature, earlyWindow),
             (Self.mediaCaptureFeature, mediaCapture),
             (Self.searchEnginesFeature, searchEngines),
+            (Self.extensionSidePanelsFeature, extensionSidePanels),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

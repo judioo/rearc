@@ -4,13 +4,14 @@ import Observation
 import SidebarModel
 import SwiftUI
 
-/// The shell's side of Chromium extensions (ABI 1.32–1.33, 1.36): the
-/// toolbar backend, action popups, install/uninstall sheets, the logical
-/// window report and extension tab requests. Installed by `ChromiumShell`.
+/// The shell's side of Chromium extensions (ABI 1.32–1.33, 1.36, 1.47): the
+/// toolbar backend, action popups, side panels, install/uninstall sheets, the
+/// logical window report and extension tab requests. Installed by `ChromiumShell`.
 final class ChromiumExtensionHost: ExtensionToolbarBackend {
     private let runtime: ChromiumRuntime
     private weak var model: BrowserViewModel?
     let popups: ExtensionPopupPresenter
+    let sidePanels: ChromiumSidePanelHost
     /// Replaced by the self-test.
     var prompts: ExtensionPromptPresenting = AlertExtensionPromptPresenter()
     private var openPrompts: [UInt64: ExtensionPromptHandle] = [:]
@@ -27,6 +28,7 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
         self.runtime = runtime
         self.model = model
         popups = ExtensionPopupPresenter(runtime: runtime)
+        sidePanels = ChromiumSidePanelHost(runtime: runtime, model: model)
     }
 
     @MainActor
@@ -38,13 +40,19 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
         popups.onChange = { [weak model, weak popups] in model?.extensions.openPopupExtensionID = popups?.extensionID }
         if capabilities.extensionActions {
             runtime.onExtensionActionEvent = { [weak self] in self?.handleActionEvent($0) }
-            runtime.onExtensionPopupCreated = { [weak self] in self?.popups.adopt($0) ?? false }
+            runtime.onExtensionPopupCreated = { [weak self] in
+                guard let self else { return false }
+                return self.popups.adopt($0) || self.sidePanels.adopt($0)
+            }
         }
+        sidePanels.spaceForLogicalWindow = { [weak self] in self?.reporter.key(forWindowID: $0) }
+        sidePanels.install()
         if capabilities.extensionInstallPrompts {
             runtime.onExtensionPrompt = { [weak self] event in MainActor.assumeIsolated { self?.handlePrompt(event) } }
         }
         runtime.onTabClosed = { [weak self] event in
             self?.popups.tabClosed(event.tabID)
+            self?.sidePanels.tabClosed(event.tabID)
             self?.reporter.forget(tab: event.tabID)
         }
         if capabilities.linkOpenRequests {
@@ -85,8 +93,10 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
         switch result {
         case .popup:
             popups.expect(popupTab: popup, owner: chromium, extensionID: extensionID, anchor: anchor)
+        case .sidePanel where runtime.capabilities.extensionSidePanels:
+            sidePanels.toggle(extensionID, owner: chromium)
         case .sidePanel:
-            model?.showToast("Side panel extensions are not supported yet", systemImage: "sidebar.right")
+            model?.showToast("Side panel extensions need a newer engine", systemImage: "sidebar.right")
         case .handled:
             break
         case nil:

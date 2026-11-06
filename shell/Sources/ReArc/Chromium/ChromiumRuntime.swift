@@ -573,7 +573,10 @@ final class ChromiumRuntime {
     /// tabs.create / windows.create / options / activate; without it requests are declined.
     var onExtensionTabRequest: ((ExtensionTabRequest) -> Void)?
     /// The created event of a popup tab `runExtensionAction` announced; false closes it.
+    /// Side panel tabs (`openSidePanel`, ABI 1.47) come through here too.
     var onExtensionPopupCreated: ((ChromiumTabEvent) -> Bool)?
+    /// sidePanel.open / close requests and options changes (ABI 1.47).
+    var onSidePanelEvent: ((ChromiumSidePanelEvent) -> Void)?
     /// Every tab.closed, after the engine saw it.
     var onTabClosed: ((ChromiumTabEvent) -> Void)?
     /// "Manage…" in the suggestions: Chromium's settings page for the product.
@@ -724,6 +727,8 @@ final class ChromiumRuntime {
         registerClientCertificateChannel(context: context)
         // ABI 1.46: camera and microphone use for the call card, before any tab.
         registerMediaCaptureChannel(context: context)
+        // ABI 1.47: extension side panel requests, before any tab.
+        registerSidePanelChannel(context: context)
         if capabilities.htmlFullscreen {
             ReArcEngineSetFullscreenCallback(fullscreenCallback, context)
         }

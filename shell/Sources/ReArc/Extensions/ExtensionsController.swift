@@ -25,6 +25,8 @@ final class ExtensionsController {
     private(set) var pins: ExtensionPins
     /// The extension whose popup is open (its button stays highlighted).
     var openPopupExtensionID: String?
+    /// Each window's extension side panel (`isOpen` for a button highlight).
+    let sidePanels = ExtensionSidePanelController()
     @ObservationIgnored weak var backend: ExtensionToolbarBackend?
     /// Pins live here (a scratch suite in the self-test).
     @ObservationIgnored var defaults: UserDefaults {

@@ -41,11 +41,15 @@ struct BrowserView: View {
                                                                    growth: model.sidebarGrowth(in: windowID))))
                 }
             }
+            .overlay(alignment: .topTrailing) { if !isPageFullscreen { zoomBadge } }
+            // An extension's side panel, opposite the sidebar (ABI 1.47).
+            .extensionSidePanel(model.extensions.sidePanels, window: windowID, sidebarSide: placement.side,
+                                topInset: placement.trafficLightsInSidebar ? Self.cardInset : TrafficLightPositioner.cardClearance,
+                                isHidden: isPageFullscreen)
             // The sidebar and card run up under the title bar: the traffic
             // lights sit on the theme like the rest of the sidebar (§4.5).
             .ignoresSafeArea(.container, edges: .top)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .topTrailing) { if !isPageFullscreen { zoomBadge } }
             // A side change swaps the layout once, while both are faded out.
             .opacity(model.sidebarFlipOpacity)
             .background(SpaceThemeBackground(model: model, window: windowID, pager: pager).ignoresSafeArea())

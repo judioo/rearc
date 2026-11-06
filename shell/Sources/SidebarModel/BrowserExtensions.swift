@@ -133,7 +133,8 @@ public enum ExtensionActionRunResult: UInt32, Sendable {
     case handled = 0
     /// A popup registry tab was created.
     case popup
-    /// A side-panel action (unsupported; nothing is shown).
+    /// A side-panel action (openPanelOnActionClick): the shell toggles the
+    /// extension's side panel (ABI 1.47; before it nothing is shown).
     case sidePanel
 }
 
