@@ -4693,15 +4693,24 @@ extension ChromiumSelfTest {
         func openFromNewTab(_ query: String, title: String) async throws -> Tab {
             let before = Set(store.content(for: homeSpace).today.map(\.id))
             let newTab = try XCTUnwrapSelfTest(sidebarNewTabRowFrame(in: window), "+ New Tab row")
+            var downs: [String] = []
+            let monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
+                downs.append("\(event.window?.title ?? "no window") at \(event.locationInWindow)")
+                return event
+            }
             let clicked = try await systemClick(atScreen: NSPoint(x: newTab.midX, y: newTab.midY)) { model.isCommandBarPresented }
+            monitor.map(NSEvent.removeMonitor)
             if !clicked {
                 // What the click met: the key window, the window under the point and the view hit there.
                 let point = NSPoint(x: newTab.midX, y: newTab.midY)
                 let under = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0)
-                let hit = window.contentView?.hitTest(window.contentView!.convert(window.convertPoint(fromScreen: point), from: nil))
+                // The frame view takes points in window coordinates.
+                let hitChain = sequence(first: window.contentView?.superview?.hitTest(window.convertPoint(fromScreen: point)), next: { $0?.superview })
+                    .prefix(6).compactMap { $0.map { String(describing: Swift.type(of: $0)) } }.joined(separator: " < ")
+                let hit: String? = hitChain.isEmpty ? nil : hitChain + "; mouse-downs: \(downs)"
                 throw Failure(description: "+ New Tab at \(newTab) opened no command bar (key \(NSApp.keyWindow?.title ?? "none"), "
                     + "window under the point \(under) vs sidebar \(window.windowNumber) '\(NSApp.window(withWindowNumber: under)?.title ?? "?")', "
-                    + "hit \(hit.map { String(describing: Swift.type(of: $0)) } ?? "nil"))")
+                    + "hit \(hit ?? "nil"))")
             }
             model.commandBarText = "\(serverBase)/nav?\(query)"
             model.submitCommandBar()
