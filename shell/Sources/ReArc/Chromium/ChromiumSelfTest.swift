@@ -4571,8 +4571,8 @@ extension ChromiumSelfTest {
                   "the Choose a Theme row \(rowFrame) must be in the sidebar")
         // A real click: the row is a SwiftUI button inside the sidebar's space pager.
         let rowPoint = NSPoint(x: rowFrame.midX, y: rowFrame.midY)
-        let opened = try await systemClick(atScreen: rowPoint) { !self.popoverWindows().isEmpty }
-        if !opened {
+        let themeOpened = try await systemClick(atScreen: rowPoint) { !self.popoverWindows().isEmpty }
+        if !themeOpened {
             let hit = sequence(first: window.contentView?.superview?.hitTest(window.convertPoint(fromScreen: rowPoint)), next: { $0?.superview })
                 .prefix(8).compactMap { $0.map { String(describing: Swift.type(of: $0)) } }.joined(separator: " < ")
             throw Failure(description: "Choose a Theme at \(rowFrame) opened no popover (key \(NSApp.keyWindow?.title ?? "none"), hit \(hit))")
