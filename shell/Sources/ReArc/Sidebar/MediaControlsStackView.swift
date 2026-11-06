@@ -101,7 +101,9 @@ enum MediaStackMotion {
 }
 
 /// Several strips: collapsed, the front card with up to two peeking behind
-/// it; on hover they fan into a list, front at the bottom (§3.4).
+/// it; on hover they fan into a list with the newest on top, so a strip that
+/// arrives slides in above the others and they stay put, as in Arc
+/// (ARC-RECORDING-2026-11-06.md §2 rule 5).
 struct MediaStripStack: View {
     let model: BrowserViewModel
     let infos: [MediaStripInfo]
@@ -113,7 +115,7 @@ struct MediaStripStack: View {
         Group {
             if isExpanded {
                 VStack(spacing: 6) {
-                    ForEach(infos.reversed()) { info in
+                    ForEach(infos) { info in
                         MediaStripCard(model: model, info: info, isExpanded: true, isAlone: infos.count == 1)
                             .transition(MediaStackMotion.card(reduceMotion: reduceMotion))
                     }

@@ -2,15 +2,14 @@ import AppKit
 import SidebarModel
 import SwiftUI
 
-/// Arc keeps extensions at the top of the sidebar: pinned actions beside
-/// the navigation buttons and a puzzle button with every extension, its pin,
-/// chrome://extensions and the Chrome Web Store. Hidden on WebKit.
+/// Arc keeps pinned extensions at the top of the sidebar, beside the
+/// navigation buttons. Every extension, its pin and the Chrome Web Store are
+/// in the site controls panel's grid, so there is no puzzle button (as in
+/// Arc). Hidden on WebKit.
 struct ExtensionToolbarView: View {
     let model: BrowserViewModel
     let engine: (any WebEngine)?
     @Environment(\.displayScale) private var displayScale
-    @State private var showsMenu = false
-    @State private var menuAnchor: NSView?
 
     private var controller: ExtensionsController { model.extensions }
     private var engineKey: ObjectIdentifier? { engine.map { ObjectIdentifier($0) } }
@@ -20,24 +19,6 @@ struct ExtensionToolbarView: View {
             HStack(spacing: 1) {
                 ForEach(controller.pinnedActions(for: engine)) { action in
                     ExtensionActionButton(controller: controller, engine: engine, action: action)
-                }
-                Button { showsMenu.toggle() } label: {
-                    Image(systemName: "puzzlepiece.extension")
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(width: 24, height: 22)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .background(AnchorReader { menuAnchor = $0 })
-                .help("Extensions")
-                .accessibilityLabel("Extensions")
-                .popover(isPresented: $showsMenu, arrowEdge: .bottom) {
-                    ExtensionsMenu(model: model, engine: engine) { id in
-                        showsMenu = false
-                        // The popup opens once this menu has closed.
-                        DispatchQueue.main.async { controller.run(id, for: engine, anchor: menuAnchor) }
-                    } dismiss: { showsMenu = false }
                 }
             }
             .task(id: engineKey) { controller.refresh(engine, scale: displayScale) }
