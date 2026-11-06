@@ -45,14 +45,18 @@ struct BottomBarView: View {
             bar(libraryOpen: libraryOpen)
                 .overlay(alignment: .top) {
                     // The stack rises from the button and rests wholly above the bar, at its
-                    // own height (not the bar's), so it never covers the Library button.
-                    if showsDownloads {
-                        RecentDownloadsStack(records: recent, downloads: model.downloads)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .alignmentGuide(.top) { $0[.bottom] }
-                            .onHover { setLibraryHover($0, .content) }
-                            .transition(QuickViewMotion.transition(reduceMotion: reduceMotion))
-                    }
+                    // own height (not the bar's), so it never covers the Library button. Its
+                    // bottom sits on a zero-height anchor at the bar's top edge: an overlay
+                    // ignores a `.top` guide moved to the content's bottom.
+                    Color.clear.frame(height: 0)
+                        .overlay(alignment: .bottom) {
+                            if showsDownloads {
+                                RecentDownloadsStack(records: recent, downloads: model.downloads)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .onHover { setLibraryHover($0, .content) }
+                                    .transition(QuickViewMotion.transition(reduceMotion: reduceMotion))
+                            }
+                        }
                 }
         }
         .animation(.linear(duration: showsDownloads ? DownloadsQuickView.openDuration : DownloadsQuickView.closeDuration), value: showsDownloads)
