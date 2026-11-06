@@ -47,7 +47,9 @@ struct SidebarListRoot<Content: View>: View {
 }
 
 /// An `NSHostingView` for `root`, sized by its SwiftUI parent. It reports no
-/// intrinsic size, so its own layout never asks the window to lay out again.
+/// intrinsic size and takes the size it is offered, so the window neither
+/// lays out again for it nor measures its views through Auto Layout (the
+/// default fitting-size path walked the whole list on every scroll step).
 struct HostedGraph<Root: View>: NSViewRepresentable {
     let root: Root
 
@@ -59,5 +61,9 @@ struct HostedGraph<Root: View>: NSViewRepresentable {
 
     func updateNSView(_ view: NSHostingView<Root>, context: Context) {
         view.rootView = root
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSHostingView<Root>, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
     }
 }
