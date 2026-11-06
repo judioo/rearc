@@ -241,6 +241,7 @@ private struct SpaceHeaderView: View {
     @Environment(\.sidebarWindow) private var window
 
     var body: some View {
+        let showsThemeEditor = model.themePopoverSpaceID == space.id && model.isKeyBrowserWindow(window)
         // Arc: an 18 pt icon at x 17, the name in 13 pt semibold grey at x 45.
         HStack(spacing: 0) {
             SpaceIconView(iconName: space.iconName, size: 15)
@@ -292,8 +293,10 @@ private struct SpaceHeaderView: View {
         .frame(height: SidebarMetrics.headerHeight)
         .contentShape(Rectangle())
         // Edit Theme Color hangs the editor under the header (ARC-RECORDING-ANALYSIS.md §2.1).
+        // Read in the body, not only in the binding: the list's graph is
+        // its own (`SidebarListHost`), so only this body's reads update it.
         .popover(isPresented: Binding(
-            get: { model.themePopoverSpaceID == space.id && model.isKeyBrowserWindow(window) },
+            get: { showsThemeEditor },
             set: { if !$0 { model.themePopoverSpaceID = nil } }
         ), arrowEdge: .bottom) {
             SpaceStyleEditor(theme: Binding(
