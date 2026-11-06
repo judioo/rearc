@@ -29,7 +29,7 @@ final class ChromiumHistorySwipe {
     func stop() {
         generation += 1
         flushProbe(edges: nil)
-        indicator.removeFromSuperview()
+        indicator.reset()
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
     }
@@ -61,7 +61,7 @@ final class ChromiumHistorySwipe {
         generation += 1
         flushProbe(edges: nil)
         machine = HistorySwipe()
-        indicator.removeFromSuperview()
+        indicator.reset()
         gesture = true
         probing = true
         pending = [event]
@@ -104,14 +104,11 @@ final class ChromiumHistorySwipe {
         else { phase = .unphased }
         let update = machine.handle(phase: phase, x: event.scrollingDeltaX, y: event.scrollingDeltaY,
                                     edges: edges, canGoBack: host.engine.canGoBack, canGoForward: host.engine.canGoForward)
-        if let direction = update.direction {
-            indicator.direction = direction
-            indicator.progress = update.progress
-            indicator.frame = NSRect(x: direction == .back ? 12 : host.bounds.width - 52,
-                                     y: host.bounds.midY - 20, width: 40, height: 40)
-            if indicator.superview == nil { host.addSubview(indicator) }
-            indicator.needsDisplay = true
-        } else { indicator.removeFromSuperview() }
+        if update.released {
+            indicator.dismiss(committing: update.commit != nil)
+        } else if let direction = update.direction {
+            indicator.show(direction, progress: update.progress, in: host)
+        }
         if let commit = update.commit {
             if commit == .back { host.engine.goBack() } else { host.engine.goForward() }
         }
@@ -120,20 +117,109 @@ final class ChromiumHistorySwipe {
     }
 }
 
+/// Arc's half disc: black at a progress-driven alpha with an opaque white
+/// arrow, sliding out from behind the page edge and clipped by it.
 private final class HistorySwipeIndicator: NSView {
-    var direction: HistorySwipe.Direction = .back
-    var progress = 0.0
+    private let content = CALayer()
+    private let disc = CAShapeLayer()
+    private let arrow = CAShapeLayer()
+    private var fade = 0
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        disc.fillColor = NSColor.black.cgColor
+        arrow.fillColor = nil
+        arrow.strokeColor = NSColor.white.cgColor
+        arrow.lineWidth = HistorySwipe.arrowStroke
+        arrow.lineCap = .round
+        arrow.lineJoin = .round
+        // Geometry tracks the fingers, so only opacity is ever animated.
+        for shape in [disc, arrow] {
+            shape.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull(), "opacity": NSNull()]
+            content.addSublayer(shape)
+        }
+        content.actions = ["position": NSNull(), "bounds": NSNull(), "opacity": NSNull()]
+        layer?.addSublayer(content)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.windowBackgroundColor.withAlphaComponent(0.95).setFill()
-        NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1)).fill()
-        NSColor.controlAccentColor.withAlphaComponent(0.3 + 0.7 * progress).setStroke()
-        let ring = NSBezierPath(ovalIn: bounds.insetBy(dx: 2, dy: 2))
-        ring.lineWidth = 3
-        ring.stroke()
-        let symbol = direction == .back ? "arrow.left" : "arrow.right"
-        NSImage(systemSymbolName: symbol, accessibilityDescription: direction == .back ? "Back" : "Forward")?
-            .draw(in: bounds.insetBy(dx: 11, dy: 11))
+
+    func reset() {
+        fade += 1
+        content.removeAllAnimations()
+        disc.removeAllAnimations()
+        content.opacity = 1
+        disc.opacity = 0
+        removeFromSuperview()
+    }
+
+    func show(_ direction: HistorySwipe.Direction, progress: Double, in host: NSView) {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let shape = HistorySwipe.indicator(progress: progress, reduceMotion: reduceMotion)
+        let width = HistorySwipe.reach + 4, height = 2 * HistorySwipe.armedRadius + 4
+        frame = NSRect(x: direction == .back ? 0 : host.bounds.width - width,
+                       y: host.bounds.midY - height / 2, width: width, height: height)
+        let appearing = superview !== host
+        if appearing { host.addSubview(self) }
+        let scale = host.window?.backingScaleFactor ?? 2
+        disc.contentsScale = scale
+        arrow.contentsScale = scale
+        // Inward distance from the page edge to this view's x.
+        let x = { (inset: Double) in direction == .back ? inset : width - inset }
+        let midY = height / 2, r = shape.radius
+        content.frame = bounds
+        disc.path = CGPath(ellipseIn: CGRect(x: x(shape.centre) - r, y: midY - r, width: 2 * r, height: 2 * r), transform: nil)
+        arrow.path = Self.arrow(pointing: direction == .back ? -1 : 1, at: CGPoint(x: x(shape.arrowCentre), y: midY))
+        let from = disc.presentation()?.opacity ?? disc.opacity
+        disc.opacity = Float(shape.opacity)
+        guard !reduceMotion, !appearing, from != disc.opacity else {
+            disc.removeAnimation(forKey: "tone")
+            return
+        }
+        let ease = CABasicAnimation(keyPath: "opacity")
+        ease.fromValue = from
+        ease.toValue = disc.opacity
+        ease.duration = HistorySwipe.opacityDuration
+        ease.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        disc.add(ease, forKey: "tone")
+    }
+
+    /// The disc stays put and fades; a commit's page swap happens underneath it.
+    func dismiss(committing: Bool) {
+        guard superview != nil else { return }
+        fade += 1
+        let token = fade
+        let out = CABasicAnimation(keyPath: "opacity")
+        out.fromValue = content.presentation()?.opacity ?? content.opacity
+        out.toValue = 0
+        out.duration = committing ? HistorySwipe.commitFadeDuration : HistorySwipe.cancelFadeDuration
+        out.timingFunction = CAMediaTimingFunction(name: committing ? .easeInEaseOut : .easeOut)
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak self] in
+            guard let self, self.fade == token else { return }
+            self.reset()
+        }
+        content.opacity = 0
+        content.add(out, forKey: "fade")
+        CATransaction.commit()
+    }
+
+    private static func arrow(pointing sign: CGFloat, at centre: CGPoint) -> CGPath {
+        let half = (HistorySwipe.arrowWidth - HistorySwipe.arrowStroke) / 2
+        let head = (HistorySwipe.arrowHeight - HistorySwipe.arrowStroke) / 2
+        let tip = CGPoint(x: centre.x + sign * half, y: centre.y)
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: centre.x - sign * half, y: centre.y))
+        path.addLine(to: tip)
+        path.move(to: CGPoint(x: tip.x - sign * head, y: centre.y - head))
+        path.addLine(to: tip)
+        path.addLine(to: CGPoint(x: tip.x - sign * head, y: centre.y + head))
+        return path
     }
 }
 #endif
