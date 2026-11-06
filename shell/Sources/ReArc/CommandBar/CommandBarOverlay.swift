@@ -192,14 +192,18 @@ struct CommandBarOverlay: View {
     @MainActor
     final class EarlyKeyCatcher {
         private var monitor: Any?
+        private var caught = false
 
         func start(text: Binding<String>) {
             stop()
+            caught = false
             var replaces = !text.wrappedValue.isEmpty
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 // Until a text field has the keyboard (the page, then the
                 // window while focus moves), keys belong to the bar.
-                guard !(event.window?.firstResponder is NSTextView) else {
+                if let field = event.window?.firstResponder as? NSTextView {
+                    // Focus selects the whole field: keep what was caught.
+                    if self?.caught == true { field.setSelectedRange(NSRange(location: (field.string as NSString).length, length: 0)) }
                     self?.stop()
                     return event
                 }
@@ -209,6 +213,7 @@ struct CommandBarOverlay: View {
                 else { return event }
                 text.wrappedValue = (replaces ? "" : text.wrappedValue) + characters
                 replaces = false
+                self?.caught = true
                 return nil
             }
         }
