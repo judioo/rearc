@@ -50,7 +50,7 @@ enum PerfSignposts {
     }
 
     /// `launch` events: Main, EngineRunCalled, EarlyWindow, EngineReady,
-    /// ModelLoaded, WindowOrderedFront, CachedChromeCommitted, EarlyWindowPresented,
+    /// ModelLoaded, WindowOrderedFront, CachedChromeCommitted,
     /// FirstSidebarFrame, FirstPageFrame, FirstInputHandled.
     static func launchEvent(_ name: StaticString) {
         guard launch.isEnabled else { return }
