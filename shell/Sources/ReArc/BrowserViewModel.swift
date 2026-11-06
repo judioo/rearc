@@ -146,8 +146,10 @@ final class BrowserViewModel {
     /// The hidden sidebar shown floating while the pointer is at the window's
     /// leading edge (Arc `SidebarHovering` / floating sidebar).
     var isSidebarPeeking = false
-    /// The Library panel per window (Home button, View Library).
+    /// The Library per window (Home button, View Library).
     var library = LibraryPresentation()
+    /// Windows whose sidebar the Library is widening (animated).
+    var libraryGrowth: [SidebarWindowID?: LibrarySidebarGrowth] = [:]
     /// Shown in the bottom bar's update slot. Nothing sets it until an updater exists.
     var availableUpdate: AvailableUpdate?
     /// Installs `availableUpdate`; the updater provides it.

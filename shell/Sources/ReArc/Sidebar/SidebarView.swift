@@ -5,6 +5,9 @@ import SidebarModel
 /// The left sidebar: navigation controls and URL field, the favorites row,
 /// the space header, per-space pinned (with folders) and today sections, and
 /// the bottom bar with the space switcher. There is no traditional tab bar.
+/// In the Library the window's sidebar is the Library (`LibraryView`),
+/// drawn over the sidebar it hides: the list's table stays as it was, so
+/// leaving the Library shows it again without rebuilding it.
 struct SidebarView: View {
     let model: BrowserViewModel
     @Environment(\.sidebarWindow) private var window
@@ -20,9 +23,30 @@ struct SidebarView: View {
     private var focusedSpace: Space { model.space(in: window) }
 
     var body: some View {
+        let section = model.librarySection(in: window)
+        ZStack(alignment: .topLeading) {
+            spaces
+                .opacity(section == nil ? 1 : 0)
+                .allowsHitTesting(section == nil)
+                .accessibilityHidden(section != nil)
+                .environment(\.sidebarCoveredByLibrary, section != nil)
+            if let section {
+                LibraryView(model: model, window: window, section: section, draggedItemID: $draggedItemID)
+                    .frame(width: model.sidebarWidth(in: window))
+            }
+        }
+        .frame(width: model.sidebarWidth(in: window), alignment: .leading)
+        .frame(maxHeight: .infinity)
+        // The sidebar has no panel: it sits on the window's theme, and its
+        // text is the theme's own title tint in the space's appearance.
+        .foregroundStyle(chrome.title)
+        .environment(\.colorScheme, chrome.isDark ? .dark : .light)
+    }
+
+    private var spaces: some View {
         let spaceIDs = model.store.spaces(in: focusedSpace.profileID).map(\.id)
         let hasFavorites = !model.store.favorites(in: focusedSpace.profileID).isEmpty
-        VStack(spacing: 0) {
+        return VStack(spacing: 0) {
             SidebarToolbarView(model: model, urlInToolbar: urlInToolbar)
 
             // A swipe over the favorites pages the spaces under them too.
@@ -42,9 +66,10 @@ struct SidebarView: View {
             }
             .background(
                 SidebarSwipeMonitor(
-                    // Not under a drag, nor under the command bar or tab switcher's scrim.
-                    isEnabled: { [model, binding = $draggedItemID] in
+                    // Not under a drag, the Library, nor the command bar or tab switcher's scrim.
+                    isEnabled: { [model, window, binding = $draggedItemID] in
                         binding.wrappedValue == nil && !model.isCommandBarPresented && model.tabSwitcher == nil
+                            && model.librarySection(in: window) == nil
                     },
                     onBegin: { pager.beginSwipe() },
                     onChange: { pager.swipe(byPoints: $0, pageWidth: Double(model.sidebarWidth)) },
@@ -64,10 +89,6 @@ struct SidebarView: View {
         }
         .frame(width: model.sidebarWidth)
         .frame(maxHeight: .infinity)
-        // The sidebar has no panel: it sits on the window's theme, and its
-        // text is the theme's own title tint in the space's appearance.
-        .foregroundStyle(chrome.title)
-        .environment(\.colorScheme, chrome.isDark ? .dark : .light)
         .overlay(alignment: .trailing) { SidebarResizeHandle(model: model) }
         .onAppear { pager.reduceMotion = reduceMotion }
         .onChange(of: reduceMotion) { _, value in pager.reduceMotion = value }

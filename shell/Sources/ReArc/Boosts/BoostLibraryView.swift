@@ -1,7 +1,7 @@
 import SwiftUI
 import SidebarModel
 
-/// The Library's Boosts page (View Boosts; Arc `BoostsPage`, BOOSTS §2, §5): the active
+/// The Library's Boosts column (View Boosts; Arc `BoostsPage`, BOOSTS §2, §5): the active
 /// profile's boosts with a master switch, per-boost on/off, script consent,
 /// and New, Edit, Rename, Duplicate, Open Site and Delete.
 struct BoostLibraryView: View {
@@ -19,14 +19,16 @@ struct BoostLibraryView: View {
         let rows = model.boostLibraryRows(filter: query)
         let total = model.store.boostLibrary().packages.count
         VStack(spacing: 0) {
+            LibraryColumnHeader(prompt: LibrarySection.boosts.searchPrompt ?? "", text: $query)
             HStack(alignment: .firstTextBaseline) {
-                Text(model.store.activeProfile.name).font(.callout).foregroundStyle(.secondary)
+                Text(model.store.activeProfile.name).font(.callout).foregroundStyle(.secondary).lineLimit(1)
                 Spacer()
                 Toggle("Boosts On", isOn: Binding(
                     get: { model.boostsMasterEnabled },
                     set: { model.setBoostsMasterEnabled($0) }
                 ))
                 .toggleStyle(.switch)
+                .controlSize(.small)
                 .help("Turn every boost in this profile on or off")
                 Menu {
                     Button("Import Boosts…") { BoostFilePanels.importBoosts(model: model) }
@@ -46,17 +48,15 @@ struct BoostLibraryView: View {
                     createError = nil
                     isCreating = true
                 } label: {
-                    Label("New Boost", systemImage: "plus")
+                    Image(systemName: "plus")
                 }
+                .buttonStyle(.borderless)
+                .help("New Boost")
+                .accessibilityLabel("New Boost")
                 .popover(isPresented: $isCreating, arrowEdge: .bottom) { newBoostForm }
             }
-            .padding([.horizontal, .top], 16)
-
-            if total > 3 {
-                TextField("Search boosts", text: $query)
-                    .textFieldStyle(.roundedBorder)
-                    .padding([.horizontal, .top], 16)
-            }
+            .padding(.horizontal, LibraryColumnMetrics.inset + 4)
+            .padding(.bottom, 8)
 
             if rows.isEmpty {
                 VStack(spacing: 8) {
@@ -64,7 +64,7 @@ struct BoostLibraryView: View {
                     Text(total == 0 ? "Boosts restyle the sites you visit. Create one for this page with New Boost." : "No matches.")
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.secondary)
-                        .frame(maxWidth: 280)
+                        .frame(maxWidth: 240)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -79,7 +79,8 @@ struct BoostLibraryView: View {
                     )
                     .contextMenu { menu(for: row) }
                 }
-                .listStyle(.inset)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
                 .opacity(model.boostsMasterEnabled ? 1 : 0.6)
             }
 
@@ -89,7 +90,7 @@ struct BoostLibraryView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
             }
-            .padding(16)
+            .padding(LibraryColumnMetrics.inset + 4)
         }
         .alert("Rename Boost", isPresented: Binding(
             get: { renamingID != nil },

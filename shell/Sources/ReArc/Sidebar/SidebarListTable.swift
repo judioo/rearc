@@ -26,6 +26,7 @@ struct SidebarListTable: NSViewRepresentable {
     @Environment(\.spacePager) private var pager
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.sidebarCoveredByLibrary) private var covered
 
     func makeCoordinator() -> SidebarListController {
         SidebarListController(model: model, spaceID: spaceID, context: SidebarListCellContext(
@@ -36,11 +37,16 @@ struct SidebarListTable: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let controller = context.coordinator
         sync(controller)
-        return controller.makeScrollView()
+        let view = controller.makeScrollView()
+        view.isHidden = covered
+        return view
     }
 
+    /// Under the Library the table is hidden, not rebuilt, so AppKit never
+    /// hands it a click meant for the Library.
     func updateNSView(_ view: NSScrollView, context: Context) {
         sync(context.coordinator)
+        if view.isHidden != covered { view.isHidden = covered }
     }
 
     static func dismantleNSView(_ view: NSScrollView, coordinator: SidebarListController) {
