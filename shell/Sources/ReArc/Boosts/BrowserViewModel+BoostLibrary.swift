@@ -18,6 +18,12 @@ extension BrowserViewModel {
         syncAllTabBoosts()
     }
 
+    /// A space's own switch (space menu, Edit Space): its open tabs lose or regain their boosts now.
+    func setSpaceBoostsEnabled(_ enabled: Bool, for spaceID: Space.ID) {
+        store.setSpaceBoostsEnabled(enabled, for: spaceID)
+        syncAllTabBoosts()
+    }
+
     func setBoostEnabled(_ packageID: UUID, enabled: Bool) {
         store.setBoostInstallationEnabled(packageID: packageID, enabled: enabled)
         syncAllTabBoosts()

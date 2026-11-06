@@ -152,7 +152,7 @@ struct SectionItemContextMenu: View {
 }
 
 /// The space menu on the sidebar header and in the space switcher
-/// (Arc `spaceHeaderContextMenu`: rename, edit theme, delete).
+/// (Arc `spaceHeaderContextMenu`: rename, edit theme, boosts, delete).
 struct SpaceContextMenu: View {
     let model: BrowserViewModel
     let space: Space
@@ -182,6 +182,13 @@ struct SpaceContextMenu: View {
         }
         Button("Expand All Folders") { model.store.setAllFoldersExpanded(true, in: space.id) }
         Button("Collapse All Folders") { model.store.setAllFoldersExpanded(false, in: space.id) }
+        Divider()
+        // Under the profile's master switch: with that off there is nothing to turn off here.
+        Toggle("Boosts in This Space", isOn: Binding(
+            get: { space.boostsEnabled },
+            set: { model.setSpaceBoostsEnabled($0, for: space.id) }
+        ))
+        .disabled(!model.store.boostLibrary(for: space.profileID).masterEnabled)
         Divider()
         Button("Delete Space…", role: .destructive) { model.pendingDeletion = .space(space.id) }
             .disabled(!model.canDeleteSpaces)

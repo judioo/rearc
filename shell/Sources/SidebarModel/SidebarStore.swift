@@ -448,6 +448,13 @@ public final class SidebarStore {
         }
     }
 
+    /// The space's boost switch (Arc's per-space boost policy). Callers reinstall open tabs' boosts.
+    public func setSpaceBoostsEnabled(_ enabled: Bool, for spaceID: Space.ID) {
+        guard let index = spaces.firstIndex(where: { $0.id == spaceID }), spaces[index].boostsEnabled != enabled else { return }
+        spaces[index].boostsEnabled = enabled
+        notifyMutation(.upsertSpace(id: spaceID))
+    }
+
     public func setUnpinnedShared(_ shared: Bool, for spaceID: Space.ID) {
         guard let index = spaces.firstIndex(where: { $0.id == spaceID }) else { return }
         spaces[index].unpinnedShared = shared
@@ -1159,7 +1166,8 @@ public final class SidebarStore {
             profileID: profileID,
             spaceID: spaceID,
             url: tab.url,
-            isPrivate: isPrivate
+            isPrivate: isPrivate,
+            spaceBoostsEnabled: spaceID.flatMap { space(withID: $0)?.boostsEnabled } ?? true
         )
         return BoostActivation.activeEntries(library: boostLibrary(for: profileID), context: context)
     }
