@@ -235,13 +235,8 @@ struct SidebarDropRow<Content: View>: View {
 
     var body: some View {
         content()
-            .background(
-                GeometryReader { geometry in
-                    Color.clear
-                        .onAppear { height = geometry.size.height }
-                        .onChange(of: geometry.size.height) { _, newValue in height = newValue }
-                }
-            )
+            // A geometry observer, not a GeometryReader view per row.
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
             .overlay(alignment: .top) { insertionLine(.before) }
             .overlay(alignment: .bottom) { insertionLine(.after) }
             .onDrag {

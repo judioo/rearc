@@ -31,6 +31,13 @@ struct TabRowView<Menu: View>: View {
     @State private var isHovering = false
     @Environment(\.themeChrome) private var chrome
 
+    /// The row's one tooltip (the icon has none of its own, to keep one
+    /// tooltip region per row).
+    private var tooltip: String {
+        let url = tab.customTitle == nil ? tab.url.absoluteString : "\(tab.title)\n\(tab.url.absoluteString)"
+        return isUnloaded ? "Unloaded — reloads when you open it\n\(url)" : url
+    }
+
     var body: some View {
         // Arc (THEMES.md §4.6): 16 pt favicon at x 18, 14 pt title at x 45,
         // on a 41 pt pitch; selected and hovered rows use the theme's
@@ -40,7 +47,6 @@ struct TabRowView<Menu: View>: View {
                 SiteIconView(image: favicon, token: tab.faviconToken, size: SidebarMetrics.iconSize)
                     .saturation(isUnloaded ? 0 : 1)
                     .opacity(isUnloaded ? 0.4 : 1)
-                    .help(isUnloaded ? "Unloaded — reloads when you open it" : "")
             }
             .frame(width: SidebarMetrics.iconSize, height: SidebarMetrics.iconSize)
 
@@ -142,6 +148,10 @@ struct TabRowView<Menu: View>: View {
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
         .contextMenu { menu() }
-        .help(tab.customTitle == nil ? tab.url.absoluteString : "\(tab.title)\n\(tab.url.absoluteString)")
+        .help(tooltip)
+        // One accessibility element per row: its title and badges read as
+        // one label, the hover buttons become its actions.
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 }
