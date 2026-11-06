@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import SidebarModel
 
-/// The left sidebar: navigation controls and URL field, the favorites row,
+/// The sidebar (left, or right by Settings): navigation controls and URL field, the favorites row,
 /// the space header, per-space pinned (with folders) and today sections, and
 /// the bottom bar with the space switcher. There is no traditional tab bar.
 /// In the Library the window's sidebar is the Library (`LibraryView`),
@@ -94,7 +94,9 @@ struct SidebarView: View {
         }
         .frame(width: model.sidebarWidth)
         .frame(maxHeight: .infinity)
-        .overlay(alignment: .trailing) { SidebarResizeHandle(model: model) }
+        .overlay(alignment: Alignment(horizontal: model.sidebarPlacement.resizeHandleEdge.horizontalAlignment, vertical: .center)) {
+            SidebarResizeHandle(model: model)
+        }
         .onAppear { pager.reduceMotion = reduceMotion }
         .onChange(of: reduceMotion) { _, value in pager.reduceMotion = value }
         // A new space list snaps; a new focus springs, or fades to and from
@@ -235,7 +237,7 @@ struct SidebarDivider: View {
     }
 }
 
-/// The trailing-edge drag handle that resizes the sidebar (Arc `SidebarResizeState`).
+/// The drag handle on the sidebar's inner edge that resizes it (Arc `SidebarResizeState`).
 private struct SidebarResizeHandle: View {
     let model: BrowserViewModel
     @State private var startWidth: CGFloat?
@@ -252,7 +254,8 @@ private struct SidebarResizeHandle: View {
                     .onChanged { value in
                         let start = startWidth ?? model.sidebarWidth
                         startWidth = start
-                        model.sidebarWidth = CGFloat(SidebarWidth.clamped(Double(start + value.translation.width)))
+                        model.sidebarWidth = CGFloat(model.sidebarPlacement.resizedWidth(start: Double(start),
+                                                                                         translation: Double(value.translation.width)))
                     }
                     .onEnded { _ in
                         startWidth = nil

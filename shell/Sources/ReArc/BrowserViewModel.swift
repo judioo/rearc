@@ -146,6 +146,13 @@ final class BrowserViewModel {
     /// The hidden sidebar shown floating while the pointer is at the window's
     /// leading edge (Arc `SidebarHovering` / floating sidebar).
     var isSidebarPeeking = false
+    /// Settings › General › Sidebar position, as laid out now. `setSidebarSide`
+    /// changes it behind `sidebarFlipOpacity`.
+    var sidebarSide: SidebarSide = .load(from: .standard)
+    /// The sidebar and page fade out and back in around a side change.
+    var sidebarFlipOpacity: Double = 1
+    /// The side asked for last, while a flip's fade-out runs (Settings shows it at once).
+    var pendingSidebarSide: SidebarSide?
     /// The Library per window (Home button, View Library).
     var library = LibraryPresentation()
     /// Windows whose sidebar the Library is widening (animated).

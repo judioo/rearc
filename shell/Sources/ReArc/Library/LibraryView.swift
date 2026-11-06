@@ -15,30 +15,38 @@ struct LibraryView: View {
     @Environment(\.themeChrome) private var chrome
 
     var body: some View {
+        // The rail keeps to the window's edge, mirrored with the sidebar.
+        let railEdge = model.sidebarPlacement.libraryRailEdge
         HStack(spacing: 0) {
-            VStack(spacing: 0) {
-                // The traffic lights' row.
-                Color.clear.frame(height: SidebarToolbarView.rowHeight)
-                // Arc's 100 pt pitch needs 600 pt; a short window packs the rail.
-                ViewThatFits(in: .vertical) {
-                    rail(chipHeight: CGFloat(LibrarySidebarLayout.chipHeight),
-                         spacing: CGFloat(LibrarySidebarLayout.railPitch - LibrarySidebarLayout.chipHeight))
-                    rail(chipHeight: 62, spacing: 2)
-                }
-                .frame(maxHeight: .infinity)
-                BottomBarView(model: model, draggedItemID: $draggedItemID)
-            }
-            .frame(width: LibrarySidebarLayout.railWidth)
-
+            if railEdge == .left { railColumn }
             if !section.coversPage {
                 LibraryColumn(model: model, window: window, section: section)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(alignment: .leading) { LibraryColumnEdge(dark: chrome.isWindowDark) }
+                    .background(alignment: Alignment(horizontal: railEdge.horizontalAlignment, vertical: .center)) {
+                        LibraryColumnEdge(dark: chrome.isWindowDark, railEdge: railEdge)
+                    }
             }
+            if railEdge == .right { railColumn }
         }
         .frame(maxHeight: .infinity)
         // Takes every click, so none reaches the hidden sidebar under it.
         .contentShape(Rectangle())
+    }
+
+    private var railColumn: some View {
+        VStack(spacing: 0) {
+            // The traffic lights' row.
+            Color.clear.frame(height: SidebarToolbarView.rowHeight)
+            // Arc's 100 pt pitch needs 600 pt; a short window packs the rail.
+            ViewThatFits(in: .vertical) {
+                rail(chipHeight: CGFloat(LibrarySidebarLayout.chipHeight),
+                     spacing: CGFloat(LibrarySidebarLayout.railPitch - LibrarySidebarLayout.chipHeight))
+                rail(chipHeight: 62, spacing: 2)
+            }
+            .frame(maxHeight: .infinity)
+            BottomBarView(model: model, draggedItemID: $draggedItemID)
+        }
+        .frame(width: LibrarySidebarLayout.railWidth)
     }
 
     private func rail(chipHeight: CGFloat, spacing: CGFloat) -> some View {
@@ -90,16 +98,21 @@ private struct LibraryRailButton: View {
     }
 }
 
-/// The column's leading edge: a 1 pt line (black 10 % on light) and a
-/// shadow that fades out over about 30 pt into the column.
+/// The column's edge on the rail's side: a 1 pt line (black 10 % on light)
+/// and a shadow that fades out over about 30 pt into the column.
 private struct LibraryColumnEdge: View {
     let dark: Bool
+    var railEdge: SidebarSide = .left
 
     var body: some View {
+        let line = Color.black.opacity(dark ? 0.35 : 0.1).frame(width: 1)
+        let fromRail = railEdge == .left
         HStack(spacing: 0) {
-            Color.black.opacity(dark ? 0.35 : 0.1).frame(width: 1)
-            LinearGradient(colors: [.black.opacity(dark ? 0.15 : 0.045), .black.opacity(0)], startPoint: .leading, endPoint: .trailing)
+            if fromRail { line }
+            LinearGradient(colors: [.black.opacity(dark ? 0.15 : 0.045), .black.opacity(0)],
+                           startPoint: fromRail ? .leading : .trailing, endPoint: fromRail ? .trailing : .leading)
                 .frame(width: 30)
+            if !fromRail { line }
         }
         .allowsHitTesting(false)
     }

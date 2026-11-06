@@ -8,6 +8,8 @@ import SidebarModel
 /// centred, site controls and split view at the right, a hairline below.
 struct CardToolbarView: View {
     let model: BrowserViewModel
+    /// With the sidebar on the right the traffic lights sit at the strip's left.
+    var trafficLightsClearance: CGFloat = 0
     @Environment(\.sidebarWindow) private var window
     @Environment(\.themeChrome) private var chrome
     @State private var showsSiteControls = false
@@ -46,9 +48,10 @@ struct CardToolbarView: View {
             .frame(maxWidth: .infinity)
 
             HStack(spacing: 0) {
-                if !model.isSidebarVisible {
+                let side = model.sidebarSide
+                if !model.isSidebarVisible, side == .left {
                     // With the sidebar hidden its toggle moves here, before back (§3).
-                    navButton("sidebar.left", help: "Show Sidebar (⌘S)", enabled: true) { model.toggleSidebar() }
+                    navButton(side.toggleSymbol, help: "Show Sidebar (⌘S)", enabled: true) { model.toggleSidebar() }
                 }
                 navButton("arrow.left", help: "Back (⌘[)", enabled: engine?.canGoBack == true) { model.goBack() }
                 navButton("arrow.right", help: "Forward (⌘])", enabled: engine?.canGoForward == true) { model.goForward() }
@@ -87,8 +90,13 @@ struct CardToolbarView: View {
                 .foregroundStyle(quietInk)
                 .help("Add Split View")
                 .accessibilityLabel("Add Split View")
+                if !model.isSidebarVisible, side == .right {
+                    // Mirrored: the toggle sits on the sidebar's side.
+                    navButton(side.toggleSymbol, help: "Show Sidebar (⌘S)", enabled: true) { model.toggleSidebar() }
+                }
             }
             .padding(.horizontal, 2.5)
+            .padding(.leading, trafficLightsClearance)
         }
         .frame(height: Self.height)
         .overlay(alignment: .bottom) {
@@ -151,18 +159,26 @@ struct TrafficLightPositioner: NSViewRepresentable {
                width: min(titlebarWidth, windowSize.width), height: titlebarHeight)
     }
 
+    /// With the sidebar on the right and no toolbar strip, the card starts
+    /// this far down: under the buttons (bottom at 30.5) by Arc's 7.5 pt.
+    static let cardClearance: CGFloat = centreY + 7 + 7.5
+
     /// The sidebar is hidden: so are the buttons, as in Arc.
     var isHidden = false
+    /// Arc's 23.5; the card toolbar's middle with the sidebar on the right.
+    var centreY: CGFloat = Self.centreY
 
     func makeNSView(context: Context) -> PositionerView { PositionerView() }
     func updateNSView(_ nsView: PositionerView, context: Context) {
         nsView.buttonsHidden = isHidden
+        nsView.centreY = centreY
         nsView.reposition()
     }
 
     final class PositionerView: NSView {
         private var observers: [NSObjectProtocol] = []
         var buttonsHidden = false
+        var centreY = TrafficLightPositioner.centreY
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -204,7 +220,7 @@ struct TrafficLightPositioner: NSViewRepresentable {
                 guard let button = window.standardWindowButton(kind) else { continue }
                 let size = button.frame.size
                 let centreX = TrafficLightPositioner.firstCentreX + TrafficLightPositioner.pitch * CGFloat(index)
-                let fromTop = TrafficLightPositioner.centreY
+                let fromTop = centreY
                 let y = titlebar.isFlipped ? fromTop - size.height / 2 : height - fromTop - size.height / 2
                 let origin = NSPoint(x: (centreX - size.width / 2).rounded(), y: y.rounded())
                 if button.frame.origin != origin { button.setFrameOrigin(origin) }

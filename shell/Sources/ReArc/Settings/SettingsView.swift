@@ -211,6 +211,18 @@ struct GeneralSettingsPane: View {
                 }
             }
             SettingsBox {
+                SettingsRow(label: "Sidebar position", detail: "The traffic lights stay at the window's top left.") {
+                    Picker("Sidebar position", selection: Binding(
+                        get: { model.pendingSidebarSide ?? model.sidebarSide },
+                        set: { model.setSidebarSide($0) }
+                    )) {
+                        ForEach(SidebarSide.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden().fixedSize()
+                }
+            }
+            SettingsBox {
                 SettingsRow(label: "Manage your default search engine, Auto-Archive, and downloads in Profile Settings.") {
                     Button("Profile Settings…") { model.settingsPane = .profiles }
                 }

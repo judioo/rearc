@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import SidebarModel
 
-/// Root window layout: sidebar on the left, web content filling the rest,
+/// Root window layout: sidebar on the left (or the right, P3.14), web content filling the rest,
 /// command bar floating centered on top. The window background is the
 /// focused space's theme (Arc `WindowTheme`), with the page inset on it as a
 /// rounded card; it follows a space swipe and crossfades on other switches. With the sidebar hidden (Cmd+S), pointing
@@ -30,15 +30,15 @@ struct BrowserView: View {
 
     var body: some View {
         ZStack {
-            // ⌘S pushes the sidebar with the card's leading edge; the card
+            // ⌘S pushes the sidebar with the card's edge beside it; the card
             // is laid out beside it only at rest (`isSidebarLaidOut`).
-            ZStack(alignment: .topLeading) {
+            ZStack(alignment: Alignment(horizontal: placement.side.horizontalAlignment, vertical: .top)) {
                 contentCard
                 if model.isSidebarVisible || model.isSidebarSliding, !isPageFullscreen {
                     let width = model.sidebarWidth(in: windowID)
                     SidebarView(model: model, draggedItemID: $draggedItemID)
-                        .offset(x: (model.sidebarReveal - 1) * width
-                                + CGFloat(model.sidebarGrowth(in: windowID)?.sidebarOffset(width: Double(width)) ?? 0))
+                        .offset(x: CGFloat(placement.sidebarOffset(reveal: model.sidebarReveal, width: Double(width),
+                                                                   growth: model.sidebarGrowth(in: windowID))))
                 }
             }
             // The sidebar and card run up under the title bar: the traffic
@@ -46,19 +46,23 @@ struct BrowserView: View {
             .ignoresSafeArea(.container, edges: .top)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .topTrailing) { if !isPageFullscreen { zoomBadge } }
+            // A side change swaps the layout once, while both are faded out.
+            .opacity(model.sidebarFlipOpacity)
             .background(SpaceThemeBackground(model: model, window: windowID, pager: pager).ignoresSafeArea())
 
             if !model.isSidebarVisible, model.isSidebarPeeking, !isPageFullscreen {
+                let edge = placement.side.edge
                 HStack(spacing: 0) {
+                    if edge == .trailing { Spacer(minLength: 0) }
                     SidebarView(model: model, draggedItemID: $draggedItemID)
                         .background(SpaceThemeBackground(model: model, window: windowID, pager: pager))
                         .clipShape(RoundedRectangle(cornerRadius: 10))
-                        .shadow(color: .black.opacity(0.25), radius: 12, x: 2)
+                        .shadow(color: .black.opacity(0.25), radius: 12, x: 2 * CGFloat(placement.inward))
                         .padding(.vertical, 6)
-                        .padding(.leading, 6)
-                    Spacer(minLength: 0)
+                        .padding(edge == .leading ? .leading : .trailing, 6)
+                    if edge == .leading { Spacer(minLength: 0) }
                 }
-                .transition(.move(edge: .leading).combined(with: .opacity))
+                .transition(.move(edge: edge).combined(with: .opacity))
             }
 
             if let session = model.peekSession, let web = model.peekEngineView() {
@@ -128,7 +132,9 @@ struct BrowserView: View {
                 .frame(width: 0, height: 0)
         )
         // Arc hides the traffic lights with the sidebar (ARC-RECORDING-ANALYSIS.md §3).
-        .background(TrafficLightPositioner(isHidden: !model.isSidebarVisible && !model.isSidebarPeeking && !isPageFullscreen)
+        // With the sidebar on the right they stay at the top left, in the card's toolbar strip.
+        .background(TrafficLightPositioner(isHidden: !showsTrafficLights,
+                                           centreY: trafficLightsCentreY)
             .frame(width: 0, height: 0))
         // The shown space's Appearance (Automatic, Light, Dark) sets the
         // window's, which its pages, easels and notes follow.
@@ -151,6 +157,7 @@ struct BrowserView: View {
         )
         .background(
             SidebarEdgeHoverMonitor(
+                placement: placement,
                 isEnabled: !model.isSidebarVisible && !isPageFullscreen,
                 isPeeking: model.isSidebarPeeking,
                 dismissWidth: model.sidebarWidth(in: windowID) + 36,
@@ -292,6 +299,20 @@ struct BrowserView: View {
         return model.themeColors.colors(for: id, theme: theme, dark: dark)
     }
 
+    private var placement: SidebarPlacement { model.sidebarPlacement }
+
+    /// The card's toolbar strip, when shown (it holds the traffic lights with the sidebar on the right).
+    private var showsCardToolbar: Bool {
+        urlInToolbar && !isPageFullscreen
+            && model.librarySection(in: windowID)?.coversPage != true && model.selectedEaselRef(in: windowID) == nil
+    }
+
+    /// Arc's height in the sidebar's top row; on the right, the card toolbar's middle.
+    private var trafficLightsCentreY: CGFloat {
+        guard !placement.trafficLightsInSidebar, showsCardToolbar else { return TrafficLightPositioner.centreY }
+        return Self.cardInset + CardToolbarView.height / 2
+    }
+
     /// This window shows a page in HTML fullscreen: only the page, edge to edge.
     private var isPageFullscreen: Bool {
         model.isHTMLFullscreen(in: windowID)
@@ -343,6 +364,9 @@ struct BrowserView: View {
                 .padding(.vertical, 5)
                 .background(.ultraThinMaterial, in: Capsule())
                 .padding(10)
+                // At the card's top right, which a sidebar on the right moves in.
+                .padding(.trailing, placement.side == .right && model.isSidebarLaidOut
+                         ? model.sidebarWidth(in: windowID) - Self.cardInset : 0)
                 .help("Page zoom — click to reset to 100% (⌘0)")
         }
     }
@@ -374,15 +398,17 @@ struct BrowserView: View {
     /// is 62 % white over the theme, so an empty card is tinted by it and
     /// changes colour with a swipe. With
     /// "URL in toolbar" on, the toolbar strip sits at its top (§4.4). With
-    /// the sidebar hidden it is inset on every side. In HTML fullscreen the
-    /// same view loses its inset and corners: a different view tree would
-    /// detach the page, which ends fullscreen.
+    /// the sidebar hidden it is inset on every side. With the sidebar on the
+    /// right it is the mirror, and without the strip its top clears the
+    /// traffic lights. In HTML fullscreen the same view loses its inset and
+    /// corners: a different view tree would detach the page, which ends fullscreen.
     private var contentCard: some View {
         let fullscreen = isPageFullscreen
         let radius: CGFloat = fullscreen ? 0 : Self.cardRadius
         let inset: CGFloat = fullscreen ? 0 : Self.cardInset
-        let showsToolbar = urlInToolbar && !fullscreen
-            && model.librarySection(in: windowID)?.coversPage != true && model.selectedEaselRef(in: windowID) == nil
+        let showsToolbar = showsCardToolbar
+        let placement = placement
+        let topInset = fullscreen || showsToolbar || placement.trafficLightsInSidebar ? inset : TrafficLightPositioner.cardClearance
         let sidebarWidth = model.sidebarWidth(in: windowID)
         // The Library widening the sidebar moves the page without laying it out again.
         let growth = fullscreen ? nil : model.sidebarGrowth(in: windowID)
@@ -390,10 +416,11 @@ struct BrowserView: View {
             reveal: model.sidebarReveal, width: sidebarWidth, inset: inset,
             showing: model.isSidebarVisible, laidOut: model.isSidebarLaidOut
         )
-        let shape = CardShape(radius: radius, leadingCut: slide.cut)
+        let shape = CardShape(radius: radius, sidebarCut: slide.cut, cutEdge: placement.cardSidebarEdge)
         return VStack(spacing: 0) {
             if showsToolbar {
-                CardToolbarView(model: model)
+                CardToolbarView(model: model, trafficLightsClearance: placement.trafficLightsInSidebar || !showsTrafficLights
+                                ? 0 : TrafficLightPositioner.titlebarWidth - Self.cardInset)
                     .zIndex(1)
             }
             contentArea
@@ -416,11 +443,18 @@ struct BrowserView: View {
         .clipShape(shape)
         .background(shape.fill(cardFill))
         .background(CardShadow(shape: shape).opacity(fullscreen ? 0 : 1))
-        .padding(.vertical, inset)
-        .padding(.trailing, inset)
-        .padding(.leading, model.isSidebarLaidOut && !fullscreen ? growth.map { CGFloat($0.from) } ?? sidebarWidth : inset)
-        .offset(x: slide.offset + CGFloat(growth?.pageOffset ?? 0))
+        .padding(.top, topInset)
+        .padding(.bottom, inset)
+        .padding(placement.side.opposite.edgeSet, inset)
+        .padding(placement.side.edgeSet,
+                 model.isSidebarLaidOut && !fullscreen ? growth.map { CGFloat($0.from) } ?? sidebarWidth : inset)
+        .offset(x: CGFloat(placement.pageOffset(slide: Double(slide.offset), growth: growth)))
         .ignoresSafeArea(edges: fullscreen ? .all : [])
+    }
+
+    /// The traffic lights show with the sidebar, as in Arc (ARC-RECORDING-ANALYSIS.md §3).
+    private var showsTrafficLights: Bool {
+        (model.isSidebarVisible || model.isSidebarPeeking) && !isPageFullscreen
     }
 
     static let cardInset: CGFloat = 10
@@ -520,34 +554,37 @@ struct SidebarSlide: Equatable {
     }
 }
 
-/// The card's rounded rectangle less a strip at its leading edge (the part
-/// a sliding sidebar still covers). The strip animates with the sidebar.
+/// The card's rounded rectangle less a strip at its edge beside the sidebar
+/// (the part a sliding sidebar still covers). The strip animates with the sidebar.
 struct CardShape: Shape {
     var radius: CGFloat
-    var leadingCut: CGFloat = 0
+    var sidebarCut: CGFloat = 0
+    var cutEdge: SidebarSide = .left
 
     var animatableData: CGFloat {
-        get { leadingCut }
-        set { leadingCut = newValue }
+        get { sidebarCut }
+        set { sidebarCut = newValue }
     }
 
     func path(in rect: CGRect) -> Path {
         let card = Path(roundedRect: rect, cornerRadius: radius, style: .continuous)
-        let cut = min(max(leadingCut, 0), rect.width)
+        let cut = min(max(sidebarCut, 0), rect.width)
         guard cut > 0 else { return card }
-        return card.intersection(Path(CGRect(x: rect.minX + cut, y: rect.minY, width: rect.width - cut, height: rect.height)))
+        let minX = cutEdge == .left ? rect.minX + cut : rect.minX
+        return card.intersection(Path(CGRect(x: minX, y: rect.minY, width: rect.width - cut, height: rect.height)))
     }
 }
 
 /// Watches pointer movement in its window: reports `true` when the pointer
-/// reaches the leading edge while the sidebar is hidden, `false` once it moves
+/// reaches the sidebar's edge while the sidebar is hidden, `false` once it moves
 /// clear of the floating sidebar. A local event monitor sees moves over web
 /// content too (WKWebView or the Chromium host view), which SwiftUI hover
 /// tracking on an overlay would not reliably get.
 struct SidebarEdgeHoverMonitor: NSViewRepresentable {
+    var placement = SidebarPlacement(side: .left)
     var isEnabled: Bool
     var isPeeking: Bool
-    /// Past this x the floating sidebar hides again (its width plus a margin).
+    /// This far from the edge the floating sidebar hides again (its width plus a margin).
     var dismissWidth: CGFloat
     var onChange: (Bool) -> Void
 
@@ -584,12 +621,16 @@ struct SidebarEdgeHoverMonitor: NSViewRepresentable {
 
         func handle(_ event: NSEvent) {
             guard parent.isEnabled, let window = view?.window, event.window === window else { return }
-            let x = event.locationInWindow.x
+            let x = Double(event.locationInWindow.x)
             let y = event.locationInWindow.y
+            let width = Double(window.frame.width)
             let inside = y >= 0 && y <= window.frame.height
-            if !parent.isPeeking, inside, x >= 0, x <= SidebarEdgeHoverMonitor.revealWidth {
+            let placement = parent.placement
+            if !parent.isPeeking, inside,
+               placement.revealsPeek(x: x, windowWidth: width, revealWidth: Double(SidebarEdgeHoverMonitor.revealWidth)) {
                 parent.onChange(true)
-            } else if parent.isPeeking, x > parent.dismissWidth || !inside {
+            } else if parent.isPeeking,
+                      placement.dismissesPeek(x: x, windowWidth: width, dismissWidth: Double(parent.dismissWidth)) || !inside {
                 parent.onChange(false)
             }
         }
