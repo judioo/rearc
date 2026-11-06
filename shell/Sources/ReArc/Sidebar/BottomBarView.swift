@@ -4,8 +4,8 @@ import SidebarModel
 
 /// The sidebar's bottom bar as Arc draws it (THEMES.md §4.7): the Library
 /// (archive) button at the left, one 4 pt dot per space of this window's
-/// profile on a 9 pt pitch with the current space's icon in place of its
-/// dot, and the "+" menu at the right, 17 pt in from each side and centred
+/// profile on a 9 pt pitch (the current space: its icon, or an 8 pt dot),
+/// and the "+" menu at the right, 17 pt in from each side and centred
 /// 24.5 pt above the window's bottom. Click a dot to switch, right-click
 /// for the space menu, drag to reorder, drop a sidebar item on one to move
 /// it there (hovering a drag over one switches to it). Downloads and the
@@ -23,90 +23,55 @@ struct BottomBarView: View {
     @State private var renamingProfileID: Profile.ID?
     @State private var renameDraft = ""
     @State private var profileActionError: String?
+    /// The Library button's downloads stack; local so hover never re-renders the sidebar.
+    @State private var libraryReveal = HoverReveal()
+    @State private var revealTask: Task<Void, Never>?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static let height: CGFloat = 49
 
     var body: some View {
+        let libraryOpen = model.librarySection(in: window) != nil
+        let recent = libraryOpen ? [] : RecentDownloads.latest(model.downloads.records)
+        let showsDownloads = libraryReveal.isShown && !recent.isEmpty
+        VStack(spacing: 0) {
+            // The downloads stack takes the update pill's place while shown.
+            UpdateBannerSlot(update: model.availableUpdate) { model.installUpdate?() }
+                .opacity(showsDownloads ? 0 : 1)
+            bar(libraryOpen: libraryOpen)
+                .overlay(alignment: .top) {
+                    if showsDownloads {
+                        RecentDownloadsStack(records: recent, downloads: model.downloads)
+                            .alignmentGuide(.top) { $0[.bottom] }
+                            .onHover { setLibraryHover($0, .content) }
+                            .transition(MediaStackMotion.card(reduceMotion: reduceMotion, distance: 8))
+                    }
+                }
+        }
+        .animation(SidebarMotion.spring(reduceMotion: reduceMotion), value: showsDownloads)
+        .onChange(of: libraryOpen) { _, _ in dismissLibraryHover() }
+    }
+
+    @ViewBuilder
+    private func bar(libraryOpen: Bool) -> some View {
         let current = model.space(in: window)
         let profile = model.profile(in: window)
         HStack(spacing: 0) {
-            // Arc's Home button (`SidebarHomeButton`): opens the Library on
-            // its last page, or closes it.
-            let libraryOpen = model.librarySection(in: window) != nil
-            Button { model.toggleLibrary(in: window) } label: {
-                Image(systemName: "archivebox.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(libraryOpen ? chrome.accent : chrome.glyph)
-                    .frame(width: 18, height: 24)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Library: Spaces, Downloads, Media, Easels & Notes, Archive and Boosts")
-            .accessibilityLabel("Library")
-            .popover(isPresented: $showingProfileList, arrowEdge: .top) {
-                ProfileListView(
-                    model: model,
-                    isPresented: $showingProfileList,
-                    onRename: beginRename,
-                    onDelete: attemptDelete
-                )
-            }
-
-            Spacer(minLength: 6)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 0) {
-                    let spaces = model.store.spaces(in: current.profileID)
-                    ForEach(Array(spaces.enumerated()), id: \.element.id) { index, space in
-                        SpaceIconButton(
-                            model: model,
-                            space: space,
-                            index: index,
-                            isCurrent: space.id == current.id,
-                            draggedItemID: $draggedItemID,
-                            draggedSpaceID: $draggedSpaceID
-                        )
-                    }
+            if libraryOpen {
+                // In the Library the bar shows only Arc's ← (§5.1); Esc leaves too.
+                Button { model.closeLibrary(in: window) } label: {
+                    Image(systemName: "arrow.left")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(chrome.glyph)
+                        .frame(width: 18, height: 24)
+                        .contentShape(Rectangle())
                 }
-            }
-            .frame(maxWidth: 140)
-            .fixedSize(horizontal: true, vertical: false)
-            .popover(isPresented: $showingSpaceList, arrowEdge: .top) {
-                SpaceListView(model: model, isPresented: $showingSpaceList)
-            }
-
-            Spacer(minLength: 6)
-
-            if SyncStatusPresentation(model.syncStatus).indicator == .red {
-                Circle()
-                    .fill(model.syncStatusColor)
-                    .frame(width: 6, height: 6)
-                    .help(model.syncStatusHelp)
-                    .padding(.trailing, 8)
-            }
-
-            if model.downloads.activeCount > 0 || model.downloads.hasDangerous || model.downloads.isTrayPresented {
-                DownloadsButton(downloads: model.downloads, isPresented: Binding(
-                    get: { model.downloads.isTrayPresented && model.isKeyBrowserWindow(window) },
-                    set: { model.downloads.isTrayPresented = $0 }
-                ))
-                .padding(.trailing, 8)
-            }
-
-            // Arc's + menu: an in-window panel above the bar; the + turns
-            // into × while it is open (ARC-RECORDING-ANALYSIS.md §5.1).
-            Button { showingPlusMenu.toggle() } label: {
-                Image(systemName: showingPlusMenu ? "xmark" : "plus")
-                    .font(.system(size: showingPlusMenu ? 13 : 15, weight: .medium))
-                    .foregroundStyle(chrome.glyph)
-                    .frame(width: 18, height: 24)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("New Space, Folder, Easel, Boost, Split or Tab")
-            .accessibilityLabel(showingPlusMenu ? "Close Menu" : "New")
-            .popover(isPresented: $showingPlusMenu, arrowEdge: .top) {
-                PlusMenuPanel(sections: plusMenu(current: current, profile: profile)) { showingPlusMenu = false }
+                .buttonStyle(.plain)
+                .help("Exit Library")
+                .accessibilityLabel("Exit Library")
+                Spacer(minLength: 0)
+            } else {
+                normalBar(current: current, profile: profile)
             }
         }
         .padding(.horizontal, 17)
@@ -127,6 +92,96 @@ struct BottomBarView: View {
         } message: {
             Text(profileActionError ?? "")
         }
+    }
+
+    /// The bar outside the Library: Library button, space dots, downloads, sync and +.
+    @ViewBuilder
+    private func normalBar(current: Space, profile: Profile) -> some View {
+        // Arc's Home button (`SidebarHomeButton`): opens the Library on
+        // its last page, or closes it. Resting on it shows the latest
+        // downloads above the bar (ARC-RECORDING-2026-11-06.md §5.1).
+        Button {
+            dismissLibraryHover()
+            model.toggleLibrary(in: window)
+        } label: {
+            Image(systemName: "archivebox.fill")
+                .font(.system(size: 14))
+                .foregroundStyle(chrome.glyph)
+                .frame(width: 18, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { setLibraryHover($0, .trigger) }
+        .help("View Library: Spaces, Downloads, Media, Easels & Notes, Archive and Boosts")
+        .accessibilityLabel("Library")
+        .popover(isPresented: $showingProfileList, arrowEdge: .top) {
+            ProfileListView(
+                model: model,
+                isPresented: $showingProfileList,
+                onRename: beginRename,
+                onDelete: attemptDelete
+            )
+        }
+
+        Spacer(minLength: 6)
+
+        SpaceDotRow(model: model, current: current, draggedItemID: $draggedItemID, draggedSpaceID: $draggedSpaceID)
+            .popover(isPresented: $showingSpaceList, arrowEdge: .top) {
+                SpaceListView(model: model, isPresented: $showingSpaceList)
+            }
+
+        Spacer(minLength: 6)
+
+        if SyncStatusPresentation(model.syncStatus).indicator == .red {
+            Circle()
+                .fill(model.syncStatusColor)
+                .frame(width: 6, height: 6)
+                .help(model.syncStatusHelp)
+                .padding(.trailing, 8)
+        }
+
+        if model.downloads.activeCount > 0 || model.downloads.hasDangerous || model.downloads.isTrayPresented {
+            DownloadsButton(downloads: model.downloads, isPresented: Binding(
+                get: { model.downloads.isTrayPresented && model.isKeyBrowserWindow(window) },
+                set: { model.downloads.isTrayPresented = $0 }
+            ))
+            .padding(.trailing, 8)
+        }
+
+        // Arc's + menu: an in-window panel above the bar; the + turns
+        // into × while it is open (ARC-RECORDING-ANALYSIS.md §5.1).
+        Button { showingPlusMenu.toggle() } label: {
+            Image(systemName: showingPlusMenu ? "xmark" : "plus")
+                .font(.system(size: showingPlusMenu ? 13 : 15, weight: .medium))
+                .foregroundStyle(chrome.glyph)
+                .frame(width: 18, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("New Space, Folder, Easel, Boost, Split or Tab")
+        .accessibilityLabel(showingPlusMenu ? "Close Menu" : "New")
+        .popover(isPresented: $showingPlusMenu, arrowEdge: .top) {
+            PlusMenuPanel(sections: plusMenu(current: current, profile: profile)) { showingPlusMenu = false }
+        }
+    }
+
+    // MARK: Library hover
+
+    private func setLibraryHover(_ hovering: Bool, _ region: HoverReveal.Region) {
+        libraryReveal.setHovering(hovering, region, at: ProcessInfo.processInfo.systemUptime)
+        revealTask?.cancel()
+        guard let deadline = libraryReveal.deadline else { return }
+        revealTask = Task { @MainActor in
+            let wait = max(deadline - ProcessInfo.processInfo.systemUptime, 0)
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            libraryReveal.advance(to: max(ProcessInfo.processInfo.systemUptime, deadline))
+        }
+    }
+
+    private func dismissLibraryHover() {
+        revealTask?.cancel()
+        libraryReveal.dismiss()
     }
 
     /// Arc's rows and shortcuts in Arc's order, then ReArc's extras.
@@ -185,6 +240,49 @@ struct BottomBarView: View {
     }
 }
 
+/// The space dots. Hover lives here so moving along the row redraws only the
+/// row: the hovered dot morphs into its space's icon and the current space's
+/// icon falls back to its larger dot, so one icon shows at a time (§5.2).
+private struct SpaceDotRow: View {
+    let model: BrowserViewModel
+    let current: Space
+    @Binding var draggedItemID: UUID?
+    @Binding var draggedSpaceID: Space.ID?
+    @State private var hoveredSpaceID: Space.ID?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let spaces = model.store.spaces(in: current.profileID)
+        let appearances = SpaceDots.appearances(spaces: spaces, current: current.id, hovered: hoveredSpaceID)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 0) {
+                ForEach(Array(spaces.enumerated()), id: \.element.id) { index, space in
+                    SpaceIconButton(
+                        model: model,
+                        space: space,
+                        index: index,
+                        appearance: appearances[index],
+                        onHover: { hover(space.id, $0) },
+                        draggedItemID: $draggedItemID,
+                        draggedSpaceID: $draggedSpaceID
+                    )
+                }
+            }
+        }
+        .frame(maxWidth: 140)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    /// The row reflows in the same transaction as the morph.
+    private func hover(_ id: Space.ID, _ hovering: Bool) {
+        let next = hovering ? id : (hoveredSpaceID == id ? nil : hoveredSpaceID)
+        guard next != hoveredSpaceID else { return }
+        withAnimation(SidebarMotion.spring(response: SpaceIconButton.morphResponse, reduceMotion: reduceMotion)) {
+            hoveredSpaceID = next
+        }
+    }
+}
+
 /// One space in the bottom bar. A sidebar item dropped on it moves to that
 /// space (keeping its section); held over it for a moment, the drag switches
 /// to the space so it can be placed precisely. A space dropped on it takes
@@ -193,42 +291,60 @@ private struct SpaceIconButton: View {
     let model: BrowserViewModel
     let space: Space
     let index: Int
-    let isCurrent: Bool
+    let appearance: SpaceDotAppearance
+    let onHover: (Bool) -> Void
     @Binding var draggedItemID: UUID?
     @Binding var draggedSpaceID: Space.ID?
     @State private var isTargeted = false
 
-    @State private var isHovering = false
     @Environment(\.themeChrome) private var chrome
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Dot ↔ icon in about 0.15 s (§5.2: 130–200 ms).
+    static let morphResponse = 0.15
 
     var body: some View {
         Button { model.selectSpace(space.id) } label: {
-            Group {
-                if isCurrent || isHovering {
-                    // The current space shows its icon in place of its dot,
-                    // and so does a hovered one (ARC-RECORDING-ANALYSIS.md §4).
+            ZStack {
+                if appearance == .icon {
                     SpaceIconView(iconName: space.iconName, size: 11)
                         .foregroundStyle(chrome.accent)
-                        .frame(width: 22, height: 24)
+                        .transition(morph)
                 } else {
+                    // 4 pt on a 9 pt pitch; the current space's dot is 8 pt.
+                    let large = appearance == .largeDot
                     Circle()
-                        .fill(chrome.tertiaryText)
-                        .frame(width: 4, height: 4)
-                        .frame(width: 9, height: 24)
+                        .fill(large ? chrome.accent : chrome.tertiaryText)
+                        .frame(width: large ? 8 : 4, height: large ? 8 : 4)
+                        .transition(morph)
                 }
             }
+            .frame(width: width, height: 24)
             .background(isTargeted ? Color.accentColor.opacity(0.35) : .clear, in: RoundedRectangle(cornerRadius: 5))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { isHovering = $0 }
+        .onHover(perform: onHover)
         .help("\(space.name) (⌃\(index + 1)) — drop a tab here to move it to this space")
+        .accessibilityLabel(space.name)
         .contextMenu { SpaceContextMenu(model: model, space: space) }
         .onDrag {
             draggedSpaceID = space.id
             return SidebarDragPayload.itemProvider(for: space.id)
         }
         .onDrop(of: [.plainText], delegate: SpaceIconDropDelegate(icon: self, isTargeted: $isTargeted))
+    }
+
+    private var width: CGFloat {
+        switch appearance {
+        case .dot: return 9
+        case .largeDot: return 13
+        case .icon: return 22
+        }
+    }
+
+    private var morph: AnyTransition {
+        reduceMotion ? .opacity : .scale(scale: 0.4).combined(with: .opacity)
     }
 }
 

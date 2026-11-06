@@ -53,28 +53,32 @@ struct MediaControlsStackView: View {
         let live = model.sidebarLiveVideoTabID(in: window)
         let strips = model.mediaStrips(in: window).filter { $0 != live }
         VStack(spacing: MediaStripMetrics.gap) {
+            // The stack grows upwards from a fixed bottom edge: a new card
+            // enters at the top from behind the one below, which stays put.
             if let live, let info = model.mediaStripInfo(for: live) {
                 LivePlayerCard(model: model, info: info)
-                    .transition(cardTransition)
+                    .transition(MediaStackMotion.card(reduceMotion: reduceMotion))
+                    .zIndex(0)
             }
             if !strips.isEmpty {
                 MediaStripStack(model: model, infos: strips.compactMap { model.mediaStripInfo(for: $0) })
-                    .transition(cardTransition)
+                    .transition(MediaStackMotion.card(reduceMotion: reduceMotion))
+                    .zIndex(1)
             }
         }
         .padding(.horizontal, MediaStripMetrics.inset)
         .padding(.bottom, live == nil && strips.isEmpty ? 0 : MediaStripMetrics.gap)
-        .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.35, dampingFraction: 0.85), value: strips)
-        .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.4, dampingFraction: 0.85), value: live)
+        .animation(SidebarMotion.spring(reduceMotion: reduceMotion), value: strips)
+        .animation(SidebarMotion.spring(reduceMotion: reduceMotion), value: live)
     }
+}
 
-    /// In: up 12 pt from 98 %, fading in; out: down 8 pt, fading (§3.5).
-    private var cardTransition: AnyTransition {
-        guard !reduceMotion else { return .opacity }
-        return .asymmetric(
-            insertion: .opacity.combined(with: .offset(y: 12)).combined(with: .scale(scale: 0.98, anchor: .bottom)),
-            removal: .opacity.combined(with: .offset(y: 8))
-        )
+/// Arc's media stack motion (ARC-RECORDING-2026-11-06.md §4 item 5): a card
+/// slides up from below its top edge and fades in, on the sidebar spring
+/// (about 0.25 s); removal reverses it. Reduce Motion fades only.
+enum MediaStackMotion {
+    static func card(reduceMotion: Bool, distance: CGFloat = MediaStripMetrics.height) -> AnyTransition {
+        reduceMotion ? .opacity : .opacity.combined(with: .offset(y: distance))
     }
 }
 
@@ -93,6 +97,7 @@ struct MediaStripStack: View {
                 VStack(spacing: 6) {
                     ForEach(infos.reversed()) { info in
                         MediaStripCard(model: model, info: info, isExpanded: true)
+                            .transition(MediaStackMotion.card(reduceMotion: reduceMotion))
                     }
                 }
             } else {
@@ -103,10 +108,14 @@ struct MediaStripStack: View {
                             .offset(y: CGFloat(index) * -4)
                             .opacity(1 - 0.25 * Double(index))
                             .allowsHitTesting(index == 0)
+                            // A strip joining or leaving the pile rises into
+                            // place without dropping below the stack's edge.
+                            .transition(MediaStackMotion.card(reduceMotion: reduceMotion, distance: 8))
                     }
                 }
             }
         }
+        .animation(SidebarMotion.spring(reduceMotion: reduceMotion), value: infos.map(\.id))
         .onHover { hovering in
             collapseTask?.cancel()
             if hovering {

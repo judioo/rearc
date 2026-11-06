@@ -90,6 +90,10 @@ final class BrowserViewModel {
     var isSidebarPeeking = false
     /// The Library panel per window (Home button, View Library).
     var library = LibraryPresentation()
+    /// Shown in the bottom bar's update slot. Nothing sets it until an updater exists.
+    var availableUpdate: AvailableUpdate?
+    /// Installs `availableUpdate`; the updater provides it.
+    @ObservationIgnored var installUpdate: (() -> Void)?
     /// Where links from other apps open; remembered across launches.
     var externalLinkDestination: ExternalLinkDestination = .load(from: .standard) {
         didSet { externalLinkDestination.save(to: externalLinkDefaults) }
