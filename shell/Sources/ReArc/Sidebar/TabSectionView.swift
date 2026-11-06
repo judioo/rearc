@@ -189,6 +189,29 @@ struct SidebarDropRow<Content: View>: View {
     }
 }
 
+/// A tab dropped on the middle of another tab groups both into a new folder,
+/// but only once the pointer has rested there: a quick pass over a row, or a
+/// click that turned into a short drag, reorders instead of making a folder.
+@MainActor
+enum SidebarGroupingDwell {
+    static let delay: TimeInterval = 0.5
+    private static var target: UUID?
+    private static var since: TimeInterval = 0
+
+    /// Whether the pointer has been over `targetID`'s middle for `delay`; nil resets.
+    static func isReady(over targetID: UUID?, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
+        guard let targetID else {
+            target = nil
+            return false
+        }
+        if target != targetID {
+            target = targetID
+            since = now
+        }
+        return now - since >= delay
+    }
+}
+
 struct SidebarRowDropDelegate: DropDelegate {
     let target: SidebarEntry
     let rowHeight: CGFloat
@@ -214,7 +237,11 @@ struct SidebarRowDropDelegate: DropDelegate {
             }
             if canEnter, (0.25 ... 0.75).contains(fraction) { return .into }
         case .tab:
-            if case .tab = dragged, (0.3 ... 0.7).contains(fraction) { return .into }
+            if case .tab = dragged, (0.3 ... 0.7).contains(fraction) {
+                if SidebarGroupingDwell.isReady(over: target.id) { return .into }
+            } else {
+                _ = SidebarGroupingDwell.isReady(over: nil)
+            }
         case .split, .easel:
             break
         }
@@ -243,6 +270,7 @@ struct SidebarRowDropDelegate: DropDelegate {
         defer {
             draggedItemID = nil
             dropState = nil
+            _ = SidebarGroupingDwell.isReady(over: nil)
         }
         if draggedItemID == nil, let position = position(for: info) {
             let target = target.id, model = model
