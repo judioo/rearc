@@ -253,24 +253,47 @@ final class LoopbackFixtureServer {
 
     func start() async throws -> UInt16 {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt16, Error>) in
-            listener.stateUpdateHandler = { [listener] state in
-                switch state {
-                case .ready:
-                    listener.stateUpdateHandler = nil
-                    continuation.resume(returning: listener.port?.rawValue ?? 0)
-                case .failed(let error):
-                    listener.stateUpdateHandler = nil
-                    continuation.resume(throwing: error)
-                default:
-                    break
-                }
-            }
-            listener.newConnectionHandler = { [queue] connection in
-                connection.start(queue: queue)
-                Self.serve(connection)
-            }
-            listener.start(queue: queue)
+            begin { continuation.resume(with: $0) }
         }
+    }
+
+    /// For a caller with no run loop to await on (the bench's early window,
+    /// inside ReArcEngineRun). The listener reports on its own queue.
+    func startBlocking(timeout: TimeInterval = 5) throws -> UInt16 {
+        let done = DispatchSemaphore(value: 0)
+        let result = LockedResult()
+        begin { result.set($0); done.signal() }
+        guard done.wait(timeout: .now() + timeout) == .success, let port = result.get() else {
+            throw CocoaError(.featureUnsupported, userInfo: [NSLocalizedDescriptionKey: "loopback listener not ready in \(timeout) s"])
+        }
+        return try port.get()
+    }
+
+    private final class LockedResult: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Result<UInt16, Error>?
+        func set(_ result: Result<UInt16, Error>) { lock.withLock { value = result } }
+        func get() -> Result<UInt16, Error>? { lock.withLock { value } }
+    }
+
+    private func begin(_ completion: @escaping (Result<UInt16, Error>) -> Void) {
+        listener.stateUpdateHandler = { [listener] state in
+            switch state {
+            case .ready:
+                listener.stateUpdateHandler = nil
+                completion(.success(listener.port?.rawValue ?? 0))
+            case .failed(let error):
+                listener.stateUpdateHandler = nil
+                completion(.failure(error))
+            default:
+                break
+            }
+        }
+        listener.newConnectionHandler = { [queue] connection in
+            connection.start(queue: queue)
+            Self.serve(connection)
+        }
+        listener.start(queue: queue)
     }
 
     /// Reads until the end of the request head; preconnected sockets may idle or close without one.

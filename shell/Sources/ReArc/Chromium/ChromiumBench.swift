@@ -177,6 +177,18 @@ final class ChromiumBench {
     private var fixtureBuildSeconds = 0.0
 
     private func startServer() async throws {
+        guard server == nil else { return }
+        let server = try makeServer()
+        didStart(server, port: try await server.start())
+    }
+
+    /// The early window's fixture needs the port before the main loop runs.
+    private func startServerBlocking() throws {
+        let server = try makeServer()
+        didStart(server, port: try server.startBlocking())
+    }
+
+    private func makeServer() throws -> LoopbackFixtureServer {
         // Generate the page set before the first request (first visits must not pay for it).
         _ = (BenchPages.images.count, BenchPages.spaScript.count, BenchPages.article.count, BenchPages.list.count)
         if let path = options.dumpPagesPath { try BenchPages.dump(to: URL(fileURLWithPath: path, isDirectory: true)) }
@@ -185,7 +197,10 @@ final class ChromiumBench {
             settings.logsRequests = false
             settings.routes = BenchPages.route
         }
-        let port = try await server.start()
+        return server
+    }
+
+    private func didStart(_ server: LoopbackFixtureServer, port: UInt16) {
         self.server = server
         base = "http://127.0.0.1:\(port)"
         report.fixture = BenchReport.Fixture(sidebar: options.fixture, seed: options.seed, server: "loopback 127.0.0.1",
@@ -214,7 +229,30 @@ final class ChromiumBench {
     private var delivery: ShellInput.Delivery { ShellInput.deliverable(window) ? .appKit : .direct }
 
     /// The fixture sidebar, the model and the real ChromiumShell with its window.
-    private func makeShell() throws {
+    /// Model construction and the early window's present, kept until the launch child records them.
+    private var modelInitSeconds: Double?
+    private var earlyPresentSeconds: Double?
+    private var earlyWindowFailure: String?
+
+    /// early_window (ABI 1.45), launch child only: the fixture sidebar's
+    /// window from inside ReArcEngineRun, before ready. `makeShell` attaches it.
+    func presentEarlyWindow() {
+        guard options.suites.contains(.launchChild) else { return }
+        do {
+            try startServerBlocking()
+        } catch {
+            earlyWindowFailure = "loopback server: \(error)"
+            return
+        }
+        buildModel()
+        shell = ChromiumShell(runtime: runtime, autosavesFrames: false)
+        let presenting = ProcessInfo.processInfo.systemUptime
+        shell.presentCachedWindow(model: model)
+        earlyPresentSeconds = ProcessInfo.processInfo.systemUptime - presenting
+        if let window = shell.browserWindows.first { place(window) }
+    }
+
+    private func buildModel() {
         let size = BenchFixture.Size(rawValue: options.fixture) ?? .items500
         let building = ProcessInfo.processInfo.systemUptime
         fixture = BenchFixture.make(size, seed: options.seed) { [base] in URL(string: "\(base)/bench/tab/\($0)")! }
@@ -228,15 +266,26 @@ final class ChromiumBench {
         model = BrowserViewModel(store: store, persistence: SidebarFilePersistence(fileURL: sidebarFile),
                                  syncEngine: LocalSyncEngine(), faviconStore: FaviconStore(directory: nil), deferStartup: true)
         LaunchTimeline.modelLoaded = ProcessInfo.processInfo.systemUptime
-        if options.suites.contains(.launchChild) { record("launch.model_init", ms(modelStart, LaunchTimeline.modelLoaded)) }
+        modelInitSeconds = LaunchTimeline.modelLoaded! - modelStart
         model.onShellAnimationComplete = { [animations] in animations.send($0) }
-        shell = ChromiumShell(runtime: runtime, autosavesFrames: false)
+    }
+
+    private func makeShell() throws {
+        let early = shell != nil
+        if !early {
+            buildModel()
+            shell = ChromiumShell(runtime: runtime, autosavesFrames: false)
+        }
+        if options.suites.contains(.launchChild) { record("launch.model_init", (modelInitSeconds ?? 0) * 1000) }
         let shellStart = ProcessInfo.processInfo.systemUptime
         shell.start(model: model)
-        if options.suites.contains(.launchChild) { record("launch.shell_start", ms(shellStart, ProcessInfo.processInfo.systemUptime)) }
+        if options.suites.contains(.launchChild) {
+            record("launch.shell_start", ms(shellStart, ProcessInfo.processInfo.systemUptime))
+            if let earlyPresentSeconds { record("launch.early_window_present", earlyPresentSeconds * 1000) }
+        }
         guard let window = shell.browserWindows.first else { throw Failure(description: "ChromiumShell opened no browser window") }
         self.window = window
-        place(window)
+        if !early { place(window) }
         probe.attach(to: window)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -904,13 +953,24 @@ final class ChromiumBench {
         scenario = "launch"
         let start = options.launchStart ?? LaunchTimeline.processStart ?? LaunchTimeline.main
         record("launch.exec_to_main", ms(start, LaunchTimeline.main))
+        if let early = LaunchTimeline.earlyWindow { record("launch.main_to_early_window", ms(LaunchTimeline.main, early)) }
         record("launch.main_to_engine_ready", ms(LaunchTimeline.main, LaunchTimeline.engineReady))
         let fcp = pageTimings.arm(timeout: 15) { $0.kind == .firstContentfulPaint }
+        let early = shell != nil
         try makeShell()
         record("launch.fixture_build", fixtureBuildSeconds * 1000)
-        let visible = await probe.nextFrame(after: window)
+        let visible: Double?
+        if early {
+            // Committed before ready, while the main run loop was not running (LaunchFrameClock).
+            visible = LaunchTimeline.earlyFrameClock.presented(timeout: 1)
+            record("launch.early_window_visible", ms(start, visible))
+            report.notes.append("Early window (ABI 1.45): the browser window and fixture sidebar were committed in the engine's early_window callback, before ready; window_visible is that commit's first display refresh (CVDisplayLink).")
+        } else {
+            visible = await probe.nextFrame(after: window)?.target
+            report.notes.append("No early window (\(earlyWindowFailure ?? (runtime.earlyWindowAt == nil ? "engine has no early_window" : "callback did not build the shell"))): the window went up after ready.")
+        }
         PerfSignposts.launchEvent("FirstSidebarFrame")
-        record("launch.window_visible", ms(start, visible?.target))
+        record("launch.window_visible", ms(start, visible))
         record("launch.cached_chrome_commit", ms(start, LaunchTimeline.cachedChromeCommitted))
         record("launch.services_start", ms(start, LaunchTimeline.servicesStarted))
         report.notes.append("Launch fixture construction is measured separately; launch.model_init excludes persisted-store disk reads. Normal launches overlap PreparedBrowserStartup with ChromeMain; trace StoreLoadStarted/Finished for that path.")
@@ -949,10 +1009,14 @@ final class ChromiumBench {
 /// Process-start and early milestones on the CACurrentMediaTime clock.
 enum LaunchTimeline {
     nonisolated(unsafe) static var main: TimeInterval = ProcessInfo.processInfo.systemUptime
+    /// The early-window callback (ABI 1.45), before browser threads and ready.
+    nonisolated(unsafe) static var earlyWindow: TimeInterval?
     nonisolated(unsafe) static var engineReady: TimeInterval?
     nonisolated(unsafe) static var modelLoaded: TimeInterval?
     nonisolated(unsafe) static var cachedChromeCommitted: TimeInterval?
     nonisolated(unsafe) static var servicesStarted: TimeInterval?
+    /// The early window's first refresh after its commit (bench only).
+    static let earlyFrameClock = LaunchFrameClock()
 
     /// The process's start (kinfo_proc p_starttime), moved onto the uptime clock.
     static var processStart: TimeInterval? {

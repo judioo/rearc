@@ -51,6 +51,7 @@ struct ChromiumCapabilities: Equatable {
     static let keyEquivalentEventsFeature = "key_equivalent_events"
     static let pipEmbeddedFeature = "pip_embedded"
     static let perfMetricsFeature = "perf_metrics"
+    static let earlyWindowFeature = "early_window"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -98,6 +99,7 @@ struct ChromiumCapabilities: Equatable {
         keyEquivalentEventsFeature: 42,
         pipEmbeddedFeature: 43,
         perfMetricsFeature: 44,
+        earlyWindowFeature: 45,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -195,6 +197,9 @@ struct ChromiumCapabilities: Equatable {
     /// `ReArcEngineSetViewPresentationCallback`, `ReArcMetricsGetHistogram`,
     /// `ReArcEngineGetProcesses`). Only `--rearc-bench` registers the callbacks.
     var perfMetrics: Bool
+    /// `ReArcEngineSetEarlyWindowCallback`: the shell puts up its cached window
+    /// when the application exists, before browser threads and profiles (launch).
+    var earlyWindow: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -248,6 +253,7 @@ struct ChromiumCapabilities: Equatable {
         keyEquivalentEvents = adopted(Self.keyEquivalentEventsFeature)
         pipEmbedded = pictureInPicture && adopted(Self.pipEmbeddedFeature)
         perfMetrics = adopted(Self.perfMetricsFeature)
+        earlyWindow = adopted(Self.earlyWindowFeature)
     }
 
     /// Inspect in the page menu: the shell opens a hosted frontend itself
@@ -320,6 +326,7 @@ struct ChromiumCapabilities: Equatable {
             (Self.keyEquivalentEventsFeature, keyEquivalentEvents),
             (Self.pipEmbeddedFeature, pipEmbedded),
             (Self.perfMetricsFeature, perfMetrics),
+            (Self.earlyWindowFeature, earlyWindow),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

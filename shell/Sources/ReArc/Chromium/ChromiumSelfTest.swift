@@ -152,6 +152,16 @@ final class ChromiumSelfTest {
             + "; app active \(NSApp.isActive)\(foreground.isEmpty ? "" : "; also on the command line")")
         log("features: " + features.map { "\($0)=\(ReArcEngineHasFeature($0) ? 1 : 0)" }.joined(separator: " "))
         try check(runtime.defaultProfileID != 0, "ready delivered a zero default profile")
+        // 0. early_window (ABI 1.45): the application-exists stage ran inside Run, before ready.
+        if capabilities.earlyWindow {
+            try check(runtime.earlyWindowAt != nil, "early_window advertised but its callback never ran")
+            let lead = ((runtime.readyAt ?? 0) - (runtime.earlyWindowAt ?? .infinity)) * 1000
+            try check(lead > 0, "the early_window callback did not run before ready")
+            log(String(format: "PASS early_window callback ran once, %.0f ms before ready", lead))
+        } else {
+            log("ABI-GAP early_window not advertised (ABI minor \(capabilities.abiMinorVersion.map(String.init) ?? "absent") < 45): "
+                + "the browser window waits for ready")
+        }
 
         // 1. Tab creation through the shell engine (shell UUIDs map to engine uint64 IDs).
         let shellTabID = UUID()

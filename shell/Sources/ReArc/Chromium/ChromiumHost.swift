@@ -65,6 +65,7 @@ enum ChromiumHost {
                 // Only loopback names resolve, as in the self-test (the fixture server is 127.0.0.1).
                 ChromiumBench.prepareLaunch()
                 let runner = ChromiumBench(runtime: runtime, options: bench)
+                runtime.onEarlyWindow = { runner.presentEarlyWindow() }
                 runtime.onReady = { runner.start() }
                 if let dir = ChromiumLaunchArguments.userDataDir(in: arguments) {
                     ChromiumLaunchArguments.prepareSelfTestUserDataDir(URL(fileURLWithPath: dir, isDirectory: true))
@@ -82,6 +83,7 @@ enum ChromiumHost {
             // the main queue: whichever finishes last starts the cached shell.
             let startup = ChromiumShellStartup(runtime: runtime, shell: shell)
             startup.prepare()
+            runtime.onEarlyWindow = { startup.earlyWindow() }
             runtime.onReady = { startup.engineReady() }
             exit(runtime.run(arguments: arguments, keychain: keychain))
         }
@@ -122,12 +124,22 @@ enum ChromiumHost {
 }
 
 /// Main-thread rendezvous: cached state and ABI readiness arrive independently.
+/// With early_window (ABI 1.45) the cached window goes up before ready, from
+/// inside ReArcEngineRun, where no main-queue turn runs: there the decode is
+/// awaited on a semaphore (it takes 10–15 ms warm), never the main queue.
 @MainActor
 private final class ChromiumShellStartup {
+    /// How long the early window waits for the sidebar decode; past it the
+    /// window goes up at ready, as before.
+    static let earlyWindowWait: TimeInterval = 0.25
+
     private let runtime: ChromiumRuntime
     private let shell: ChromiumShell
-    private var prepared: PreparedBrowserStartup?
+    private let loaded = PreparedStartupSlot()
+    /// The model whose window went up early.
+    private var earlyModel: BrowserViewModel?
     private var ready = false
+    private var started = false
 
     init(runtime: ChromiumRuntime, shell: ChromiumShell) {
         self.runtime = runtime
@@ -136,15 +148,21 @@ private final class ChromiumShellStartup {
 
     func prepare() {
         let file = SidebarFilePersistence.defaultFileURL
+        let loaded = self.loaded
         DispatchQueue.global(qos: .userInitiated).async {
-            let prepared = PreparedBrowserStartup.load(from: file)
-            DispatchQueue.main.async { self.didPrepare(prepared) }
+            loaded.fill(PreparedBrowserStartup.load(from: file))
+            DispatchQueue.main.async { self.startIfReady() }
         }
     }
 
-    private func didPrepare(_ prepared: PreparedBrowserStartup) {
-        self.prepared = prepared
-        startIfReady()
+    func earlyWindow() {
+        guard let prepared = loaded.wait(timeout: Self.earlyWindowWait) else {
+            ChromiumLog.info("early window: sidebar not decoded within \(Int(Self.earlyWindowWait * 1000)) ms; the window waits for ready")
+            return
+        }
+        let model = ChromiumShell.makeModel(runtime: runtime, prepared: prepared)
+        earlyModel = model
+        shell.presentCachedWindow(model: model)
     }
 
     func engineReady() {
@@ -153,9 +171,34 @@ private final class ChromiumShellStartup {
     }
 
     private func startIfReady() {
-        guard ready, let prepared else { return }
-        self.prepared = nil
-        shell.start(model: ChromiumShell.makeModel(runtime: runtime, prepared: prepared))
+        guard ready, !started else { return }
+        if let earlyModel {
+            started = true
+            shell.start(model: earlyModel)
+        } else if let prepared = loaded.value {
+            started = true
+            shell.start(model: ChromiumShell.makeModel(runtime: runtime, prepared: prepared))
+        }
+    }
+}
+
+/// The worker's decode, readable from the main thread with or without a run loop.
+private final class PreparedStartupSlot: @unchecked Sendable {
+    private let lock = NSLock()
+    private let filled = DispatchSemaphore(value: 0)
+    private var stored: PreparedBrowserStartup?
+
+    var value: PreparedBrowserStartup? { lock.withLock { stored } }
+
+    func fill(_ prepared: PreparedBrowserStartup) {
+        lock.withLock { stored = prepared }
+        filled.signal()
+    }
+
+    func wait(timeout: TimeInterval) -> PreparedBrowserStartup? {
+        if let value { return value }
+        _ = filled.wait(timeout: .now() + timeout)
+        return value
     }
 }
 
@@ -187,6 +230,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     /// One never-shown window, with no page or user state. Consumed once.
     private var preparedLittleArcWindow: NSWindow?
     private var terminating = false
+    /// The cached window is up (`presentCachedWindow`) and `ready` has not run.
+    private var awaitingReady = false
     private let menuTarget = ChromiumMenuTarget()
     /// The tray's Chromium side; the controller only holds it weakly.
     private var downloadBackend: ChromiumDownloadBackend?
@@ -226,12 +271,34 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         return model
     }
 
-    /// `model` must come from `makeModel` (or name the Default owner itself first).
+    /// early_window (ABI 1.45), from inside `ReArcEngineRun` before `ready`:
+    /// orders front the browser window with the cached sidebar and commits it.
+    /// No engine call is made, and services wait for `start(model:)` at ready.
     @MainActor
-    func start(model: BrowserViewModel) {
+    func presentCachedWindow(model: BrowserViewModel) {
+        precondition(self.model == nil)
+        adopt(model)
+        awaitingReady = true
+        openBrowserWindow()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    private func adopt(_ model: BrowserViewModel) {
         NSApp.setActivationPolicy(.regular)
         self.model = model
         model.windowPresenter = self
+    }
+
+    /// At ready. `model` must come from `makeModel` (or name the Default owner
+    /// itself first); after `presentCachedWindow` it must be the same model.
+    @MainActor
+    func start(model: BrowserViewModel) {
+        if let early = self.model {
+            precondition(early === model)
+        } else {
+            adopt(model)
+        }
         model.presentAirTrafficControl = { [weak self] in self?.presentAirTrafficControl() }
         model.onProfileDeleted = { [weak self, runtime] id in
             // EngineHost already dropped the profile's engines. Its private windows
@@ -307,7 +374,13 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             model?.prepareForQuit()
         }
         NSApp.mainMenu = makeMainMenu(model: model)
-        openBrowserWindow()
+        if awaitingReady {
+            // The cached window is up; the services it deferred start now.
+            awaitingReady = false
+            DispatchQueue.main.async { [weak model] in model?.finishStartup() }
+        } else {
+            openBrowserWindow()
+        }
         ExternalLinkRouter.shared.attach(model)
         NotificationCenter.default.addObserver(
             self,
@@ -372,12 +445,20 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         if first {
             PerfSignposts.launchEvent("WindowOrderedFront")
             // Commit the cached chrome before services create any page engines.
-            // ABI ready has already run; named profiles/pages may still be cold.
+            // Either ABI ready has run (named profiles/pages may still be cold),
+            // or this is the early window and Chromium is still starting.
             window.displayIfNeeded()
             CATransaction.flush()
             LaunchTimeline.cachedChromeCommitted = ProcessInfo.processInfo.systemUptime
             PerfSignposts.launchEvent("CachedChromeCommitted")
-            DispatchQueue.main.async { [weak model] in model?.finishStartup() }
+            if awaitingReady {
+                // The probe's display link needs the main run loop, which Chromium holds until ready.
+                if PresentationProbe.shared.isEnabled, let committed = LaunchTimeline.cachedChromeCommitted {
+                    LaunchTimeline.earlyFrameClock.start(after: committed, screen: window.screen ?? NSScreen.main)
+                }
+            } else {
+                DispatchQueue.main.async { [weak model] in model?.finishStartup() }
+            }
         }
         return window
     }

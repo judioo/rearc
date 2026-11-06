@@ -49,8 +49,9 @@ enum PerfSignposts {
         DispatchQueue.main.async { interaction.endInterval(kind.name, state) }
     }
 
-    /// `launch` events: Main, EngineRunCalled, EngineReady, ModelLoaded,
-    /// WindowOrderedFront, FirstSidebarFrame, FirstPageFrame, FirstInputHandled.
+    /// `launch` events: Main, EngineRunCalled, EarlyWindow, EngineReady,
+    /// ModelLoaded, WindowOrderedFront, CachedChromeCommitted, EarlyWindowPresented,
+    /// FirstSidebarFrame, FirstPageFrame, FirstInputHandled.
     static func launchEvent(_ name: StaticString) {
         guard launch.isEnabled else { return }
         launch.emitEvent(name)

@@ -294,6 +294,10 @@ private let viewInvalidatedCallback: @convention(c) (UnsafeMutableRawPointer?, U
     MainActor.assumeIsolated { runtime(from: context).handleViewInvalidated(attachmentID: attachment, reason: reason) }
 }
 
+private let earlyWindowCallback: @convention(c) (UnsafeMutableRawPointer?) -> Void = { context in
+    MainActor.assumeIsolated { runtime(from: context).handleEarlyWindow() }
+}
+
 private let terminateCallback: @convention(c) (UnsafeMutableRawPointer?) -> Void = { context in
     MainActor.assumeIsolated { runtime(from: context).handleTerminateRequested() }
 }
@@ -510,6 +514,13 @@ final class ChromiumRuntime {
     private var shutdownVetoed = false
 
     var onReady: (() -> Void)?
+    /// early_window (ABI 1.45): runs once inside `ReArcEngineRun`, when the
+    /// application exists and before browser threads, profiles and `ready`.
+    /// AppKit windows only; the main queue is not serviced until after it.
+    var onEarlyWindow: (() -> Void)?
+    /// When the early-window callback ran and when ready arrived (uptime clock).
+    private(set) var earlyWindowAt: TimeInterval?
+    private(set) var readyAt: TimeInterval?
     /// Runs before shutdown starts for an AppKit quit request (persist shell state here).
     var onTerminateRequested: (() -> Void)?
     /// Chromium-created contents (popups, target=_blank). Return true to adopt;
@@ -660,6 +671,10 @@ final class ChromiumRuntime {
             return -status
         }
         isConfigured = true
+        // Registered whenever the engine has it, so the self-test sees the stage ran.
+        if Self.probeCapabilities().earlyWindow {
+            ReArcEngineSetEarlyWindowCallback(earlyWindowCallback, context)
+        }
         let owned = arguments.map { strdup($0) }
         defer { owned.forEach { free($0) } }
         var argv: [UnsafePointer<CChar>?] = owned.map { UnsafePointer($0) }
@@ -671,7 +686,15 @@ final class ChromiumRuntime {
         return code
     }
 
+    fileprivate func handleEarlyWindow() {
+        earlyWindowAt = ProcessInfo.processInfo.systemUptime
+        LaunchTimeline.earlyWindow = earlyWindowAt
+        PerfSignposts.launchEvent("EarlyWindow")
+        onEarlyWindow?()
+    }
+
     fileprivate func handleReady(defaultProfileID profile: UInt64) {
+        readyAt = ProcessInfo.processInfo.systemUptime
         defaultProfileID = profile
         capabilities = Self.probeCapabilities()
         isReady = true
