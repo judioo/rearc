@@ -52,6 +52,7 @@ struct CommandBarOverlay: View {
     private var isCommandMode: Bool { text.hasPrefix(">") }
 
     @FocusState private var isFieldFocused: Bool
+    @State private var earlyKeys = EarlyKeyCatcher()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -153,8 +154,10 @@ struct CommandBarOverlay: View {
         .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
         .onAppear {
             isFieldFocused = true
+            earlyKeys.start(text: $text)
             reclaimFocusFromPage()
         }
+        .onDisappear { earlyKeys.stop() }
         .onChange(of: focusRequest) { _, _ in
             isFieldFocused = false
             DispatchQueue.main.async { isFieldFocused = true }
@@ -180,6 +183,38 @@ struct CommandBarOverlay: View {
             isFieldFocused = false
             DispatchQueue.main.async { isFieldFocused = true }
             reclaimFocusFromPage(attempts: attempts - 1)
+        }
+    }
+
+    /// Keys typed straight after ⌘T or ⌘L, before the field has the keyboard,
+    /// would reach the focused page: they go into the field instead. The
+    /// prefilled URL is selected, so the first key replaces it, as in the field.
+    @MainActor
+    final class EarlyKeyCatcher {
+        private var monitor: Any?
+
+        func start(text: Binding<String>) {
+            stop()
+            var replaces = !text.wrappedValue.isEmpty
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard ShortcutRouter.isWebContent(event.window?.firstResponder) else {
+                    // The field (or anything else) has the keyboard now.
+                    if event.window?.firstResponder is NSTextView { self?.stop() }
+                    return event
+                }
+                let modifiers = event.modifierFlags.intersection([.command, .control, .option])
+                guard modifiers.isEmpty, let characters = event.characters, !characters.isEmpty,
+                      characters.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) && $0.value < 0xF700 })
+                else { return event }
+                text.wrappedValue = (replaces ? "" : text.wrappedValue) + characters
+                replaces = false
+                return nil
+            }
+        }
+
+        func stop() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
         }
     }
 
