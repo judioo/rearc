@@ -1,8 +1,8 @@
 import XCTest
 @testable import ReArc
 
-/// A tab dropped on a tab makes a folder only after the pointer rests there,
-/// so a click that became a short drag cannot fold a new tab into Pinned.
+/// A tab dropped on a tab stacks them only after the pointer rests there,
+/// so a click that became a short drag cannot stack a new tab by accident.
 @MainActor
 final class GroupingDwellTests: XCTestCase {
     func testGroupingWaitsForTheDwellOnOneTarget() {

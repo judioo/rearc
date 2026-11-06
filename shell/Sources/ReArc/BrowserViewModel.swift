@@ -180,6 +180,8 @@ final class BrowserViewModel {
     var spaceCreationDraft: SpaceDraft?
     var profileEditorRequest: ProfileEditorRequest?
     var itemIconEditorID: UUID?
+    /// The split row whose name is being edited in place.
+    var renamingSplitID: SplitViewItem.ID?
     /// Today tabs archived by the last Clear, for Undo.
     var lastClearedTabIDs: [Tab.ID] = []
     var pendingRename: SidebarRenameRequest?
@@ -678,7 +680,7 @@ final class BrowserViewModel {
         let sectionKind: Tab.Kind = anchorTab.kind == .pinned ? .pinned : .today
         if let existing = store.splitContaining(tabID: anchorTab.id)?.split {
             // Inside a split: add a blank pane, up to four.
-            guard existing.tabs.count < 4 else { return }
+            guard !existing.isFull else { return showSplitFullToast() }
             let pane = store.addTab(kind: sectionKind, title: "New Tab", url: URL(string: "about:blank")!)
             guard store.splitTab(pane.id, with: anchorTab.id) != nil else {
                 store.closeTab(pane.id)

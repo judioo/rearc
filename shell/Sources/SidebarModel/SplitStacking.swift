@@ -80,3 +80,11 @@ extension SidebarStore {
         return true
     }
 }
+
+extension SplitViewItem {
+    /// Copy Links and Arc's "Copy links as Markdown": one pane per line.
+    public func links(markdown: Bool) -> String {
+        tabs.map { markdown ? PageLinkCopyFormat.markdownLink(url: $0.url, title: $0.displayTitle) : $0.url.absoluteString }
+            .joined(separator: "\n")
+    }
+}

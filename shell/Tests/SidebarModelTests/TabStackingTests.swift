@@ -161,4 +161,11 @@ final class TabStackingTests: XCTestCase {
         XCTAssertEqual(store.locateSplit(splitID)?.section, .unpinned)
         XCTAssertTrue(store.content(for: store.activeSpaceID).pinned.isEmpty)
     }
+
+    func testCopyLinksListsOnePanePerLine() throws {
+        let (store, tabs) = makeStore(tabs: 2)
+        let split = try XCTUnwrap(store.createSplit(tabIDs: tabs.map(\.id), orientation: .horizontal))
+        XCTAssertEqual(split.links(markdown: false), "https://t0.example\nhttps://t1.example")
+        XCTAssertEqual(split.links(markdown: true), "[T0](https://t0.example)\n[T1](https://t1.example)")
+    }
 }

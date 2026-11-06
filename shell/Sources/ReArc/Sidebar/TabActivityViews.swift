@@ -86,9 +86,11 @@ struct ShellToastView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: toast.systemImage)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(chrome.accent)
+            if !toast.systemImage.isEmpty {
+                Image(systemName: toast.systemImage)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(chrome.accent)
+            }
             HStack(spacing: 3) {
                 ForEach(Array(toast.segments.enumerated()), id: \.offset) { _, segment in
                     if segment.isKeycap {

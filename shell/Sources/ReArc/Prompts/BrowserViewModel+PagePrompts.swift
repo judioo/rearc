@@ -27,6 +27,7 @@ extension BrowserViewModel: PageLinkRouting {
         guard store.splitTab(pane.id, with: anchorID) != nil else {
             store.closeTab(pane.id)
             engineHost.remove(pane.id)
+            if store.isSplitFull(joining: anchorID) { showSplitFullToast() }
             return openLinkTab(url, from: prompts, select: true)
         }
         loadSelectedIfNeeded()
