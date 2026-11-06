@@ -148,6 +148,9 @@ final class FirstRunOnboarding: OnboardingHost {
             hidden.first?.makeKeyAndOrderFront(nil)
         }
         hidden = []
+        // The player's own dismiss goes through a weak reference that dropping
+        // the takeover here clears; without this the clear overlay stays on top.
+        takeover?.dismiss()
         takeover = nil
         onDone?()
     }

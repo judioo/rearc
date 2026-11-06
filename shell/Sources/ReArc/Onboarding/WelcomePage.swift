@@ -37,7 +37,7 @@ enum WelcomePage {
         @media (prefers-color-scheme: dark) { :root { --ink: #EEF0FF; --muted: rgba(238,240,255,.65); --faint: rgba(238,240,255,.4); --bg: #12142B; --key: rgba(255,255,255,.06); --keyline: rgba(255,255,255,.14); } }
         * { box-sizing: border-box; }
         body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink); font: 17px/1.5 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; display: flex; align-items: center; }
-        main { padding: 0 12%; max-width: 980px; }
+        main { margin: 0 12%; max-width: 980px; }
         .motto { color: var(--sun); font-size: 12px; font-weight: 600; letter-spacing: .25em; margin: 0 0 18px; }
         h1 { font-weight: 300; font-size: clamp(32px, 4.4vw, 52px); line-height: 1.15; margin: 0 0 16px; letter-spacing: -.01em; }
         .you { color: var(--you); }
