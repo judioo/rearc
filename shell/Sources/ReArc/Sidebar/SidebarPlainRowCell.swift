@@ -86,6 +86,7 @@ final class SidebarPlainRowCell: NSView {
     func configure(row: SidebarOutlineRow, controller: SidebarListController) {
         if row.id != rowID {
             unhost()
+            if pointerInside, let rowID { controller.hoverPreview.pointerExited(rowID) }
             pointerInside = false
         }
         rowID = row.id
@@ -314,12 +315,14 @@ final class SidebarPlainRowCell: NSView {
         pointerInside = true
         updateFill()
         updateHosting()
+        if let rowID { controller?.hoverPreview.pointerEntered(self, id: rowID, kind: kind) }
     }
 
     override func mouseExited(with event: NSEvent) {
         pointerInside = false
         updateFill()
         updateHosting()
+        if let rowID { controller?.hoverPreview.pointerExited(rowID) }
     }
 
     /// Re-reads whether the pointer is over the row, after a scroll or a
