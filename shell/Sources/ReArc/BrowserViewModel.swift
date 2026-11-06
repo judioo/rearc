@@ -1610,7 +1610,11 @@ final class BrowserViewModel {
 
     func reopenClosedTab() {
         guard let tab = store.reopenMostRecentClosedTab() else { return }
-        engineHost.engine(for: tab, profileID: profileID(for: tab)).load(tab.url)
+        // A reopened split brings back every pane; panes already open keep their pages.
+        for pane in store.splitContaining(tabID: tab.id)?.split.tabs ?? [tab]
+        where pane.id == tab.id || engineHost.engine(forTabID: pane.id, profileID: profileID(for: pane)) == nil {
+            engineHost.engine(for: pane, profileID: profileID(for: pane)).load(pane.url)
+        }
         loadSelectedIfNeeded()
     }
 

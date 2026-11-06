@@ -135,6 +135,8 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
     /// Every visible plain row hosts its SwiftUI row: a drag is under way,
     /// so the rows' own drop targets must be there.
     var hostsAllRows: Bool { isDragging || externalDrag }
+    /// Tab cards and folder lists for rows under the pointer.
+    private(set) lazy var hoverPreview = SidebarHoverPreview(controller: self)
 
     static let cellID = NSUserInterfaceItemIdentifier("SidebarListCell")
     static let plainCellID = NSUserInterfaceItemIdentifier("SidebarPlainRow")
@@ -215,6 +217,7 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
         externalDragTimer?.invalidate()
+        hoverPreview.invalidate()
     }
 
     // MARK: Live rows
@@ -223,7 +226,10 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
         let center = NotificationCenter.default
         observers = [
             center.addObserver(forName: NSScrollView.willStartLiveScrollNotification, object: scroll, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.isLiveScrolling = true }
+                MainActor.assumeIsolated {
+                    self?.isLiveScrolling = true
+                    self?.hoverPreview.cancel()
+                }
             },
             center.addObserver(forName: NSScrollView.didEndLiveScrollNotification, object: scroll, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
@@ -232,7 +238,13 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
                 }
             },
             center.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.isMenuTracking = true }
+                MainActor.assumeIsolated {
+                    self?.isMenuTracking = true
+                    self?.hoverPreview.cancel()
+                }
+            },
+            center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.hoverPreview.cancel() }
             },
             center.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {

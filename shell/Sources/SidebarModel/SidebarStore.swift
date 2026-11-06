@@ -632,9 +632,9 @@ public final class SidebarStore {
         }
     }
 
-    /// Removes a tab. Pinned and Today tabs go to the closed-tab stack and the
-    /// archive (Arc keywords for Archive Tab include "Close"); a favorite is
-    /// deleted outright (`unloadFavorite` is the Cmd+W path for favorites).
+    /// Removes a tab and records it for ⇧⌘T. Pinned and Today tabs also go to
+    /// the archive (Arc keywords for Archive Tab include "Close"); a favorite
+    /// is deleted (`unloadFavorite` is the Cmd+W path for favorites).
     public func closeTab(_ id: Tab.ID) {
         recordClosedTabIfNeeded(tabID: id)
         if let splitLocation = splitContaining(tabID: id) {
@@ -697,10 +697,11 @@ public final class SidebarStore {
         return true
     }
 
-    /// Closes the split item and all contained tabs (tabs are not restored).
+    /// Closes the split item and all contained tabs; ⇧⌘T brings the split back.
     public func closeSplit(_ splitID: SplitViewItem.ID) {
         guard let location = locateSplit(splitID),
               let split = split(withID: splitID) else { return }
+        recordClosedSplit(splitID)
         let priorIndex = displayEntries(in: location.spaceID).firstIndex(where: { $0.id == splitID })
         var section = sectionEntries(for: location.section, spaceID: location.spaceID)
         section.removeAll { $0.id == splitID }
@@ -945,54 +946,165 @@ public final class SidebarStore {
     // MARK: - Closed tabs
 
     private func recordClosedTabIfNeeded(tabID: Tab.ID) {
-        guard let tab = tab(withID: tabID) else { return }
-        switch locate(tabID) {
+        guard let tab = tab(withID: tabID), let location = locate(tabID) else { return }
+        let spaceID: Space.ID
+        let placement: ClosedTabPlacement
+        switch location {
         case .favorite:
-            return
-        case .splitPane:
-            return
-        case .pinned(let spaceID), .today(let spaceID):
-            closedTabStack.push(ClosedTabRecord(tab: tab, spaceID: spaceID))
-            notifyMutation()
-        case nil:
-            break
+            guard let owner = favoriteOwner(of: tabID) else { return }
+            spaceID = activeSpaceID
+            placement = .favorite(profileID: owner, index: favorites(in: owner).firstIndex(where: { $0.id == tabID }) ?? 0)
+        case .splitPane(let sid, let splitID):
+            guard let split = split(withID: splitID), let section = locateSplit(splitID)?.section else { return }
+            spaceID = sid
+            placement = .splitPane(
+                splitID: splitID,
+                paneIndex: split.tabs.firstIndex(where: { $0.id == tabID }) ?? 0,
+                section: section,
+                index: sectionEntries(for: section, spaceID: sid).firstIndex(where: { $0.id == splitID }) ?? 0
+            )
+        case .pinned(let sid), .today(let sid):
+            guard let parent = parent(of: tabID) else { return }
+            let index = entries(in: parent).firstIndex(where: { $0.id == tabID }) ?? 0
+            spaceID = sid
+            switch parent {
+            case .folder(let folderID): placement = .folder(folderID, index: index)
+            case .section(_, let section): placement = .section(section, index: index)
+            case .favorites: return
+            }
         }
+        closedTabStack.push(ClosedTabRecord(tab: tab, spaceID: spaceID, placement: placement))
+        notifyMutation()
     }
 
+    private func recordClosedSplit(_ splitID: SplitViewItem.ID) {
+        guard let split = split(withID: splitID), let location = locateSplit(splitID) else { return }
+        let index = sectionEntries(for: location.section, spaceID: location.spaceID).firstIndex(where: { $0.id == splitID }) ?? 0
+        let focus = split.tabs.first(where: { $0.id == split.focusTabID }) ?? split.tabs[0]
+        closedTabStack.push(ClosedTabRecord(
+            tab: focus,
+            spaceID: location.spaceID,
+            placement: .section(location.section, index: index),
+            split: split
+        ))
+    }
+
+    /// Puts the newest closed tab back where it was: same container and index,
+    /// back into its split if that split still has room. A missing folder
+    /// falls back to the end of Pinned, a missing space to the active one, a
+    /// missing profile to the active profile's favorites.
     @discardableResult
     public func reopenMostRecentClosedTab() -> Tab? {
         guard let record = closedTabStack.popMostRecent() else { return nil }
         archivedTabs.removeAll { $0.id == record.tab.id }
-        let restored = Tab(
-            kind: record.tab.kind == .pinned ? .pinned : .today,
-            title: record.tab.title,
-            url: record.tab.url,
-            faviconToken: record.tab.faviconToken,
-            isUnread: record.tab.isUnread,
-            customTitle: record.tab.customTitle,
-            lastActiveAt: now(),
-            savedURL: record.tab.savedURL,
-            savedTitle: record.tab.savedTitle,
-            customIcon: record.tab.customIcon
-        )
-        switch restored.kind {
-        case .favorite:
-            return nil
-        case .pinned:
-            var content = content(for: record.spaceID)
-            content.pinned.append(.tab(restored))
-            contentBySpace[record.spaceID] = content
-        case .today:
-            var content = content(for: record.spaceID)
-            content.today.insert(.tab(restored), at: 0)
-            contentBySpace[record.spaceID] = content
+        let spaceID = spaces.contains(where: { $0.id == record.spaceID }) ? record.spaceID : activeSpaceID
+        let restored: Tab
+        if let split = record.split {
+            restored = reopenSplit(split, placement: record.placement, spaceID: spaceID)
+        } else if case .splitPane(let splitID, let paneIndex, _, _)? = record.placement,
+                  let rejoined = rejoinSplit(splitID, tab: record.tab, at: paneIndex) {
+            restored = rejoined
+        } else {
+            let (parent, index) = reopenTarget(for: record, spaceID: spaceID)
+            restored = insertReopened(record.tab, into: parent, at: index)
         }
-        if spaces.contains(where: { $0.id == record.spaceID }) {
-            selectSpace(record.spaceID)
-        }
-        selectTab(restored.id)
+        focusTab(restored.id)
         notifyMutation()
         return restored
+    }
+
+    private func reopenTarget(for record: ClosedTabRecord, spaceID: Space.ID) -> (ItemParent, Int) {
+        switch record.placement {
+        case .favorite(let profileID, let index):
+            let owner = profiles.contains(where: { $0.id == profileID }) ? profileID : activeProfileID
+            return (.favorites(owner), index)
+        case .section(let section, let index), .splitPane(_, _, let section, let index):
+            return (.section(spaceID: spaceID, section: section), index)
+        case .folder(let folderID, let index):
+            if folder(withID: folderID) != nil { return (.folder(folderID), index) }
+            return (.section(spaceID: spaceID, section: .pinned), .max)
+        case nil:
+            return record.tab.kind == .pinned
+                ? (.section(spaceID: spaceID, section: .pinned), .max)
+                : (.section(spaceID: spaceID, section: .unpinned), 0)
+        }
+    }
+
+    /// A fresh id, so the engine and sync treat the reopened tab as new.
+    private func reopenedCopy(of tab: Tab, kind: Tab.Kind, sortRank: String = "") -> Tab {
+        Tab(
+            kind: kind,
+            title: tab.title,
+            url: tab.url,
+            faviconToken: tab.faviconToken,
+            isUnread: tab.isUnread,
+            sortRank: sortRank,
+            customTitle: tab.customTitle,
+            lastActiveAt: now(),
+            savedURL: tab.savedURL,
+            savedTitle: tab.savedTitle,
+            customIcon: tab.customIcon
+        )
+    }
+
+    private func insertReopened(_ tab: Tab, into parent: ItemParent, at index: Int) -> Tab {
+        let siblings = entries(in: parent)
+        let clamped = max(0, min(index, siblings.count))
+        switch parent {
+        case .favorites(let profileID):
+            let copy = reopenedCopy(of: tab, kind: .favorite, sortRank: rankForNewFavorite(at: clamped, profileID: profileID))
+            favoritesByProfile[profileID, default: []].append(copy)
+            notifyMutation(.insertItem(id: copy.id, spaceID: nil, container: .favorite, sortRank: copy.sortRank))
+            return copy
+        case .section(let spaceID, let section):
+            let kind: Tab.Kind = section == .pinned ? .pinned : .today
+            let copy = reopenedCopy(of: tab, kind: kind, sortRank: rankForNewItem(in: siblings, atIndex: clamped))
+            var entries = siblings
+            entries.insert(.tab(copy), at: clamped)
+            setSectionEntries(entries, for: section, spaceID: spaceID)
+            let container: SidebarItemContainer = section == .pinned ? .pinned : .unpinned
+            notifyMutation(.insertItem(id: copy.id, spaceID: spaceID, container: container, sortRank: copy.sortRank))
+            return copy
+        case .folder(let folderID):
+            let copy = reopenedCopy(of: tab, kind: .pinned, sortRank: rankForNewItem(in: siblings, atIndex: clamped))
+            insertIntoFolder(.tab(copy), folderID: folderID)
+            notifyMutation(.placeItemInFolder(id: copy.id, folderID: folderID, sortRank: copy.sortRank))
+            return copy
+        }
+    }
+
+    private func rejoinSplit(_ splitID: SplitViewItem.ID, tab: Tab, at paneIndex: Int) -> Tab? {
+        guard var split = split(withID: splitID), split.tabs.count < 4,
+              let location = locateSplit(splitID) else { return nil }
+        let copy = reopenedCopy(of: tab, kind: location.section == .pinned ? .pinned : .today)
+        split.tabs.insert(copy, at: min(paneIndex, split.tabs.count))
+        split.widthFactors[copy.id] = 1.0 / Double(split.tabs.count)
+        split.widthFactors = SplitViewItem.normalizedFactors(split.widthFactors, tabIDs: split.tabs.map(\.id))
+        replaceSplit(split)
+        return copy
+    }
+
+    /// Rebuilds a closed split with fresh tab ids; returns its focused pane.
+    private func reopenSplit(_ closed: SplitViewItem, placement: ClosedTabPlacement?, spaceID: Space.ID) -> Tab {
+        var section = ItemContainerKind.SpaceSection.unpinned, index = 0
+        if case .section(let s, let i)? = placement { (section, index) = (s, i) }
+        let kind: Tab.Kind = section == .pinned ? .pinned : .today
+        let tabs = closed.tabs.map { reopenedCopy(of: $0, kind: kind) }
+        let newID = Dictionary(uniqueKeysWithValues: zip(closed.tabs.map(\.id), tabs.map(\.id)))
+        let siblings = sectionEntries(for: section, spaceID: spaceID)
+        let clamped = max(0, min(index, siblings.count))
+        let split = SplitViewItem(
+            orientation: closed.orientation,
+            focusTabID: newID[closed.focusTabID],
+            widthFactors: Dictionary(uniqueKeysWithValues: closed.widthFactors.compactMap { key, value in newID[key].map { ($0, value) } }),
+            tabs: tabs,
+            memberPlacements: Dictionary(uniqueKeysWithValues: closed.memberPlacements.compactMap { key, value in newID[key].map { ($0, value) } }),
+            sortRank: rankForNewItem(in: siblings, atIndex: clamped)
+        )
+        var entries = siblings
+        entries.insert(.split(split), at: clamped)
+        setSectionEntries(entries, for: section, spaceID: spaceID)
+        return tabs.first(where: { $0.id == split.focusTabID }) ?? tabs[0]
     }
 
     /// Moves a plain tab (from anywhere in a space, folders included) to the

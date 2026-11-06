@@ -4,6 +4,7 @@ import SwiftUI
 /// WebKit-path SwiftUI app; launched by `ReArcMain`.
 struct ReArcApp: App {
     @State private var model = BrowserViewModel()
+    @NSApplicationDelegateAdaptor(WebKitAppDelegate.self) private var appDelegate
 
     var body: some Scene {
         WindowGroup("ReArc") {
@@ -12,6 +13,7 @@ struct ReArcApp: App {
                     // The Settings scene opens through AppKit's action (macOS 14).
                     model.presentSettings = { _ in NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) }
                     if model.appIcon != .standard { model.appIcon.apply() }
+                    appDelegate.model = model
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -118,6 +120,10 @@ struct ReArcApp: App {
             }
             CommandMenu("Spaces") {
                 ShellMenuButtons(groups: ShellMenus.spaces(model), overrides: model.shortcutOverrides)
+            }
+            CommandGroup(after: .windowArrangement) {
+                Divider()
+                ShellMenuButtons(groups: ShellMenus.littleArcs(model), overrides: model.shortcutOverrides)
             }
         }
 
