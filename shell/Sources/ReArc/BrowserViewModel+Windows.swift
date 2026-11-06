@@ -27,7 +27,7 @@ extension BrowserViewModel {
     }
 
     func themeColor(in window: SidebarWindowID?) -> Color {
-        let theme = space(in: window).theme
+        let theme = shownTheme(in: window)
         return Color(red: theme.red, green: theme.green, blue: theme.blue)
     }
 

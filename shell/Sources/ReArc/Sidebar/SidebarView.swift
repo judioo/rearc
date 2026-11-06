@@ -43,8 +43,17 @@ struct SidebarView: View {
         .environment(\.colorScheme, chrome.isDark ? .dark : .light)
     }
 
+    /// Create a Space shows as a page after the profile's last space.
+    private var focusedPageID: Space.ID {
+        model.isCreatingSpace(in: window) ? SpaceCreationSession.pageID : focusedSpace.id
+    }
+
     private var spaces: some View {
         let spaceIDs = model.store.spaces(in: focusedSpace.profileID).map(\.id)
+        let pages = PagerPages(
+            ids: model.isCreatingSpace(in: window) ? SpaceCreationSession.pages(spaces: spaceIDs) : spaceIDs,
+            focused: focusedPageID
+        )
         let hasFavorites = !model.store.favorites(in: focusedSpace.profileID).isEmpty
         return VStack(spacing: 0) {
             SidebarToolbarView(model: model, urlInToolbar: urlInToolbar)
@@ -60,7 +69,7 @@ struct SidebarView: View {
                     }
                 }
 
-                SpacePagesView(pager: pager, focusedSpaceID: focusedSpace.id) { spaceID in
+                SpacePagesView(pager: pager, focusedSpaceID: pages.focused) { spaceID in
                     spacePage(spaceID)
                 }
             }
@@ -73,11 +82,7 @@ struct SidebarView: View {
                     },
                     onBegin: { pager.beginSwipe() },
                     onChange: { pager.swipe(byPoints: $0, pageWidth: Double(model.sidebarWidth)) },
-                    onEnd: {
-                        if let id = pager.endSwipe(), id != model.space(in: window).id {
-                            model.selectSpace(id)
-                        }
-                    },
+                    onEnd: { swipeLanded(on: pager.endSwipe()) },
                     onCancel: { pager.cancelSwipe() }
                 )
             )
@@ -92,11 +97,29 @@ struct SidebarView: View {
         .overlay(alignment: .trailing) { SidebarResizeHandle(model: model) }
         .onAppear { pager.reduceMotion = reduceMotion }
         .onChange(of: reduceMotion) { _, value in pager.reduceMotion = value }
-        .onChange(of: spaceIDs, initial: true) { _, ids in
-            pager.sync(spaceIDs: ids, focused: focusedSpace.id, animated: false)
+        // A new space list snaps; a new focus springs, or fades to and from
+        // Create a Space's page.
+        .onChange(of: pages, initial: true) { old, new in
+            let creationSwap = old.focused != new.focused
+                && (old.focused == SpaceCreationSession.pageID || new.focused == SpaceCreationSession.pageID)
+            pager.sync(spaceIDs: new.ids, focused: new.focused, animated: true,
+                       fade: creationSwap ? SpaceCreationSession.fadeDuration(opening: model.spaceCreation?.origin) : nil)
         }
-        .onChange(of: focusedSpace.id) { _, id in
-            pager.sync(spaceIDs: spaceIDs, focused: id, animated: true)
+    }
+
+    /// A swipe let go. A full pull past the last space opens Create a Space;
+    /// a swipe from its page onto a space closes it once the page rests.
+    private func swipeLanded(on id: Space.ID?) {
+        guard let id else { return }
+        let creating = model.isCreatingSpace(in: window)
+        if id == SpaceCreationSession.pageID {
+            if !creating { model.beginSpaceCreation(profileID: focusedSpace.profileID, in: window, origin: .overscroll) }
+            return
+        }
+        if id != model.space(in: window).id { model.selectSpace(id) }
+        guard creating else { return }
+        pager.whenSettled { [model, pager] in
+            if !pager.restsOnCreationPage { model.spaceCreation = nil }
         }
     }
 
@@ -105,19 +128,31 @@ struct SidebarView: View {
     /// focused one keeps its table.
     private func spacePage(_ spaceID: Space.ID) -> some View {
         let colors = pageChrome(spaceID)
-        return SidebarSpacePage(model: model, spaceID: spaceID, draggedItemID: $draggedItemID, dropState: $dropState,
-                                draggedID: draggedItemID, drop: dropState)
-            .equatable()
-            .environment(\.themeChrome, colors)
-            .environment(\.colorScheme, colors.isDark ? .dark : .light)
-            .foregroundStyle(colors.title)
+        return Group {
+            if spaceID == SpaceCreationSession.pageID {
+                SpaceCreationPage(model: model)
+            } else {
+                SidebarSpacePage(model: model, spaceID: spaceID, draggedItemID: $draggedItemID, dropState: $dropState,
+                                 draggedID: draggedItemID, drop: dropState)
+                    .equatable()
+            }
+        }
+        .environment(\.themeChrome, colors)
+        .environment(\.colorScheme, colors.isDark ? .dark : .light)
+        .foregroundStyle(colors.title)
     }
 
     private func pageChrome(_ spaceID: Space.ID) -> ThemeChromeColors {
-        guard spaceID != focusedSpace.id, let theme = model.store.space(withID: spaceID)?.theme else { return chrome }
+        guard spaceID != focusedPageID, let theme = model.pageTheme(spaceID) else { return chrome }
         let dark = theme.appearance.isDark(systemDark: SystemAppearance.isSystemDark)
         return model.themeColors.colors(for: spaceID, theme: theme, dark: dark)
     }
+}
+
+/// The pager's pages and the one in front.
+private struct PagerPages: Equatable {
+    var ids: [Space.ID]
+    var focused: Space.ID
 }
 
 /// Offset changes belong to SpacePagesView. A frame of the pager does not

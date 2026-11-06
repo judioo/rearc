@@ -2,108 +2,162 @@ import AppKit
 import SwiftUI
 import SidebarModel
 
-/// Create a Space as Arc lays it out (ARC-RECORDING-ANALYSIS.md §5.2): a
-/// title and subtitle, the name field with a leading icon button, the
-/// Profile row, Choose a Theme (the editor popover), then a full-width
-/// Create Space button in the theme's colour with Cancel under it. A new
-/// space starts on Arc's built-in theme, and the window previews the theme
-/// as it is edited. Nothing is created until Create; Cancel or Escape
-/// leaves the sidebar unchanged. It stays a sheet: Arc pages it into the
-/// sidebar as a new space, which is not built yet.
-struct SpaceCreationView: View {
+/// Create a Space as a page of the sidebar, after the profile's last space,
+/// as Arc lays it out (docs/arc-recordings/2026-11-06-space-swipe-feel-and-new-space.md
+/// §2.4): three cards, the title and subtitle, the name field with a leading
+/// icon button, the Profile row, Choose a Theme (the editor popover, over
+/// the page), then a full-width Create Space button in the theme's colour
+/// with Cancel under it. The window takes the draft's theme as it is edited.
+/// Nothing is created until Create; Cancel, Escape or a swipe back onto a
+/// space leaves the sidebar as it was.
+struct SpaceCreationPage: View {
     let model: BrowserViewModel
-    @State var draft: SpaceDraft
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.themeChrome) private var chrome
+    @FocusState private var nameFocused: Bool
     @State private var emoji = ""
     @State private var choosingIcon = false
 
+    /// While the page fades out after Cancel the session is gone; it keeps
+    /// drawing the last draft instead of changing under the fade.
+    @State private var shown: SpaceDraft?
+
+    private var draft: Binding<SpaceDraft> {
+        Binding(
+            get: { model.spaceCreation?.draft ?? shown ?? SpaceDraft.blank(in: model.store) },
+            set: { model.spaceCreation?.draft = $0 }
+        )
+    }
+
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "rectangle.stack.fill")
-                .font(.system(size: 30))
-                .foregroundStyle(.secondary)
-                .padding(.top, 4)
-            Text("Create a Space").font(.system(size: 17, weight: .semibold))
+        let current = draft.wrappedValue
+        VStack(spacing: 0) {
+            SpaceCreationCards()
+                .padding(.top, 30)
+            Text("Create a Space")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(chrome.title)
+                .padding(.top, 14)
             Text("Separate your tabs for life, work, projects, and more.")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 12.5))
+                .foregroundStyle(chrome.secondaryText)
                 .multilineTextAlignment(.center)
-                .padding(.bottom, 6)
-
-            HStack(spacing: 8) {
-                Button { choosingIcon = true } label: {
-                    SpaceIconView(iconName: draft.iconName, size: 12)
-                    .frame(width: 20, height: 20)
-                    .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Color.primary.opacity(0.25)))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Choose an icon")
-                .popover(isPresented: $choosingIcon, arrowEdge: .bottom) { iconPicker }
-                TextField("Space name…", text: $draft.name)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .onSubmit(create)
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 32)
-            .background(Color.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-
-            if model.store.profiles.count > 1 {
-                HStack(spacing: 8) {
-                    Image(systemName: "face.smiling").font(.system(size: 12)).foregroundStyle(.secondary)
-                    Text("Profile").font(.system(size: 13, weight: .medium))
-                    Spacer(minLength: 4)
-                    Picker("Profile", selection: $draft.profileID) {
-                        ForEach(model.store.profiles) { profile in
-                            Text(profile.name).tag(profile.id)
-                        }
-                    }
-                    .labelsHidden()
-                    .fixedSize()
-                    Image(systemName: "info.circle")
-                        .foregroundStyle(.secondary)
-                        .help("The space's tabs use this profile's cookies, history and favorites")
-                }
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 6)
                 .padding(.horizontal, 10)
-                .frame(height: 32)
-                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            VStack(spacing: 8) {
+                nameField(current)
+                if model.store.profiles.count > 1 { profileRow(current) }
+                ChooseThemeRow(theme: draft.theme, arrowEdge: .trailing, height: 34)
             }
+            .padding(.top, 26)
 
-            ChooseThemeRow(theme: $draft.theme)
-
-            Spacer(minLength: 12)
+            Spacer(minLength: 16)
 
             Button(action: create) {
                 Text("Create Space")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 30)
-                    .background(createColor, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .opacity(draft.canCreate(in: model.store) ? 1 : 0.45)
+                    .frame(height: 36)
+                    .background(createColor(current), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .opacity(current.canCreate(in: model.store) ? 1 : 0.45)
             }
             .buttonStyle(.plain)
-            .keyboardShortcut(.defaultAction)
-            .disabled(!draft.canCreate(in: model.store))
-            Button("Cancel", role: .cancel) {
-                model.spaceCreationDraft = nil
-                dismiss()
-            }
-            .buttonStyle(.plain)
-            .font(.system(size: 12))
-            .foregroundStyle(.secondary)
-            .keyboardShortcut(.cancelAction)
+            .disabled(!current.canCreate(in: model.store))
+            Button("Cancel") { model.cancelSpaceCreation() }
+                .buttonStyle(.plain)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(chrome.secondaryText)
+                .keyboardShortcut(.cancelAction)
+                .padding(.top, 12)
+                .padding(.bottom, 14)
         }
-        .padding(16)
-        .frame(width: 260, height: 430)
-        // The window behind previews the new space's theme as it is edited.
-        .onChange(of: draft.theme) { _, theme in model.spaceCreationDraft?.theme = theme }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onAppear {
+            shown = model.spaceCreation?.draft
+            nameFocused = true
+        }
+        .onChange(of: model.spaceCreation?.draft) { _, value in
+            if let value { shown = value }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Create a Space")
+    }
+
+    private func nameField(_ current: SpaceDraft) -> some View {
+        HStack(spacing: 8) {
+            Button { choosingIcon = true } label: {
+                Group {
+                    if current.iconName.isEmpty {
+                        Image(systemName: "plus").font(.system(size: 9, weight: .semibold))
+                    } else {
+                        SpaceIconView(iconName: current.iconName, size: 11)
+                    }
+                }
+                .foregroundStyle(chrome.secondaryText)
+                .frame(width: 18, height: 18)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .strokeBorder(chrome.secondaryText.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: current.iconName.isEmpty ? [2, 2] : []))
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Choose an icon")
+            .accessibilityLabel("Choose an icon")
+            .popover(isPresented: $choosingIcon, arrowEdge: .trailing) { iconPicker }
+            TextField("Space name…", text: draft.name)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .focused($nameFocused)
+                .onSubmit(create)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 34)
+        .background(fieldFill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(chrome.separator, lineWidth: 1))
+    }
+
+    private func profileRow(_ current: SpaceDraft) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "face.smiling")
+                .font(.system(size: 12))
+                .foregroundStyle(chrome.secondaryText)
+            Text("Profile").font(.system(size: 13, weight: .medium))
+            Spacer(minLength: 4)
+            Menu {
+                ForEach(model.store.profiles) { profile in
+                    Button(profile.name) { draft.wrappedValue.profileID = profile.id }
+                }
+            } label: {
+                Text(model.store.profile(withID: current.profileID)?.name ?? "Profile")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .menuStyle(.button)
+            .buttonStyle(.accessoryBar)
+            .fixedSize()
+            .frame(maxWidth: 96, alignment: .trailing)
+            Image(systemName: "info.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(chrome.secondaryText)
+                .help("The space's tabs use this profile's cookies, history and favorites")
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 34)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+    }
+
+    private var fieldFill: Color {
+        chrome.isWindowDark ? Color.white.opacity(0.08) : Color.white.opacity(0.6)
     }
 
     /// The theme's accent, as Arc tints the button (red on a red theme).
-    private var createColor: Color {
-        Color(SpaceThemeRoles(theme: draft.theme).semantic(dark: false).foregroundPrimary)
+    private func createColor(_ draft: SpaceDraft) -> Color {
+        Color(SpaceThemeRoles(theme: draft.theme).semantic(dark: chrome.isWindowDark).foregroundPrimary)
     }
 
     private var iconPicker: some View {
@@ -111,13 +165,13 @@ struct SpaceCreationView: View {
             LazyVGrid(columns: Array(repeating: GridItem(.fixed(30), spacing: 6), count: 6), spacing: 6) {
                 ForEach(Space.iconChoices, id: \.self) { symbol in
                     Button {
-                        draft.iconName = symbol
+                        draft.wrappedValue.iconName = symbol
                         choosingIcon = false
                     } label: {
                         Image(systemName: symbol)
                             .frame(width: 30, height: 30)
                             .background(
-                                draft.iconName == symbol ? Color.accentColor.opacity(0.25) : Color.primary.opacity(0.05),
+                                draft.wrappedValue.iconName == symbol ? Color.accentColor.opacity(0.25) : Color.primary.opacity(0.05),
                                 in: RoundedRectangle(cornerRadius: 6)
                             )
                     }
@@ -139,8 +193,8 @@ struct SpaceCreationView: View {
     }
 
     private func create() {
-        guard model.createSpace(from: draft) != nil else { return }
-        dismiss()
+        guard let session = model.spaceCreation else { return }
+        model.createSpace(from: session.draft)
     }
 
     /// Lowercase words would be read as an SF Symbol name; take them only if one exists.
@@ -148,6 +202,28 @@ struct SpaceCreationView: View {
         let glyph = emoji.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !glyph.isEmpty else { return }
         if Space.isSymbolName(glyph), NSImage(systemSymbolName: glyph, accessibilityDescription: nil) == nil { return }
-        draft.iconName = Space.isSymbolName(glyph) ? glyph : String(glyph.prefix(2))
+        draft.wrappedValue.iconName = Space.isSymbolName(glyph) ? glyph : String(glyph.prefix(2))
+        choosingIcon = false
+    }
+}
+
+/// Arc's three fanned cards over the title.
+private struct SpaceCreationCards: View {
+    var body: some View {
+        ZStack {
+            card("leaf.fill", tint: .green).rotationEffect(.degrees(-12)).offset(x: -17, y: 3)
+            card("book.closed.fill", tint: .orange).rotationEffect(.degrees(12)).offset(x: 17, y: 3)
+            card("laptopcomputer", tint: .gray)
+        }
+        .frame(width: 72, height: 44)
+        .accessibilityHidden(true)
+    }
+
+    private func card(_ symbol: String, tint: Color) -> some View {
+        RoundedRectangle(cornerRadius: 4, style: .continuous)
+            .fill(Color.white)
+            .frame(width: 26, height: 34)
+            .overlay(Image(systemName: symbol).font(.system(size: 12)).foregroundStyle(tint))
+            .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
     }
 }

@@ -4508,22 +4508,26 @@ extension ChromiumSelfTest {
                       "the header's theme popover \(headerPopover) is not under the header \(header)")
         }
         let headerPlace = header.map { String(format: "top %.0f pt under the header", $0.minY - headerPopover.maxY) } ?? "header not found by accessibility"
-        // Create a Space: the Choose a Theme row's popover.
-        model.spaceCreationDraft = SpaceDraft.suggested(in: store, profileID: store.activeProfileID)
-        try await wait("Create a Space sheet", timeout: 5) { window.attachedSheet != nil }
-        let sheet = try XCTUnwrapSelfTest(window.attachedSheet, "Create a Space sheet")
-        try await wait("Choose a Theme row", timeout: 5) { self.accessibilityElement(in: sheet, labelled: "Choose a Theme") != nil }
-        let row = accessibilityElement(in: sheet, labelled: "Choose a Theme")!
+        // Create a Space opens in the sidebar, not a sheet; its Choose a
+        // Theme popover opens over the page, right of the row.
+        model.beginSpaceCreation(profileID: store.activeProfileID, in: store.keyWindowID)
+        try await wait("Create a Space page", timeout: 5) { self.accessibilityElement(in: window, labelled: "Choose a Theme") != nil }
+        try check(window.attachedSheet == nil, "Create a Space must open in the sidebar, not as a sheet")
+        let row = accessibilityElement(in: window, labelled: "Choose a Theme")!
         let rowFrame = row.accessibilityFrame()
-        click(atScreen: NSPoint(x: rowFrame.midX, y: rowFrame.midY), in: sheet)
+        try check(rowFrame.maxX <= window.frame.minX + model.sidebarWidth + 2,
+                  "the Choose a Theme row \(rowFrame) must be in the sidebar")
+        click(atScreen: NSPoint(x: rowFrame.midX, y: rowFrame.midY), in: window)
         try await wait("Choose a Theme popover", timeout: 5) { !popoverWindows().isEmpty }
         let rowPopover = popoverWindows()[0].frame
         let side = rowPopover.maxX <= rowFrame.minX + 2 ? "left" : rowPopover.minX >= rowFrame.maxX - 2 ? "right" : "over"
-        try check(side == "left", "the Choose a Theme popover \(rowPopover) must be left of its row \(rowFrame), got \(side)")
+        try check(side == "right", "the Choose a Theme popover \(rowPopover) must be right of its row \(rowFrame), got \(side)")
         popoverWindows().forEach { $0.close() }
-        model.spaceCreationDraft = nil
-        try await wait("Create a Space sheet closed", timeout: 5) { window.attachedSheet == nil && popoverWindows().isEmpty }
-        results.append("(3) Edit Theme Color's popover opens under the header (\(headerPlace)); Create a Space's opens \(side) of the Choose a Theme row")
+        model.cancelSpaceCreation()
+        try await wait("Create a Space page closed", timeout: 5) {
+            self.accessibilityElement(in: window, labelled: "Choose a Theme") == nil && popoverWindows().isEmpty
+        }
+        results.append("(3) Edit Theme Color's popover opens under the header (\(headerPlace)); Create a Space opens in the sidebar and its theme popover opens \(side) of the Choose a Theme row")
 
         // (4) The copy toast's share button opens the share menu.
         model.selectTab(tab.id)

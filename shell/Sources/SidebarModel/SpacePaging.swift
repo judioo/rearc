@@ -97,8 +97,15 @@ public struct SpacePaging: Sendable {
         return springStart + log(amplitude / Self.restThreshold) / (zeta * omega)
     }
 
+    /// How far the page is pulled past the last one, in pages (rubber-banded).
+    public func overscroll(at time: TimeInterval) -> Double {
+        max(0, position(at: time) - Double(pageCount - 1))
+    }
+
     /// The two pages visible at `time` (equal when it rests on one) and how
-    /// far the view is from the first to the second, 0…1.
+    /// far the view is from the first to the second, 0…1. The window theme
+    /// mixes the two by `fraction`, so its colour moves with the page and
+    /// holds while the page rubber-bands past an end.
     public func visiblePages(at time: TimeInterval) -> (from: Int, to: Int, fraction: Double) {
         let p = min(max(position(at: time), 0), Double(pageCount - 1))
         let from = Int(p.rounded(.down))
@@ -175,6 +182,22 @@ public struct SpacePaging: Sendable {
         startSpring(to: page, from: from, velocity: velocity, at: time)
     }
 
+    /// A page came or went at the end (Create a Space's page). The view
+    /// stays where it is; a running spring keeps its velocity.
+    public mutating func setPageCount(_ count: Int, at time: TimeInterval) {
+        let count = max(count, 1)
+        guard count != pageCount else { return }
+        let shown = position(at: time), speed = velocity(at: time)
+        pageCount = count
+        trackingOrigin = Self.clamp(trackingOrigin, count: count)
+        if isTracking {
+            trackedPosition = Self.unRubberBand(shown, count: count)
+            samples = [(time, trackedPosition)]
+        } else {
+            startSpring(to: Self.clamp(targetPage, count: count), from: shown, velocity: speed, at: time)
+        }
+    }
+
     // MARK: Physics
 
     private mutating func startSpring(to page: Int, from position: Double, velocity: Double, at time: TimeInterval) {
@@ -249,6 +272,47 @@ public struct SpacePaging: Sendable {
 
     private static func clamp(_ page: Int, count: Int) -> Int {
         min(max(page, 0), count - 1)
+    }
+}
+
+/// Pulling past the last space to make a new one
+/// (docs/arc-recordings/2026-11-06-space-swipe-feel-and-new-space.md §2.3).
+/// A "+" in a ring slides in from the sidebar's trailing edge as the page
+/// rubber-bands, the ring closes as the pull grows, and at the threshold
+/// the icon fills. Letting go while it is full opens Create a Space.
+/// Distances are the page's visible stretch, in pages.
+public struct SpaceOverscroll: Equatable, Sendable {
+    /// Arc: the icon's edge shows at ≈ 5 pt of stretch, it is fully in by
+    /// ≈ 16 pt and fills at ≈ 23 pt, on a 228 pt sidebar.
+    public static let appearsAt = 0.02
+    public static let parksAt = 0.07
+    public static let threshold = 0.10
+    /// The icon's diameter and its parked centre, points from the trailing edge.
+    public static let diameter = 26.0
+    public static let parkedInset = 26.5
+
+    public let stretch: Double
+
+    public init(stretch: Double) {
+        self.stretch = max(0, stretch)
+    }
+
+    public var isVisible: Bool { stretch > Self.appearsAt }
+
+    /// 0 with the icon just past the trailing edge, 1 parked.
+    public var reveal: Double {
+        min(max((stretch - Self.appearsAt) / (Self.parksAt - Self.appearsAt), 0), 1)
+    }
+
+    /// The ring's drawn share, 0…1 (Arc draws it anticlockwise from 12 o'clock).
+    public var ring: Double { min(stretch / Self.threshold, 1) }
+
+    /// Full: letting go now makes a space.
+    public var isArmed: Bool { stretch >= Self.threshold }
+
+    /// The icon centre's distance in from the sidebar's trailing edge.
+    public var centerInset: Double {
+        -Self.diameter / 2 + reveal * (Self.parkedInset + Self.diameter / 2)
     }
 }
 
