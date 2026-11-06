@@ -34,9 +34,9 @@ final class Wave28ModelTests: XCTestCase {
     func testHomeButtonReopensTheLastPageOrCloses() {
         var library = LibraryPresentation()
         let window = SidebarWindowID()
-        XCTAssertEqual(library.lastSection, .spaces)
+        XCTAssertEqual(library.lastSection, .media)
         library.toggle(in: window, selection: nil)
-        XCTAssertEqual(library.section(in: window, selection: nil), .spaces)
+        XCTAssertEqual(library.section(in: window, selection: nil), .media)
         library.open(.boosts, in: window, selection: nil)
         library.toggle(in: window, selection: nil)
         XCTAssertNil(library.section(in: window, selection: nil))
