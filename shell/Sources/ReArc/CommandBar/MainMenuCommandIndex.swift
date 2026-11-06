@@ -46,7 +46,13 @@ enum MainMenuCommandIndex {
 }
 
 extension BrowserViewModel {
+    /// Read once each time the bar opens, then kept until it closes: reading
+    /// validates every menu item, which took ≈ 1.6 ms of every keystroke and
+    /// of ⌘L's first frame. Running a row still checks its item (`perform`).
     var commandBarMenuCommands: [MenuCommand] {
-        MainActor.assumeIsolated { MainMenuCommandIndex.commands() }
+        if let snapshot = commandBarMenuSnapshot { return snapshot }
+        let commands = MainActor.assumeIsolated { MainMenuCommandIndex.commands() }
+        if isCommandBarPresented { commandBarMenuSnapshot = commands }
+        return commands
     }
 }

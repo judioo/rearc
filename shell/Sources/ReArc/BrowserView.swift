@@ -125,7 +125,9 @@ struct BrowserView: View {
         .environment(\.themeChrome, themeChrome)
         .environment(\.sidebarWindow, windowID)
         .environment(\.spacePager, pager)
-        .animation(.easeInOut(duration: 0.15), value: model.isCommandBarPresented)
+        // Arc's bar is complete in its first frame: it opens without a
+        // transition and only fades out (docs/PERF-BASELINE.md, "Arc vs ReArc").
+        .animation(model.isCommandBarPresented ? nil : .easeInOut(duration: 0.15), value: model.isCommandBarPresented)
         .frame(minWidth: 760, minHeight: 520)
         .background(
             DragSessionEndMonitor(isActive: draggedItemID != nil) { draggedItemID = nil }

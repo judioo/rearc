@@ -66,6 +66,9 @@ struct CommandBarOverlay: View {
                 TextField(placeholder, text: $text)
                     .textFieldStyle(.plain)
                     .font(.title3)
+                    // Not a credential: AppKit then skips its password AutoFill
+                    // check as the field takes the keyboard (≈ 3 ms on ⌘T / ⌘L).
+                    .textContentType(.URL)
                     .focused($isFieldFocused)
                     .overlay(alignment: .leading) { inlineCompletion }
                     .onSubmit(onSubmit)
@@ -153,7 +156,7 @@ struct CommandBarOverlay: View {
         )
         .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
         .onAppear {
-            isFieldFocused = true
+            focusFieldInFirstFrame()
             earlyKeys.start(text: $text)
             reclaimFocusFromPage()
         }
@@ -171,6 +174,39 @@ struct CommandBarOverlay: View {
             onMoveHighlight(1)
             return .handled
         }
+    }
+
+    /// The field takes the keyboard before the bar's first frame is committed.
+    /// On appear the field is not in the window yet: focus asked of SwiftUI
+    /// then lands a frame or two late, and over a focused page SwiftUI first
+    /// hands the keyboard back to the page, which costs the first frame
+    /// another few milliseconds. So the page lets go here, and the field takes
+    /// the keyboard over AppKit once this update has put it in the window.
+    private func focusFieldInFirstFrame() {
+        guard let window = NSApp.keyWindow else {
+            isFieldFocused = true
+            return
+        }
+        if ShortcutRouter.isWebContent(window.firstResponder) { window.makeFirstResponder(nil) }
+        let placeholder = placeholder
+        DispatchQueue.main.async {
+            if let field = Self.field(in: window, placeholder: placeholder),
+               field.currentEditor() != nil || window.makeFirstResponder(field) { return }
+            isFieldFocused = true
+        }
+    }
+
+    /// The bar's text field: the window's visible editable field with its placeholder.
+    private static func field(in window: NSWindow, placeholder: String) -> NSTextField? {
+        func search(_ view: NSView) -> NSTextField? {
+            if view.isHidden { return nil }
+            if let field = view as? NSTextField, field.isEditable, field.placeholderString == placeholder { return field }
+            for subview in view.subviews.reversed() {
+                if let field = search(subview) { return field }
+            }
+            return nil
+        }
+        return window.contentView.flatMap(search)
     }
 
     /// On appear the field can be outside the window still, and a focused page
