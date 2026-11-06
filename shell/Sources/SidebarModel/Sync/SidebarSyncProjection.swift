@@ -438,6 +438,7 @@ public enum SidebarSyncProjection {
     static func splitValues(_ split: SplitViewItem) -> [String: SyncValue] {
         [
             "customIcon": iconValue(split.customIcon),
+            "title": split.title.map(SyncValue.string) ?? .null,
             "orientation": (try? SyncValue.encoding(split.orientation)) ?? .null,
             "focusTabID": .string(split.focusTabID.uuidString),
             "widthFactors": .object(Dictionary(uniqueKeysWithValues: split.widthFactors.map { ($0.key.uuidString, .number($0.value)) })),
@@ -462,7 +463,8 @@ public enum SidebarSyncProjection {
         let focus = values["focusTabID"]?.stringValue.flatMap(UUID.init(uuidString:)).flatMap { focus in
             tabs.contains { $0.id == focus } ? focus : nil
         }
-        var split = SplitViewItem(id: id, orientation: orientation, focusTabID: focus, tabs: tabs, memberPlacements: placements, sortRank: rank, customIcon: icon(in: values))
+        var split = SplitViewItem(id: id, orientation: orientation, focusTabID: focus, tabs: tabs, memberPlacements: placements, sortRank: rank, customIcon: icon(in: values),
+                                  title: values["title"]?.stringValue)
         // As written, not re-normalized: re-normalizing would drift the values a little on every sync.
         if Set(factors.keys) == Set(tabs.map(\.id)) { split.widthFactors = factors }
         return split

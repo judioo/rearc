@@ -94,8 +94,8 @@ public enum SidebarListRow: Equatable, Identifiable {
     }
 }
 
-/// Row heights for the sidebar list. Tab and folder rows sit on Arc's pitch;
-/// easels, splits and the empty-section placeholder size to their content,
+/// Row heights for the sidebar list. Tab, folder and split rows sit on Arc's
+/// pitch; easels and the empty-section placeholder size to their content,
 /// so the table measures them and keeps an estimate until it has.
 public struct SidebarListHeights: Equatable {
     public var rowPitch: Double = 41
@@ -105,7 +105,6 @@ public struct SidebarListHeights: Equatable {
     /// The drop line after a section that has rows.
     public var sectionEnd: Double = 10
     public var easelEstimate: Double = 29
-    public var splitEstimate: Double = 80
     public var placeholderEstimate: Double = 29
 
     public init() {}
@@ -119,8 +118,9 @@ public struct SidebarListHeights: Equatable {
         case .sectionEnd(_, let isEmpty): isEmpty ? nil : sectionEnd
         case .item(let item, _):
             switch item.node.kind {
-            case .tab, .folder: rowPitch
-            case .easel, .split: nil
+            // A split is one row, stacked in place like Arc's.
+            case .tab, .folder, .split: rowPitch
+            case .easel: nil
             }
         }
     }
@@ -131,7 +131,6 @@ public struct SidebarListHeights: Equatable {
         if let fixed = fixed(row) { return fixed }
         if let measured, measured >= 1 { return measured }
         switch row {
-        case .item(let item, _) where item.node.kind == .split: return splitEstimate
         case .item: return easelEstimate
         default: return placeholderEstimate
         }

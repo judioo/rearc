@@ -45,16 +45,20 @@ extension SidebarStore {
     /// can make (or grow) a split: plain tabs of the anchor's space only, no
     /// favorites, not already in a split, and room for a fifth pane is refused.
     public func canSplit(_ tabID: Tab.ID, onto anchorID: Tab.ID) -> Bool {
-        guard tabID != anchorID,
-              case .tab = entry(withID: tabID),
-              kind(of: tabID) != .favorite, kind(of: tabID) != nil,
-              splitContaining(tabID: tabID) == nil,
-              let tabSpace = spaceContaining(tabID: tabID),
-              tabSpace == spaceContaining(tabID: anchorID) else { return false }
+        guard isSplitCandidate(tabID, joining: anchorID) else { return false }
         if let existing = splitContaining(tabID: anchorID)?.split {
-            return existing.tabs.count < 4
+            return !existing.isFull
         }
         return kind(of: anchorID) == .pinned || kind(of: anchorID) == .today
+    }
+
+    /// A plain tab of the anchor's space, not a favorite or another split's pane.
+    func isSplitCandidate(_ tabID: Tab.ID, joining anchorID: Tab.ID) -> Bool {
+        tabID != anchorID
+            && entry(withID: tabID).map { if case .tab = $0 { true } else { false } } == true
+            && kind(of: tabID) != .favorite && kind(of: tabID) != nil
+            && splitContaining(tabID: tabID) == nil
+            && spaceContaining(tabID: tabID).map { $0 == spaceContaining(tabID: anchorID) } == true
     }
 
     /// Drag-to-split: `tabID` becomes a pane on `edge` of what the anchor

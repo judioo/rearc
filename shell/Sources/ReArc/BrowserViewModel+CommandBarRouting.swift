@@ -70,6 +70,7 @@ extension BrowserViewModel {
                 paneID = store.addTab(kind: anchor.kind == .pinned ? .pinned : .today, title: url.host() ?? "New Tab", url: url, in: space).id
             }
             if store.splitTab(paneID, with: anchorID) == nil {
+                if store.isSplitFull(joining: anchorID) { showSplitFullToast() }
                 store.selectTab(paneID)
             } else if let split = store.splitContaining(tabID: paneID)?.split {
                 store.selectSplit(split.id, focusTabID: paneID)

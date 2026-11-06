@@ -123,11 +123,10 @@ struct SidebarEntryRow: View, Equatable {
             .contextMenu { SectionItemContextMenu(model: model, entry: entry) }
         case .split(let split):
             SplitRowView(
-                model: model,
                 split: split,
                 isSelected: isSelected(split.id),
+                isDropTarget: isDropInto,
                 focusedTabID: split.focusTabID,
-                themeColor: model.themeColor(in: window),
                 favicon: { model.favicon(for: $0) },
                 showsAudibleIndicator: { model.showsAudibleIndicator(for: $0) },
                 onMutePane: { model.toggleMute($0) },
@@ -140,9 +139,15 @@ struct SidebarEntryRow: View, Equatable {
                     } else {
                         model.closeTab(tabID)
                     }
-                }
-            )
-            .contextMenu { SectionItemContextMenu(model: model, entry: entry) }
+                },
+                isRenaming: Binding(
+                    get: { model.renamingSplitID == split.id },
+                    set: { model.renamingSplitID = $0 ? split.id : nil }
+                ),
+                onRename: { model.renameSplit(split.id, to: $0) }
+            ) { paneID in
+                SectionItemContextMenu(model: model, entry: entry, paneID: paneID)
+            }
         }
     }
 }
@@ -196,9 +201,9 @@ struct SidebarDropRow<Content: View>: View {
     }
 }
 
-/// A tab dropped on the middle of another tab groups both into a new folder,
-/// but only once the pointer has rested there: a quick pass over a row, or a
-/// click that turned into a short drag, reorders instead of making a folder.
+/// A tab dropped on the middle of another tab or a split stacks them (Arc's
+/// drag-to-combine), but only once the pointer has rested there: a quick
+/// pass over a row, or a click that turned into a short drag, reorders.
 @MainActor
 enum SidebarGroupingDwell {
     static let delay: TimeInterval = 0.5
@@ -243,13 +248,13 @@ struct SidebarRowDropDelegate: DropDelegate {
             case .split, .easel: canEnter = false
             }
             if canEnter, (0.25 ... 0.75).contains(fraction) { return .into }
-        case .tab:
-            if case .tab = dragged, (0.3 ... 0.7).contains(fraction) {
+        case .tab, .split:
+            if model.store.canCombineIntoSplit(draggedItemID, onto: target.id), (0.3 ... 0.7).contains(fraction) {
                 if SidebarGroupingDwell.isReady(over: target.id) { return .into }
             } else {
                 _ = SidebarGroupingDwell.isReady(over: nil)
             }
-        case .split, .easel:
+        case .easel:
             break
         }
         return fraction < 0.5 ? .before : .after
@@ -297,7 +302,7 @@ struct SidebarRowDropDelegate: DropDelegate {
             case (.into, .folder(let folder)):
                 model.moveItem(draggedItemID, intoFolder: folder.id)
             case (.into, _):
-                model.groupIntoNewFolder(target: target.id, dragged: draggedItemID)
+                model.combineIntoSplit(draggedItemID, onto: target.id)
             case (.before, _):
                 model.moveItem(draggedItemID, relativeTo: target.id, after: false)
             case (.after, _):

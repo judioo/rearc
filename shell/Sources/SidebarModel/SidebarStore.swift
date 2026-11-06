@@ -1099,7 +1099,9 @@ public final class SidebarStore {
             widthFactors: Dictionary(uniqueKeysWithValues: closed.widthFactors.compactMap { key, value in newID[key].map { ($0, value) } }),
             tabs: tabs,
             memberPlacements: Dictionary(uniqueKeysWithValues: closed.memberPlacements.compactMap { key, value in newID[key].map { ($0, value) } }),
-            sortRank: rankForNewItem(in: siblings, atIndex: clamped)
+            sortRank: rankForNewItem(in: siblings, atIndex: clamped),
+            customIcon: closed.customIcon,
+            title: closed.title
         )
         var entries = siblings
         entries.insert(.split(split), at: clamped)

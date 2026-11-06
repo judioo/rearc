@@ -403,12 +403,6 @@ extension BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
-    /// Drop a tab onto a tab: group both in a new folder and rename it.
-    func groupIntoNewFolder(target: UUID, dragged: UUID) {
-        guard let folder = store.createFolder(grouping: target, with: dragged) else { return }
-        beginRename(.folder(folder.id))
-    }
-
     // MARK: - Folders
 
     @discardableResult

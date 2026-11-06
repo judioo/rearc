@@ -117,6 +117,8 @@ struct FolderContextMenu: View {
 struct SectionItemContextMenu: View {
     let model: BrowserViewModel
     let entry: SidebarEntry
+    /// The split pane right-clicked, for its own items.
+    var paneID: Tab.ID? = nil
 
     var body: some View {
         let store = model.store
@@ -128,10 +130,17 @@ struct SectionItemContextMenu: View {
                 model.moveItem(entry.id, to: .section(spaceID: spaceID, section: target), index: index)
             }
         }
+        if case .split(let split) = entry {
+            Button("Rename…") { model.beginSplitRename(split.id) }
+        }
         ItemIconMenu(model: model, itemID: entry.id)
         switch entry {
         case .split(let split):
-            Button("Separate Split View") { model.unsplit(split.id) }
+            // Arc's Split View Context Menu: add a tab, separate all, flip,
+            // then the right-clicked pane's own items under its title.
+            Divider()
+            Button("Add Tab to Split View") { model.addBlankPane(to: split.id) }
+            Button("Separate All Tabs") { model.unsplit(split.id) }
             Button(split.orientation == .horizontal ? "Arrange Top and Bottom" : "Arrange Side by Side") {
                 model.flipSplitOrientation(split.id)
             }
@@ -139,10 +148,16 @@ struct SectionItemContextMenu: View {
                 model.selectSplit(split.id, focusTabID: split.focusTabID)
                 model.toggleExpandedSplitPane(split.id)
             }
-            Button("Copy Links") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(split.tabs.map(\.url.absoluteString).joined(separator: "\n"), forType: .string)
+            if let pane = split.tabs.first(where: { $0.id == (paneID ?? split.focusTabID) }) {
+                Section(pane.displayTitle) {
+                    Button("Separate from Split View") { model.unsplitTabIfInSplit(pane.id) }
+                    Button("Copy Link") { model.copyURL(of: pane.id) }
+                    Button("Close Pane") { model.closeTab(pane.id) }
+                }
             }
+            Divider()
+            Button("Copy Links") { model.copySplitLinks(split.id, markdown: false) }
+            Button("Copy Links as Markdown") { model.copySplitLinks(split.id, markdown: true) }
             Divider()
             Button("Close Split View") { model.closeSplit(split.id) }
         case .easel(let ref):
