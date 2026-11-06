@@ -33,7 +33,8 @@ struct PreparedBrowserStartup {
     }
 
     /// The downloads tray's file, read as launch reads it (the bench's downloads suite times this).
+    /// The tray keeps the newest `DownloadList.defaultLimit` rows, so the rest is never decoded.
     static func loadDownloads(from file: URL) -> DownloadListFile.Contents {
-        DownloadListFile.load(from: file)
+        DownloadListFile.load(from: file, limit: DownloadList.defaultLimit)
     }
 }

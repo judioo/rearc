@@ -241,9 +241,52 @@ public struct DownloadList: Codable, Equatable, Sendable {
     public static let defaultLimit = 50
 
     public private(set) var records: [DownloadRecord]
+    /// How many rows carry each id: an event for a GUID the list does not
+    /// hold skips the scan of every row (Chromium replays its whole download
+    /// history at launch, one new GUID after another).
+    private var idCounts: [String: Int]
+
+    enum CodingKeys: String, CodingKey {
+        case records
+    }
 
     public init(records: [DownloadRecord] = []) {
         self.records = records
+        idCounts = records.reduce(into: [:]) { $0[$1.id, default: 0] += 1 }
+    }
+
+    /// `DownloadListFile.load(from:limit:)` passes a limit: only the first
+    /// that many rows are decoded and the rest of the file is not read.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard let limit = decoder.userInfo[.downloadRecordLimit] as? Int else {
+            self.init(records: try container.decode([DownloadRecord].self, forKey: .records))
+            return
+        }
+        var rows = try container.nestedUnkeyedContainer(forKey: .records)
+        var records: [DownloadRecord] = []
+        while records.count < limit, !rows.isAtEnd {
+            records.append(try rows.decode(DownloadRecord.self))
+        }
+        self.init(records: records)
+    }
+
+    public static func == (lhs: DownloadList, rhs: DownloadList) -> Bool {
+        lhs.records == rhs.records
+    }
+
+    private func index(of id: String) -> Int? {
+        guard idCounts[id] != nil else { return nil }
+        return records.firstIndex { $0.id == id }
+    }
+
+    private mutating func removeRecord(at index: Int) {
+        let id = records.remove(at: index).id
+        if let count = idCounts[id], count > 1 { idCounts[id] = count - 1 } else { idCounts[id] = nil }
+    }
+
+    private mutating func replaceRecords(_ kept: [DownloadRecord]) {
+        self = DownloadList(records: kept)
     }
 
     public var activeCount: Int { records.filter(\.isActive).count }
@@ -259,7 +302,7 @@ public struct DownloadList: Codable, Equatable, Sendable {
     }
 
     public func record(withID id: String) -> DownloadRecord? {
-        records.first { $0.id == id }
+        index(of: id).map { records[$0] }
     }
 
     public enum Change: Equatable, Sendable {
@@ -275,10 +318,10 @@ public struct DownloadList: Codable, Equatable, Sendable {
     @discardableResult
     public mutating func apply(_ event: DownloadEvent, source: DownloadSource, now: Date) -> Change {
         guard !event.guid.isEmpty else { return .ignored }
-        let index = records.firstIndex { $0.id == event.guid }
+        let index = index(of: event.guid)
         if event.kind == .removed {
             guard let index else { return .ignored }
-            records.remove(at: index)
+            removeRecord(at: index)
             return .removed(event.guid)
         }
         if let index {
@@ -324,20 +367,21 @@ public struct DownloadList: Codable, Equatable, Sendable {
         } else {
             records.insert(record, at: 0)
         }
+        idCounts[record.id, default: 0] += 1
         return .inserted(event.guid)
     }
 
     @discardableResult
     public mutating func remove(id: String) -> Bool {
-        guard let index = records.firstIndex(where: { $0.id == id }) else { return false }
-        records.remove(at: index)
+        guard let index = index(of: id) else { return false }
+        removeRecord(at: index)
         return true
     }
 
     /// Removes every finished row (complete, cancelled, failed); returns them.
     public mutating func clearFinished() -> [DownloadRecord] {
         let finished = records.filter { !$0.isActive }
-        records.removeAll { !$0.isActive }
+        replaceRecords(records.filter(\.isActive))
         return finished
     }
 
@@ -356,12 +400,17 @@ public struct DownloadList: Codable, Equatable, Sendable {
     /// Keeps the newest `limit` finished rows; in-progress rows always stay.
     public mutating func trim(to limit: Int = DownloadList.defaultLimit) {
         var kept = 0
-        records = records.filter { record in
+        replaceRecords(records.filter { record in
             if record.isActive { return true }
             kept += 1
             return kept <= limit
-        }
+        })
     }
+}
+
+extension CodingUserInfoKey {
+    /// An `Int`: `DownloadList` decodes at most this many rows.
+    public static let downloadRecordLimit = CodingUserInfoKey(rawValue: "net.rearc.downloadRecordLimit")!
 }
 
 public enum DownloadFormat {

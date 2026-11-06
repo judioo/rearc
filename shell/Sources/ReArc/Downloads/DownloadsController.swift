@@ -76,7 +76,7 @@ final class DownloadsController {
     init(fileURL: URL?, workspace: NSWorkspace = .shared, prepared: DownloadListFile.Contents? = nil) {
         self.fileURL = fileURL
         self.workspace = workspace
-        let contents = prepared ?? fileURL.map(DownloadListFile.load(from:)) ?? DownloadListFile.Contents()
+        let contents = prepared ?? fileURL.map { DownloadListFile.load(from: $0, limit: DownloadList.defaultLimit) } ?? DownloadListFile.Contents()
         var list = contents.list
         list.markStaleTransfersInterrupted()
         list.trim()
