@@ -116,8 +116,7 @@ enum ChromiumHost {
             url = FileManager.default.temporaryDirectory
                 .appendingPathComponent("rearc-selftest-\(ProcessInfo.processInfo.processIdentifier)")
         } else {
-            url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("ReArc/Chromium", isDirectory: true)
+            url = ShellDataLocation.root.appendingPathComponent("Chromium", isDirectory: true)
         }
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
@@ -249,6 +248,11 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     /// The self-test runs this shell on a throwaway sidebar and must not move
     /// the user's saved window frame.
     private let autosavesFrames: Bool
+
+    /// The first browser window's saved frame. A launch on `REARC_DATA_DIR`
+    /// keeps its own, so a test launch leaves the user's frame alone.
+    static let mainWindowFrameName = ShellDataLocation.isOverridden
+        ? "ReArcChromiumMainWindow.isolated" : "ReArcChromiumMainWindow"
 
     init(runtime: ChromiumRuntime, autosavesFrames: Bool = true) {
         self.runtime = runtime
@@ -436,8 +440,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             content: NSHostingView(rootView: BrowserView(model: model))
         )
         if first, autosavesFrames {
-            window.setFrameAutosaveName("ReArcChromiumMainWindow")
-            if !window.setFrameUsingName("ReArcChromiumMainWindow") { window.center() }
+            window.setFrameAutosaveName(Self.mainWindowFrameName)
+            if !window.setFrameUsingName(Self.mainWindowFrameName) { window.center() }
         } else {
             cascade(window, offset: 0)
         }

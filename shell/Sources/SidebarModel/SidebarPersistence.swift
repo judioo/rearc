@@ -18,13 +18,11 @@ public protocol SidebarPersisting: AnyObject {
     func flush()
 }
 
-/// Local JSON file persistence at `~/Library/Application Support/ReArc/sidebar.json`.
+/// Local JSON file persistence at `~/Library/Application Support/ReArc/sidebar.json`
+/// (`ShellDataLocation`).
 public final class SidebarFilePersistence: SidebarPersisting {
-    public static let defaultFileURL: URL = {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("ReArc", isDirectory: true)
-            .appendingPathComponent("sidebar.json", isDirectory: false)
-    }()
+    public static let defaultFileURL: URL = ShellDataLocation.root
+        .appendingPathComponent("sidebar.json", isDirectory: false)
 
     public let fileURL: URL
     private let encoder: JSONEncoder

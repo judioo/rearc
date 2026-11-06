@@ -8,12 +8,11 @@ public protocol EaselPersisting: AnyObject {
     func documentExists(id: UUID) -> Bool
 }
 
-/// One JSON file per document: `~/Library/Application Support/ReArc/easels/{uuid}.json`.
+/// One JSON file per document: `~/Library/Application Support/ReArc/easels/{uuid}.json`
+/// (`ShellDataLocation`).
 public final class EaselFilePersistence: EaselPersisting {
-    public static let defaultDirectoryURL: URL = {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ReArc/easels", isDirectory: true)
-    }()
+    public static let defaultDirectoryURL: URL = ShellDataLocation.root
+        .appendingPathComponent("easels", isDirectory: true)
 
     private let directoryURL: URL
     private let encoder: JSONEncoder

@@ -9,10 +9,8 @@ public protocol CaptureFileStoring: AnyObject {
 }
 
 public final class CaptureFileStore: CaptureFileStoring {
-    public static let defaultDirectoryURL: URL = {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ReArc/Captures", isDirectory: true)
-    }()
+    public static let defaultDirectoryURL: URL = ShellDataLocation.root
+        .appendingPathComponent("Captures", isDirectory: true)
 
     private let directoryURL: URL
 
