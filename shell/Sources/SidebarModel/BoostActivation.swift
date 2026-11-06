@@ -5,12 +5,15 @@ public struct BoostTabContext: Equatable, Sendable {
     public var spaceID: Space.ID?
     public var url: URL
     public var isPrivate: Bool
+    /// The space's own switch (`Space.boostsEnabled`); off turns every boost off there.
+    public var spaceBoostsEnabled: Bool
 
-    public init(profileID: Profile.ID, spaceID: Space.ID?, url: URL, isPrivate: Bool = false) {
+    public init(profileID: Profile.ID, spaceID: Space.ID?, url: URL, isPrivate: Bool = false, spaceBoostsEnabled: Bool = true) {
         self.profileID = profileID
         self.spaceID = spaceID
         self.url = url
         self.isPrivate = isPrivate
+        self.spaceBoostsEnabled = spaceBoostsEnabled
     }
 }
 
@@ -50,7 +53,7 @@ public enum BoostActivation {
         context: BoostTabContext
     ) -> Bool {
         guard library.profileID == context.profileID else { return false }
-        guard library.masterEnabled else { return false }
+        guard library.masterEnabled, context.spaceBoostsEnabled else { return false }
         if context.isPrivate, !installation.allowPrivate { return false }
         guard let package = library.package(id: installation.packageID),
               BoostScopeMatcher.matches(scope: package.manifest.hostScope, url: context.url) else {
@@ -76,7 +79,7 @@ public enum BoostActivation {
         context: BoostTabContext
     ) -> [BoostRuntimeEntry] {
         guard library.profileID == context.profileID else { return [] }
-        guard library.masterEnabled else { return [] }
+        guard library.masterEnabled, context.spaceBoostsEnabled else { return [] }
         guard BoostScopeMatcher.urlIsEligibleForBoosts(context.url) else { return [] }
 
         var entries: [BoostRuntimeEntry] = []

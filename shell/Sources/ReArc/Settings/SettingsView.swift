@@ -626,11 +626,13 @@ struct AdvancedSettingsPane: View {
     @Bindable var model: BrowserViewModel
     let capabilities: SettingsCapabilities
     @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
+    @AppStorage(ReorderHapticsPreference.key) private var reorderHaptics = ReorderHapticsPreference.defaultValue
 
     var body: some View {
         SettingsForm {
             SettingsBox {
                 SettingsToggleRow(label: "When opening ReArc, restore windows from previous session", isOn: $model.restoresWindows)
+                SettingsToggleRow(label: "Haptic feedback when reordering tabs", isOn: $reorderHaptics)
                 SettingsToggleRow(label: "Show URL in toolbar", detail: urlInToolbar
                     ? "Back, forward, reload and the address sit in a strip at the top of the page."
                     : "Back, forward, reload and the address sit at the top of the sidebar.",

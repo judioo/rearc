@@ -325,6 +325,9 @@ public struct Space: Identifiable, Hashable, Codable {
     public var profileID: Profile.ID
     /// LexoRank position among spaces in the profile.
     public var sortRank: String
+    /// Boosts run in this space's tabs (Arc's per-space boost policy). Under
+    /// the profile's master switch: off here wins, on defers to it.
+    public var boostsEnabled: Bool
 
     public init(
         id: UUID = UUID(),
@@ -335,7 +338,8 @@ public struct Space: Identifiable, Hashable, Codable {
         unpinnedContainerID: UUID = UUID(),
         unpinnedShared: Bool = false,
         profileID: Profile.ID? = nil,
-        sortRank: String = ""
+        sortRank: String = "",
+        boostsEnabled: Bool = true
     ) {
         self.id = id
         self.name = name
@@ -346,12 +350,13 @@ public struct Space: Identifiable, Hashable, Codable {
         self.unpinnedShared = unpinnedShared
         self.profileID = profileID ?? UUID()
         self.sortRank = sortRank
+        self.boostsEnabled = boostsEnabled
     }
 
     enum CodingKeys: String, CodingKey {
         case id, name, theme, iconName
         case pinnedContainerID, unpinnedContainerID, unpinnedShared
-        case profileID, sortRank
+        case profileID, sortRank, boostsEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -365,5 +370,21 @@ public struct Space: Identifiable, Hashable, Codable {
         unpinnedShared = try c.decodeIfPresent(Bool.self, forKey: .unpinnedShared) ?? false
         profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID) ?? UUID()
         sortRank = try c.decodeIfPresent(String.self, forKey: .sortRank) ?? ""
+        boostsEnabled = try c.decodeIfPresent(Bool.self, forKey: .boostsEnabled) ?? true
+    }
+
+    /// `boostsEnabled` is written only when off, so a space encodes (and syncs) exactly as before.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(theme, forKey: .theme)
+        try c.encode(iconName, forKey: .iconName)
+        try c.encode(pinnedContainerID, forKey: .pinnedContainerID)
+        try c.encode(unpinnedContainerID, forKey: .unpinnedContainerID)
+        try c.encode(unpinnedShared, forKey: .unpinnedShared)
+        try c.encode(profileID, forKey: .profileID)
+        try c.encode(sortRank, forKey: .sortRank)
+        if !boostsEnabled { try c.encode(false, forKey: .boostsEnabled) }
     }
 }

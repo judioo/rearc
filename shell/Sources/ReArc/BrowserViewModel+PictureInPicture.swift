@@ -35,8 +35,8 @@ extension BrowserViewModel {
     }
 
     /// Arc's automatic PiP on a tab switch (`AutoPiPPolicy.tabSwitchPlan`):
-    /// the tab you left with a playing video goes into PiP, and a tab put
-    /// there this way comes back when you show it again.
+    /// the tab you left with a playing video, or in a call, goes into PiP,
+    /// and a tab put there this way comes back when you show it again.
     func applyAutoPiPOnTabSwitch(now: Date = Date()) {
         let visible = visibleTabIDs
         let previous = pipVisibleTabIDs
@@ -54,6 +54,7 @@ extension BrowserViewModel {
             media: mediaStateByTab,
             hosts: hosts,
             autoEntered: autoPiPEnteredTabIDs,
+            inCall: Set(captureStateByTab.filter(\.value.isCapturingCallMedia).keys),
             // Video in Sidebar implies entering on a switch away: that is how the video gets there.
             isEnabled: automaticPictureInPicture || (embedsVideoInSidebar && engineHost.supportsLiveVideo),
             settings: store.autoPiPPolicy,

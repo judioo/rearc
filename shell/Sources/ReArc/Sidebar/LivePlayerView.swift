@@ -37,10 +37,10 @@ struct LivePlayerCard: View {
     }
 }
 
-/// Hover controls over a live video: scrims, play/pause in the centre, back
-/// to tab and the title top left, pop out (or dock / minimize) and close top
-/// right, and a scrubber along the bottom (§5.3). A click elsewhere on the
-/// video goes to the tab.
+/// Hover controls over a live video: scrims, play/pause in the centre (with
+/// previous and next when the video offers them), back to tab and the title
+/// top left, pop out (or dock / minimize) and close top right, and a
+/// scrubber along the bottom (§5.3). A click elsewhere on the video goes to the tab.
 struct LiveVideoControls: View {
     enum Style { case sidebar, panel }
 
@@ -98,16 +98,32 @@ struct LiveVideoControls: View {
                     .padding(.horizontal, 8)
                     .padding(.bottom, 6)
             }
-            Button { video.perform(.togglePlayPause) } label: {
-                Image(systemName: video.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 28)).foregroundStyle(.white)
-                    .contentTransition(.symbolEffect(.replace))
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+            // Track buttons only when offered: the floating panel has no strip row to dim them in.
+            HStack(spacing: 16) {
+                if video.canSkipTracks.previous {
+                    centreButton("backward.end.fill", size: 18, help: "Previous") { model.mediaPreviousTrack(tabID) }
+                }
+                centreButton(video.isPlaying ? "pause.fill" : "play.fill", size: 28, help: video.isPlaying ? "Pause" : "Play") {
+                    video.perform(.togglePlayPause)
+                }
+                if video.canSkipTracks.next {
+                    centreButton("forward.end.fill", size: 18, help: "Next") { model.mediaNextTrack(tabID) }
+                }
             }
-            .buttonStyle(.plain)
-            .help(video.isPlaying ? "Pause" : "Play")
         }
+    }
+
+    private func centreButton(_ systemName: String, size: CGFloat, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: size)).foregroundStyle(.white)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(help)
     }
 
     private func overlayButton(_ systemName: String, help: String, action: @escaping () -> Void) -> some View {

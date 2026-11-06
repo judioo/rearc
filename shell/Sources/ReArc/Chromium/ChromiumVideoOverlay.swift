@@ -58,6 +58,7 @@ final class ChromiumVideoOverlay: LiveVideoHandle {
         (buttons & UInt32(REARC_VIDEO_OVERLAY_BUTTON_PREVIOUS_TRACK) != 0,
          buttons & UInt32(REARC_VIDEO_OVERLAY_BUTTON_NEXT_TRACK) != 0)
     }
+    var canHangUp: Bool { buttons & UInt32(REARC_VIDEO_OVERLAY_BUTTON_HANG_UP) != 0 }
 
     func position(at date: Date) -> Double? {
         guard let sample = positionSample else { return nil }

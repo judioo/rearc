@@ -48,6 +48,51 @@ extension BrowserViewModel {
         engine.toggleCapture(device)
     }
 
+    /// How the call card's end button ends a call. A page leaves a meeting
+    /// only from its own UI or its media session "hangup" handler, which the
+    /// engine exposes only on the call's PiP video (the HANG_UP overlay
+    /// button, as on Chrome's video-conferencing PiP). Without it the one
+    /// sure way out is taking the page down: ⌘W's close, which archives a
+    /// Today tab (Reopen Closed Tab brings it back) and unloads a pinned tab
+    /// or favorite, keeping its row. Either drops the page's streams.
+    enum CallEndAction: Equatable {
+        case hangUp
+        case closeTab
+        case unloadTab
+
+        static func resolve(canHangUp: Bool, kind: Tab.Kind?, inSplit: Bool) -> CallEndAction? {
+            if canHangUp { return .hangUp }
+            switch kind {
+            case nil: return nil
+            case .favorite: return .unloadTab
+            case .pinned: return inSplit ? .closeTab : .unloadTab
+            case .today: return .closeTab
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .hangUp: "Leave Call"
+            case .closeTab: "End Call (Close Tab)"
+            case .unloadTab: "End Call (Unload Tab)"
+            }
+        }
+    }
+
+    func callEndAction(for tabID: Tab.ID) -> CallEndAction? {
+        CallEndAction.resolve(canHangUp: liveVideo(for: tabID)?.canHangUp == true,
+                              kind: store.kind(of: tabID),
+                              inSplit: store.splitContaining(tabID: tabID) != nil)
+    }
+
+    func endCall(_ tabID: Tab.ID) {
+        switch callEndAction(for: tabID) {
+        case .hangUp?: liveVideo(for: tabID)?.perform(.hangUp)
+        case .closeTab?, .unloadTab?: closeTab(tabID)
+        case nil: break
+        }
+    }
+
     /// The tab whose live video plays in the sidebar, if any.
     func sidebarLiveVideoTabID(in window: SidebarWindowID?) -> Tab.ID? {
         livePlacements.keys.sorted { $0.uuidString < $1.uuidString }.first {
@@ -124,12 +169,22 @@ extension BrowserViewModel {
         }
     }
 
+    /// The strip enables a track button when the session or the PiP video
+    /// offers it; the press goes to whichever does (the session first).
     func mediaNextTrack(_ tabID: Tab.ID) {
-        mediaEngine(for: tabID)?.skipToNextTrack()
+        if !mediaState(for: tabID).canNextTrack, let video = liveVideo(for: tabID), video.canSkipTracks.next {
+            video.perform(.nextTrack)
+        } else {
+            mediaEngine(for: tabID)?.skipToNextTrack()
+        }
     }
 
     func mediaPreviousTrack(_ tabID: Tab.ID) {
-        mediaEngine(for: tabID)?.skipToPreviousTrack()
+        if !mediaState(for: tabID).canPreviousTrack, let video = liveVideo(for: tabID), video.canSkipTracks.previous {
+            video.perform(.previousTrack)
+        } else {
+            mediaEngine(for: tabID)?.skipToPreviousTrack()
+        }
     }
 
     /// "Close Mini Player": hidden until the tab plays again.

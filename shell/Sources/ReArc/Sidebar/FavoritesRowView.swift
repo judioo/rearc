@@ -37,6 +37,7 @@ struct FavoritesRowView: View {
                     .contextMenu { TabContextMenu(model: model, tab: tab) }
                     .onDrag {
                         draggedTabID = tab.id
+                        SidebarDropHaptics.dragBegan()
                         return SidebarDragPayload.itemProvider(for: tab.id)
                     }
                     .onDrop(
@@ -133,6 +134,7 @@ private struct FavoriteDropDelegate: DropDelegate {
         guard accepts() else { return DropProposal(operation: .forbidden) }
         let state = SidebarDropState(targetID: targetTab.id, position: position(info))
         if dropState != state { dropState = state }
+        SidebarDropHaptics.positionChanged(to: state)
         return DropProposal(operation: .move)
     }
 
@@ -149,6 +151,7 @@ private struct FavoriteDropDelegate: DropDelegate {
         withAnimation(.easeInOut(duration: 0.15)) {
             model.moveItem(draggedTabID, relativeTo: targetTab.id, after: position(info) == .after)
         }
+        SidebarDropHaptics.dropped(moved: true)
         return true
     }
 }

@@ -21,6 +21,8 @@ protocol LiveVideoHandle: AnyObject {
     var hasEnded: Bool { get }
     var isMuted: Bool { get }
     var canSkipTracks: (previous: Bool, next: Bool) { get }
+    /// The page handles the media session "hangup" action (a call in PiP).
+    var canHangUp: Bool { get }
     /// Seconds; nil without a position (or a live stream).
     var duration: Double? { get }
     func position(at date: Date) -> Double?

@@ -3,8 +3,8 @@ import SwiftUI
 import SidebarModel
 
 /// Edit Space sheet: name, theme (Arc's style editor: colours or a
-/// gradient, grain and appearance, SIDEBAR-SPEC §4.6), icon (SF Symbols or an emoji) and
-/// profile. Changes apply live, like Arc's editor, except a profile change,
+/// gradient, grain and appearance, SIDEBAR-SPEC §4.6), icon (SF Symbols or an emoji),
+/// profile and boosts. Changes apply live, like Arc's editor, except a profile change,
 /// which asks first; Done closes the sheet.
 struct SpaceEditorView: View {
     let model: BrowserViewModel
@@ -32,6 +32,7 @@ struct SpaceEditorView: View {
 
             if let space {
                 profileRow(space)
+                boostsRow(space)
             }
 
             ChooseThemeRow(theme: Binding(
@@ -118,6 +119,20 @@ struct SpaceEditorView: View {
                   ? "A profile keeps at least one space"
                   : "Move this space and its tabs to another profile")
         }
+    }
+
+    /// Off here overrides the profile's boosts for this space only; with the profile's switch off there is nothing to override.
+    private func boostsRow(_ space: Space) -> some View {
+        let profileOn = model.store.boostLibrary(for: space.profileID).masterEnabled
+        return Toggle(isOn: Binding(
+            get: { model.store.space(withID: spaceID)?.boostsEnabled ?? true },
+            set: { model.setSpaceBoostsEnabled($0, for: spaceID) }
+        )) {
+            Text("Boosts").font(.headline)
+        }
+        .toggleStyle(.switch)
+        .disabled(!profileOn)
+        .help(profileOn ? "Run this profile's boosts in this space" : "Boosts are off for this profile")
     }
 
     private func color(_ theme: SpaceTheme) -> Color {
