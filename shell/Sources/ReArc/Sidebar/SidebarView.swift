@@ -81,9 +81,9 @@ struct SidebarView: View {
 }
 
 /// Offset changes belong to SpacePagesView. A frame of the pager does not
-/// rebuild an unchanged outline. The list runs in its own hosting view
-/// (`SidebarListHost`): a scroll step, or a change one of its rows
-/// observes, updates and lays out only the list, not the window.
+/// rebuild an unchanged outline. The list runs in its own hosting view in
+/// an AppKit scroll view (`SidebarListHost`): a scroll step only moves the
+/// clip view, and a change one of its rows observes updates the list alone.
 private struct SidebarSpacePage: View, Equatable {
     let model: BrowserViewModel
     let spaceID: Space.ID
@@ -119,40 +119,40 @@ private struct SidebarSpaceList: View {
         let outline = model.store.outline(for: space.id)
         let collapsed = model.isPinnedSectionCollapsed(spaceID: space.id, in: window)
         let pinned = collapsed ? collapsedPinned(outline.pinned, spaceID: space.id) : outline.pinned
-        return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                SpaceHeaderView(
-                    model: model,
-                    space: space,
-                    hasPinned: !outline.pinned.isEmpty,
-                    isPinnedCollapsed: collapsed,
-                    onTogglePinned: { model.togglePinnedSection(spaceID: space.id, in: window) }
-                )
-                .padding(.bottom, SidebarMetrics.headerToFirstRow)
-                TabSectionView(
-                    title: nil,
-                    section: .pinned,
-                    spaceID: space.id,
-                    nodes: pinned,
-                    model: model,
-                    draggedItemID: $draggedItemID,
-                    dropState: $dropState
-                )
-                TodayHeaderView(model: model, spaceID: space.id, hasTabs: !outline.today.isEmpty)
-                // Arc's "+ New Tab" heads Today, right under the divider.
-                NewTabRowView { model.newTab() }
-                TabSectionView(
-                    title: nil,
-                    section: .unpinned,
-                    spaceID: space.id,
-                    nodes: outline.today,
-                    model: model,
-                    draggedItemID: $draggedItemID,
-                    dropState: $dropState
-                )
-            }
-            .padding(.horizontal, SidebarMetrics.rowInset)
+        // A plain stack: `SidebarListHost` scrolls it in AppKit, and a
+        // scroll step does no SwiftUI work.
+        return VStack(alignment: .leading, spacing: 0) {
+            SpaceHeaderView(
+                model: model,
+                space: space,
+                hasPinned: !outline.pinned.isEmpty,
+                isPinnedCollapsed: collapsed,
+                onTogglePinned: { model.togglePinnedSection(spaceID: space.id, in: window) }
+            )
+            .padding(.bottom, SidebarMetrics.headerToFirstRow)
+            TabSectionView(
+                title: nil,
+                section: .pinned,
+                spaceID: space.id,
+                nodes: pinned,
+                model: model,
+                draggedItemID: $draggedItemID,
+                dropState: $dropState
+            )
+            TodayHeaderView(model: model, spaceID: space.id, hasTabs: !outline.today.isEmpty)
+            // Arc's "+ New Tab" heads Today, right under the divider.
+            NewTabRowView { model.newTab() }
+            TabSectionView(
+                title: nil,
+                section: .unpinned,
+                spaceID: space.id,
+                nodes: outline.today,
+                model: model,
+                draggedItemID: $draggedItemID,
+                dropState: $dropState
+            )
         }
+        .padding(.horizontal, SidebarMetrics.rowInset)
     }
 
     /// A collapsed Pinned section keeps only its selected item

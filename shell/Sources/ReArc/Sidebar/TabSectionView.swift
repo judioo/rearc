@@ -69,8 +69,7 @@ struct SidebarOutlineRow: Identifiable, Equatable {
 /// One section of the sidebar (pinned or today) for a space. It lays out
 /// the space's outline; each row reads its own entry, selection and engine
 /// state, so a change to one tab redraws its row only. The rows are not
-/// wrapped in a stack: inside the page's lazy stack each one is built when
-/// it scrolls into view.
+/// wrapped in a stack of their own: they sit in the page's stack.
 struct TabSectionView: View {
     let title: String?
     let section: ItemContainerKind.SpaceSection
