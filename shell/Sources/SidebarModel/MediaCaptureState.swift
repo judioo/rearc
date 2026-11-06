@@ -60,6 +60,12 @@ public struct MediaCaptureState: Equatable, Sendable {
         isCapturingVideo || isCapturingAudio || camera != .unknown || microphone != .unknown
     }
 
+    /// A live camera or microphone stream: leaving the tab puts its video in
+    /// Picture in Picture (Arc's Meet auto-PiP). Reports alone don't count.
+    public var isCapturingCallMedia: Bool {
+        isCapturingVideo || isCapturingAudio
+    }
+
     /// Off as the card draws it: the page's report when it gives one, else no live stream.
     public func isOff(_ device: Device) -> Bool {
         switch state(of: device) {

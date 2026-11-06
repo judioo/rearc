@@ -61,8 +61,11 @@ struct MediaControlsStackView: View {
                         favicon: model.favicon(for: tab),
                         faviconToken: tab.faviconToken,
                         capture: capture,
+                        isAlone: calls.count == 1,
+                        endTitle: model.callEndAction(for: id)?.title,
                         goToTab: { model.goToMediaTab(id) },
-                        toggle: { model.toggleCapture($0, in: id) }
+                        toggle: { model.toggleCapture($0, in: id) },
+                        endCall: { model.endCall(id) }
                     )
                     .transition(MediaStackMotion.card(reduceMotion: reduceMotion))
                 }
@@ -111,14 +114,14 @@ struct MediaStripStack: View {
             if isExpanded {
                 VStack(spacing: 6) {
                     ForEach(infos.reversed()) { info in
-                        MediaStripCard(model: model, info: info, isExpanded: true)
+                        MediaStripCard(model: model, info: info, isExpanded: true, isAlone: infos.count == 1)
                             .transition(MediaStackMotion.card(reduceMotion: reduceMotion))
                     }
                 }
             } else {
                 ZStack(alignment: .bottom) {
                     ForEach(Array(infos.prefix(3).enumerated()).reversed(), id: \.element.id) { index, info in
-                        MediaStripCard(model: model, info: info, isExpanded: false)
+                        MediaStripCard(model: model, info: info, isExpanded: false, isAlone: infos.count == 1)
                             .padding(.horizontal, CGFloat(index) * 8)
                             .offset(y: CGFloat(index) * -4)
                             .opacity(1 - 0.25 * Double(index))
@@ -155,11 +158,14 @@ struct MediaStripStack: View {
 /// favicon (go to tab), previous, play/pause, next and volume. Hovered it
 /// grows upward by a title row: the media title, a pop-out (Picture in
 /// Picture) button and ×. The controls row keeps its five cells
-/// (ARC-RECORDING-ANALYSIS.md §7, frames 2691–2692).
+/// (ARC-RECORDING-ANALYSIS.md §7, frames 2691–2692). A title too long for
+/// the row scrolls while the pointer is on the card or the strip is alone.
 struct MediaStripCard: View {
     let model: BrowserViewModel
     let info: MediaStripInfo
     let isExpanded: Bool
+    var isAlone = false
+    @State private var isHovering = false
     @Environment(\.themeChrome) private var chrome
 
     var body: some View {
@@ -170,6 +176,7 @@ struct MediaStripCard: View {
             MediaStripRow(model: model, info: info)
         }
         .background(MediaStripBackground())
+        .onHover { isHovering = $0 }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Media controls for \(info.title)")
     }
@@ -177,11 +184,9 @@ struct MediaStripCard: View {
     private var titleRow: some View {
         HStack(spacing: 2) {
             Button { model.goToMediaTab(info.id) } label: {
-                Text(info.title)
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .foregroundStyle(chrome.isDark ? Color.white.opacity(0.9) : Color.black.opacity(0.8))
+                MarqueeText(text: info.title, font: .system(size: 12, weight: .medium),
+                            color: chrome.isDark ? Color.white.opacity(0.9) : Color.black.opacity(0.8),
+                            isActive: isHovering || isAlone)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
             }

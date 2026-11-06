@@ -80,12 +80,17 @@ public enum AutoPiPPolicy {
     /// Switching tabs: the tab that left the screen with a playing video goes
     /// into Picture in Picture (one at a time: the engine keeps a single PiP
     /// window), and a tab ReArc put there leaves it when it is shown again.
+    /// A tab in a call (`inCall`: camera or microphone capturing) qualifies
+    /// without a playing video and goes first, as Arc does for Google Meet:
+    /// a call's tiles need not report playback, and losing sight of the call
+    /// matters more than of a video.
     public static func tabSwitchPlan(
         previouslyVisible: Set<UUID>,
         nowVisible: Set<UUID>,
         media: [UUID: WebMediaState],
         hosts: [UUID: String],
         autoEntered: Set<UUID>,
+        inCall: Set<UUID> = [],
         isEnabled: Bool,
         settings: AutoPiPPolicyState,
         now: Date
@@ -99,12 +104,14 @@ public enum AutoPiPPolicy {
         guard isEnabled, !otherInPiP else { return plan }
         let hidden = previouslyVisible.subtracting(nowVisible).sorted { $0.uuidString < $1.uuidString }
         let eligible = hidden.filter { id in
-            guard let state = media[id], state.isPlaying, state.canPictureInPicture, !state.isPictureInPicture,
+            guard let state = media[id], state.isPlaying || inCall.contains(id),
+                  state.canPictureInPicture, !state.isPictureInPicture,
                   let host = hosts[id], !host.isEmpty else { return false }
             return effectiveHostPreference(host: host, settings: settings, now: now) == .enabled
         }
-        // Prefer the tab you can hear (a muted autoplay preview is not what you were watching).
-        plan.enter = eligible.first { media[$0]?.isAudible == true } ?? eligible.first
+        // Prefer a call, then the tab you can hear (a muted autoplay preview is not what you were watching).
+        plan.enter = eligible.first { inCall.contains($0) }
+            ?? eligible.first { media[$0]?.isAudible == true } ?? eligible.first
         return plan
     }
 }
