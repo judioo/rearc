@@ -4728,7 +4728,16 @@ extension ChromiumSelfTest {
                 // The frame view takes points in window coordinates.
                 let hitChain = sequence(first: window.contentView?.superview?.hitTest(window.convertPoint(fromScreen: point)), next: { $0?.superview })
                     .prefix(6).compactMap { $0.map { String(describing: Swift.type(of: $0)) } }.joined(separator: " < ")
-                let hit: String? = hitChain.isEmpty ? nil : hitChain + "; mouse-downs: \(downs)"
+                var geometry = ""
+                if let leaf = window.contentView?.superview?.hitTest(window.convertPoint(fromScreen: point)),
+                   let plain = sequence(first: leaf, next: { $0.superview }).first(where: { $0 is SidebarPlainRowCell }) as? SidebarPlainRowCell,
+                   let table = sequence(first: plain as NSView, next: { $0.superview }).first(where: { $0 is NSTableView }) as? NSTableView {
+                    let row = table.row(for: plain)
+                    let newTabRow = (table.delegate as? SidebarListController)?.rows.firstIndex(of: .newTab) ?? -1
+                    geometry = "; plain row \(row) '\(plain.rowID.flatMap { store.tab(withID: $0)?.displayTitle } ?? "?")' frame \(plain.convert(plain.bounds, to: nil)), "
+                        + "its hosted view \(leaf.convert(leaf.bounds, to: nil)); + New Tab is row \(newTabRow) at \(table.convert(table.rect(ofRow: max(newTabRow, 0)), to: nil))"
+                }
+                let hit: String? = hitChain.isEmpty ? nil : hitChain + "; mouse-downs: \(downs)" + geometry
                 throw Failure(description: "+ New Tab at \(newTab) opened no command bar (key \(NSApp.keyWindow?.title ?? "none"), "
                     + "window under the point \(under) vs sidebar \(window.windowNumber) '\(NSApp.window(withWindowNumber: under)?.title ?? "?")', "
                     + "hit \(hit ?? "nil"))")
