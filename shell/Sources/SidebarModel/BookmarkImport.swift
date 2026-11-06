@@ -124,14 +124,15 @@ public enum BookmarkHTMLImport {
 }
 
 extension SidebarStore {
-    /// A new space in the active profile holding `nodes` as pinned tabs and
-    /// folders, in file order. Returns the space and how many tabs it got.
+    /// A new space in `profileID` (the active profile by default) holding
+    /// `nodes` as pinned tabs and folders, in file order. Returns the space
+    /// and how many tabs it got.
     @discardableResult
-    public func importBookmarks(_ nodes: [BookmarkNode], spaceName: String) -> (space: Space, tabs: Int)? {
+    public func importBookmarks(_ nodes: [BookmarkNode], spaceName: String, profileID: Profile.ID? = nil) -> (space: Space, tabs: Int)? {
         guard nodes.contains(where: { $0.linkCount > 0 }) else { return nil }
         let name = spaceName.trimmingCharacters(in: .whitespacesAndNewlines)
         let space = addSpace(name: name.isEmpty ? "Imported" : name, theme: SpaceTheme.presets[spaces.count % SpaceTheme.presets.count],
-                             iconName: "bookmark.fill")
+                             iconName: "bookmark.fill", profileID: profileID)
         var tabs = 0
         func place(_ nodes: [BookmarkNode], folder: UUID?) {
             for node in nodes {

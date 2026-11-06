@@ -1,7 +1,7 @@
 import Foundation
 
 /// Horizontal (side-by-side) or vertical (stacked) split layout.
-public enum SplitLayoutOrientation: String, Codable, CaseIterable, Equatable {
+public enum SplitLayoutOrientation: String, Codable, CaseIterable, Equatable, Sendable {
     case horizontal
     case vertical
 }
