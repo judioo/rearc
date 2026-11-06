@@ -57,13 +57,14 @@ final class Wave34BottomBarTests: XCTestCase {
 
     // MARK: Hover reveal
 
-    func testRevealsAfterHalfASecondOnTheButton() {
+    func testRevealsShortlyAfterRestingOnTheButton() {
         var reveal = HoverReveal()
+        XCTAssertEqual(reveal.showDelay, 0.15)
         reveal.setHovering(true, .trigger, at: 10)
-        XCTAssertEqual(reveal.deadline, 10.5)
-        XCTAssertFalse(reveal.advance(to: 10.4))
+        XCTAssertEqual(reveal.deadline, 10.15)
+        XCTAssertFalse(reveal.advance(to: 10.1))
         XCTAssertFalse(reveal.isShown)
-        XCTAssertTrue(reveal.advance(to: 10.5))
+        XCTAssertTrue(reveal.advance(to: 10.15))
         XCTAssertTrue(reveal.isShown)
         XCTAssertNil(reveal.deadline)
     }
@@ -71,7 +72,7 @@ final class Wave34BottomBarTests: XCTestCase {
     func testLeavingBeforeTheDelayCancels() {
         var reveal = HoverReveal()
         reveal.setHovering(true, .trigger, at: 0)
-        reveal.setHovering(false, .trigger, at: 0.3)
+        reveal.setHovering(false, .trigger, at: 0.1)
         XCTAssertNil(reveal.deadline)
         XCTAssertFalse(reveal.advance(to: 1))
         XCTAssertFalse(reveal.isShown)
@@ -80,24 +81,25 @@ final class Wave34BottomBarTests: XCTestCase {
     func testCrossingFromTheButtonToTheStackKeepsItShown() {
         var reveal = HoverReveal()
         reveal.setHovering(true, .trigger, at: 0)
-        reveal.advance(to: 0.5)
+        reveal.advance(to: 0.15)
         reveal.setHovering(false, .trigger, at: 1)
-        reveal.setHovering(true, .content, at: 1.05)
+        reveal.setHovering(true, .content, at: 1.3)
         XCTAssertNil(reveal.deadline)
         XCTAssertFalse(reveal.advance(to: 2))
         XCTAssertTrue(reveal.isShown)
     }
 
+    /// Arc keeps the stack about half a second after the pointer leaves.
     func testMovingAwayHidesAfterTheGrace() {
         var reveal = HoverReveal()
         reveal.setHovering(true, .trigger, at: 0)
-        reveal.advance(to: 0.5)
+        reveal.advance(to: 0.15)
         reveal.setHovering(true, .content, at: 1)
         reveal.setHovering(false, .trigger, at: 1)
         reveal.setHovering(false, .content, at: 2)
-        XCTAssertEqual(reveal.deadline, 2.15)
-        XCTAssertFalse(reveal.advance(to: 2.1))
-        XCTAssertTrue(reveal.advance(to: 2.15))
+        XCTAssertEqual(reveal.deadline, 2.5)
+        XCTAssertFalse(reveal.advance(to: 2.4))
+        XCTAssertTrue(reveal.advance(to: 2.5))
         XCTAssertFalse(reveal.isShown)
     }
 
@@ -111,7 +113,7 @@ final class Wave34BottomBarTests: XCTestCase {
     func testDismissHidesAtOnce() {
         var reveal = HoverReveal()
         reveal.setHovering(true, .trigger, at: 0)
-        reveal.advance(to: 0.5)
+        reveal.advance(to: 0.15)
         reveal.dismiss()
         XCTAssertFalse(reveal.isShown)
         XCTAssertNil(reveal.deadline)

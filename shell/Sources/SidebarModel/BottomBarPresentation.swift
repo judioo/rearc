@@ -143,9 +143,9 @@ public enum BarChipPlacement {
 }
 
 /// Hover-to-reveal timing for the Library button's downloads stack (§5.1):
-/// it shows once the pointer has rested about 0.5 s and hides when it has
-/// left both the button and the stack. A short grace on leaving lets the
-/// pointer cross from the button to the stack. Time is passed in.
+/// it shows once the pointer has rested on the button briefly and hides when
+/// it has left both the button and the stack for a while, so the pointer can
+/// cross from the button to the stack. Time is passed in.
 public struct HoverReveal: Equatable, Sendable {
     public enum Region: Hashable, Sendable {
         case trigger, content
@@ -158,7 +158,7 @@ public struct HoverReveal: Equatable, Sendable {
     /// When the pending change (show or hide) is due.
     public private(set) var deadline: TimeInterval?
 
-    public init(showDelay: TimeInterval = 0.5, hideDelay: TimeInterval = 0.15) {
+    public init(showDelay: TimeInterval = DownloadsQuickView.showDelay, hideDelay: TimeInterval = DownloadsQuickView.hideDelay) {
         self.showDelay = showDelay
         self.hideDelay = hideDelay
     }
@@ -190,6 +190,78 @@ public struct HoverReveal: Equatable, Sendable {
         isShown = false
         deadline = nil
     }
+}
+
+/// Arc's downloads quick view as measured from its recording
+/// (docs/arc-recordings/2026-11-06-downloads-quick-view.md). Rows are counted
+/// from the bottom, the newest file sitting on the Library button. Every
+/// timing lives here; the views only apply the poses.
+public enum DownloadsQuickView {
+    /// Pointer on the button to the first row: 8–10 frames at 60 fps.
+    public static let showDelay: TimeInterval = 0.15
+    /// Arc keeps the stack about half a second after the pointer leaves.
+    public static let hideDelay: TimeInterval = 0.5
+
+    /// Row to row, in points.
+    public static let rowPitch: Double = 56
+    /// The bottom row starts this far below its place, so the stack unfolds
+    /// out of the button rather than over it.
+    public static let originDrop: Double = 14
+
+    /// Opening: the rows' spacing eases out exponentially, half-way after one
+    /// frame and settled by about 0.12 s; no overshoot.
+    public static let openTimeConstant: TimeInterval = 0.024
+    public static let openDuration: TimeInterval = 0.18
+    /// Each row fades in over this, the bottom row first.
+    public static let openFade: TimeInterval = 0.06
+    public static let openStagger: TimeInterval = 0.012
+
+    /// Closing: each row sinks toward the button and fades, bottom row first;
+    /// the top row is gone after about 5 frames.
+    public static let closeFade: TimeInterval = 0.035
+    public static let closeSink: Double = 40
+    public static let closeSinkDuration: TimeInterval = 0.06
+    public static let closeStagger: TimeInterval = 0.012
+    public static var closeDuration: TimeInterval {
+        closeStagger * Double(RecentDownloads.limit - 1) + max(closeFade, closeSinkDuration)
+    }
+
+    /// Where a row is drawn relative to its place: `offset` points down.
+    public struct Pose: Equatable, Sendable {
+        public var offset: Double
+        public var opacity: Double
+
+        public static let rest = Pose(offset: 0, opacity: 1)
+    }
+
+    public enum Phase: Equatable, Sendable {
+        case opening, closing
+    }
+
+    /// The pose of the row `fromBottom` places above the button, `elapsed`
+    /// seconds into the phase.
+    public static func pose(_ phase: Phase, fromBottom row: Int, elapsed: TimeInterval) -> Pose {
+        let row = Double(max(row, 0))
+        switch phase {
+        case .opening:
+            let fade = clamp((elapsed - row * openStagger) / openFade)
+            return Pose(offset: (1 - spread(at: elapsed)) * (originDrop + row * rowPitch),
+                        opacity: 1 - (1 - fade) * (1 - fade))
+        case .closing:
+            let local = elapsed - row * closeStagger
+            let sink = clamp(local / closeSinkDuration)
+            return Pose(offset: closeSink * sink * sink, opacity: 1 - clamp(local / closeFade))
+        }
+    }
+
+    /// The opening's spacing, 0 (folded on the button) to 1, normalised so it
+    /// lands exactly on 1 at `openDuration`.
+    public static func spread(at elapsed: TimeInterval) -> Double {
+        let t = min(max(elapsed, 0), openDuration)
+        return (1 - exp(-t / openTimeConstant)) / (1 - exp(-openDuration / openTimeConstant))
+    }
+
+    private static func clamp(_ x: Double) -> Double { min(max(x, 0), 1) }
 }
 
 public enum RecentDownloads {
