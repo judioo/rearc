@@ -27,11 +27,14 @@ final class BrowserImportWindowController: NSWindowController, NSWindowDelegate 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    /// Each opening looks again (counts change as the other browser runs);
+    /// bringing an open window forward keeps the choices made in it.
     override func showWindow(_ sender: Any?) {
+        let wasVisible = window?.isVisible ?? false
         super.showWindow(sender)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        session.discover()
+        if !wasVisible { session.discover() }
     }
 }
 

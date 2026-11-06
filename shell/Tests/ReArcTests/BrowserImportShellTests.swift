@@ -88,6 +88,33 @@ final class BrowserImportShellTests: XCTestCase {
         return session
     }
 
+    private func waitForDetail(_ session: BrowserImportSession, _ profile: ImportSourceProfile) {
+        let loaded = expectation(description: "detail")
+        DispatchQueue.global().async {
+            while true {
+                var ready = false
+                DispatchQueue.main.sync { ready = session.detail(for: profile) != nil }
+                if ready { break }
+                usleep(10_000)
+            }
+            loaded.fulfill()
+        }
+        wait(for: [loaded], timeout: 10)
+    }
+
+    func testLookingAgainKeepsTheSelectedProfileAndReloadsItsCounts() throws {
+        let session = discoveredSession(makeModel())
+        guard case .profile(let profile) = try XCTUnwrap(session.sources.last) else { return XCTFail("no profile") }
+        session.selection = .profile(profile)
+        waitForDetail(session, profile)
+        let again = expectation(description: "rediscovered")
+        session.discover { again.fulfill() }
+        wait(for: [again], timeout: 10)
+        XCTAssertEqual(session.selection, .profile(profile))
+        waitForDetail(session, profile)
+        XCTAssertEqual(session.detail(for: profile)?.inventory.historyPages, 1)
+    }
+
     func testTheMenuAndCommandBarOpenTheImportWindow() {
         let model = makeModel()
         XCTAssertEqual(ShellMenus.importing(model, chromiumImporter: false).first?.first?.title, "Import from Arc, Chrome or Brave…")
@@ -133,17 +160,7 @@ final class BrowserImportShellTests: XCTestCase {
         guard case .profile(let profile) = try XCTUnwrap(session.sources.last) else { return XCTFail("no profile") }
         XCTAssertEqual(profile.name, "Everyday")
         session.selection = .profile(profile)
-        let loaded = expectation(description: "detail")
-        DispatchQueue.global().async {
-            while true {
-                var ready = false
-                DispatchQueue.main.sync { ready = session.detail(for: profile) != nil }
-                if ready { break }
-                usleep(10_000)
-            }
-            loaded.fulfill()
-        }
-        wait(for: [loaded], timeout: 10)
+        waitForDetail(session, profile)
         XCTAssertEqual(session.detail(for: profile)?.inventory.bookmarks, 1)
         XCTAssertEqual(session.detail(for: profile)?.setup.searchEngine?.name, "Bing")
         let imported = expectation(description: "imported")

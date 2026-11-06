@@ -89,8 +89,13 @@ final class BrowserImportSession {
                 self.arcProblem = problem
                 self.arcSettings = settings
                 if let arc, let store = self.model?.store { self.arcChoices = arc.defaultChoices(for: store) }
+                self.details = [:]
                 self.isDiscovering = false
-                if self.selection == nil { self.selection = self.sources.first }
+                if let selection = self.selection, self.sources.contains(selection) {
+                    if case .profile(let profile) = selection { self.loadDetail(profile) }
+                } else {
+                    self.selection = self.sources.first
+                }
                 completion?()
             }
         }
