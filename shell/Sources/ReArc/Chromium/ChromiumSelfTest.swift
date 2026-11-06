@@ -1065,7 +1065,10 @@ final class ChromiumSelfTest {
             syncEngine: LocalSyncEngine(),
             faviconStore: FaviconStore(directory: nil)
         )
-        let shell = ChromiumShell(runtime: runtime, autosavesFrames: false)
+        // A temp session file: the user's window-session.json is never read or written.
+        let sessionFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rearc-selftest-window-session-\(UUID().uuidString).json")
+        let shell = ChromiumShell(runtime: runtime, autosavesFrames: false, sessionFile: sessionFile)
         shell.start(model: model)
         guard let first = shell.browserWindows.first else { throw Failure(description: "ChromiumShell opened no browser window") }
         let engineA = try shellEngine(model, tabA)
@@ -1318,7 +1321,82 @@ final class ChromiumSelfTest {
         }
         try checkOneLease(engineA, "reopened window")
         log("PASS closing the last window kept the app running (no quit); reopen attached tab A again (lease \(engineA.attachmentID ?? 0))")
+        try await windowSessionChecks(shell: shell, model: model, sessionFile: sessionFile)
         try? FileManager.default.removeItem(at: sidebarFile)
+        try? FileManager.default.removeItem(at: sessionFile)
+    }
+
+    /// Window session restore (docs/WINDOW-RESTORE.md): two browser windows on
+    /// two ReArc spaces with set frames are saved, closed (as a quit would leave
+    /// the file) and restored; frames, z-order, key window and spaces come back.
+    /// Frames stay on the primary display, so this passes with one display; the
+    /// display and desktop moves are the manual checks in WINDOW-RESTORE.md.
+    @MainActor
+    private func windowSessionChecks(shell: ChromiumShell, model: BrowserViewModel, sessionFile: URL) async throws {
+        let store = model.store
+        let home = store.activeSpace
+        let work = store.addSpace(name: "Session Work")
+        for window in shell.browserWindows where window !== shell.browserWindows.first { shell.closeWindow(window) }
+        guard let first = shell.browserWindows.first, let second = shell.openBrowserWindow(),
+              let firstID = shell.sidebarWindowID(of: first), let secondID = shell.sidebarWindowID(of: second) else {
+            throw Failure(description: "session: two browser windows did not open")
+        }
+        guard let visible = NSScreen.screens.first?.visibleFrame else { throw Failure(description: "session: no display") }
+        let frameA = WindowPlacement.clamp(CGRect(x: visible.minX + 40, y: visible.maxY - 700, width: 900, height: 640), into: visible)
+        let frameB = WindowPlacement.clamp(CGRect(x: visible.minX + 260, y: visible.maxY - 780, width: 860, height: 600), into: visible)
+        first.setFrame(frameA, display: true)
+        second.setFrame(frameB, display: true)
+        // Window 2 on the Work space, then window 1 key on Home (and in front).
+        model.windowBecameKey(secondID)
+        store.selectSpace(work.id)
+        first.makeKeyAndOrderFront(nil)
+        model.windowBecameKey(firstID)
+        store.selectSpace(home.id)
+        try check(store.focusedSpaceID(in: secondID) == work.id && store.focusedSpaceID(in: firstID) == home.id,
+                  "session setup: window spaces \(store.focusedSpaceID(in: firstID)) / \(store.focusedSpaceID(in: secondID))")
+
+        shell.saveWindowSession()
+        let savedData = try Data(contentsOf: sessionFile)
+        let saved = try XUnwrap(WindowSessionFile.decode(savedData))
+        try check(saved.windows.count == 2, "session saved \(saved.windows.count) windows")
+        let savedKey = try XUnwrap(saved.launchWindow)
+        try check(savedKey.isKey && savedKey.frame == frameA && savedKey.spaceID == home.id,
+                  "saved key window: \(savedKey.frame) space \(String(describing: savedKey.spaceID))")
+        let savedOther = try XUnwrap(saved.otherWindows.first)
+        try check(savedOther.frame == frameB && savedOther.spaceID == work.id && savedOther.profileID == work.profileID,
+                  "saved second window: \(savedOther.frame) space \(String(describing: savedOther.spaceID))")
+        try check(saved.windows.allSatisfy { $0.display?.uuid != nil && $0.appKitState?.isEmpty == false },
+                  "saved windows lack a display UUID or AppKit (desktop) state")
+        log("PASS window session saved: 2 windows, key \(savedKey.frame) on \(home.name), second \(savedOther.frame) on \(work.name), "
+            + "display \(savedKey.display?.uuid ?? "-"), AppKit state \(savedKey.appKitState?.count ?? 0) bytes")
+
+        shell.closeWindow(second)
+        shell.closeWindow(first)
+        try await wait("session windows closed") { shell.browserWindowCount == 0 }
+        try await wait("closing them saved the session", timeout: 5) {
+            WindowSessionFile.load(from: sessionFile).map { $0.windows.isEmpty && $0.lastClosed != nil } ?? false
+        }
+        // A quit saves before its windows close: put that file back, then launch-restore it.
+        try savedData.write(to: sessionFile, options: [.atomic])
+        let restored = shell.restoreWindowSession()
+        try check(restored.count == 2, "restore opened \(restored.count) windows")
+        let restoredIDs = restored.compactMap(shell.sidebarWindowID(of:))
+        try check(restoredIDs.count == 2, "restored windows have no sidebar window ID")
+        try check(restored[0].frame == frameA && restored[1].frame == frameB,
+                  "restored frames \(restored[0].frame) / \(restored[1].frame), expected \(frameA) / \(frameB)")
+        try check(store.focusedSpaceID(in: restoredIDs[1]) == work.id,
+                  "restored second window shows \(store.focusedSpaceID(in: restoredIDs[1])), not \(work.name)")
+        try await wait("restored key window back on its space") {
+            store.keyWindowID == restoredIDs[0] && store.activeSpaceID == home.id
+        }
+        let order = NSApp.orderedWindows.filter { restored.contains($0) }
+        try check(order.first === restored[0], "restored z-order: the key window is not in front")
+        try check(restored.allSatisfy(\.isOnActiveSpace), "a restored window left the current desktop")
+        log("PASS window session restored: frames \(restored[0].frame) / \(restored[1].frame), key window in front on "
+            + "\(home.name), second on \(work.name); both on this desktop")
+        shell.closeWindow(restored[1])
+        try await wait("one window left") { shell.browserWindowCount == 1 }
+        _ = store.removeSpace(work.id)
     }
 
     // MARK: Sidebar navigation controls (wave 17)
