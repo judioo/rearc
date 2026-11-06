@@ -35,6 +35,7 @@ let package = Package(
     products: [
         .executable(name: "rearc", targets: ["ReArc"]),
         .library(name: "SidebarModel", targets: ["SidebarModel"]),
+        .executable(name: "arc-vs-rearc", targets: ["ArcBench"]),
     ],
     targets: [
         // Pure-Swift model layer: no SwiftUI/AppKit/WebKit imports.
@@ -46,6 +47,18 @@ let package = Package(
             dependencies: ["SidebarModel"],
             swiftSettings: reArcSwiftSettings,
             linkerSettings: reArcLinkerSettings
+        ),
+        // Arc vs ReArc from outside (docs/ARC-VS-REARC-BENCH.md): the pure
+        // frame-diff, timing, stats and report code, and the command-line tool
+        // that posts keys and captures one window (scripts/arc-vs-rearc.sh).
+        .target(name: "ArcBenchCore"),
+        .executableTarget(
+            name: "ArcBench",
+            dependencies: ["ArcBenchCore", "SidebarModel"]
+        ),
+        .testTarget(
+            name: "ArcBenchCoreTests",
+            dependencies: ["ArcBenchCore"]
         ),
         .testTarget(
             name: "SidebarModelTests",
