@@ -80,7 +80,10 @@ final class Perf5ListTableTests: XCTestCase {
         let heights = (0 ..< table.numberOfRows).map { controller.tableView(table, heightOfRow: $0) }
         XCTAssertEqual(heights, [SidebarMetrics.headerHeight + SidebarMetrics.headerToFirstRow, 17, SidebarMetrics.rowPitch, SidebarMetrics.rowPitch])
         XCTAssertFalse(controller.tableView(table, shouldSelectRow: 3))
+        // perf-7: tab and folder rows are plain AppKit cells; the header is SwiftUI.
         let cell = controller.tableView(table, viewFor: table.tableColumns.first, row: 3)
-        XCTAssertNotNil(cell?.subviews.first as? NSHostingView<SidebarListCell>)
+        XCTAssertTrue(cell is SidebarPlainRowCell)
+        let header = controller.tableView(table, viewFor: table.tableColumns.first, row: 0)
+        XCTAssertNotNil(header?.subviews.first as? NSHostingView<SidebarListCell>)
     }
 }

@@ -851,6 +851,7 @@ final class ChromiumBench {
             var frames = 0
             SidebarListCellCounters.layouts = 0
             SidebarListCellCounters.configures = 0
+            SidebarListCellCounters.hostings = 0
             await probe.eachFrame(of: window) { link in
                 if first == nil { first = link.timestamp }
                 last = link.timestamp
@@ -863,7 +864,7 @@ final class ChromiumBench {
             frameStats(id, from: first, to: last, input: .direct, contaminated: contaminated(), warmup: warmup)
             if !warmup {
                 report.notes.append("\(id): \(frames) frames, cell layouts \(SidebarListCellCounters.layouts), "
-                    + "cells configured \(SidebarListCellCounters.configures)")
+                    + "cells configured \(SidebarListCellCounters.configures), rows hosted \(SidebarListCellCounters.hostings)")
             }
         }
     }

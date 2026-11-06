@@ -124,8 +124,20 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
     private var isActive = true
     private var heightsPending: Set<SidebarListRow.ID> = []
     private var shownSelection: UUID?
+    private var externalDrag = false
+    private var externalDragTimer: Timer?
+    private var observers: [NSObjectProtocol] = []
+    /// A scroll gesture is moving the list: rows passing under a still
+    /// pointer stay plain until it ends.
+    private(set) var isLiveScrolling = false
+    /// A context menu is open; the row it came from stays live.
+    private(set) var isMenuTracking = false
+    /// Every visible plain row hosts its SwiftUI row: a drag is under way,
+    /// so the rows' own drop targets must be there.
+    var hostsAllRows: Bool { isDragging || externalDrag }
 
     static let cellID = NSUserInterfaceItemIdentifier("SidebarListCell")
+    static let plainCellID = NSUserInterfaceItemIdentifier("SidebarPlainRow")
     static let rowViewID = NSUserInterfaceItemIdentifier("SidebarListRow")
     /// Larger changes (a Clear, a space's first load) reload all rows at once.
     static let animatedChangeLimit = 24
@@ -173,6 +185,7 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
         scroll.contentInsets = NSEdgeInsetsZero
         rebuild(animated: false, reloadAll: true)
         trackSelection()
+        observeInteraction(scroll)
         return scroll
     }
 
@@ -180,6 +193,84 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
         isActive = false
         tableView?.dataSource = nil
         tableView?.delegate = nil
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        externalDragTimer?.invalidate()
+    }
+
+    // MARK: Live rows
+
+    private func observeInteraction(_ scroll: NSScrollView) {
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(forName: NSScrollView.willStartLiveScrollNotification, object: scroll, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.isLiveScrolling = true }
+            },
+            center.addObserver(forName: NSScrollView.didEndLiveScrollNotification, object: scroll, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.isLiveScrolling = false
+                    self?.syncPlainCells()
+                }
+            },
+            center.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.isMenuTracking = true }
+            },
+            center.addObserver(forName: NSMenu.didEndTrackingNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.isMenuTracking = false
+                    self?.syncPlainCells()
+                }
+            },
+        ]
+    }
+
+    /// Each visible plain row re-reads the pointer and whether it should be live.
+    private func syncPlainCells() {
+        tableView?.enumerateAvailableRowViews { rowView, _ in
+            (rowView.view(atColumn: 0) as? SidebarPlainRowCell)?.syncPointer()
+        }
+    }
+
+    /// A link or file dragged over a plain row from a page or another app.
+    /// The rows stay live until the button comes up.
+    func noteExternalDrag() {
+        guard !externalDrag else { return }
+        externalDrag = true
+        syncPlainCells()
+        externalDragTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self, NSEvent.pressedMouseButtons == 0 else { return }
+                timer.invalidate()
+                self.externalDragTimer = nil
+                self.externalDrag = false
+                self.syncPlainCells()
+            }
+        }
+    }
+
+    /// The SwiftUI row a plain cell hosts while it is live.
+    func hostedRoot(for id: UUID, cell: SidebarPlainRowCell) -> SidebarHostedRow? {
+        guard let row = rows.first(where: { $0.id == .item(id) }) else { return nil }
+        return SidebarHostedRow(
+            cell: SidebarListCell(row: row, model: model, spaceID: spaceID, context: context, onHeight: nil),
+            onHover: { [weak cell] in cell?.hostedHoverChanged($0) }
+        )
+    }
+
+    /// Accessibility's press on a plain row: what a click on the row does.
+    func press(_ id: UUID, kind: SidebarOutlineNode.Kind) {
+        switch kind {
+        case .folder:
+            withAnimation(.easeInOut(duration: 0.15)) { model.store.toggleFolderExpanded(id) }
+        default:
+            model.selectTab(id)
+        }
+    }
+
+    /// Tab and folder rows draw in AppKit; the others are SwiftUI cells.
+    static func isPlain(_ row: SidebarListRow) -> Bool {
+        guard case .item(let item, _) = row else { return false }
+        return item.node.kind == .tab || item.node.kind == .folder
     }
 
     /// From the representable: a different space reloads; a drag starting or
@@ -187,10 +278,12 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
     func update(spaceID: Space.ID, isDragging: Bool) {
         guard spaceID != self.spaceID || isDragging != self.isDragging else { return }
         let spaceChanged = spaceID != self.spaceID
+        let dragChanged = isDragging != self.isDragging
         self.spaceID = spaceID
         self.isDragging = isDragging
         if spaceChanged { measured = [:] }
         rebuild(animated: false, reloadAll: spaceChanged)
+        if dragChanged { syncPlainCells() }
     }
 
     // MARK: Rows
@@ -326,6 +419,16 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard rows.indices.contains(row) else { return nil }
         let item = rows[row]
+        if Self.isPlain(item), case .item(let outline, _) = item {
+            SidebarListCellCounters.configures += 1
+            let cell = tableView.makeView(withIdentifier: Self.plainCellID, owner: nil) as? SidebarPlainRowCell ?? {
+                let cell = SidebarPlainRowCell()
+                cell.identifier = Self.plainCellID
+                return cell
+            }()
+            cell.configure(row: outline, controller: self)
+            return cell
+        }
         let measures = heights.fixed(item) == nil
         let root = SidebarListCell(
             row: item, model: model, spaceID: spaceID, context: context,
@@ -377,13 +480,8 @@ private final class SidebarTableRowView: NSTableRowView {
 enum SidebarListCellCounters {
     @MainActor static var layouts = 0
     @MainActor static var configures = 0
-}
-
-private final class SidebarListCellHostingView: NSHostingView<SidebarListCell> {
-    override func layout() {
-        SidebarListCellCounters.layouts += 1
-        super.layout()
-    }
+    /// Plain rows that started hosting their SwiftUI row (perf-7).
+    @MainActor static var hostings = 0
 }
 
 /// A reusable cell: one hosting view filling it.
@@ -391,7 +489,7 @@ private final class SidebarListCellView: NSView {
     let hosting: NSHostingView<SidebarListCell>
 
     init(root: SidebarListCell) {
-        hosting = SidebarListCellHostingView(rootView: root)
+        hosting = SidebarCountingHostingView(rootView: root)
         super.init(frame: .zero)
         hosting.sizingOptions = []
         hosting.autoresizingMask = [.width, .height]
