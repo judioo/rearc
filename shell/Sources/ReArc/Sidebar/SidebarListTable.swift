@@ -111,7 +111,7 @@ final class SidebarListCellContext {
 
 /// The table's data source: the flattened rows, their heights, and the
 /// observation that keeps both current.
-final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSGestureRecognizerDelegate {
     let model: BrowserViewModel
     private(set) var spaceID: Space.ID
     let context: SidebarListCellContext
@@ -183,10 +183,29 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
         scroll.verticalScrollElasticity = .allowed
         scroll.automaticallyAdjustsContentInsets = false
         scroll.contentInsets = NSEdgeInsetsZero
+        let emptySpaceClick = NSClickGestureRecognizer(target: self, action: #selector(openTabFromEmptySpace(_:)))
+        emptySpaceClick.numberOfClicksRequired = 2
+        emptySpaceClick.delaysPrimaryMouseButtonEvents = false
+        emptySpaceClick.delegate = self
+        scroll.addGestureRecognizer(emptySpaceClick)
         rebuild(animated: false, reloadAll: true)
         trackSelection()
         observeInteraction(scroll)
         return scroll
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: NSGestureRecognizer) -> Bool {
+        guard let tableView, let scroll = tableView.enclosingScrollView,
+              scroll.contentView.bounds.contains(gestureRecognizer.location(in: scroll.contentView)) else { return false }
+        let point = gestureRecognizer.location(in: tableView)
+        let bottom = tableView.numberOfRows > 0 ? tableView.rect(ofRow: tableView.numberOfRows - 1).maxY : 0
+        return SidebarEmptySpaceClick.opensNewTab(clickCount: 2, rowIndex: tableView.row(at: point),
+                                                  y: point.y, rowsBottom: bottom)
+    }
+
+    @objc private func openTabFromEmptySpace(_ recognizer: NSClickGestureRecognizer) {
+        guard gestureRecognizerShouldBegin(recognizer) else { return }
+        model.newTab()
     }
 
     func invalidate() {

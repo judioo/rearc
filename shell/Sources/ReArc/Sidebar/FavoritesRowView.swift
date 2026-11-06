@@ -2,7 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 import SidebarModel
 
-/// The top row of favorite tabs: icon-only squares, no close button. They
+/// The grid of favorite tabs: icon-only squares, no close button. They
 /// belong to the active profile and show in all its spaces. Drag to reorder,
 /// drag a sidebar tab in to favorite it, drag a favorite into a section to
 /// unfavorite it.
@@ -17,8 +17,11 @@ struct FavoritesRowView: View {
         let profileID = model.space(in: window).profileID
         let favorites = model.store.favorites(in: profileID)
         let selectedID = model.selectedItemID(in: window)
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
+        let layout = FavoritesGridLayout(itemCount: favorites.count,
+                                         availableWidth: Double(model.sidebarWidth - 2 * SidebarMetrics.rowInset))
+        VStack(spacing: 0) {
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(layout.tileWidth), spacing: FavoritesGridLayout.spacing),
+                                     count: layout.columns), spacing: FavoritesGridLayout.spacing) {
                 ForEach(favorites) { tab in
                     FavoriteIconView(
                         tab: tab,
@@ -27,7 +30,8 @@ struct FavoritesRowView: View {
                         isUnloaded: model.isTabUnloaded(tab.id),
                         isInPictureInPicture: model.isPictureInPicture(tab.id),
                         activity: model.tabActivity(tab.id),
-                        insertion: insertion(for: tab.id)
+                        insertion: insertion(for: tab.id),
+                        width: layout.tileWidth
                     )
                     .onTapGesture { model.selectTab(tab.id) }
                     .contextMenu { TabContextMenu(model: model, tab: tab) }
@@ -39,33 +43,29 @@ struct FavoritesRowView: View {
                         of: [.plainText],
                         delegate: FavoriteDropDelegate(
                             targetTab: tab,
+                            tileWidth: layout.tileWidth,
                             model: model,
                             draggedTabID: $draggedTabID,
                             dropState: $dropState
                         )
                     )
                 }
-                if favorites.isEmpty, draggedTabID.flatMap({ model.store.entry(withID: $0) }).map(isPlainTab) == true {
-                    Text("Drop here to add to Favorites")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, minHeight: 34)
-                        .background(
-                            RoundedRectangle(cornerRadius: 9)
-                                .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-                                .foregroundStyle(.secondary.opacity(0.6))
-                        )
-                }
+            }
+            if draggedTabID != nil {
                 SectionEndDropZone(
                     destination: .favorites(profileID),
-                    placeholder: nil,
+                    placeholder: favorites.isEmpty && draggedTabID.flatMap({ model.store.entry(withID: $0) }).map(isPlainTab) == true
+                        ? "Drop here to add to Favorites" : nil,
                     model: model,
                     draggedItemID: $draggedTabID,
                     dropState: $dropState
                 )
-                .frame(minWidth: 24, minHeight: 34)
+                .frame(minHeight: favorites.isEmpty ? 34 : 18)
             }
         }
+        .onDrop(of: SidebarURLDropLoader.acceptedTypes, delegate: FavoriteAreaDropDelegate(
+            model: model, profileID: profileID, draggedTabID: $draggedTabID, dropState: $dropState
+        ))
     }
 
     private func isPlainTab(_ entry: SidebarEntry) -> Bool {
@@ -79,8 +79,41 @@ struct FavoritesRowView: View {
     }
 }
 
+private struct FavoriteAreaDropDelegate: DropDelegate {
+    let model: BrowserViewModel
+    let profileID: Profile.ID
+    @Binding var draggedTabID: UUID?
+    @Binding var dropState: SidebarDropState?
+
+    func validateDrop(info: DropInfo) -> Bool {
+        if let draggedTabID {
+            guard case .tab = model.store.entry(withID: draggedTabID) else { return false }
+            return true
+        }
+        return SidebarURLDropLoader.hasLinks(info)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: validateDrop(info: info) ? (draggedTabID == nil ? .copy : .move) : .forbidden)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard validateDrop(info: info) else { return false }
+        defer { draggedTabID = nil; dropState = nil }
+        if let draggedTabID {
+            let count = model.store.favorites(in: profileID).filter { $0.id != draggedTabID }.count
+            model.moveItem(draggedTabID, to: .favorites(profileID), index: count)
+            return true
+        }
+        return SidebarURLDropLoader.load(info) { urls in
+            model.openDroppedURLs(urls, appendingTo: .favorites(profileID))
+        }
+    }
+}
+
 private struct FavoriteDropDelegate: DropDelegate {
     let targetTab: Tab
+    let tileWidth: CGFloat
     let model: BrowserViewModel
     @Binding var draggedTabID: UUID?
     @Binding var dropState: SidebarDropState?
@@ -93,7 +126,7 @@ private struct FavoriteDropDelegate: DropDelegate {
     }
 
     private func position(_ info: DropInfo) -> SidebarDropPosition {
-        info.location.x < 17 ? .before : .after
+        info.location.x < tileWidth / 2 ? .before : .after
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -128,15 +161,16 @@ private struct FavoriteIconView: View {
     var isInPictureInPicture = false
     var activity: TabActivity = .idle
     let insertion: SidebarDropPosition?
+    var width: CGFloat = 34
     @State private var isHovering = false
 
     var body: some View {
         TabActivityIcon(activity: activity) {
-            SiteIconView(image: favicon, token: tab.faviconToken, size: favicon == nil ? 22 : 18)
+            SiteIconView(image: favicon, token: tab.faviconToken, size: favicon == nil ? 22 : 18, customIcon: tab.customIcon)
                 .saturation(isUnloaded ? 0 : 1)
                 .opacity(isUnloaded ? 0.4 : 1)
         }
-            .frame(width: 34, height: 34)
+            .frame(width: width, height: FavoritesGridLayout.tileHeight)
             .background(
                 isSelected
                     ? Color.primary.opacity(0.16)

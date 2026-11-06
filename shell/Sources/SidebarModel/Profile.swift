@@ -36,6 +36,16 @@ public struct Profile: Identifiable, Hashable, Codable, Sendable {
         self.themeColor = themeColor
     }
 
+    enum CodingKeys: String, CodingKey { case id, name, avatar, themeColor }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        avatar = try c.decodeIfPresent(ProfileAvatarDescriptor.self, forKey: .avatar) ?? .personalDefault()
+        themeColor = try c.decodeIfPresent(SpaceTheme.self, forKey: .themeColor) ?? .default
+    }
+
     public static func personalDefault(id: UUID = UUID()) -> Profile {
         Profile(
             id: id,
@@ -52,3 +62,6 @@ public enum ProfileMutationError: Equatable, Sendable {
     case profileOwnsSpaces(count: Int)
     case duplicateName
 }
+
+/// Item overrides use the same glyph encoding as profile avatars.
+public typealias SidebarItemIcon = ProfileAvatarDescriptor.Kind

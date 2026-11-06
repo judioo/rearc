@@ -3,6 +3,43 @@ import XCTest
 
 final class ProfileTests: XCTestCase {
 
+    func testDraftRequiresNameAndCreatesIdentityWithoutSelecting() throws {
+        let store = SidebarStore()
+        let active = store.activeProfileID
+        XCTAssertNil(store.createProfile(from: ProfileDraft(name: " \n")))
+        XCTAssertEqual(store.profiles.count, 1)
+        let draft = ProfileDraft(name: "  Work  ", avatar: .init(kind: .emoji("💼")), themeColor: SpaceTheme.presets[2])
+        let profile = try XCTUnwrap(store.createProfile(from: draft))
+        XCTAssertEqual(profile.name, "Work")
+        XCTAssertEqual(profile.avatar, draft.avatar)
+        XCTAssertEqual(profile.themeColor, draft.themeColor)
+        XCTAssertEqual(store.spaces(in: profile.id).first?.theme, draft.themeColor)
+        XCTAssertEqual(store.activeProfileID, active)
+    }
+
+    func testEditingIdentityPersistsAndKeepsOtherProfiles() throws {
+        let store = SidebarStore()
+        let personal = store.activeProfile
+        let work = store.addProfile(name: "Work")
+        let draft = ProfileDraft(name: "Office", avatar: .init(kind: .sfSymbol(name: "building.2.fill")), themeColor: SpaceTheme.presets[3])
+        XCTAssertNil(store.updateProfile(work.id, from: draft))
+        XCTAssertEqual(store.profile(withID: personal.id), personal)
+        XCTAssertEqual(store.updateProfile(UUID(), from: draft), .profileNotFound)
+        XCTAssertEqual(store.updateProfile(work.id, from: ProfileDraft()), .duplicateName)
+        let restored = SidebarStore()
+        restored.applySnapshot(try JSONDecoder().decode(SidebarSnapshot.self, from: JSONEncoder().encode(store.makeSnapshot())))
+        XCTAssertEqual(restored.profile(withID: work.id).map(ProfileDraft.init(profile:)), draft)
+    }
+
+    func testLegacyProfileWithoutAppearanceDecodes() throws {
+        let id = UUID()
+        let data = try JSONSerialization.data(withJSONObject: ["id": id.uuidString, "name": "Legacy"])
+        let profile = try JSONDecoder().decode(Profile.self, from: data)
+        XCTAssertEqual(profile.id, id)
+        XCTAssertEqual(profile.avatar, .personalDefault())
+        XCTAssertEqual(profile.themeColor, .default)
+    }
+
     func testDefaultProfileNamedPersonal() {
         let store = SidebarStore()
         XCTAssertEqual(store.profiles.count, 1)

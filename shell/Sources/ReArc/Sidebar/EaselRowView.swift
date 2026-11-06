@@ -15,7 +15,7 @@ struct EaselRowView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: isNote ? "note.text" : "paintpalette")
+            SidebarGlyphView(icon: ref.customIcon, fallback: isNote ? "note.text" : "paintpalette")
                 .foregroundStyle(.secondary)
                 .frame(width: 18)
             if isEditing {

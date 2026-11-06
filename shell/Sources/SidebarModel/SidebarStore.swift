@@ -194,6 +194,17 @@ public final class SidebarStore {
         return nil
     }
 
+    @discardableResult
+    public func updateProfile(_ id: Profile.ID, from draft: ProfileDraft) -> ProfileMutationError? {
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else { return .profileNotFound }
+        guard draft.canSave else { return .duplicateName }
+        profiles[index].name = draft.trimmedName
+        profiles[index].avatar = draft.avatar
+        profiles[index].themeColor = draft.themeColor
+        notifyMutation()
+        return nil
+    }
+
     public func renameProfile(_ id: Profile.ID, to name: String) -> ProfileMutationError? {
         guard let index = profiles.firstIndex(where: { $0.id == id }) else {
             return .profileNotFound
@@ -830,6 +841,7 @@ public final class SidebarStore {
         if case .favorites = parent {
             let copy = addTab(kind: .today, title: original.title, url: original.url)
             renameTab(copy.id, to: original.customTitle)
+            setCustomIcon(original.customIcon, for: copy.id)
             return tab(withID: copy.id)
         }
         let siblings = entries(in: parent)
@@ -843,7 +855,8 @@ public final class SidebarStore {
             customTitle: original.customTitle,
             lastActiveAt: now(),
             savedURL: original.savedURL,
-            savedTitle: original.savedTitle
+            savedTitle: original.savedTitle,
+            customIcon: original.customIcon
         )
         switch parent {
         case .favorites:
@@ -952,7 +965,8 @@ public final class SidebarStore {
             customTitle: record.tab.customTitle,
             lastActiveAt: now(),
             savedURL: record.tab.savedURL,
-            savedTitle: record.tab.savedTitle
+            savedTitle: record.tab.savedTitle,
+            customIcon: record.tab.customIcon
         )
         switch restored.kind {
         case .favorite:
@@ -1617,7 +1631,7 @@ public final class SidebarStore {
         guard visited.insert(id).inserted else { return nil }
         if let record = snapshot.foldersByID[id] {
             let children = record.childIDs.compactMap { resolveEntry(id: $0, snapshot: snapshot, visited: &visited) }
-            return .folder(SidebarFolder(id: record.id, title: record.title, children: children, sortRank: record.sortRank))
+            return .folder(SidebarFolder(id: record.id, title: record.title, children: children, sortRank: record.sortRank, customIcon: record.customIcon))
         }
         if let split = snapshot.splitsByID[id] { return .split(split) }
         if let easel = snapshot.easelRefsByID[id] { return .easel(easel) }

@@ -124,40 +124,44 @@ final class SidebarPlainRowCell: NSView {
             title.stringValue = state.title
             title.font = .systemFont(ofSize: SidebarMetrics.titleSize, weight: kind == .folder ? .semibold : .regular)
             title.textColor = NSColor(chrome.title)
-            switch kind {
-            case .folder:
-                let symbol = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)?
-                    .withSymbolConfiguration(.init(pointSize: 17, weight: .medium))
-                icon.image = symbol
-                icon.imageScaling = .scaleNone
-                icon.contentTintColor = NSColor(chrome.accent)
-                icon.layer?.cornerRadius = 0
-                icon.isHidden = false
-                icon.alphaValue = 1
-                icon.contentFilters = []
-                tokenBadge.isHidden = true
-            default:
-                icon.imageScaling = .scaleProportionallyUpOrDown
-                icon.contentTintColor = nil
-                icon.layer?.cornerRadius = SidebarMetrics.iconSize * 0.2
-                if let favicon = state.favicon {
-                    icon.image = favicon
+            if let customIcon = state.customIcon {
+                applyCustomIcon(customIcon)
+            } else {
+                switch kind {
+                case .folder:
+                    let symbol = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)?
+                        .withSymbolConfiguration(.init(pointSize: 17, weight: .medium))
+                    icon.image = symbol
+                    icon.imageScaling = .scaleNone
+                    icon.contentTintColor = NSColor(chrome.accent)
+                    icon.layer?.cornerRadius = 0
                     icon.isHidden = false
+                    icon.alphaValue = 1
+                    icon.contentFilters = []
                     tokenBadge.isHidden = true
-                } else {
-                    icon.image = nil
-                    icon.isHidden = true
-                    tokenBadge.isHidden = false
-                    token.stringValue = state.token
-                    token.font = .systemFont(ofSize: SidebarMetrics.iconSize * 0.6, weight: .bold)
-                    token.textColor = NSColor(chrome.title)
-                    tokenBadge.layer?.cornerRadius = SidebarMetrics.iconSize * 0.3
-                    tokenBadge.layer?.backgroundColor = NSColor(chrome.title).withAlphaComponent(0.08).cgColor
+                default:
+                    icon.imageScaling = .scaleProportionallyUpOrDown
+                    icon.contentTintColor = nil
+                    icon.layer?.cornerRadius = SidebarMetrics.iconSize * 0.2
+                    if let favicon = state.favicon {
+                        icon.image = favicon
+                        icon.isHidden = false
+                        tokenBadge.isHidden = true
+                    } else {
+                        icon.image = nil
+                        icon.isHidden = true
+                        tokenBadge.isHidden = false
+                        token.stringValue = state.token
+                        token.font = .systemFont(ofSize: SidebarMetrics.iconSize * 0.6, weight: .bold)
+                        token.textColor = NSColor(chrome.title)
+                        tokenBadge.layer?.cornerRadius = SidebarMetrics.iconSize * 0.3
+                        tokenBadge.layer?.backgroundColor = NSColor(chrome.title).withAlphaComponent(0.08).cgColor
+                    }
+                    let dim = state.isUnloaded
+                    icon.alphaValue = dim ? 0.4 : 1
+                    tokenBadge.alphaValue = dim ? 0.4 : 1
+                    icon.contentFilters = dim ? Self.grayscale : []
                 }
-                let dim = state.isUnloaded
-                icon.alphaValue = dim ? 0.4 : 1
-                tokenBadge.alphaValue = dim ? 0.4 : 1
-                icon.contentFilters = dim ? Self.grayscale : []
             }
             unread.backgroundColor = NSColor.controlAccentColor.cgColor
             unread.isHidden = !state.isUnread
@@ -167,6 +171,30 @@ final class SidebarPlainRowCell: NSView {
         }
         updateFill()
         needsLayout = true
+    }
+
+    private func applyCustomIcon(_ customIcon: SidebarItemIcon) {
+        let size = kind == .folder ? 17 : SidebarMetrics.iconSize
+        icon.layer?.cornerRadius = 0
+        icon.contentFilters = state.isUnloaded ? Self.grayscale : []
+        icon.alphaValue = state.isUnloaded ? 0.4 : 1
+        tokenBadge.alphaValue = icon.alphaValue
+        switch customIcon {
+        case .sfSymbol(let name):
+            icon.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: size, weight: .medium))
+            icon.imageScaling = .scaleProportionallyUpOrDown
+            icon.contentTintColor = NSColor(kind == .folder ? state.chrome.accent : state.chrome.title)
+            icon.isHidden = false
+            tokenBadge.isHidden = true
+        case .emoji(let text):
+            icon.isHidden = true
+            tokenBadge.isHidden = false
+            token.stringValue = text
+            token.font = .systemFont(ofSize: size)
+            token.textColor = NSColor(state.chrome.title)
+            tokenBadge.layer?.backgroundColor = nil
+        }
     }
 
     private static let grayscale: [CIFilter] = {
@@ -390,6 +418,7 @@ final class SidebarPlainRowCell: NSView {
 struct PlainRowState: Equatable {
     var title = ""
     var favicon: NSImage?
+    var customIcon: SidebarItemIcon?
     var token = ""
     var isSelected = false
     var isUnloaded = false
@@ -406,6 +435,7 @@ struct PlainRowState: Equatable {
         switch model.store.entry(withID: id) {
         case .tab(let tab):
             state.title = tab.displayTitle
+            state.customIcon = tab.customIcon
             state.favicon = model.favicon(for: tab)
             state.token = tab.faviconToken
             state.isSelected = model.store.isSelected(tab.id, inSpace: spaceID)
@@ -417,6 +447,7 @@ struct PlainRowState: Equatable {
                 || model.renameHint?.tabID == tab.id
         case .folder(let folder):
             state.title = folder.title
+            state.customIcon = folder.customIcon
             state.isExpanded = model.store.isFolderExpanded(folder.id)
         case .split, .easel, nil:
             // Not a row the plain cell draws: the SwiftUI row takes over.
@@ -426,7 +457,7 @@ struct PlainRowState: Equatable {
     }
 
     static func == (a: PlainRowState, b: PlainRowState) -> Bool {
-        a.title == b.title && a.favicon === b.favicon && a.token == b.token && a.isSelected == b.isSelected
+        a.title == b.title && a.customIcon == b.customIcon && a.favicon === b.favicon && a.token == b.token && a.isSelected == b.isSelected
             && a.isUnloaded == b.isUnloaded && a.isUnread == b.isUnread && a.isExpanded == b.isExpanded
             && a.needsHosting == b.needsHosting && a.chrome == b.chrome
     }

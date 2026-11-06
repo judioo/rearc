@@ -33,6 +33,7 @@ struct TabContextMenu: View {
             .disabled(!model.canUnloadTab(tab.id))
             .help("Frees the page's memory; the tab stays here and reloads when you open it")
         Button("Rename…") { model.beginRename(.tab(tab.id)) }
+        ItemIconMenu(model: model, itemID: tab.id)
         Button("Duplicate") { model.duplicateTab(tab.id) }
         Button("Copy Link") { model.copyURL(of: tab.id) }
         Button("Copy Link as Markdown") { model.copyURL(of: tab.id, format: .markdown) }
@@ -98,6 +99,7 @@ struct FolderContextMenu: View {
         let store = model.store
         let expanded = store.isFolderExpanded(folder.id)
         Button("Rename Folder…") { model.beginRename(.folder(folder.id)) }
+        ItemIconMenu(model: model, itemID: folder.id)
         Button("New Folder Inside") { model.newFolder(parentFolderID: folder.id) }
         Divider()
         Button(expanded ? "Collapse Folder" : "Expand Folder") { store.setFolderExpanded(folder.id, !expanded) }
@@ -126,6 +128,7 @@ struct SectionItemContextMenu: View {
                 model.moveItem(entry.id, to: .section(spaceID: spaceID, section: target), index: index)
             }
         }
+        ItemIconMenu(model: model, itemID: entry.id)
         switch entry {
         case .split(let split):
             Button("Separate Split View") { model.unsplit(split.id) }

@@ -472,13 +472,9 @@ private struct ProfileListView: View {
 
                     Menu {
                         Button("Rename…") { onRename(profile) }
-                        Menu("Avatar") {
-                            Button("Person") { model.store.setProfileAvatar(.personalDefault(), for: profile.id) }
-                            ForEach(["🌱", "💼", "🏠", "🎨", "🚀", "🦊"], id: \.self) { emoji in
-                                Button(emoji) {
-                                    model.store.setProfileAvatar(.init(kind: .emoji(emoji)), for: profile.id)
-                                }
-                            }
+                        Button("Edit Avatar and Color…") {
+                            isPresented = false
+                            model.beginProfileEditing(profile)
                         }
                         Menu("Archive Today Tabs After") {
                             ForEach(AutoArchiveThreshold.allCases, id: \.self) { threshold in
@@ -505,7 +501,7 @@ private struct ProfileListView: View {
             Divider().padding(.vertical, 4)
 
             Button {
-                model.addProfile()
+                model.beginProfileCreation()
                 isPresented = false
             } label: {
                 HStack(spacing: 8) {

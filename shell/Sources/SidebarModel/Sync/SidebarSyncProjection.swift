@@ -22,7 +22,7 @@ public struct SyncRecordBody: Equatable, Sendable {
 /// state, and rescues rows whose parent is gone or forms a cycle the same way
 /// on every Mac, so devices holding the same records show the same sidebar.
 public enum SidebarSyncProjection {
-    static let tabFields = ["title", "url", "customTitle", "savedURL", "savedTitle"]
+    static let tabFields = ["title", "url", "customTitle", "customIcon", "savedURL", "savedTitle"]
     /// Per-Mac tab state kept out of records: it changes on every visit.
     static let localTabKeys: Set<String> = ["lastActiveAt", "isUnread", "faviconToken"]
 
@@ -56,6 +56,7 @@ public enum SidebarSyncProjection {
     public static func extract(_ snapshot: SidebarSnapshot) -> [String: SyncRecordBody] {
         var records: [String: SyncRecordBody] = [:]
         for (index, profile) in snapshot.profiles.enumerated() {
+            // Avatar and themeColor are profile identity and sync with the name.
             var values = objectFields(profile, dropping: ["id"])
             let library = snapshot.boostLibrariesByProfileID[profile.id]
             values["boostsEnabled"] = .bool(library?.masterEnabled ?? true)
@@ -119,6 +120,7 @@ public enum SidebarSyncProjection {
             case .folder(let folder):
                 var values = placement(type: "folder", parent: parent, spaceID: spaceID, rank: rank)
                 values["title"] = .string(folder.title)
+                values["customIcon"] = iconValue(folder.customIcon)
                 records[name] = SyncRecordBody(kind: .item, values: values)
                 extractEntries(folder.children, parent: .folder(folder.id), spaceID: spaceID, into: &records)
             case .easel:
@@ -132,9 +134,19 @@ public enum SidebarSyncProjection {
         values["title"] = .string(tab.title)
         values["url"] = .string(tab.url.absoluteString)
         values["customTitle"] = tab.customTitle.map(SyncValue.string) ?? .null
+        values["customIcon"] = iconValue(tab.customIcon)
         values["savedURL"] = tab.savedURL.map { .string($0.absoluteString) } ?? .null
         values["savedTitle"] = tab.savedTitle.map(SyncValue.string) ?? .null
         return SyncRecordBody(kind: .item, values: values)
+    }
+
+    // User-chosen icons sync for tabs, folders and splits; easels remain local-only.
+    private static func iconValue(_ icon: SidebarItemIcon?) -> SyncValue {
+        icon.flatMap { try? SyncValue.encoding($0) } ?? .null
+    }
+
+    private static func icon(in values: [String: SyncValue]) -> SidebarItemIcon? {
+        try? values["customIcon"]?.decoded(as: SidebarItemIcon.self)
     }
 
     private static func placement(type: String, parent: Parent, spaceID: UUID?, rank: String) -> [String: SyncValue] {
@@ -425,6 +437,7 @@ public enum SidebarSyncProjection {
 
     static func splitValues(_ split: SplitViewItem) -> [String: SyncValue] {
         [
+            "customIcon": iconValue(split.customIcon),
             "orientation": (try? SyncValue.encoding(split.orientation)) ?? .null,
             "focusTabID": .string(split.focusTabID.uuidString),
             "widthFactors": .object(Dictionary(uniqueKeysWithValues: split.widthFactors.map { ($0.key.uuidString, .number($0.value)) })),
@@ -449,7 +462,7 @@ public enum SidebarSyncProjection {
         let focus = values["focusTabID"]?.stringValue.flatMap(UUID.init(uuidString:)).flatMap { focus in
             tabs.contains { $0.id == focus } ? focus : nil
         }
-        var split = SplitViewItem(id: id, orientation: orientation, focusTabID: focus, tabs: tabs, memberPlacements: placements, sortRank: rank)
+        var split = SplitViewItem(id: id, orientation: orientation, focusTabID: focus, tabs: tabs, memberPlacements: placements, sortRank: rank, customIcon: icon(in: values))
         // As written, not re-normalized: re-normalizing would drift the values a little on every sync.
         if Set(factors.keys) == Set(tabs.map(\.id)) { split.widthFactors = factors }
         return split
@@ -551,7 +564,7 @@ public enum SidebarSyncProjection {
         switch item.type {
         case "folder":
             let title = item.values["title"]?.stringValue ?? "New Folder"
-            return .folder(SidebarFolder(id: item.id, title: title, children: children(.folder(item.id)), sortRank: item.rank))
+            return .folder(SidebarFolder(id: item.id, title: title, children: children(.folder(item.id)), sortRank: item.rank, customIcon: icon(in: item.values)))
         case "split":
             guard var split = makeSplit(id: item.id, values: item.values, rank: item.rank) else { return local.entries[item.id] }
             split.tabs = split.tabs.map { tab in
@@ -580,7 +593,8 @@ public enum SidebarSyncProjection {
                 customTitle: item.values["customTitle"]?.stringValue,
                 lastActiveAt: existing?.lastActiveAt ?? Date(),
                 savedURL: item.values["savedURL"]?.stringValue.flatMap(URL.init(string:)),
-                savedTitle: item.values["savedTitle"]?.stringValue
+                savedTitle: item.values["savedTitle"]?.stringValue,
+                customIcon: icon(in: item.values)
             )
             if isFavorite {
                 tab.savedURL = nil
@@ -625,7 +639,7 @@ public enum SidebarSyncProjection {
         guard visited.insert(id).inserted else { return nil }
         if let record = snapshot.foldersByID[id] {
             let children = record.childIDs.compactMap { resolve($0, in: snapshot, visited: &visited) }
-            return .folder(SidebarFolder(id: record.id, title: record.title, children: children, sortRank: record.sortRank))
+            return .folder(SidebarFolder(id: record.id, title: record.title, children: children, sortRank: record.sortRank, customIcon: record.customIcon))
         }
         if let split = snapshot.splitsByID[id] { return .split(split) }
         if let easel = snapshot.easelRefsByID[id] { return .easel(easel) }

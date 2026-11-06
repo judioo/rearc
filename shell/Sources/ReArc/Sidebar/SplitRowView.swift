@@ -4,6 +4,7 @@ import SidebarModel
 
 /// Sidebar cell for a split item with child tab rows.
 struct SplitRowView: View {
+    let model: BrowserViewModel
     let split: SplitViewItem
     let isSelected: Bool
     let focusedTabID: Tab.ID
@@ -21,8 +22,7 @@ struct SplitRowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Image(systemName: split.orientation == .horizontal ? "square.split.2x1" : "square.split.1x2")
-                    .font(.system(size: 11, weight: .semibold))
+                SidebarGlyphView(icon: split.customIcon, fallback: split.orientation == .horizontal ? "square.split.2x1" : "square.split.1x2", size: 11)
                     .foregroundStyle(.secondary)
                 Text("Split View")
                     .font(.caption.weight(.semibold))
@@ -65,6 +65,7 @@ struct SplitRowView: View {
                     onMute: { onMutePane(tab.id) }
                 )
                 .padding(.leading, 12)
+                .contextMenu { ItemIconMenu(model: model, itemID: tab.id) }
             }
         }
     }
@@ -84,7 +85,7 @@ private struct SplitPaneRowView: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            SiteIconView(image: favicon, token: tab.faviconToken, size: 14)
+            SiteIconView(image: favicon, token: tab.faviconToken, size: 14, customIcon: tab.customIcon)
                 .frame(width: 16, height: 16)
             Text(tab.displayTitle)
                 .font(.caption)
