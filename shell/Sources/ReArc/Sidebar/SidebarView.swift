@@ -25,21 +25,27 @@ struct SidebarView: View {
         VStack(spacing: 0) {
             SidebarToolbarView(model: model, urlInToolbar: urlInToolbar)
 
-            // Arc shows no favorites row, and no divider, until there are favorites.
-            if hasFavorites || draggedItemID != nil {
-                FavoritesRowView(model: model, draggedTabID: $draggedItemID, dropState: $dropState)
-                    .padding(.horizontal, SidebarMetrics.rowInset)
-                if hasFavorites {
-                    SidebarDivider().padding(.vertical, 8)
+            // A swipe over the favorites pages the spaces under them too.
+            VStack(spacing: 0) {
+                // Arc shows no favorites row, and no divider, until there are favorites.
+                if hasFavorites || draggedItemID != nil {
+                    FavoritesRowView(model: model, draggedTabID: $draggedItemID, dropState: $dropState)
+                        .padding(.horizontal, SidebarMetrics.rowInset)
+                    if hasFavorites {
+                        SidebarDivider().padding(.vertical, 8)
+                    }
                 }
-            }
 
-            SpacePagesView(pager: pager, focusedSpaceID: focusedSpace.id) { spaceID in
-                spacePage(spaceID)
+                SpacePagesView(pager: pager, focusedSpaceID: focusedSpace.id) { spaceID in
+                    spacePage(spaceID)
+                }
             }
             .background(
                 SidebarSwipeMonitor(
-                    isEnabled: draggedItemID == nil,
+                    // Not under a drag, nor under the command bar or tab switcher's scrim.
+                    isEnabled: { [model, binding = $draggedItemID] in
+                        binding.wrappedValue == nil && !model.isCommandBarPresented && model.tabSwitcher == nil
+                    },
                     onBegin: { pager.beginSwipe() },
                     onChange: { pager.swipe(byPoints: $0, pageWidth: Double(model.sidebarWidth)) },
                     onEnd: {
@@ -73,10 +79,23 @@ struct SidebarView: View {
         }
     }
 
+    /// A neighbouring space slides in with its own theme's text colours. The
+    /// modifiers are the same for every page, so a page that becomes the
+    /// focused one keeps its table.
     private func spacePage(_ spaceID: Space.ID) -> some View {
-        SidebarSpacePage(model: model, spaceID: spaceID, draggedItemID: $draggedItemID, dropState: $dropState,
-                         draggedID: draggedItemID, drop: dropState)
+        let colors = pageChrome(spaceID)
+        return SidebarSpacePage(model: model, spaceID: spaceID, draggedItemID: $draggedItemID, dropState: $dropState,
+                                draggedID: draggedItemID, drop: dropState)
             .equatable()
+            .environment(\.themeChrome, colors)
+            .environment(\.colorScheme, colors.isDark ? .dark : .light)
+            .foregroundStyle(colors.title)
+    }
+
+    private func pageChrome(_ spaceID: Space.ID) -> ThemeChromeColors {
+        guard spaceID != focusedSpace.id, let theme = model.store.space(withID: spaceID)?.theme else { return chrome }
+        let dark = theme.appearance.isDark(systemDark: SystemAppearance.isSystemDark)
+        return model.themeColors.colors(for: spaceID, theme: theme, dark: dark)
     }
 }
 

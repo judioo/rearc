@@ -306,8 +306,10 @@ extension Color {
 /// Turns two-finger horizontal scrolls over the sidebar into space swipes.
 /// The first few points decide the axis: vertical scrolls pass through to
 /// the sidebar's scroll view; a horizontal one is consumed, momentum included.
+/// `isEnabled` is asked when a gesture begins, so the sidebar never observes
+/// what it reads.
 struct SidebarSwipeMonitor: NSViewRepresentable {
-    var isEnabled: Bool
+    var isEnabled: () -> Bool
     var onBegin: () -> Void
     var onChange: (Double) -> Void
     var onEnd: () -> Void
@@ -358,11 +360,11 @@ struct SidebarSwipeMonitor: NSViewRepresentable {
             }
             if event.phase.contains(.began) {
                 let point = view.convert(event.locationInWindow, from: nil)
-                tracking = parent.isEnabled && window.isKeyWindow && view.bounds.contains(point)
+                tracking = window.isKeyWindow && view.bounds.contains(point) && parent.isEnabled()
                 claimed = false
                 swallowMomentum = false
                 lock = SwipeAxisLock()
-                if tracking { _ = lock.add(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY) }
+                if tracking { _ = lock.add(dx: contentDelta(event), dy: event.scrollingDeltaY) }
                 return event
             }
             guard tracking else { return event }
@@ -377,10 +379,10 @@ struct SidebarSwipeMonitor: NSViewRepresentable {
             }
             guard event.phase.contains(.changed) else { return event }
             if claimed {
-                parent.onChange(event.scrollingDeltaX)
+                parent.onChange(contentDelta(event))
                 return nil
             }
-            switch lock.add(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY) {
+            switch lock.add(dx: contentDelta(event), dy: event.scrollingDeltaY) {
             case .horizontal:
                 claimed = true
                 parent.onBegin()
@@ -392,6 +394,10 @@ struct SidebarSwipeMonitor: NSViewRepresentable {
             case .undecided:
                 return event
             }
+        }
+
+        private func contentDelta(_ event: NSEvent) -> Double {
+            SwipeAxisLock.contentDelta(event.scrollingDeltaX, invertedFromDevice: event.isDirectionInvertedFromDevice)
         }
     }
 }
