@@ -165,6 +165,7 @@ struct SidebarDropRow<Content: View>: View {
             .overlay(alignment: .bottom) { insertionLine(.after) }
             .onDrag {
                 draggedItemID = entry.id
+                SidebarDropHaptics.dragBegan()
                 return SidebarDragPayload.itemProvider(for: entry.id)
             }
             .onDrop(
@@ -262,6 +263,7 @@ struct SidebarRowDropDelegate: DropDelegate {
         }
         let state = SidebarDropState(targetID: target.id, position: position)
         if dropState != state { dropState = state }
+        if draggedItemID != nil { SidebarDropHaptics.positionChanged(to: state) }
         return DropProposal(operation: draggedItemID == nil ? .copy : .move)
     }
 
@@ -294,6 +296,7 @@ struct SidebarRowDropDelegate: DropDelegate {
                 model.moveItem(draggedItemID, relativeTo: target.id, after: true)
             }
         }
+        SidebarDropHaptics.dropped(moved: true)
         return true
     }
 }
@@ -347,6 +350,7 @@ struct SectionEndDropZone: View {
         func dropEntered(info: DropInfo) {
             isTargeted = true
             zone.dropState = nil
+            if zone.draggedItemID != nil { SidebarDropHaptics.enteredSectionEnd() }
         }
 
         func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -368,6 +372,7 @@ struct SectionEndDropZone: View {
             withAnimation(.easeInOut(duration: 0.15)) {
                 zone.model.moveItem(dragged, to: zone.destination, index: count)
             }
+            SidebarDropHaptics.dropped(moved: true)
             return true
         }
     }
