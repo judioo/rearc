@@ -33,9 +33,9 @@ enum WindowList {
 
     /// The frontmost browser window: layer 0 and at least 800 × 500 pt, which
     /// leaves out Little Arc, popovers and panels.
-    static func browserWindow(pid: pid_t) -> WindowInfo? {
-        normal(pid: pid).first { $0.bounds.width >= 800 && $0.bounds.height >= 500 }
-    }
+    static func browserWindow(pid: pid_t) -> WindowInfo? { normal(pid: pid).first(where: isBrowserSized) }
+
+    static func isBrowserSized(_ window: WindowInfo) -> Bool { window.bounds.width >= 800 && window.bounds.height >= 500 }
 
     /// Polls until a layer-0 window appears that is not in `before` (or, with
     /// `closing`, until `closing` leaves the list). Returns the host time of
