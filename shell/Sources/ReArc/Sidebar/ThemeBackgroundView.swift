@@ -120,7 +120,7 @@ enum ThemeTextureTiles {
 /// One theme's chrome colours for the current appearance, as SwiftUI
 /// colours. Sidebar text, glyphs, rows and separators read them from the
 /// environment, so nothing on the theme is plain black or white.
-struct ThemeChromeColors {
+struct ThemeChromeColors: Equatable {
     var title: Color
     var secondaryText: Color
     var tertiaryText: Color

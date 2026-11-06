@@ -35,56 +35,8 @@ struct SidebarRowItem: Identifiable {
     }
 }
 
-/// One section of the sidebar (pinned or today) for a space. It lays out
-/// the space's outline; each row reads its own entry, selection and engine
-/// state, so a change to one tab redraws its row only. The rows are not
-/// wrapped in a stack: inside the page's lazy stack each one is built when
-/// it scrolls into view.
-struct TabSectionView: View {
-    let title: String?
-    let section: ItemContainerKind.SpaceSection
-    let spaceID: Space.ID
-    let nodes: [SidebarOutlineNode]
-    let model: BrowserViewModel
-    @Binding var draggedItemID: UUID?
-    @Binding var dropState: SidebarDropState?
-
-    var body: some View {
-        if let title, !nodes.isEmpty {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
-        }
-        let expanded = model.store.expandedFolderIDs
-        let candidates = SidebarOutlineRow.peekCandidates(nodes, expanded: expanded)
-        let peeked = candidates.isEmpty ? nil : model.store.selection(among: candidates, inSpace: spaceID)
-        ForEach(SidebarOutlineRow.rows(nodes, expanded: expanded, selected: peeked)) { row in
-            SidebarEntryRow(
-                id: row.id,
-                depth: row.depth,
-                spaceID: spaceID,
-                model: model,
-                dropPosition: dropState?.targetID == row.id ? dropState?.position : nil,
-                draggedItemID: $draggedItemID,
-                dropState: $dropState
-            )
-            .equatable()
-        }
-        SectionEndDropZone(
-            destination: .section(spaceID: spaceID, section: section),
-            placeholder: nodes.isEmpty && draggedItemID != nil
-                ? (section == .pinned ? "Drop here to pin" : "Drop here to unpin")
-                : nil,
-            model: model,
-            draggedItemID: $draggedItemID,
-            dropState: $dropState
-        )
-    }
-}
-
-/// One sidebar row by id. Equal inputs skip the body, so a section that
-/// re-lays out does not rebuild its rows; the row's own reads (its entry,
+/// One sidebar row by id. Equal inputs skip the body, so a cell whose
+/// context changes does not rebuild its row; the row's own reads (its entry,
 /// its selection, its engine's activity) redraw it when they change.
 struct SidebarEntryRow: View, Equatable {
     let id: UUID

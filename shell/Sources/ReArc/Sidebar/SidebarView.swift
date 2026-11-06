@@ -81,9 +81,9 @@ struct SidebarView: View {
 }
 
 /// Offset changes belong to SpacePagesView. A frame of the pager does not
-/// rebuild an unchanged outline. The list runs in its own hosting view
-/// (`SidebarListHost`): a scroll step, or a change one of its rows
-/// observes, updates and lays out only the list, not the window.
+/// rebuild an unchanged outline. The list is an AppKit table of reused
+/// hosting cells (`SidebarListTable`): a scroll step moves rows, and a
+/// change one row observes updates that row's cell only.
 private struct SidebarSpacePage: View, Equatable {
     let model: BrowserViewModel
     let spaceID: Space.ID
@@ -100,9 +100,8 @@ private struct SidebarSpacePage: View, Equatable {
 
     var body: some View {
         let showsThemeEditor = model.themePopoverSpaceID == spaceID && model.isKeyBrowserWindow(window)
-        SidebarListHost(tint: model.themeColor(in: window)) {
-            SidebarSpaceList(model: model, spaceID: spaceID, draggedItemID: $draggedItemID, dropState: $dropState)
-        }
+        SidebarListTable(model: model, spaceID: spaceID, tint: model.themeColor(in: window),
+                         draggedItemID: $draggedItemID, dropState: $dropState)
         // Edit Theme Color hangs the editor under the header
         // (ARC-RECORDING-ANALYSIS.md §2.1). It is presented from here, over
         // the header's slot: a popover did not open from the list's own
@@ -122,65 +121,6 @@ private struct SidebarSpacePage: View, Equatable {
                     ))
                 }
         }
-    }
-}
-
-/// One space's scrolling outline: header, pinned, Today. It observes its
-/// own space, outline and rows inside the list's hosting view.
-private struct SidebarSpaceList: View {
-    let model: BrowserViewModel
-    let spaceID: Space.ID
-    @Binding var draggedItemID: UUID?
-    @Binding var dropState: SidebarDropState?
-    @Environment(\.sidebarWindow) private var window
-
-    var body: some View {
-        let space = model.store.space(withID: spaceID) ?? model.space(in: window)
-        let outline = model.store.outline(for: space.id)
-        let collapsed = model.isPinnedSectionCollapsed(spaceID: space.id, in: window)
-        let pinned = collapsed ? collapsedPinned(outline.pinned, spaceID: space.id) : outline.pinned
-        return ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                SpaceHeaderView(
-                    model: model,
-                    space: space,
-                    hasPinned: !outline.pinned.isEmpty,
-                    isPinnedCollapsed: collapsed,
-                    onTogglePinned: { model.togglePinnedSection(spaceID: space.id, in: window) }
-                )
-                .padding(.bottom, SidebarMetrics.headerToFirstRow)
-                TabSectionView(
-                    title: nil,
-                    section: .pinned,
-                    spaceID: space.id,
-                    nodes: pinned,
-                    model: model,
-                    draggedItemID: $draggedItemID,
-                    dropState: $dropState
-                )
-                TodayHeaderView(model: model, spaceID: space.id, hasTabs: !outline.today.isEmpty)
-                // Arc's "+ New Tab" heads Today, right under the divider.
-                NewTabRowView { model.newTab() }
-                TabSectionView(
-                    title: nil,
-                    section: .unpinned,
-                    spaceID: space.id,
-                    nodes: outline.today,
-                    model: model,
-                    draggedItemID: $draggedItemID,
-                    dropState: $dropState
-                )
-            }
-            .padding(.horizontal, SidebarMetrics.rowInset)
-        }
-    }
-
-    /// A collapsed Pinned section keeps only its selected item
-    /// (`PinnedSectionCollapseState.visibleEntries`).
-    private func collapsedPinned(_ nodes: [SidebarOutlineNode], spaceID: Space.ID) -> [SidebarOutlineNode] {
-        let leaves = SidebarOutlineNode.leaves(nodes)
-        guard let selected = model.store.selection(among: leaves.map(\.id), inSpace: spaceID) else { return [] }
-        return leaves.filter { $0.id == selected }
     }
 }
 
@@ -250,7 +190,7 @@ private struct SidebarResizeHandle: View {
 
 /// Current space identity above the pinned section, with the space menu
 /// (Arc `spaceHeader` / `spaceHeaderContextMenu`). Double-click renames.
-private struct SpaceHeaderView: View {
+struct SpaceHeaderView: View {
     let model: BrowserViewModel
     let space: Space
     var hasPinned = false
@@ -325,7 +265,7 @@ private struct SpaceHeaderView: View {
 
 /// The divider above Today with Arc's Clear action (`UnpinnedSectionDividerCellView`,
 /// menu Clear Unpinned Tabs); after a clear it offers Undo.
-private struct TodayHeaderView: View {
+struct TodayHeaderView: View {
     let model: BrowserViewModel
     let spaceID: Space.ID
     let hasTabs: Bool
@@ -377,7 +317,7 @@ private struct TodayHeaderView: View {
 
 /// Arc's persistent "+ New Tab" cell at the head of Today (`NewTabCellView`):
 /// a 12 pt plus and faded 14 pt text on the row pitch.
-private struct NewTabRowView: View {
+struct NewTabRowView: View {
     let action: () -> Void
     @State private var isHovering = false
     @Environment(\.themeChrome) private var chrome
