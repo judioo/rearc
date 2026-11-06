@@ -68,6 +68,7 @@ final class SiteControlsPanelTests: XCTestCase {
         XCTAssertEqual(row(.snoozedUntil(now.addingTimeInterval(5))).state, "Snoozed for 1 min")
         XCTAssertEqual(row(.enabled, enabled: false).state, "Off for all sites")
         XCTAssertTrue(row(.enabled, enabled: false).isBlocked)
+        XCTAssertEqual(row(.disabled, enabled: false).actions, [])
     }
 
     func testAllowingAutoPictureInPictureEndsABlockOrSnooze() {

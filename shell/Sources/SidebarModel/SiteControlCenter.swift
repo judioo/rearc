@@ -176,7 +176,8 @@ extension SiteControlCenter {
     }
 
     /// Arc's "Automatic Picture-In-Picture" row, from ReArc's per-site
-    /// allow, block and one-hour snooze. Off in Settings wins for every site.
+    /// allow, block and one-hour snooze. Off in Settings wins for every
+    /// site, and then the row has nothing to change.
     static func autoPiPRow(_ preference: AutoPiPHostPreference, enabled: Bool, now: Date) -> SettingRow {
         var row = SettingRow(kind: .autoPictureInPicture, title: "Automatic Picture-In-Picture", state: "Allowed",
                              symbol: "pip", isBlocked: false, actions: [.block, .snoozeOneHour])
@@ -196,6 +197,7 @@ extension SiteControlCenter {
         if !enabled {
             row.state = "Off for all sites"
             row.isBlocked = true
+            row.actions = []
         }
         return row
     }
