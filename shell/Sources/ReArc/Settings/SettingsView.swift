@@ -415,8 +415,14 @@ final class ShortcutRecorder {
         stop()
         recordingID = id
         refused = false
+        let window = NSApp.keyWindow
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let id = self.recordingID else { return event }
+            // Typing in another window ends the recording; that key goes where it was going.
+            guard event.window === window else {
+                self.stop()
+                return event
+            }
             self.handle(event, for: id)
             return nil
         }
@@ -514,10 +520,11 @@ struct ShortcutsSettingsPane: View {
             }
         }
         .onAppear {
-            recorder.onRecord = { [weak model] id, change in
+            // The model does not hold the recorder: no cycle.
+            recorder.onRecord = { [model] id, change in
                 switch change {
-                case .chord(let chord): model?.shortcutOverrides.set(chord, for: id)
-                case .unbound: model?.shortcutOverrides.unbind(id)
+                case .chord(let chord): model.shortcutOverrides.set(chord, for: id)
+                case .unbound: model.shortcutOverrides.unbind(id)
                 }
             }
         }

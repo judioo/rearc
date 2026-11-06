@@ -20,6 +20,8 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
         window.toolbarStyle = .preference
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
+        // The height follows the pane; only the position is remembered.
+        if !window.setFrameUsingName("ReArcSettings") { window.center() }
         window.setFrameAutosaveName("ReArcSettings")
         super.init(window: window)
         let toolbar = NSToolbar(identifier: "ReArcSettings")
@@ -36,7 +38,6 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
 
     func show(_ pane: SettingsPane?) {
         if let pane { model.settingsPane = pane }
-        if window?.isVisible != true { window?.center() }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

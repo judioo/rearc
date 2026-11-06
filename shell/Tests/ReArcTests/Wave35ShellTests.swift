@@ -259,6 +259,9 @@ final class Wave35ShellTests: XCTestCase {
         XCTAssertTrue(model.activeSearchEngineSettings === stub, "the engine's own call wins once it exists")
         model.searchEngineSettings = nil
         if model.webKitSearchPreference != nil {
+            // The preference is saved to the test process's own defaults: put them back as they were.
+            let stored = UserDefaults.standard.object(forKey: SearchProviderPreference.providerKey)
+            defer { UserDefaults.standard.set(stored, forKey: SearchProviderPreference.providerKey) }
             let webKit = model.activeSearchEngineSettings
             XCTAssertEqual(webKit?.engines.map(\.id), SearchProvider.builtIn.map(\.id))
             webKit?.setDefaultEngine(SearchProvider.google.id, for: model.store.activeProfileID)
