@@ -64,6 +64,8 @@ final class DownloadsController {
     var canReviewDangerous = false
     /// Chromium's current warnings (ABI 1.24 `dangerous_downloads`), by row; not persisted.
     private(set) var warnings: [String: DownloadWarning] = [:]
+    /// The Library search's folded names and sites, kept between keystrokes.
+    @ObservationIgnored private var searchIndex = LibraryDownloads.SearchIndex()
     @ObservationIgnored private let fileURL: URL?
     @ObservationIgnored private var saveWorkItem: DispatchWorkItem?
     @ObservationIgnored private let workspace: NSWorkspace
@@ -87,6 +89,11 @@ final class DownloadsController {
     }
 
     var records: [DownloadRecord] { list.records }
+
+    /// The rows the Library's search shows (`LibraryDownloads.matching`).
+    func matching(_ query: String) -> [DownloadRecord] {
+        searchIndex.matching(list.records, query: query)
+    }
     var activeCount: Int { list.activeCount }
     var hasDangerous: Bool { list.records.contains(where: needsDecision) }
 

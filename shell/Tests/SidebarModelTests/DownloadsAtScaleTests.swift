@@ -110,4 +110,36 @@ final class DownloadsAtScaleTests: XCTestCase {
         XCTAssertEqual(DownloadListFile.load(from: url, limit: 50).list.records.map(\.id), ["only"])
         XCTAssertEqual(DownloadListFile.load(from: url, limit: 0).list.records, [])
     }
+
+    // MARK: Search index
+
+    func testSearchIndexMatchesLikeAFreshSearch() {
+        let records = [
+            record("a", path: "/d/Quarterly Report.pdf", url: "https://files.example.com/a"),
+            record("b", path: "/d/photo.jpg", url: "https://cdn.example.org/b"),
+            record("c", path: "", url: "https://éxample.net/Résumé.docx"),
+            record("d", path: "/d/notes.txt", url: "not a url"),
+            record("e", path: "/d/写真 2026.png", url: "https://例え.jp/e"),
+            record("f", path: "/d/line\r\nbreak.txt", url: "https://example.com/f"),
+            record("g", path: "/d/Cafe\u{301} menu.pdf", url: "https://example.com/g"),
+        ]
+        var index = LibraryDownloads.SearchIndex()
+        for query in ["", " report ", "CDN", "resume", "EXAMPLE", "zip", "txt", "é", "写真", "例え", "\n", "line", "cafe", "café menu", "E"] {
+            XCTAssertEqual(index.matching(records, query: query).map(\.id),
+                           LibraryDownloads.matching(records, query: query).map(\.id), "query \(query)")
+        }
+    }
+
+    func testSearchIndexFollowsRowsWhosePathOrURLChanged() {
+        var records = [record("a", path: "/d/draft.txt"), record("b", path: "/d/photo.jpg")]
+        var index = LibraryDownloads.SearchIndex()
+        XCTAssertEqual(index.matching(records, query: "draft").map(\.id), ["a"])
+        records[0].targetPath = "/d/final.txt"
+        XCTAssertEqual(index.matching(records, query: "draft").map(\.id), [])
+        XCTAssertEqual(index.matching(records, query: "final").map(\.id), ["a"])
+        records[1].url = "https://pictures.example.com/b"
+        XCTAssertEqual(index.matching(records, query: "pictures").map(\.id), ["b"])
+        records.append(record("c", path: "/d/final-2.txt"))
+        XCTAssertEqual(index.matching(records, query: "final").map(\.id), ["a", "c"])
+    }
 }

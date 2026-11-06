@@ -96,7 +96,7 @@ struct DownloadsTrayView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             Divider()
-            let records = LibraryDownloads.matching(downloads.records, query: query)
+            let records = downloads.matching(query)
             if records.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "arrow.down.circle")
