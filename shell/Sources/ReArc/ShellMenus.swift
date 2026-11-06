@@ -374,6 +374,14 @@ enum ShellMenus {
     /// View menu: Arc's View Library and its pages (`openLibrary`,
     /// `viewEaselsAndNotes`, `viewScreenshotsAndCaptures`, `openDownloads`,
     /// `viewArchive`, `viewBoosts`; SIDEBAR-SPEC §6).
+    /// Window menu (P3.22). Arc binds no keys to these.
+    static func littleArcs(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[
+            ShellMenuItem("Show All Little Arcs") { model.showAllLittleArcs() },
+            ShellMenuItem("Close All Little Arcs") { model.closeAllLittleArcs() },
+        ]]
+    }
+
     static func library(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [
             [ShellMenuItem("View Library", "l", [.command, .shift]) { model.openLibrary(nil) }],

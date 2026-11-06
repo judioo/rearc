@@ -404,6 +404,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let mainMenu = makeMainMenu(model: model)
         menuKeyEquivalents.apply(model.shortcutOverrides, to: mainMenu)
         NSApp.mainMenu = mainMenu
+        ApplicationDockMenuHook.install { [weak self, weak model] in
+            model?.dockMenu(newWindow: { self?.openBrowserWindow() })
+        }
         if awaitingReady {
             // The cached window is up; the services it deferred start now.
             awaitingReady = false
@@ -1167,6 +1170,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(.separator())
+        target.add(ShellMenus.littleArcs(model), to: windowMenu)
         windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         main.addSubmenu(windowMenu, title: "Window")
