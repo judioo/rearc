@@ -3329,6 +3329,47 @@ extension ChromiumSelfTest {
         try await wait("tab A after the wave 27 checks") { engine.pageTitle == Self.titleA && !engine.isLoading }
     }
 
+    // MARK: P3.14: sidebar on the right
+
+    /// Settings › General › Sidebar position: on the right the sidebar's list
+    /// sits at the window's right edge and the page beside it on the left;
+    /// back on the left, as before.
+    @MainActor
+    fileprivate func sidebarSideChecks(model: BrowserViewModel, engine: ChromiumEngine, window: NSWindow) async throws {
+        let original = model.sidebarSide
+        guard let content = window.contentView else { throw Failure(description: "no content view") }
+        func sidebarTables() -> [CGRect] {
+            func tables(in view: NSView) -> [NSTableView] {
+                ((view as? NSTableView).map { [$0] } ?? []) + view.subviews.flatMap(tables(in:))
+            }
+            return tables(in: content).filter { !$0.isHiddenOrHasHiddenAncestor }
+                .map { $0.enclosingScrollView ?? $0 }
+                .map { $0.convert($0.bounds, to: nil) }
+                .filter { $0.width > 0 && $0.intersects(content.bounds) }
+        }
+        let width = content.bounds.width
+        let sidebar = model.sidebarWidth(in: model.store.keyWindowID)
+        for side in [SidebarSide.right, .left] {
+            model.setSidebarSide(side)
+            try await wait("the sidebar moved \(side.rawValue)", timeout: 5) { model.sidebarSide == side && model.sidebarFlipOpacity == 1 }
+            try await Task.sleep(nanoseconds: 400_000_000)
+            let frames = sidebarTables()
+            try check(!frames.isEmpty, "no sidebar list on screen with the sidebar on the \(side.rawValue)")
+            let page = engine.leaseHolder.map { $0.convert($0.bounds, to: nil) } ?? .zero
+            switch side {
+            case .right:
+                try check(frames.allSatisfy { $0.minX >= width - sidebar - 1 }, "the sidebar's list is at \(frames), not the right \(sidebar) pt")
+                try check(page.maxX <= width - sidebar + 1 && page.minX < sidebar, "the page is at \(page), not left of the sidebar")
+            case .left:
+                try check(frames.allSatisfy { $0.maxX <= sidebar + 1 }, "the sidebar's list is at \(frames), not the left \(sidebar) pt")
+                try check(page.minX >= sidebar - 1, "the page is at \(page), not right of the sidebar")
+            }
+        }
+        model.setSidebarSide(original)
+        try await wait("the sidebar back on the \(original.rawValue)", timeout: 5) { model.sidebarSide == original && model.sidebarFlipOpacity == 1 }
+        log("PASS sidebar position: Right puts the sidebar's list at the window's right edge and the page left of it; Left puts them back")
+    }
+
     // MARK: Wave 28: Library, themes, Boosts v2, capture
 
     @MainActor
@@ -3353,6 +3394,8 @@ extension ChromiumSelfTest {
         try check(model.librarySection(in: key) == nil, "a sidebar click left the Library open")
         try check(model.sidebarWidth(in: key) == restingWidth, "the sidebar stayed \(model.sidebarWidth(in: key)) pt wide")
         log("PASS Library: View > View Media opens the Library in the key window's sidebar beside the page; Spaces is the rail; selecting the tab closes it")
+
+        try await sidebarSideChecks(model: model, engine: engine, window: window)
 
         // Gradient theme with Dark appearance: the window turns dark; back to the plain theme, it follows the Mac.
         let space = store.activeSpaceID
