@@ -766,6 +766,34 @@ public enum AppCommandRegistry {
                 action: .openBrowserPage(.extensions)
             ),
             AppCommand(
+                id: "search-engine-settings",
+                title: "Search Engine Settings",
+                keywords: ["search", "engine", "google", "default", "settings"],
+                minQueryLength: 3,
+                action: .openBrowserPage(.searchSettings)
+            ),
+            AppCommand(
+                id: "download-settings",
+                title: "Download Settings",
+                keywords: ["download", "location", "folder", "settings"],
+                minQueryLength: 3,
+                action: .openBrowserPage(.downloadSettings)
+            ),
+            AppCommand(
+                id: "payment-settings",
+                title: "Payment Methods",
+                keywords: ["payment", "credit", "cards", "autofill", "settings"],
+                minQueryLength: 3,
+                action: .openBrowserPage(.payments)
+            ),
+            AppCommand(
+                id: "notification-settings",
+                title: "Notification Settings",
+                keywords: ["notifications", "alerts", "permissions", "settings"],
+                minQueryLength: 3,
+                action: .openBrowserPage(.notifications)
+            ),
+            AppCommand(
                 id: "view-page-source",
                 title: "View Page Source",
                 keywords: ["source", "view", "html", "developer"],
