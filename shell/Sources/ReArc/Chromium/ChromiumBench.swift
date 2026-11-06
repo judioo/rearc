@@ -246,6 +246,8 @@ final class ChromiumBench {
         try makeShell()
         // A loopback default search: typed text never reaches a real engine.
         if runtime.capabilities.searchAutocomplete, let services = model.commandBarServices as? ChromiumCommandBarServices {
+            // Staged startup (perf-3) makes the selected tab's engine after the first frame.
+            try await settle("selected tab's engine", timeout: 30) { [self] in (try? selectedEngine()) != nil }
             let engine = try selectedEngine()
             _ = await engine.waitForTab()
             let loopback = SearchProvider(id: "bench", name: "ReArc Bench Search", keyword: "search.bench.invalid",

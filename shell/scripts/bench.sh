@@ -115,7 +115,7 @@ sleep 2
 LOCKED_FLAG=()
 [[ $ALLOW_LOCKED == 0 ]] || LOCKED_FLAG=(--rearc-bench-allow-locked)
 COMMON=(--rearc-bench-iterations="$ITERATIONS" --rearc-bench-warmups="$WARMUPS" --rearc-bench-fixture="$FIXTURE"
-        --rearc-bench-seed="$SEED" "${LOCKED_FLAG[@]}")
+        --rearc-bench-seed="$SEED" ${LOCKED_FLAG[@]+"${LOCKED_FLAG[@]}"})
 [[ -z $ONLY ]] || COMMON+=(--rearc-bench-only="$ONLY")
 
 STATUS=0
