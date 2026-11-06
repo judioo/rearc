@@ -291,6 +291,11 @@ private struct CommandBarResultRow: View {
                     .help(action == .deleteFromHistory ? "\(action.title) (⇧⌫)" : action.title)
                 }
             }
+            if let key = result.keyEquivalent, !key.isEmpty {
+                Text(key)
+                    .font(.system(size: 12))
+                    .foregroundStyle(secondary)
+            }
             if let spaceName {
                 Text(spaceName)
                     .font(.system(size: 12, weight: isHighlighted ? .semibold : .regular))

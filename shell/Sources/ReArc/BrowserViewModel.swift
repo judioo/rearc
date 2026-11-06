@@ -293,6 +293,7 @@ final class BrowserViewModel {
                     mediaByTab: mediaStateByTab, tabMuteModel: tabMuteModel,
                     navigationSchemes: engineHost.navigationSchemes, externalLinkDestination: externalLinkDestination))
             },
+            menuCommands: commandBarMenuCommands,
             externalLinkDestination: externalLinkDestination,
             live: commandBarLive,
             searchProvider: searchProvider,
@@ -1436,6 +1437,11 @@ final class BrowserViewModel {
                     return
                 }
             case .command:
+                if let id = choice.menuCommandID {
+                    dismissCommandBar()
+                    DispatchQueue.main.async { _ = MainMenuCommandIndex.perform(id) }
+                    return
+                }
                 if let action = choice.commandAction {
                     if action == .peekAtURL || action == .openLittleArcWindow {
                         executeCommand(action, commandID: choice.commandID)
