@@ -44,10 +44,12 @@ struct BottomBarView: View {
             }
             bar(libraryOpen: libraryOpen)
                 .overlay(alignment: .top) {
-                    // The button's chip is the stack's base: it rises from the chip's top edge.
+                    // The stack rises from the button and rests wholly above the bar, at its
+                    // own height (not the bar's), so it never covers the Library button.
                     if showsDownloads {
                         RecentDownloadsStack(records: recent, downloads: model.downloads)
-                            .alignmentGuide(.top) { $0[.bottom] - (Self.height - LibraryButton.chipSize) / 2 }
+                            .fixedSize(horizontal: false, vertical: true)
+                            .alignmentGuide(.top) { $0[.bottom] }
                             .onHover { setLibraryHover($0, .content) }
                             .transition(QuickViewMotion.transition(reduceMotion: reduceMotion))
                     }
