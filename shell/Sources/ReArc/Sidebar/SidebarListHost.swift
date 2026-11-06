@@ -2,12 +2,11 @@ import AppKit
 import SwiftUI
 import SidebarModel
 
-/// Scrolls `content` in an AppKit scroll view, in its own `NSHostingView`
-/// (perf-4). A SwiftUI scroll view flushes its graph, places its lazy rows
-/// and walks every focus responder on each bounds change, and in the
-/// window's graph it also laid out all of `BrowserView`. Here a scroll step
-/// moves the clip view and nothing else; a change the list observes updates
-/// the list's graph alone.
+/// Runs `content` in its own `NSHostingView` (perf-4). A SwiftUI scroll view
+/// flushes its whole graph on each bounds change and lays out the root
+/// hosting view; in the window's graph that is all of `BrowserView`. In a
+/// graph of its own a scroll step renders the list alone, and a change the
+/// list observes no longer invalidates the window.
 ///
 /// Environment does not cross a hosting view, so the values the sidebar's
 /// rows read are carried over here and set again on the inner root.
@@ -20,7 +19,7 @@ struct SidebarListHost<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        ScrollingHostedGraph(root: SidebarListRoot(
+        HostedGraph(root: SidebarListRoot(
             chrome: chrome, window: window, pager: pager, colorScheme: colorScheme, tint: tint, content: content()
         ))
     }
@@ -47,41 +46,18 @@ struct SidebarListRoot<Content: View>: View {
     }
 }
 
-/// An `NSScrollView` whose document is an `NSHostingView` for `root`: full
-/// width, as tall as its content. It fills what its SwiftUI parent offers,
-/// so the window never measures the list's views through Auto Layout.
-struct ScrollingHostedGraph<Root: View>: NSViewRepresentable {
+/// An `NSHostingView` for `root`, sized by its SwiftUI parent. It reports no
+/// intrinsic size, so its own layout never asks the window to lay out again.
+struct HostedGraph<Root: View>: NSViewRepresentable {
     let root: Root
 
-    func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
-        scroll.drawsBackground = false
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = false
-        scroll.autohidesScrollers = true
-        scroll.scrollerStyle = .overlay
-        scroll.horizontalScrollElasticity = .none
-        scroll.automaticallyAdjustsContentInsets = false
-        scroll.contentView.drawsBackground = false
-
-        let host = NSHostingView(rootView: root)
-        host.sizingOptions = [.intrinsicContentSize]
-        host.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = host
-        let clip = scroll.contentView
-        NSLayoutConstraint.activate([
-            host.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
-            host.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
-            host.topAnchor.constraint(equalTo: clip.topAnchor),
-        ])
-        return scroll
+    func makeNSView(context: Context) -> NSHostingView<Root> {
+        let view = NSHostingView(rootView: root)
+        view.sizingOptions = []
+        return view
     }
 
-    func updateNSView(_ scroll: NSScrollView, context: Context) {
-        (scroll.documentView as? NSHostingView<Root>)?.rootView = root
-    }
-
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
-        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    func updateNSView(_ view: NSHostingView<Root>, context: Context) {
+        view.rootView = root
     }
 }
