@@ -4697,7 +4697,7 @@ extension ChromiumSelfTest {
                 let hit = window.contentView?.hitTest(window.contentView!.convert(window.convertPoint(fromScreen: point), from: nil))
                 throw Failure(description: "+ New Tab at \(newTab) opened no command bar (key \(NSApp.keyWindow?.title ?? "none"), "
                     + "window under the point \(under) vs sidebar \(window.windowNumber) '\(NSApp.window(withWindowNumber: under)?.title ?? "?")', "
-                    + "hit \(hit.map { String(describing: type(of: $0)) } ?? "nil"))")
+                    + "hit \(hit.map { String(describing: Swift.type(of: $0)) } ?? "nil"))")
             }
             model.commandBarText = "\(serverBase)/nav?\(query)"
             model.submitCommandBar()
