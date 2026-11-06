@@ -71,10 +71,10 @@ final class Wave33ShellTests: XCTestCase {
     func testCardShapeCutsTheStripTheSlidingSidebarCovers() {
         let rect = CGRect(x: 0, y: 0, width: 400, height: 300)
         XCTAssertEqual(CardShape(radius: 8).path(in: rect).boundingRect, rect)
-        let cut = CardShape(radius: 8, leadingCut: 150).path(in: rect).boundingRect
+        let cut = CardShape(radius: 8, sidebarCut: 150).path(in: rect).boundingRect
         XCTAssertEqual(cut.minX, 150, accuracy: 0.01)
         XCTAssertEqual(cut.maxX, 400, accuracy: 0.01)
-        XCTAssertEqual(CardShape(radius: 8, leadingCut: 900).path(in: rect).boundingRect.width, 0, accuracy: 0.01)
+        XCTAssertEqual(CardShape(radius: 8, sidebarCut: 900).path(in: rect).boundingRect.width, 0, accuracy: 0.01)
     }
 
     // MARK: Space switch (§4)

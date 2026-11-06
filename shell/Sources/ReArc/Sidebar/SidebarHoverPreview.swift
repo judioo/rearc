@@ -120,7 +120,7 @@ final class SidebarHoverPreview: NSObject, NSPopoverDelegate {
         let popover = self.popover ?? makePopover()
         popover.contentViewController = NSHostingController(rootView: root)
         // On an open popover this moves it to the new row.
-        popover.show(relativeTo: cell.bounds, of: cell, preferredEdge: .maxX)
+        popover.show(relativeTo: cell.bounds, of: cell, preferredEdge: model.sidebarPlacement.hoverPreviewEdge.rectEdge)
         self.popover = popover
     }
 
