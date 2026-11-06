@@ -418,10 +418,13 @@ struct GrainDial: View {
 }
 
 /// "Choose a Theme": the row in Create a Space and Edit Space that opens the
-/// editor as a popover pointing left at it (§2.1).
+/// editor as a popover beside it (§2.1): left of a sheet, and over the page
+/// from Create a Space's sidebar page.
 struct ChooseThemeRow: View {
     @Binding var theme: SpaceTheme
     var title = "Choose a Theme"
+    var arrowEdge: Edge = .leading
+    var height: CGFloat = 32
     @State private var isPresented = false
 
     var body: some View {
@@ -436,12 +439,12 @@ struct ChooseThemeRow: View {
                 ThemeSwatchPreview(theme: theme)
             }
             .padding(.horizontal, 10)
-            .frame(height: 32)
+            .frame(height: height)
             .background(Color.primary.opacity(isPresented ? 0.1 : 0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .popover(isPresented: $isPresented, arrowEdge: .leading) {
+        .popover(isPresented: $isPresented, arrowEdge: arrowEdge) {
             SpaceStyleEditor(theme: $theme)
         }
     }

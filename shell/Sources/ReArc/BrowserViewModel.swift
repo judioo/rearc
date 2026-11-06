@@ -178,8 +178,46 @@ final class BrowserViewModel {
     var spaceEditorID: Space.ID?
     /// Edit Theme Color: the space whose header shows the theme editor popover.
     var themePopoverSpaceID: Space.ID?
-    /// The New Space dialog's fields while it is open.
-    var spaceCreationDraft: SpaceDraft?
+    /// Create a Space while it is open, as a page of one window's sidebar.
+    /// The window reads its theme and where it shows (`creationShell`); the
+    /// name and icon are observed apart, so typing redraws the page alone.
+    var spaceCreation: SpaceCreationSession? {
+        get {
+            guard var session = creationShell else { return nil }
+            session.draft.name = creationName
+            session.draft.iconName = creationIcon
+            return session
+        }
+        set {
+            let shell = newValue.map { session -> SpaceCreationSession in
+                var session = session
+                session.draft.name = ""
+                session.draft.iconName = ""
+                return session
+            }
+            if shell != creationShell { creationShell = shell }
+            if newValue?.draft.name ?? "" != creationName { creationName = newValue?.draft.name ?? "" }
+            if newValue?.draft.iconName ?? "" != creationIcon { creationIcon = newValue?.draft.iconName ?? "" }
+        }
+    }
+    private var creationShell: SpaceCreationSession?
+    private var creationName = ""
+    private var creationIcon = ""
+    /// Create a Space's fields; setting a draft opens the page in the key window.
+    var spaceCreationDraft: SpaceDraft? {
+        get { spaceCreation?.draft }
+        set {
+            if let newValue {
+                if spaceCreation == nil {
+                    spaceCreation = SpaceCreationSession(draft: newValue, window: store.keyWindowID, origin: .command)
+                } else {
+                    spaceCreation?.draft = newValue
+                }
+            } else {
+                spaceCreation = nil
+            }
+        }
+    }
     var profileEditorRequest: ProfileEditorRequest?
     var itemIconEditorID: UUID?
     /// The split row whose name is being edited in place.
@@ -758,18 +796,51 @@ final class BrowserViewModel {
         return space
     }
 
-    /// New Space: opens the creation dialog (name, icon, theme, profile).
-    /// Arc starts a new space on its built-in theme (ARC-RECORDING-ANALYSIS.md §1, row 7).
-    func beginSpaceCreation(profileID: Profile.ID? = nil) {
-        var draft = SpaceDraft.suggested(in: store, profileID: profileID)
-        draft.theme = .arcDefault
-        spaceCreationDraft = draft
+    /// New Space: Create a Space opens as a page after the last space of
+    /// the window's sidebar (name, icon, theme, profile). Arc starts it blank
+    /// on its built-in theme (ARC-RECORDING-ANALYSIS.md §1, row 7) and fades
+    /// to it; pulled past the last space it pops in at once.
+    func beginSpaceCreation(profileID: Profile.ID? = nil, in window: SidebarWindowID? = nil,
+                            origin: SpaceCreationSession.Origin = .command) {
+        let window = window ?? store.keyWindowID
+        if librarySection(in: window) != nil { closeLibrary(in: window) }
+        let draft = SpaceDraft.blank(in: store, profileID: profileID ?? space(in: window).profileID)
+        swapCreationPage(SpaceCreationSession(draft: draft, window: window, origin: origin), origin: origin)
+    }
+
+    /// Cancel: the page fades back to the space the window was on.
+    func cancelSpaceCreation() {
+        guard spaceCreation != nil else { return }
+        swapCreationPage(nil, origin: nil)
+    }
+
+    private func swapCreationPage(_ session: SpaceCreationSession?, origin: SpaceCreationSession.Origin?) {
+        var transaction = Transaction(animation: .easeOut(duration: max(SpaceCreationSession.fadeDuration(opening: origin), 0.12)))
+        transaction.swapsCreationPage = true
+        withTransaction(transaction) { spaceCreation = session }
+    }
+
+    /// A page's theme: a space's, or Create a Space's draft.
+    func pageTheme(_ id: Space.ID) -> SpaceTheme? {
+        id == SpaceCreationSession.pageID ? creationShell?.draft.theme : store.space(withID: id)?.theme
+    }
+
+    /// The window shows Create a Space's page.
+    func isCreatingSpace(in window: SidebarWindowID?) -> Bool {
+        creationShell?.isShown(in: window) ?? false
+    }
+
+    /// The theme a window wears: its space's, or the draft's while it
+    /// shows Create a Space.
+    func shownTheme(in window: SidebarWindowID?) -> SpaceTheme {
+        if let session = creationShell, session.isShown(in: window) { return session.draft.theme }
+        return space(in: window).theme
     }
 
     @discardableResult
     func createSpace(from draft: SpaceDraft) -> Space? {
         guard let space = store.createSpace(from: draft) else { return nil }
-        spaceCreationDraft = nil
+        spaceCreation = nil
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
         return space

@@ -133,7 +133,7 @@ struct BrowserView: View {
         // The shown space's Appearance (Automatic, Light, Dark) sets the
         // window's, which its pages, easels and notes follow.
         .background(
-            WindowAppearanceSetter(appearance: model.space(in: windowID).theme.appearance)
+            WindowAppearanceSetter(appearance: model.shownTheme(in: windowID).appearance)
                 .frame(width: 0, height: 0)
         )
         .background(
@@ -234,14 +234,6 @@ struct BrowserView: View {
             }
         }
         .modifier(SidebarPersonalizationSheets(model: model, isOwner: isKeyWindowSheetOwner))
-        .sheet(isPresented: Binding(
-            get: { model.spaceCreationDraft != nil && isKeyWindowSheetOwner },
-            set: { if !$0 { model.spaceCreationDraft = nil } }
-        )) {
-            if let draft = model.spaceCreationDraft {
-                SpaceCreationView(model: model, draft: draft)
-            }
-        }
         .alert(model.pendingRename?.alertTitle ?? "Rename", isPresented: Binding(
             get: { model.pendingRename != nil },
             set: { if !$0 { model.pendingRename = nil } }
@@ -291,11 +283,13 @@ struct BrowserView: View {
         CommandBarContainer(model: model, width: width)
     }
 
-    /// The focused space's chrome colours in its resolved appearance.
+    /// The focused space's chrome colours in its resolved appearance, or
+    /// Create a Space's draft while the window shows it.
     private var themeChrome: ThemeChromeColors {
-        let theme = model.space(in: windowID).theme
+        let theme = model.shownTheme(in: windowID)
         let dark = theme.appearance.isDark(systemDark: SystemAppearance.isDark(colorScheme))
-        return model.themeColors.colors(for: model.space(in: windowID).id, theme: theme, dark: dark)
+        let id = model.isCreatingSpace(in: windowID) ? SpaceCreationSession.pageID : model.space(in: windowID).id
+        return model.themeColors.colors(for: id, theme: theme, dark: dark)
     }
 
     /// This window shows a page in HTML fullscreen: only the page, edge to edge.
@@ -307,7 +301,7 @@ struct BrowserView: View {
         model.pendingSpaceProfileChange.map(model.spaceProfileChangeMessage) ?? ("", "", "")
     }
 
-    /// Only the key window presents the shared New Space sheet.
+    /// Only the key window presents the shared sheets.
     private var isKeyWindowSheetOwner: Bool {
         model.store.keyWindowID == nil || model.store.keyWindowID == windowID
     }
@@ -377,7 +371,8 @@ struct BrowserView: View {
     /// The page as a rounded card inset on the theme background (Arc's
     /// content frame, THEMES.md §4.3): 10 pt from the top, right and bottom,
     /// flush with the sidebar, 8 pt corners and a soft shadow. Its own fill
-    /// is 70 % white over the theme, so an empty card is tinted by it. With
+    /// is 62 % white over the theme, so an empty card is tinted by it and
+    /// changes colour with a swipe. With
     /// "URL in toolbar" on, the toolbar strip sits at its top (§4.4). With
     /// the sidebar hidden it is inset on every side. In HTML fullscreen the
     /// same view loses its inset and corners: a different view tree would
@@ -431,11 +426,12 @@ struct BrowserView: View {
     static let cardInset: CGFloat = 10
     static let cardRadius: CGFloat = 8
 
-    /// About 70 % white over the theme in light (`#F6F4FA` → `#FAF7F7` on the
-    /// default). In dark the card has no wash: an empty page shows the
-    /// gradient at full strength (ARC-RECORDING-ANALYSIS.md §2.7, frame 1000).
+    /// About 62 % white over the theme in light: saturated themes put it
+    /// at 0.60–0.65 (2026-11-06-space-swipe-feel-and-new-space.md §2.2; the
+    /// pale default gave ≈ 70 %). In dark the card has no wash: an empty page
+    /// shows the gradient at full strength (ARC-RECORDING-ANALYSIS.md §2.7).
     private var cardFill: Color {
-        themeChrome.isWindowDark ? Color.clear : Color.white.opacity(0.7)
+        themeChrome.isWindowDark ? Color.clear : Color.white.opacity(0.62)
     }
 
     @ViewBuilder
