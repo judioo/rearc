@@ -17,6 +17,29 @@ enum SidebarRenameRequest: Equatable {
     }
 }
 
+/// What ✕ and ⌘W do to a tab, as `closeTabNow` decides it, and how the
+/// button and the menu name that.
+enum TabCloseKind: Equatable {
+    /// A Today tab (or a split pane) goes to the archive.
+    case archive
+    /// A pinned tab goes back to its saved URL, unloaded; the row stays.
+    case unloadPinned
+    /// A favorite is unloaded and stays in the strip.
+    case unloadFavorite
+
+    /// The ✕ button's label. "Archive this tab" is Arc's tooltip on a Today
+    /// row; the recording did not capture Arc's pinned wording, so pinned
+    /// and favorite rows use a plain "Close tab".
+    var buttonLabel: String {
+        self == .archive ? "Archive this tab" : "Close tab"
+    }
+
+    /// The ⌘W item: Arc's Shortcuts list names it "Archive Tab".
+    var menuTitle: String {
+        self == .archive ? "Archive Tab" : "Close Tab"
+    }
+}
+
 /// Destructive sidebar actions that ask first (Arc `SpaceDeletionConfiguration`,
 /// `DeleteProfileDialog`).
 /// Change Profile of a space, waiting for confirmation (Arc ConfirmInterProfileMove).
@@ -107,7 +130,54 @@ extension BrowserViewModel {
         }
     }
 
+    // MARK: - Close wording
+
+    func closeKind(of id: Tab.ID) -> TabCloseKind {
+        switch store.kind(of: id) {
+        case .favorite: return .unloadFavorite
+        case .pinned where store.splitContaining(tabID: id) == nil: return .unloadPinned
+        default: return .archive
+        }
+    }
+
+    /// The ⌘W item's title for the selected tab; a key private window
+    /// closes instead, so it keeps "Close Tab".
+    var closeTabMenuTitle: String {
+        guard keyPrivateWindow == nil, let id = store.selectedTabID else { return "Close Tab" }
+        return closeKind(of: id).menuTitle
+    }
+
     // MARK: - Pinning and favorites
+
+    /// How long a just-pinned row says "Double-click to rename" (Arc's drop, about 3 s).
+    static let renameHintDuration: TimeInterval = 3
+
+    /// The row's subtitle while its rename hint shows.
+    func renameHintSubtitle(for id: Tab.ID, now: Date = Date()) -> String? {
+        guard let hint = renameHint, hint.tabID == id,
+              now.timeIntervalSince(hint.shownAt) < Self.renameHintDuration else { return nil }
+        return "Double-click to rename"
+    }
+
+    func showRenameHint(for id: Tab.ID, now: Date = Date()) {
+        renameHint = (id, now)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.renameHintDuration) { [weak self] in
+            self?.expireRenameHint()
+        }
+    }
+
+    /// Clears the hint once its time is up; a newer hint keeps its own time.
+    func expireRenameHint(now: Date = Date()) {
+        guard let hint = renameHint, now.timeIntervalSince(hint.shownAt) >= Self.renameHintDuration else { return }
+        renameHint = nil
+    }
+
+    /// After a move or command: a tab that was not pinned and now is shows the hint.
+    private func noteMove(of id: UUID, wasPinned: Bool) {
+        if !wasPinned, store.kind(of: id) == .pinned, store.splitContaining(tabID: id) == nil {
+            showRenameHint(for: id)
+        }
+    }
 
     /// Cmd+D: pin a Today tab, unpin a pinned one.
     func togglePin(_ tabID: Tab.ID? = nil) {
@@ -116,6 +186,7 @@ extension BrowserViewModel {
         switch store.kind(of: id) {
         case .today:
             store.pinTab(id)
+            noteMove(of: id, wasPinned: false)
             showToast("Pinned Tab to “\(space)”", systemImage: "pin.fill")
         case .pinned:
             store.unpinTab(id)
@@ -136,6 +207,7 @@ extension BrowserViewModel {
     func moveFavoriteToPinned(_ id: Tab.ID) {
         let count = store.content(for: store.activeSpaceID).pinned.count
         store.moveItem(id, to: .section(spaceID: store.activeSpaceID, section: .pinned), index: count)
+        noteMove(of: id, wasPinned: false)
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
     }
@@ -267,13 +339,17 @@ extension BrowserViewModel {
     // MARK: - Drag and drop
 
     func moveItem(_ id: UUID, relativeTo targetID: UUID, after: Bool) {
+        let wasPinned = store.kind(of: id) == .pinned
         guard store.moveItem(id, relativeTo: targetID, after: after) else { return }
+        noteMove(of: id, wasPinned: wasPinned)
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
     }
 
     func moveItem(_ id: UUID, to destination: SidebarStore.ItemDestination, index: Int) {
+        let wasPinned = store.kind(of: id) == .pinned
         guard store.moveItem(id, to: destination, index: index) else { return }
+        noteMove(of: id, wasPinned: wasPinned)
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
     }
@@ -319,7 +395,9 @@ extension BrowserViewModel {
     /// Drop onto a folder row: append to the folder and open it.
     func moveItem(_ id: UUID, intoFolder folderID: UUID) {
         let count = store.folder(withID: folderID)?.children.count ?? 0
+        let wasPinned = store.kind(of: id) == .pinned
         guard store.moveItem(id, to: .folder(folderID), index: count) else { return }
+        noteMove(of: id, wasPinned: wasPinned)
         store.setFolderExpanded(folderID, true)
         loadSelectedIfNeeded()
     }

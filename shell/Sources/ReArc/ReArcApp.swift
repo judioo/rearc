@@ -112,7 +112,8 @@ struct ReArcApp: App {
                 // Cmd+W — close the selected tab. There is no replaceable
                 // placement for File > Close Window, so BrowserView strips
                 // its key equivalent on launch, leaving this the sole ⌘W.
-                Button("Close Tab") { model.closeSelectedTabOrPrivateWindow() }
+                // Named for what it does to the selected tab ("Archive Tab" in Today).
+                Button(model.closeTabMenuTitle) { model.closeSelectedTabOrPrivateWindow() }
                     .keyboardShortcut("w")
                 Button("Reopen Closed Tab") { model.reopenClosedTab() }
                     .keyboardShortcut("t", modifiers: [.command, .shift])

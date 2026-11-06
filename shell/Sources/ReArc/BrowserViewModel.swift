@@ -120,6 +120,8 @@ final class BrowserViewModel {
     var lastClearedTabIDs: [Tab.ID] = []
     var pendingRename: SidebarRenameRequest?
     var pendingRenameText = ""
+    /// The just-pinned row showing "Double-click to rename", and since when.
+    var renameHint: (tabID: Tab.ID, shownAt: Date)?
     var pendingDeletion: SidebarDeletionRequest?
     /// A space waiting for confirmation to move to another profile.
     var pendingSpaceProfileChange: SpaceProfileChange?
