@@ -81,7 +81,9 @@ struct SidebarView: View {
 }
 
 /// Offset changes belong to SpacePagesView. A frame of the pager does not
-/// rebuild an unchanged outline; this view observes its own space and rows.
+/// rebuild an unchanged outline. The list runs in its own hosting view
+/// (`SidebarListHost`): a scroll step, or a change one of its rows
+/// observes, updates and lays out only the list, not the window.
 private struct SidebarSpacePage: View, Equatable {
     let model: BrowserViewModel
     let spaceID: Space.ID
@@ -95,6 +97,22 @@ private struct SidebarSpacePage: View, Equatable {
         lhs.model === rhs.model && lhs.spaceID == rhs.spaceID
             && lhs.draggedID == rhs.draggedID && lhs.drop == rhs.drop
     }
+
+    var body: some View {
+        SidebarListHost(tint: model.themeColor(in: window)) {
+            SidebarSpaceList(model: model, spaceID: spaceID, draggedItemID: $draggedItemID, dropState: $dropState)
+        }
+    }
+}
+
+/// One space's scrolling outline: header, pinned, Today. It observes its
+/// own space, outline and rows inside the list's hosting view.
+private struct SidebarSpaceList: View {
+    let model: BrowserViewModel
+    let spaceID: Space.ID
+    @Binding var draggedItemID: UUID?
+    @Binding var dropState: SidebarDropState?
+    @Environment(\.sidebarWindow) private var window
 
     var body: some View {
         let space = model.store.space(withID: spaceID) ?? model.space(in: window)
