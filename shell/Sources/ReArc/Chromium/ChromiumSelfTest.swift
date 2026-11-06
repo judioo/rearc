@@ -4623,8 +4623,8 @@ extension ChromiumSelfTest {
                       !(cell is SidebarPlainRowCell), !cell.visibleRect.isEmpty else {
                     return nil
                 }
-                // A click there must reach this cell: while rows move, a stale frame lies under another row.
-                let inWindow = cell.convert(cell.bounds, to: nil)
+                // The row's final rect, and a click there must reach this cell.
+                let inWindow = table.convert(table.rect(ofRow: index), to: nil)
                 let center = NSPoint(x: inWindow.midX, y: inWindow.midY)
                 guard let hit = window.contentView?.superview?.hitTest(center), hit === cell || hit.isDescendant(of: cell) else {
                     return nil
@@ -4695,6 +4695,10 @@ extension ChromiumSelfTest {
         var results: [String] = []
         let homeSpace = store.activeSpaceID
         let anchor = store.addTab(kind: .pinned, title: "Lifecycle anchor", url: URL(string: "\(serverBase)/a")!)
+        // The sidebar list takes the new row a moment later and slides the rows below it down:
+        // measured before that, + New Tab is one row too high and the click lands on the row above.
+        try await wait("pinned anchor row on screen", timeout: 5) { self.sidebarRowFrame(anchor.id, in: window) != nil }
+        try await Task.sleep(nanoseconds: 500_000_000)
 
         // Opens a Today tab from the sidebar's + New Tab and the command bar.
         func openFromNewTab(_ query: String, title: String) async throws -> Tab {
