@@ -429,6 +429,9 @@ final class BrowserViewModel {
     let sitePermissions: SitePermissionsController
     /// Command-bar visit history, saved next to the sidebar file.
     var visitHistory: VisitHistory
+    /// No sidebar file yet: the sample store stands in until the onboarding
+    /// replaces it (Onboarding/FirstRunOnboarding.swift).
+    let isFirstRun: Bool
     @ObservationIgnored let historyFileURL: URL?
     @ObservationIgnored var historySaveWorkItem: DispatchWorkItem?
     @ObservationIgnored let historySaveQueue = DispatchQueue(label: "net.rearc.history.persistence", qos: .utility)
@@ -466,6 +469,7 @@ final class BrowserViewModel {
             ?? FaviconStore(directory: persistence.fileURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
         self.store = store ?? SidebarFilePersistence.loadStore(persistence: persistence)
         self.sidebarRecoveredFromCorruption = persistence.loadOutcome == .recoveredFromCorruptFile
+        self.isFirstRun = persistence.loadOutcome == .missingFile
         let historyFile = Self.siblingFile(VisitHistoryFile.fileName, of: persistence.fileURL)
         self.historyFileURL = historyFile
         self.visitHistory = preparedStartup?.history ?? VisitHistoryFile.load(from: historyFile)

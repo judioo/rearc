@@ -14,6 +14,7 @@ struct ReArcApp: App {
                     model.presentSettings = { _ in NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) }
                     if model.appIcon != .standard { model.appIcon.apply() }
                     appDelegate.model = model
+                    appDelegate.startOnboardingIfNeeded()
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -120,6 +121,9 @@ struct ReArcApp: App {
             }
             CommandMenu("Spaces") {
                 ShellMenuButtons(groups: ShellMenus.spaces(model), overrides: model.shortcutOverrides)
+            }
+            CommandGroup(replacing: .help) {
+                Button("Watch the Sunrise Again") { appDelegate.watchSunriseAgain() }
             }
             CommandGroup(after: .windowArrangement) {
                 Divider()

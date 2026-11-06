@@ -160,6 +160,8 @@ private final class ChromiumShellStartup {
             ChromiumLog.info("early window: sidebar not decoded within \(Int(Self.earlyWindowWait * 1000)) ms; the window waits for ready")
             return
         }
+        // A first run opens on the sunrise, not on the browser.
+        if FirstRunOnboarding.kind(isFirstRun: prepared.sidebar.outcome == .missingFile) != nil { return }
         let model = ChromiumShell.makeModel(runtime: runtime, prepared: prepared)
         earlyModel = model
         shell.presentCachedWindow(model: model)
@@ -233,6 +235,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private var terminating = false
     /// The cached window is up (`presentCachedWindow`) and `ready` has not run.
     private var awaitingReady = false
+    private var onboarding: FirstRunOnboarding?
     private let menuTarget = ChromiumMenuTarget()
     /// The tray's Chromium side; the controller only holds it weakly.
     private var downloadBackend: ChromiumDownloadBackend?
@@ -416,6 +419,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         }
         // The launch window's saved siblings open behind it once the engine is up.
         DispatchQueue.main.async { [weak self] in self?.restoreOtherSessionWindows() }
+        // In this same turn, so the first window is put away before it is ever drawn.
+        if let kind = FirstRunOnboarding.kind(isFirstRun: model.isFirstRun) { runOnboarding(kind) }
         ExternalLinkRouter.shared.attach(model)
         NotificationCenter.default.addObserver(
             self,
@@ -425,6 +430,15 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         )
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.async { [weak self] in self?.prepareLittleArcWindow() }
+    }
+
+    /// The sunrise: on a first run, or Help › Watch the Sunrise Again.
+    @MainActor
+    func runOnboarding(_ kind: FirstRunOnboarding.Kind) {
+        guard let model, onboarding == nil, !terminating else { return }
+        let onboarding = FirstRunOnboarding(kind: kind, model: model) { [weak self] in self?.browserWindows ?? [] }
+        self.onboarding = onboarding
+        onboarding.start { [weak self] in self?.onboarding = nil }
     }
 
     @MainActor
@@ -1178,6 +1192,13 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         main.addSubmenu(windowMenu, title: "Window")
         NSApp.windowsMenu = windowMenu
+
+        let help = NSMenu(title: "Help")
+        help.addItem(target.item("Watch the Sunrise Again", "") { [weak self] in
+            MainActor.assumeIsolated { self?.runOnboarding(.replay) }
+        })
+        main.addSubmenu(help, title: "Help")
+        NSApp.helpMenu = help
         return main
     }
 }

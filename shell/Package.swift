@@ -36,6 +36,7 @@ let package = Package(
         .executable(name: "rearc", targets: ["ReArc"]),
         .library(name: "SidebarModel", targets: ["SidebarModel"]),
         .executable(name: "arc-vs-rearc", targets: ["ArcBench"]),
+        .executable(name: "sunrise", targets: ["SunrisePrototype"]),
     ],
     targets: [
         // Pure-Swift model layer: no SwiftUI/AppKit/WebKit imports.
@@ -44,7 +45,7 @@ let package = Package(
         // the WebEngine protocol.
         .executableTarget(
             name: "ReArc",
-            dependencies: ["SidebarModel"],
+            dependencies: ["SidebarModel", "Onboarding"],
             swiftSettings: reArcSwiftSettings,
             linkerSettings: reArcLinkerSettings
         ),
@@ -56,6 +57,20 @@ let package = Package(
             name: "ArcBench",
             dependencies: ["ArcBenchCore", "SidebarModel"]
         ),
+        // First-run onboarding: the sunrise (Act 0) scene, its score and the
+        // full-screen takeover. `sunrise` runs it on its own and renders previews.
+        .target(
+            name: "Onboarding",
+            resources: [.copy("Resources/voice-placeholder.wav")]
+        ),
+        .executableTarget(
+            name: "SunrisePrototype",
+            dependencies: ["Onboarding"]
+        ),
+        .testTarget(
+            name: "OnboardingTests",
+            dependencies: ["Onboarding"]
+        ),
         .testTarget(
             name: "ArcBenchCoreTests",
             dependencies: ["ArcBenchCore"]
@@ -66,7 +81,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ReArcTests",
-            dependencies: ["ReArc", "SidebarModel"]
+            dependencies: ["ReArc", "SidebarModel", "Onboarding"]
         ),
     ]
 )

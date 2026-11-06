@@ -64,6 +64,30 @@ final class ClosureMenuItem: NSMenuItem {
 /// The WebKit path's Dock menu, through SwiftUI's delegate adaptor.
 final class WebKitAppDelegate: NSObject, NSApplicationDelegate {
     weak var model: BrowserViewModel?
+    private var onboarding: FirstRunOnboarding?
+    private var checkedFirstRun = false
+
+    /// The first window appeared: on a first run, the sunrise takes over.
+    @MainActor
+    func startOnboardingIfNeeded() {
+        guard !checkedFirstRun, let model else { return }
+        checkedFirstRun = true
+        if let kind = FirstRunOnboarding.kind(isFirstRun: model.isFirstRun) { run(kind) }
+    }
+
+    @MainActor
+    func watchSunriseAgain() { run(.replay) }
+
+    @MainActor
+    private func run(_ kind: FirstRunOnboarding.Kind) {
+        guard let model, onboarding == nil else { return }
+        let onboarding = FirstRunOnboarding(kind: kind, model: model) {
+            NSApp.windows.filter { $0.isVisible && $0.canBecomeMain && !($0 is NSPanel) && $0.styleMask.contains(.titled) }
+        }
+        self.onboarding = onboarding
+        // After the window is on screen, so it can be put away.
+        DispatchQueue.main.async { onboarding.start { [weak self] in self?.onboarding = nil } }
+    }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         model?.dockMenu(newWindow: nil)
