@@ -35,6 +35,9 @@ final class BrowserViewModel {
     @ObservationIgnored var syncActivationObserver: NSObjectProtocol?
     private let nowPlaying: MediaKeyRouting
     private var mediaSubscriptions: [Tab.ID: AnyCancellable] = [:]
+    private var captureSubscriptions: [Tab.ID: AnyCancellable] = [:]
+    /// Camera and microphone use per tab, for the call card (engines with `media_capture`).
+    var captureStateByTab: [Tab.ID: MediaCaptureState] = [:]
 
     var mediaStateByTab: [Tab.ID: WebMediaState] = [:] {
         didSet {
@@ -565,6 +568,8 @@ final class BrowserViewModel {
         observedPageTitles[id] = nil
         mediaSubscriptions[id] = nil
         mediaStateByTab[id] = nil
+        captureSubscriptions[id] = nil
+        captureStateByTab[id] = nil
         tabMuteModel.markUserUnmuted(id)
         closeDevTools(for: id)
         engineHost.remove(id)
@@ -577,6 +582,8 @@ final class BrowserViewModel {
                 engineHost.remove(tab.id)
                 mediaSubscriptions[tab.id] = nil
                 mediaStateByTab[tab.id] = nil
+                captureSubscriptions[tab.id] = nil
+                captureStateByTab[tab.id] = nil
             }
         }
         store.closeSplit(splitID)
@@ -865,6 +872,14 @@ final class BrowserViewModel {
             .sink { [weak self] state in
                 self?.applyMediaState(state, tabID: tab.id, tab: tab)
             }
+        if captureSubscriptions[tab.id] == nil, let capturing = engine as? MediaCaptureProviding {
+            captureSubscriptions[tab.id] = capturing.mediaCapturePublisher
+                .removeDuplicates()
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] state in
+                    self?.captureStateByTab[tab.id] = state.isInCall ? state : nil
+                }
+        }
     }
 
     private func applyMediaState(_ state: WebMediaState, tabID: Tab.ID, tab: Tab) {
@@ -919,6 +934,10 @@ final class BrowserViewModel {
             mediaSubscriptions[id] = nil
             mediaStateByTab[id] = nil
             tabMuteModel.markUserUnmuted(id)
+        }
+        for id in captureSubscriptions.keys where !liveTabIDs.contains(id) {
+            captureSubscriptions[id] = nil
+            captureStateByTab[id] = nil
         }
     }
 

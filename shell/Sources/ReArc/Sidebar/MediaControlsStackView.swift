@@ -52,7 +52,21 @@ struct MediaControlsStackView: View {
     var body: some View {
         let live = model.sidebarLiveVideoTabID(in: window)
         let strips = model.mediaStrips(in: window).filter { $0 != live }
+        let calls = model.callCards(in: window)
         VStack(spacing: MediaStripMetrics.gap) {
+            ForEach(calls, id: \.self) { id in
+                if let tab = model.store.tab(withID: id), let capture = model.captureStateByTab[id] {
+                    CallCardView(
+                        title: tab.displayTitle,
+                        favicon: model.favicon(for: tab),
+                        faviconToken: tab.faviconToken,
+                        capture: capture,
+                        goToTab: { model.goToMediaTab(id) },
+                        toggle: { model.toggleCapture($0, in: id) }
+                    )
+                    .transition(MediaStackMotion.card(reduceMotion: reduceMotion))
+                }
+            }
             // The stack grows upwards from a fixed bottom edge: a new card
             // enters at the top from behind the one below, which stays put.
             if let live, let info = model.mediaStripInfo(for: live) {
@@ -67,7 +81,8 @@ struct MediaControlsStackView: View {
             }
         }
         .padding(.horizontal, MediaStripMetrics.inset)
-        .padding(.bottom, live == nil && strips.isEmpty ? 0 : MediaStripMetrics.gap)
+        .padding(.bottom, live == nil && strips.isEmpty && calls.isEmpty ? 0 : MediaStripMetrics.gap)
+        .animation(SidebarMotion.spring(reduceMotion: reduceMotion), value: calls)
         .animation(SidebarMotion.spring(reduceMotion: reduceMotion), value: strips)
         .animation(SidebarMotion.spring(reduceMotion: reduceMotion), value: live)
     }

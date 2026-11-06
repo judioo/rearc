@@ -27,7 +27,25 @@ extension BrowserViewModel {
         for (id, media) in mediaStateByTab where media.isPictureInPicture && livePlacements[id] == nil {
             suppressed.insert(id)
         }
+        // A tab in a call shows its call card instead of a strip, as in Arc.
+        suppressed.formUnion(captureStateByTab.keys)
         return mediaControls.strips(visibleTabIDs: visibleTabIDs(in: window), suppressed: suppressed)
+    }
+
+    /// Tabs using the camera or microphone that this window isn't showing:
+    /// each gets a call card above the strips (Arc's Meet card).
+    func callCards(in window: SidebarWindowID?) -> [Tab.ID] {
+        let visible = visibleTabIDs(in: window)
+        return captureStateByTab.keys
+            .filter { !visible.contains($0) && store.tab(withID: $0) != nil }
+            .sorted { $0.uuidString < $1.uuidString }
+    }
+
+    func toggleCapture(_ device: MediaCaptureState.Device, in tabID: Tab.ID) {
+        guard let tab = store.tab(withID: tabID),
+              let engine = engineHost.engine(forTabID: tabID, profileID: profileID(for: tab)) as? MediaCaptureProviding
+        else { return }
+        engine.toggleCapture(device)
     }
 
     /// The tab whose live video plays in the sidebar, if any.
