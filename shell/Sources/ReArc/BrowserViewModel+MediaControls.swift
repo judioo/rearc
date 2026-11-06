@@ -6,7 +6,8 @@ import SidebarModel
 /// live PiP video goes (sidebar card, floating panel or minimized into its
 /// strip), and the strip and player buttons.
 extension BrowserViewModel {
-    static let embedsVideoInSidebarKey = "ReArcEmbeddedSidebarVideo"
+    /// A new key: the old one stored "on" from when that was the default.
+    static let embedsVideoInSidebarKey = "ReArcSidebarVideo"
 
     // MARK: - What shows
 

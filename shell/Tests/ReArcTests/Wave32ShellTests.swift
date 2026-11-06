@@ -77,7 +77,8 @@ final class Wave32ShellTests: XCTestCase {
             b = store.addTab(kind: .today, title: "News", url: URL(string: "https://news.test")!)
             store.selectTab(b.id)
         }
-        XCTAssertTrue(model.embedsVideoInSidebar, "Video in Sidebar is on by default")
+        XCTAssertFalse(model.embedsVideoInSidebar, "Video in Sidebar is off by default, as in Arc")
+        model.embedsVideoInSidebar = true
         model.mediaStateByTab[a.id] = WebMediaState(isPlaying: true, canPictureInPicture: true, isPictureInPicture: true, hasLiveVideo: true)
         XCTAssertEqual(model.livePlacements[a.id], .sidebar)
         XCTAssertEqual(model.mediaStrips(in: nil), [a.id], "the sidebar card carries the strip row")

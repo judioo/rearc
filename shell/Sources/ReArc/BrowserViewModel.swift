@@ -51,8 +51,9 @@ final class BrowserViewModel {
     /// Tabs whose next PiP session was asked for in the floating panel ("Open Picture in Picture").
     @ObservationIgnored var livePanelRequests: Set<Tab.ID> = []
     /// ReArc > Video in Sidebar: a live video plays in the sidebar above its
-    /// strip instead of a floating panel (a ReArc addition; on by default).
-    var embedsVideoInSidebar = UserDefaults.standard.object(forKey: BrowserViewModel.embedsVideoInSidebarKey) as? Bool ?? true {
+    /// strip instead of a floating panel (a ReArc addition; off by default,
+    /// since Arc shows only the strip).
+    var embedsVideoInSidebar = UserDefaults.standard.object(forKey: BrowserViewModel.embedsVideoInSidebarKey) as? Bool ?? false {
         didSet {
             externalLinkDefaults.set(embedsVideoInSidebar, forKey: Self.embedsVideoInSidebarKey)
             for (id, placement) in livePlacements where placement != .minimized {
