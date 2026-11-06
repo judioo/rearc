@@ -99,6 +99,11 @@ public struct SidebarSpaceOutline: Equatable {
     public var pinned: [SidebarOutlineNode]
     public var today: [SidebarOutlineNode]
 
+    public init(pinned: [SidebarOutlineNode], today: [SidebarOutlineNode]) {
+        self.pinned = pinned
+        self.today = today
+    }
+
     init(_ content: SidebarStore.SpaceContent) {
         pinned = content.pinned.map(SidebarOutlineNode.init)
         today = content.today.map(SidebarOutlineNode.init)
