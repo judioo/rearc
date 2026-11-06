@@ -518,6 +518,8 @@ final class ChromiumRuntime {
     /// application exists and before browser threads, profiles and `ready`.
     /// AppKit windows only; the main queue is not serviced until after it.
     var onEarlyWindow: (() -> Void)?
+    /// The engine has ABI 1.45 `early_window` (static; callable before `run`).
+    var supportsEarlyWindow: Bool { Self.probeCapabilities().earlyWindow }
     /// When the early-window callback ran and when ready arrived (uptime clock).
     private(set) var earlyWindowAt: TimeInterval?
     private(set) var readyAt: TimeInterval?
@@ -672,7 +674,7 @@ final class ChromiumRuntime {
         }
         isConfigured = true
         // Registered whenever the engine has it, so the self-test sees the stage ran.
-        if Self.probeCapabilities().earlyWindow {
+        if supportsEarlyWindow {
             ReArcEngineSetEarlyWindowCallback(earlyWindowCallback, context)
         }
         let owned = arguments.map { strdup($0) }

@@ -65,6 +65,7 @@ enum ChromiumHost {
                 // Only loopback names resolve, as in the self-test (the fixture server is 127.0.0.1).
                 ChromiumBench.prepareLaunch()
                 let runner = ChromiumBench(runtime: runtime, options: bench)
+                if runtime.supportsEarlyWindow { runner.prepareLaunchChild() }
                 runtime.onEarlyWindow = { runner.presentEarlyWindow() }
                 runtime.onReady = { runner.start() }
                 if let dir = ChromiumLaunchArguments.userDataDir(in: arguments) {

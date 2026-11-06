@@ -234,9 +234,12 @@ final class ChromiumBench {
     private var earlyPresentSeconds: Double?
     private var earlyWindowFailure: String?
 
-    /// early_window (ABI 1.45), launch child only: the fixture sidebar's
-    /// window from inside ReArcEngineRun, before ready. `makeShell` attaches it.
-    func presentEarlyWindow() {
+    /// The fixture built on a worker while ChromeMain starts, as a real launch decodes sidebar.json.
+    private let earlyFixture = EarlyFixtureSlot()
+
+    /// Launch child, before `ReArcEngineRun`: the loopback server, then the
+    /// fixture on a worker for `presentEarlyWindow`.
+    func prepareLaunchChild() {
         guard options.suites.contains(.launchChild) else { return }
         do {
             try startServerBlocking()
@@ -244,6 +247,25 @@ final class ChromiumBench {
             earlyWindowFailure = "loopback server: \(error)"
             return
         }
+        let size = BenchFixture.Size(rawValue: options.fixture) ?? .items500
+        let (seed, base, slot) = (options.seed, base, earlyFixture)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let building = ProcessInfo.processInfo.systemUptime
+            let fixture = BenchFixture.make(size, seed: seed) { URL(string: "\(base)/bench/tab/\($0)")! }
+            slot.fill(fixture, seconds: ProcessInfo.processInfo.systemUptime - building)
+        }
+    }
+
+    /// early_window (ABI 1.45), launch child only: the fixture sidebar's
+    /// window from inside ReArcEngineRun, before ready. `makeShell` attaches it.
+    func presentEarlyWindow() {
+        guard options.suites.contains(.launchChild), server != nil else { return }
+        guard let (built, seconds) = earlyFixture.wait(timeout: 2) else {
+            earlyWindowFailure = "fixture not built within 2 s"
+            return
+        }
+        fixture = built
+        fixtureBuildSeconds = seconds
         buildModel()
         shell = ChromiumShell(runtime: runtime, autosavesFrames: false)
         let presenting = ProcessInfo.processInfo.systemUptime
@@ -253,10 +275,12 @@ final class ChromiumBench {
     }
 
     private func buildModel() {
-        let size = BenchFixture.Size(rawValue: options.fixture) ?? .items500
-        let building = ProcessInfo.processInfo.systemUptime
-        fixture = BenchFixture.make(size, seed: options.seed) { [base] in URL(string: "\(base)/bench/tab/\($0)")! }
-        fixtureBuildSeconds = ProcessInfo.processInfo.systemUptime - building
+        if fixture == nil {
+            let size = BenchFixture.Size(rawValue: options.fixture) ?? .items500
+            let building = ProcessInfo.processInfo.systemUptime
+            fixture = BenchFixture.make(size, seed: options.seed) { [base] in URL(string: "\(base)/bench/tab/\($0)")! }
+            fixtureBuildSeconds = ProcessInfo.processInfo.systemUptime - building
+        }
         let store = fixture.store
         // A small page selected at start: the first Today tab of the first space.
         if let first = store.content(for: fixture.spaceIDs[0]).todayLeaves.first?.id { store.selectTab(first) }
@@ -972,13 +996,14 @@ final class ChromiumBench {
         PerfSignposts.launchEvent("FirstSidebarFrame")
         record("launch.window_visible", ms(start, visible))
         record("launch.cached_chrome_commit", ms(start, LaunchTimeline.cachedChromeCommitted))
-        record("launch.services_start", ms(start, LaunchTimeline.servicesStarted))
         report.notes.append("Launch fixture construction is measured separately; launch.model_init excludes persisted-store disk reads. Normal launches overlap PreparedBrowserStartup with ChromeMain; trace StoreLoadStarted/Finished for that path.")
         let bar = probe.arm("commandbar", accepts: { $0.hasPrefix("open") })
         _ = press("l", keyCode: 37, .command)
         let usable = await bar.value()
         PerfSignposts.launchEvent("FirstInputHandled")
         record("launch.first_usable", ms(start, usable?.target), input: delivery)
+        // After the early window, services start on the main-queue turn after ready.
+        record("launch.services_start", ms(start, LaunchTimeline.servicesStarted))
         let painted = contentCanPresent ? await fcp.value() : nil
         if !contentCanPresent { _ = contentTimeout(0) }
         PerfSignposts.launchEvent("FirstPageFrame")
@@ -1003,6 +1028,24 @@ final class ChromiumBench {
         record("launch.store_apply", ms(applying, ProcessInfo.processInfo.systemUptime))
         report.notes.append("launch.store.* and store_apply are isolated warm-cache fixture measurements after first usable, not cumulative cold launch milestones; restored \(restored.spaces.count) spaces.")
         report.status = "complete"
+    }
+}
+
+/// The launch child's worker-built fixture, readable before the main loop runs.
+private final class EarlyFixtureSlot: @unchecked Sendable {
+    private let lock = NSLock()
+    private let filled = DispatchSemaphore(value: 0)
+    private var stored: (BenchFixture.Result, TimeInterval)?
+
+    func fill(_ fixture: BenchFixture.Result, seconds: TimeInterval) {
+        lock.withLock { stored = (fixture, seconds) }
+        filled.signal()
+    }
+
+    func wait(timeout: TimeInterval) -> (BenchFixture.Result, TimeInterval)? {
+        if let value = lock.withLock({ stored }) { return value }
+        _ = filled.wait(timeout: .now() + timeout)
+        return lock.withLock { stored }
     }
 }
 
