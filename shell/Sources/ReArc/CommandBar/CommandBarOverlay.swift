@@ -187,7 +187,7 @@ struct CommandBarOverlay: View {
     }
 
     /// Keys typed straight after ⌘T or ⌘L, before the field has the keyboard,
-    /// would reach the focused page: they go into the field instead. The
+    /// would reach the focused page or nothing: they go into the field instead. The
     /// prefilled URL is selected, so the first key replaces it, as in the field.
     @MainActor
     final class EarlyKeyCatcher {
@@ -197,9 +197,10 @@ struct CommandBarOverlay: View {
             stop()
             var replaces = !text.wrappedValue.isEmpty
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard ShortcutRouter.isWebContent(event.window?.firstResponder) else {
-                    // The field (or anything else) has the keyboard now.
-                    if event.window?.firstResponder is NSTextView { self?.stop() }
+                // Until a text field has the keyboard (the page, then the
+                // window while focus moves), keys belong to the bar.
+                guard !(event.window?.firstResponder is NSTextView) else {
+                    self?.stop()
                     return event
                 }
                 let modifiers = event.modifierFlags.intersection([.command, .control, .option])
