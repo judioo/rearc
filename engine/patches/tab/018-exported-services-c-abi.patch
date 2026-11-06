@@ -1,0 +1,1354 @@
+# Patch-ID: P-TAB-001 / P-NAV-001 (wave 10, services C ABI)
+# Area: tab.
+# Rationale: expose per-tab media/mute, favicon PNGs, security events, isolated
+#   scoped document-start/end scripts and CSS, trusted shift-click link peek,
+#   and bounded viewport/full-page capture without Browser or renderer patches.
+# Last-Rebased: 2026-11-02 (Chromium 156.0.8078.74).
+# Frozen-file exceptions: core ABI adds services declarations/capability routing
+#   and replaces its explicit dormant services hooks; correct argv sentinel and
+#   default-profile query while stopping. media_adapter adds supported next/
+#   previous actions while retaining per-WebContents action checks. The native
+#   content host must mirror hidden state to the stable GetNativeView container:
+#   WebContentsViewMac::CreateView initially hides it, and WebContents visibility
+#   updates the renderer widget rather than replacing ViewsHostableSetVisible.
+#   Resign content first responder before hide, as upstream's NSView bridge does.
+#   This necessary S4 fix was discovered by native input integration tests.
+#   No private widget/layer access; no upstream C++ change. Minimal :core source
+#   addition and export/order additions (legacy lifecycle exports included).
+# Policy: internal restricted per-tab DevToolsAgentHostClient, no debugging port,
+#   browser target, file access, page-facing privileged bridge or user activation.
+#   Script scopes OR host/path/scheme rules; private PSL protects registrable
+#   domains; isolated worlds per package, main-frame-only, once per document.
+#   CSS follows ordered plan/pageshow/SPA; orphan listeners cannot restore removed
+#   styles. Replacement errors may leave an acknowledged partial plan; retry the
+#   whole plan, never promise reversal of JS effects. Async work is weak-scoped,
+#   generation checked and deadline bounded; navigation cancels snapshots.
+#   Captures: 16 MiB encoded, 64M CSS pixels, 16384 per side. PiP unsupported.
+# Gate: first green p24 attempt 2 (p23: DictValue lvalue chaining API corrected);
+#   refinements p25-p27 green; final p28 green. G1-G5 PASS smoke-tab018.log.
+#   Native core/services PASS: runtime-abi-{core,services}.log. Includes isolated
+#   start/end/scoped scripts, CSS removal/pageshow, overlapping scopes, favicon,
+#   mute/security, trusted native shift-click, both PNG scopes and cancellation.
+#   Pure C syntax/module import PASS. nm -gU: 37 definitions in libchrome_dll;
+#   component framework dlsym PASS all 37 via reexports (nm-tab018.log).
+#   All 40 public exports covered by release order list, ChromeMain last;
+#   non-component build/runtime/signing not claimed. Full replay: replay-abi.log.
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 469e9016d3..6511140218 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -48,3 +48,15 @@ _ReArcViewResize
+ _ReArcViewSetVisible
+ _ReArcViewRelease
+ _ReArcBufferFree
++
++# ReArc services ABI (tab/018).
++_ReArcEngineSetServiceCallback
++_ReArcTabMediaAction
++_ReArcTabSetMuted
++_ReArcEnginePauseAllMedia
++_ReArcTabSetPictureInPicture
++_ReArcFaviconGet
++_ReArcTabSetScripts
++_ReArcTabRefreshStyles
++_ReArcTabSetLinkPeek
++_ReArcTabCaptureSnapshot
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 9a6f9a063d..e95c178dc9 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -56,5 +56,21 @@ _ReArcViewSetVisible
+ _ReArcViewRelease
+ _ReArcBufferFree
+ 
++# Legacy lifecycle exports must also precede ChromeMain in release builds.
++_ReArcEngineBridgeVersion
++_ReArcEngineSetLifecycleCallbacks
++
++# ReArc services ABI (tab/018).
++_ReArcEngineSetServiceCallback
++_ReArcTabMediaAction
++_ReArcTabSetMuted
++_ReArcEnginePauseAllMedia
++_ReArcTabSetPictureInPicture
++_ReArcFaviconGet
++_ReArcTabSetScripts
++_ReArcTabRefreshStyles
++_ReArcTabSetLinkPeek
++_ReArcTabCaptureSnapshot
++
+ # _ChromeMain must be listed last.  That's the whole point of this file.
+ _ChromeMain
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 1b26f2ab94..bd19bd9b4f 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1460,6 +1460,7 @@ source_set("core") {
+       "rearc_bridge/rearc_abi_internal.h",
+       "rearc_bridge/rearc_engine_abi.h",
+       "rearc_bridge/rearc_engine_abi.mm",
++      "rearc_bridge/rearc_services_abi.cc",
+     ]
+   }
+ 
+diff --git a/chrome/browser/rearc_bridge/content_host_mac.mm b/chrome/browser/rearc_bridge/content_host_mac.mm
+index 712c1cedb1..fe9443820c 100644
+--- a/chrome/browser/rearc_bridge/content_host_mac.mm
++++ b/chrome/browser/rearc_bridge/content_host_mac.mm
+@@ -6,9 +6,9 @@
+ 
+ #import <Cocoa/Cocoa.h>
+ #import <CoreFoundation/CoreFoundation.h>
++#include <pthread.h>
+ 
+ #include <cmath>
+-#include <pthread.h>
+ 
+ #include "base/check.h"
+ #include "base/logging.h"
+@@ -47,6 +47,21 @@ - (instancetype)init {
+   return self;
+ }
+ 
++// WebContents visibility updates its renderer widget, but the initially-hidden
++// WebContentsViewCocoa container is normally shown by Chrome's Views host.
++// Our native host owns that responsibility (public GetNativeView only).
++- (void)setHidden:(BOOL)hidden {
++  CHECK(pthread_main_np());
++  if (hidden &&
++      [_contentView.window.firstResponder isKindOfClass:[NSView class]] &&
++      [(NSView*)_contentView.window.firstResponder
++          isDescendantOf:_contentView]) {
++    [_contentView.window makeFirstResponder:nil];
++  }
++  [_contentView setHidden:hidden];
++  [super setHidden:hidden];
++}
++
+ - (void)attachContent:(NSView*)content {
+   if (_contentView == content) {
+     return;
+@@ -63,8 +78,8 @@ - (void)attachContent:(NSView*)content {
+ - (void)setSizeDip:(NSSize)size scaleHint:(double)scaleHint {
+   _scaleHint = scaleHint > 0.0 ? scaleHint : 1.0;
+   // §6: DIP are rounded to points; scale is a hint.
+-  [self setFrameSize:NSMakeSize(std::round(size.width),
+-                                std::round(size.height))];
++  [self
++      setFrameSize:NSMakeSize(std::round(size.width), std::round(size.height))];
+ }
+ 
+ @end
+diff --git a/chrome/browser/rearc_bridge/media_adapter.cc b/chrome/browser/rearc_bridge/media_adapter.cc
+index 21ddec0629..56a54d21dd 100644
+--- a/chrome/browser/rearc_bridge/media_adapter.cc
++++ b/chrome/browser/rearc_bridge/media_adapter.cc
+@@ -113,6 +113,22 @@ class MediaAdapter : public content::WebContentsObserver,
+     if (!media) {
+       return MediaCommandResult::kInvalidState;
+     }
++    if (action == MediaPlaybackAction::kNext ||
++        action == MediaPlaybackAction::kPrevious) {
++      const auto required = action == MediaPlaybackAction::kNext
++                                ? MediaSessionAction::kNextTrack
++                                : MediaSessionAction::kPreviousTrack;
++      if (std::find(actions_.begin(), actions_.end(), required) ==
++          actions_.end()) {
++        return MediaCommandResult::kUnsupported;
++      }
++      if (action == MediaPlaybackAction::kNext) {
++        media->NextTrack();
++      } else {
++        media->PreviousTrack();
++      }
++      return MediaCommandResult::kAccepted;
++    }
+     bool play;
+     switch (action) {
+       case MediaPlaybackAction::kPlay:
+diff --git a/chrome/browser/rearc_bridge/media_adapter.h b/chrome/browser/rearc_bridge/media_adapter.h
+index 7af32f165c..9b61b1e674 100644
+--- a/chrome/browser/rearc_bridge/media_adapter.h
++++ b/chrome/browser/rearc_bridge/media_adapter.h
+@@ -14,7 +14,7 @@ namespace rearc {
+ void AttachMediaAdapter(uint64_t tab_id);
+ void DetachMediaAdapter(uint64_t tab_id);
+ 
+-enum class MediaPlaybackAction { kPlay, kPause, kToggle };
++enum class MediaPlaybackAction { kPlay, kPause, kToggle, kNext, kPrevious };
+ enum class MediaCommandResult { kAccepted, kInvalidState, kUnsupported };
+ MediaCommandResult MediaSetPlayback(uint64_t tab_id,
+                                     MediaPlaybackAction action);
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index c07f7e525b..52713e9e35 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -17,5 +17,6 @@ void ABITabDestroyed();
+ // Services extend these hooks in tab/018.
+ void ABIAttachServices(uint64_t tab_id);
+ void ABIDetachServices(uint64_t tab_id);
++bool ABIHasServiceFeature(const char* feature);
+ }  // namespace rearc
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index b14109e4e2..bc63d7e222 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -80,7 +80,8 @@ typedef struct ReArcCallbacks {
+ 
+ // Accepted async operations invoke completion exactly once. Synchronous
+ // rejection invokes no completion. cancelled=true means a beforeunload veto.
+-// Successful shutdown completes after Run returns, as the last callback.
++// Successful shutdown completes after ChromeMain teardown, as the last
++// callback immediately before ReArcEngineRun returns.
+ typedef void (*ReArcCompletion)(void* context,
+                                 ReArcStatus status,
+                                 bool cancelled);
+@@ -159,6 +160,97 @@ REARC_ENGINE_EXPORT void ReArcViewRelease(void* native_view);
+ // Frees engine-allocated binary results; never free borrowed callback strings.
+ REARC_ENGINE_EXPORT void ReArcBufferFree(void* buffer);
+ 
++// Services callbacks use the same borrowed-for-callback ownership as core.
++// kind: 0 favicon, 1 media, 2 security, 3 link_peek.
++// playback: 0 playing, 1 paused, 2 stopped, 3 unknown.
++// security: 0 secure, 1 insecure, 2 dangerous, 3 none, 4 unknown.
++typedef struct ReArcServiceEvent {
++  uint32_t kind;
++  uint64_t profile_id, tab_id, content_generation;
++  const char* page_url;
++  const char* icon_ref;
++  bool favicon_cleared;
++  uint32_t playback;
++  bool audible, muted, pip_available, pip_active, has_metadata;
++  const char* title;
++  const char* artist;
++  const char* album;
++  uint32_t security;
++  const char* href;
++} ReArcServiceEvent;
++typedef void (*ReArcServiceCallback)(void* context,
++                                     const ReArcServiceEvent* event);
++// Register before creating tabs (or before Run). Null disables delivery.
++REARC_ENGINE_EXPORT void ReArcEngineSetServiceCallback(
++    ReArcServiceCallback callback,
++    void* context);
++// action: 0 play, 1 pause, 2 toggle, 3 next, 4 previous, 5 pause-all in tab.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabMediaAction(uint64_t tab_id,
++                                                    uint32_t action);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetMuted(uint64_t tab_id, bool muted);
++REARC_ENGINE_EXPORT ReArcStatus ReArcEnginePauseAllMedia(void);
++// PiP is unsupported at this pin's browser-less delegate integration.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetPictureInPicture(uint64_t tab_id,
++                                                            bool active);
++// Output is +1 malloc PNG, free with ReArcBufferFree. Bound to tab/profile.
++REARC_ENGINE_EXPORT ReArcStatus ReArcFaviconGet(uint64_t tab_id,
++                                                const char* icon_ref,
++                                                uint8_t** data,
++                                                size_t* size);
++
++// OR-ed host rules per package. Only top-frame http(s) documents match.
++// host: canonical ASCII DNS host, never '*' or empty. Subdomains require a
++// registrable domain (private PSL included). path_prefix: empty or starts '/',
++// matched exactly or at a '/' boundary. scheme_mask: HTTP=1, HTTPS=2, both=3.
++typedef struct ReArcScriptScope {
++  const char* host;
++  const char* path_prefix;
++  bool include_subdomains;
++  uint32_t scheme_mask;
++} ReArcScriptScope;
++// Ordered replacement plan: <=128 entries, <=32 scopes each, <=1 MiB UTF-8.
++// id: unique [A-Za-z0-9_-], 1..128 chars; one distinct isolated world per id.
++// source runs once per document/id (even for overlapping scopes), at run_at
++// 0 start or 1 end. CSS refreshes on pageshow/SPA navigation/explicit refresh.
++// Replacement removes orphan CSS; never undoes JS effects or reruns an ID.
++// Completion OK means future-document registrations are acknowledged. Navigate
++// AFTER completion for document-start guarantees; current CSS is best effort.
++typedef struct ReArcScript {
++  const char* id;
++  const ReArcScriptScope* scopes;
++  size_t scope_count;
++  uint32_t run_at;
++  const char* source;
++  const char* css;
++} ReArcScript;
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetScripts(uint64_t tab_id,
++                                                   const ReArcScript* entries,
++                                                   size_t count,
++                                                   ReArcCompletion completion,
++                                                   void* context);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabRefreshStyles(uint64_t tab_id);
++// Observed trusted primary-frame shift-left-click anchors only. Delivered as
++// service kind 3 (href); default navigation is suppressed while enabled.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetLinkPeek(uint64_t tab_id,
++                                                    bool enabled,
++                                                    ReArcCompletion completion,
++                                                    void* context);
++// scope: 0 viewport, 1 full page. Callback owns +1 PNG data; free with
++// ReArcBufferFree, including when the host discards a stale result. Error:
++// null data/0 size. Captures fail cancelled on navigation/content teardown;
++// at most one snapshot per tab; 16 MiB encoded, 64 Mpixel/16384 side bound.
++typedef void (*ReArcSnapshotCallback)(void* context,
++                                      ReArcStatus status,
++                                      uint64_t tab_id,
++                                      uint64_t content_generation,
++                                      uint8_t* data,
++                                      size_t size);
++REARC_ENGINE_EXPORT ReArcStatus
++ReArcTabCaptureSnapshot(uint64_t tab_id,
++                        uint32_t scope,
++                        ReArcSnapshotCallback completion,
++                        void* context);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index aef5cc561e..c8bdb88114 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -320,9 +320,6 @@ void ABIInitializeTab(uint64_t id) {
+   EmitInitialSnapshotEvent(id);
+   ABIAttachServices(id);
+ }
+-// Replaced by tab/018 with the services implementation.
+-void ABIAttachServices(uint64_t) {}
+-void ABIDetachServices(uint64_t) {}
+ void ABITabDestroyed() {
+   auto& a = ABI::Get();
+   CHECK(a.live_tabs);
+@@ -350,7 +347,8 @@ bool ReArcEngineHasFeature(const char* feature) {
+     return false;
+   }
+   return std::string(feature) == "native_view" ||
+-         std::string(feature) == "navigation";
++         std::string(feature) == "navigation" ||
++         rearc::ABIHasServiceFeature(feature);
+ }
+ const char* ReArcStatusName(ReArcStatus status) {
+   CHECK([NSThread isMainThread]);
+@@ -427,9 +425,9 @@ int ReArcEngineRun(int argc, const char* const* argv) {
+   for (auto& arg : args) {
+     pointers.push_back(arg.c_str());
+   }
++  pointers.push_back(nullptr);
+   a.ran = true;
+-  const int result =
+-      ChromeMain(static_cast<int>(pointers.size()), pointers.data());
++  const int result = ChromeMain(static_cast<int>(args.size()), pointers.data());
+   // The scheduler no longer exists. Flush any already captured deliveries
+   // directly, then deliver the terminal lifecycle result from this host frame.
+   a.ready = false;
+@@ -448,7 +446,9 @@ int ReArcEngineRun(int argc, const char* const* argv) {
+ }
+ uint64_t ReArcEngineDefaultProfile(void) {
+   CHECK([NSThread isMainThread]);
+-  return ABI::Get().ready ? rearc::DefaultBridgeProfileId() : 0;
++  return ABI::Get().ready && !ABI::Get().stopping
++             ? rearc::DefaultBridgeProfileId()
++             : 0;
+ }
+ ReArcStatus ReArcEngineShutdown(bool force,
+                                 ReArcCompletion completion,
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+new file mode 100644
+index 0000000000..60f8b90282
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -0,0 +1,997 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <pthread.h>
++
++#include <algorithm>
++#include <cmath>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <memory>
++#include <set>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/base64.h"
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/timer/timer.h"
++#include "base/values.h"
++#include "chrome/browser/rearc_bridge/favicon_adapter.h"
++#include "chrome/browser/rearc_bridge/ipc_service_events.h"
++#include "chrome/browser/rearc_bridge/media_adapter.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
++#include "chrome/browser/rearc_bridge/security_adapter.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "content/public/browser/devtools_agent_host.h"
++#include "content/public/browser/devtools_agent_host_client.h"
++#include "content/public/browser/media_session.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "net/base/registry_controlled_domains/registry_controlled_domain.h"
++#include "services/media_session/public/mojom/media_session.mojom.h"
++#include "url/gurl.h"
++
++namespace rearc {
++namespace {
++
++ReArcServiceCallback service_callback = nullptr;
++void* service_context = nullptr;
++
++void PublishService(ServiceEvent event, std::string href = {}) {
++  CHECK(pthread_main_np());
++  ABIPost(base::BindOnce(
++      [](ServiceEvent e, std::string href) {
++        CHECK(pthread_main_np());
++        if (!service_callback) {
++          return;
++        }
++        std::string title = base::UTF16ToUTF8(e.media_title);
++        std::string artist = base::UTF16ToUTF8(e.media_artist);
++        std::string album = base::UTF16ToUTF8(e.media_album);
++        ReArcServiceEvent c{};
++        c.kind = href.empty() ? static_cast<uint32_t>(e.kind) : 3;
++        c.profile_id = e.profile_id;
++        c.tab_id = e.tab_id;
++        c.content_generation = e.content_generation;
++        c.page_url = e.favicon_page_url.c_str();
++        c.icon_ref = e.favicon_icon_ref.c_str();
++        c.favicon_cleared = e.favicon_cleared;
++        c.playback = static_cast<uint32_t>(e.playback);
++        c.audible = e.audible;
++        c.muted = e.muted;
++        c.pip_available = e.pip_available;
++        c.pip_active = e.pip_active;
++        c.has_metadata = e.has_metadata;
++        c.title = title.c_str();
++        c.artist = artist.c_str();
++        c.album = album.c_str();
++        c.security = static_cast<uint32_t>(e.security_state);
++        c.href = href.c_str();
++        service_callback(service_context, &c);
++      },
++      std::move(event), std::move(href)));
++}
++
++class ServicesSink : public ServiceEventSink {
++ public:
++  void OnServiceEvent(const ServiceEvent& event) override {
++    CHECK(pthread_main_np());
++    CHECK(event.profile_id);
++    PublishService(event);
++  }
++};
++ServicesSink& Sink() {
++  static base::NoDestructor<ServicesSink> sink;
++  return *sink;
++}
++
++void Complete(ReArcCompletion callback, void* context, ReArcStatus status) {
++  ABIPost(base::BindOnce(callback, context, status, status == REARC_CANCELLED));
++}
++std::string Quote(const std::string& value) {
++  return base::WriteJson(base::Value(value)).value();
++}
++
++struct Scope {
++  std::string host, path;
++  bool subdomains;
++  uint32_t schemes;
++};
++struct Script {
++  std::string id, source, css;
++  std::vector<Scope> scopes;
++  uint32_t run_at;
++  size_t order;
++};
++
++// Returns a self-contained isolated-world script. Host scope is checked for
++// each document; a pathname prefix matches only at a path-segment boundary.
++std::string ScriptSource(const Script& s, bool css_only) {
++  base::ListValue rules;
++  for (const auto& scope : s.scopes) {
++    rules.Append(base::DictValue()
++                     .Set("host", scope.host)
++                     .Set("path", scope.path)
++                     .Set("subdomains", scope.subdomains)
++                     .Set("schemes", static_cast<int>(scope.schemes)));
++  }
++  std::string body =
++      "(()=>{if(window!==window.top)return;const rules=" +
++      base::WriteJson(rules).value() +
++      ";function eligible(){const l=location;const "
++      "scheme=l.protocol==='http:'?1:"
++      "l.protocol==='https:'?2:0;return !!scheme&&rules.some(r=>"
++      "(r.schemes&scheme)&&(l.hostname===r.host||r.subdomains&&"
++      "l.hostname.endsWith('.'+r.host))&&(!r.path||l.pathname===r.path||"
++      "l.pathname.startsWith(r.path.endsWith('/')?r.path:r.path+'/')));}"
++      "const id='rearc-boost-'+" +
++      Quote(s.id) +
++      ";function css(){let "
++      "n=document.getElementById(id);if(!eligible()){if(n)n.remove();return;}"
++      "const text=" +
++      Quote(s.css) +
++      ";if(!text){if(n)n.remove();return;}"
++      "if(!document.documentElement)return;const "
++      "allowed=document.documentElement."
++      "getAttribute('data-rearc-abi-plan');if(allowed&&!JSON.parse(allowed)."
++      "includes(id))"
++      "{if(n)n.remove();return;}if(!n){n=document.createElement('style');n.id="
++      "id;"
++      "n.setAttribute('data-rearc-abi','');}n.textContent=text;const order=" +
++      std::to_string(s.order) +
++      ";n.setAttribute('data-rearc-order',String(order));"
++      "const "
++      "next=Array.from(document.querySelectorAll('style[data-rearc-abi]'))."
++      "find("
++      "x=>x!==n&&Number(x.getAttribute('data-rearc-order'))>order);"
++      "if(next)next.before(n);else(document.head||document.documentElement)."
++      "appendChild(n);}";
++  const std::string listener =
++      "if(!globalThis.__rearcCSSListener){window.addEventListener('pageshow',()"
++      "=>"
++      "{if(globalThis.__rearcApplyCSS)globalThis.__rearcApplyCSS();});"
++      "globalThis.__rearcCSSListener=true;}globalThis.__rearcApplyCSS=css;";
++  if (css_only) {
++    return body + listener + "css();})();";
++  }
++  body +=
++      "if(!globalThis.__rearcCSSListener){window.addEventListener('pageshow',()"
++      "=>"
++      "{if(globalThis.__rearcApplyCSS)globalThis.__rearcApplyCSS();});"
++      "globalThis.__rearcCSSListener=true;}globalThis.__rearcApplyCSS=css;"
++      "function run(){css();if(!eligible()||globalThis.__rearcRan)return;"
++      "globalThis.__rearcRan=true;try{\n" +
++      s.source + "\n}catch(e){console.error('[ReArc Boost]',e);}}";
++  if (s.run_at == 0) {
++    body +=
++        "run();if(!document.documentElement)"
++        "document.addEventListener('DOMContentLoaded',css,{once:true});";
++  } else {
++    body +=
++        "if(document.readyState==='loading')"
++        "document.addEventListener('DOMContentLoaded',run,{once:true});else "
++        "run();";
++  }
++  return body + "})();";
++}
++std::string PeekSource(bool enabled) {
++  return std::string(
++             "(()=>{if(window!==window.top)return;"
++             "if(globalThis.__rearcPeek){document.removeEventListener('click',"
++             "globalThis.__rearcPeek,true);globalThis.__rearcPeek=null;}") +
++         (enabled ? "globalThis.__rearcPeek=function(e){if(!e.isTrusted||!e."
++                    "shiftKey||e.button!==0)return;"
++                    "const "
++                    "a=e.composedPath().find(n=>n&&n.tagName==='A'&&n.href);if("
++                    "!a)return;"
++                    "let u;try{u=new URL(a.href);}catch(_){return;}"
++                    "if(u.protocol!=='http:'&&u.protocol!=='https:')return;"
++                    "e.preventDefault();e.stopImmediatePropagation();"
++                    "globalThis.rearcLinkPeek(u.href);};"
++                    "document.addEventListener('click',globalThis.__rearcPeek,"
++                    "true);"
++                  : "") +
++         "})();";
++}
++
++class PageServices;
++auto& Pages() {
++  static base::NoDestructor<std::map<uint64_t, std::unique_ptr<PageServices>>>
++      pages;
++  return *pages;
++}
++
++// Internal, per-WebContents CDP client: no remote debugging server, no protocol
++// entry point exported to the host. Restricted to the current top-level page;
++// no browser target, files, WebUI, user-gesture grants or main-world
++// evaluation.
++class PageServices : public content::DevToolsAgentHostClient,
++                     public content::WebContentsObserver {
++ public:
++  using Reply = base::OnceCallback<void(ReArcStatus, base::DictValue)>;
++  explicit PageServices(TabSession& s)
++      : content::WebContentsObserver(s.web_contents()),
++        tab_id_(s.tab_id()),
++        profile_id_(s.profile_id()),
++        generation_(s.content_generation()),
++        host_(content::DevToolsAgentHost::GetOrCreateFor(s.web_contents())) {
++    CHECK(pthread_main_np());
++    attached_ = host_->AttachClient(this);
++    if (attached_) {
++      Send("Page.enable", {}, {});
++      Send("Runtime.enable", {}, {});
++      Send("Runtime.addBinding",
++           base::DictValue()
++               .Set("name", "rearcLinkPeek")
++               .Set("executionContextName", "rearc.host"),
++           {});
++    }
++  }
++  ~PageServices() override {
++    CHECK(pthread_main_np());
++    if (attached_) {
++      host_->DetachClient(this);
++    }
++    CancelPending(REARC_CANCELLED);
++    weak_factory_.InvalidateWeakPtrs();
++  }
++  bool IsTrusted() override { return false; }
++  bool MayReadLocalFiles() override { return false; }
++  bool MayWriteLocalFiles() override { return false; }
++  bool MayAttachToURL(const GURL& url, bool webui) override {
++    return !webui && (url.is_empty() || url.SchemeIsHTTPOrHTTPS() ||
++                      url.spec() == "about:blank");
++  }
++  bool MayAttachToRenderFrameHost(content::RenderFrameHost* frame) override {
++    return content::DevToolsAgentHostClient::MayAttachToRenderFrameHost(frame);
++  }
++  void AgentHostClosed(content::DevToolsAgentHost*) override {
++    CHECK(pthread_main_np());
++    attached_ = false;
++    contexts_.clear();
++    CancelPending(REARC_CANCELLED);
++  }
++  void DidStartNavigation(content::NavigationHandle* handle) override {
++    CHECK(pthread_main_np());
++    if (handle->IsInPrimaryMainFrame() && !handle->IsSameDocument()) {
++      ++document_epoch_;
++      contexts_.clear();
++      // Snapshot results cannot cross documents even within one content gen.
++      if (snapshot_callback_) {
++        FinishSnapshot(REARC_CANCELLED, {});
++      }
++    }
++  }
++  void WebContentsDestroyed() override {
++    CHECK(pthread_main_np());
++    if (attached_) {
++      host_->DetachClient(this);
++    }
++    attached_ = false;
++    CancelPending(REARC_CANCELLED);
++    Observe(nullptr);
++  }
++  void DispatchProtocolMessage(content::DevToolsAgentHost*,
++                               base::span<const uint8_t> bytes) override {
++    CHECK(pthread_main_np());
++    auto value = base::JSONReader::ReadDict(
++        std::string_view(reinterpret_cast<const char*>(bytes.data()),
++                         bytes.size()),
++        base::JSON_PARSE_RFC);
++    if (!value) {
++      return;
++    }
++    if (auto id = value->FindInt("id")) {
++      auto it = pending_.find(*id);
++      if (it == pending_.end()) {
++        return;
++      }
++      auto callback = std::move(it->second->reply);
++      pending_.erase(it);
++      if (callback) {
++        auto* result = value->FindDict("result");
++        std::move(callback).Run(
++            value->contains("error") ? REARC_UNSUPPORTED : REARC_OK,
++            result ? result->Clone() : base::DictValue());
++      }
++      return;
++    }
++    const auto* method = value->FindString("method");
++    const auto* params = value->FindDict("params");
++    if (!method || !params) {
++      return;
++    }
++    if (*method == "Page.frameNavigated") {
++      const auto* frame = params->FindDict("frame");
++      if (frame && !frame->contains("parentId")) {
++        if (const auto* id = frame->FindString("id")) {
++          main_frame_ = *id;
++        }
++      }
++    } else if (*method == "Runtime.executionContextCreated") {
++      const auto* c = params->FindDict("context");
++      if (!c) {
++        return;
++      }
++      const auto* name = c->FindString("name");
++      const auto* aux = c->FindDict("auxData");
++      auto id = c->FindInt("id");
++      if (name && *name == "rearc.host" && aux && id) {
++        if (const auto* frame = aux->FindString("frameId")) {
++          contexts_[*id] = *frame;
++        }
++      }
++    } else if (*method == "Runtime.executionContextDestroyed") {
++      if (auto id = params->FindInt("executionContextId")) {
++        contexts_.erase(*id);
++      }
++    } else if (*method == "Runtime.executionContextsCleared") {
++      contexts_.clear();
++    } else if (*method == "Runtime.bindingCalled" && peek_enabled_) {
++      const auto* name = params->FindString("name");
++      const auto* payload = params->FindString("payload");
++      auto id = params->FindInt("executionContextId");
++      if (!name || *name != "rearcLinkPeek" || !payload || !id ||
++          !contexts_.contains(*id) || contexts_.at(*id) != main_frame_ ||
++          !Current()) {
++        return;
++      }
++      GURL href(*payload);
++      if (!href.is_valid() || !href.SchemeIsHTTPOrHTTPS()) {
++        return;
++      }
++      ServiceEvent event;
++      event.kind = ServiceEventKind::kMediaStateChanged;  // Dedicated C kind 3.
++      event.profile_id = profile_id_;
++      event.tab_id = tab_id_;
++      event.content_generation = generation_;
++      PublishService(std::move(event), href.spec());
++    } else if (*method == "Page.navigatedWithinDocument") {
++      const auto* frame = params->FindString("frameId");
++      if (frame && *frame == main_frame_) {
++        RefreshStyles();
++      }
++    }
++  }
++
++  bool available() const { return attached_; }
++  bool busy() const { return installing_; }
++  bool snapshot_busy() const { return snapshot_callback_ != nullptr; }
++
++  void SetScripts(std::vector<Script> scripts,
++                  ReArcCompletion completion,
++                  void* context) {
++    installing_ = true;
++    install_completion_ = completion;
++    install_context_ = context;
++    desired_scripts_ = std::move(scripts);
++    // Remove registrations one at a time; on an error keep unremoved IDs so a
++    // later replacement can retry, rather than silently leaking user scripts.
++    RemoveNextScript();
++  }
++  void RefreshStyles() {
++    CHECK(pthread_main_np());
++    std::string cleanup = "(()=>{const ids=new Set([";
++    for (const auto& s : scripts_) {
++      cleanup += Quote("rearc-boost-" + s.id) + ",";
++    }
++    cleanup +=
++        "]);if(document.documentElement)document.documentElement.setAttribute("
++        "'data-rearc-abi-plan',JSON.stringify(Array.from(ids)));"
++        "document.querySelectorAll('style[data-rearc-abi]').forEach(n=>"
++        "{if(!ids.has(n.id))n.remove();});})();";
++    Evaluate("rearc.host", cleanup);
++    for (const auto& s : scripts_) {
++      Evaluate("rearc.boost." + s.id, ScriptSource(s, true));
++    }
++  }
++  void SetPeek(bool enabled, ReArcCompletion completion, void* context) {
++    peek_installing_ = true;
++    // Replacing a listener must also replace its future-document registration.
++    if (!peek_script_id_.empty()) {
++      Send(
++          "Page.removeScriptToEvaluateOnNewDocument",
++          base::DictValue().Set("identifier", peek_script_id_),
++          base::BindOnce(&PageServices::InstallPeek, weak_factory_.GetWeakPtr(),
++                         enabled, completion, context));
++    } else {
++      InstallPeek(enabled, completion, context, REARC_OK, {});
++    }
++  }
++  bool peek_busy() const { return peek_installing_; }
++
++  void Snapshot(uint32_t scope, ReArcSnapshotCallback callback, void* context) {
++    snapshot_callback_ = callback;
++    snapshot_context_ = context;
++    snapshot_epoch_ = document_epoch_;
++    Send("Page.getLayoutMetrics", {},
++         base::BindOnce(&PageServices::Capture, weak_factory_.GetWeakPtr(),
++                        scope, document_epoch_));
++  }
++
++ private:
++  struct Pending {
++    Reply reply;
++    base::OneShotTimer timeout;
++  };
++  bool Current() const {
++    auto* s = TabRegistry::Get().FindSession(tab_id_);
++    return s && s->content_generation() == generation_ &&
++           s->close_state() == TabSession::CloseState::kOpen;
++  }
++  void Send(std::string method, base::DictValue params, Reply reply) {
++    CHECK(pthread_main_np());
++    if (!attached_) {
++      if (reply) {
++        std::move(reply).Run(REARC_INVALID_STATE, {});
++      }
++      return;
++    }
++    int id = next_message_++;
++    if (reply) {
++      auto pending = std::make_unique<Pending>();
++      pending->reply = std::move(reply);
++      pending->timeout.Start(FROM_HERE, base::Seconds(30),
++                             base::BindOnce(&PageServices::Timeout,
++                                            weak_factory_.GetWeakPtr(), id));
++      pending_.emplace(id, std::move(pending));
++    }
++    std::string message = base::WriteJson(base::DictValue()
++                                              .Set("id", id)
++                                              .Set("method", method)
++                                              .Set("params", std::move(params)))
++                              .value();
++    host_->DispatchProtocolMessage(this, base::as_byte_span(message));
++  }
++  void Timeout(int id) {
++    auto it = pending_.find(id);
++    if (it == pending_.end()) {
++      return;
++    }
++    auto reply = std::move(it->second->reply);
++    pending_.erase(it);
++    std::move(reply).Run(REARC_CANCELLED, {});
++  }
++  void CancelPending(ReArcStatus status) {
++    // Callbacks can start follow-up commands; detached state rejects them.
++    attached_ = false;
++    auto pending = std::move(pending_);
++    for (auto& [id, p] : pending) {
++      if (p->reply) {
++        std::move(p->reply).Run(status, {});
++      }
++    }
++    if (snapshot_callback_) {
++      FinishSnapshot(status, {});
++    }
++  }
++  void RemoveNextScript() {
++    if (script_ids_.empty()) {
++      scripts_.clear();
++      AddNextScript();
++      return;
++    }
++    Send("Page.removeScriptToEvaluateOnNewDocument",
++         base::DictValue().Set("identifier", script_ids_.back()),
++         base::BindOnce(
++             [](base::WeakPtr<PageServices> self, ReArcStatus status,
++                base::DictValue) {
++               if (!self) {
++                 return;
++               }
++               if (status) {
++                 self->FinishInstall(status);
++                 return;
++               }
++               self->script_ids_.pop_back();
++               self->RemoveNextScript();
++             },
++             weak_factory_.GetWeakPtr()));
++  }
++  void AddNextScript() {
++    if (scripts_.size() == desired_scripts_.size()) {
++      RefreshStyles();
++      FinishInstall(REARC_OK);
++      return;
++    }
++    const auto& s = desired_scripts_[scripts_.size()];
++    Send("Page.addScriptToEvaluateOnNewDocument",
++         base::DictValue()
++             .Set("source", ScriptSource(s, false))
++             .Set("worldName", "rearc.boost." + s.id),
++         base::BindOnce(
++             [](base::WeakPtr<PageServices> self, ReArcStatus status,
++                base::DictValue result) {
++               if (!self) {
++                 return;
++               }
++               const auto* id = result.FindString("identifier");
++               if (status || !id) {
++                 self->FinishInstall(status ? status : REARC_INTERNAL);
++                 return;
++               }
++               self->script_ids_.push_back(*id);
++               self->scripts_.push_back(
++                   self->desired_scripts_[self->scripts_.size()]);
++               self->AddNextScript();
++             },
++             weak_factory_.GetWeakPtr()));
++  }
++  void FinishInstall(ReArcStatus status) {
++    if (!installing_) {
++      return;
++    }
++    installing_ = false;
++    auto callback = install_completion_;
++    install_completion_ = nullptr;
++    Complete(callback, install_context_, status);
++  }
++  void Evaluate(std::string world, std::string expression) {
++    // Discover top frame at use time (also works before first frameNavigated).
++    Send("Page.getFrameTree", {},
++         base::BindOnce(
++             [](base::WeakPtr<PageServices> self, std::string world,
++                std::string expression, ReArcStatus status,
++                base::DictValue result) {
++               if (!self || status || !self->Current()) {
++                 return;
++               }
++               const auto* id =
++                   result.FindStringByDottedPath("frameTree.frame.id");
++               if (!id) {
++                 return;
++               }
++               self->main_frame_ = *id;
++               self->Send("Page.createIsolatedWorld",
++                          base::DictValue()
++                              .Set("frameId", *id)
++                              .Set("worldName", world)
++                              .Set("grantUniveralAccess", false),
++                          base::BindOnce(
++                              [](base::WeakPtr<PageServices> self,
++                                 std::string expression, ReArcStatus status,
++                                 base::DictValue result) {
++                                if (!self || status || !self->Current()) {
++                                  return;
++                                }
++                                auto id = result.FindInt("executionContextId");
++                                if (id) {
++                                  self->Send("Runtime.evaluate",
++                                             base::DictValue()
++                                                 .Set("expression", expression)
++                                                 .Set("contextId", *id)
++                                                 .Set("userGesture", false)
++                                                 .Set("returnByValue", true),
++                                             {});
++                                }
++                              },
++                              self, std::move(expression)));
++             },
++             weak_factory_.GetWeakPtr(), std::move(world),
++             std::move(expression)));
++  }
++  void InstallPeek(bool enabled,
++                   ReArcCompletion completion,
++                   void* context,
++                   ReArcStatus status,
++                   base::DictValue) {
++    if (status) {
++      peek_installing_ = false;
++      Complete(completion, context, status);
++      return;
++    }
++    peek_script_id_.clear();
++    Send("Page.addScriptToEvaluateOnNewDocument",
++         base::DictValue()
++             .Set("worldName", "rearc.host")
++             .Set("source", PeekSource(enabled)),
++         base::BindOnce(
++             [](base::WeakPtr<PageServices> self, bool enabled,
++                ReArcCompletion completion, void* context, ReArcStatus status,
++                base::DictValue result) {
++               if (!self) {
++                 Complete(completion, context, REARC_CANCELLED);
++                 return;
++               }
++               self->peek_installing_ = false;
++               const auto* id = result.FindString("identifier");
++               if (!status && id) {
++                 self->peek_script_id_ = *id;
++                 self->peek_enabled_ = enabled;
++                 self->Evaluate("rearc.host", PeekSource(enabled));
++               } else if (!status) {
++                 status = REARC_INTERNAL;
++               }
++               Complete(completion, context, status);
++             },
++             weak_factory_.GetWeakPtr(), enabled, completion, context));
++  }
++  void Capture(uint32_t scope,
++               uint64_t epoch,
++               ReArcStatus status,
++               base::DictValue result) {
++    if (!snapshot_callback_ || snapshot_epoch_ != epoch) {
++      return;
++    }
++    if (status || !Current() || epoch != document_epoch_) {
++      FinishSnapshot(status ? status : REARC_CANCELLED, {});
++      return;
++    }
++    const auto* dimensions =
++        result.FindDict(scope ? "cssContentSize" : "cssVisualViewport");
++    if (!dimensions) {
++      FinishSnapshot(REARC_UNSUPPORTED, {});
++      return;
++    }
++    const double width =
++        dimensions->FindDouble(scope ? "width" : "clientWidth").value_or(0);
++    const double height =
++        dimensions->FindDouble(scope ? "height" : "clientHeight").value_or(0);
++    if (!std::isfinite(width) || !std::isfinite(height) || width <= 0 ||
++        height <= 0 || width > 16384 || height > 16384 ||
++        width * height > 64000000) {
++      FinishSnapshot(REARC_TOO_LARGE, {});
++      return;
++    }
++    base::DictValue params;
++    params.Set("format", "png");
++    params.Set("fromSurface", true);
++    params.Set("captureBeyondViewport", scope != 0);
++    if (scope) {
++      params.Set("clip", base::DictValue()
++                             .Set("x", 0)
++                             .Set("y", 0)
++                             .Set("width", width)
++                             .Set("height", height)
++                             .Set("scale", 1));
++    }
++    Send("Page.captureScreenshot", std::move(params),
++         base::BindOnce(
++             [](base::WeakPtr<PageServices> self, uint64_t epoch,
++                ReArcStatus status, base::DictValue result) {
++               if (!self || !self->snapshot_callback_ ||
++                   self->snapshot_epoch_ != epoch) {
++                 return;
++               }
++               if (status || !self->Current() ||
++                   epoch != self->document_epoch_) {
++                 self->FinishSnapshot(status ? status : REARC_CANCELLED, {});
++                 return;
++               }
++               const auto* encoded = result.FindString("data");
++               std::string png;
++               if (!encoded ||
++                   encoded->size() > ((REARC_MAX_BLOB_BYTES + 2) / 3) * 4) {
++                 self->FinishSnapshot(
++                     encoded ? REARC_TOO_LARGE : REARC_INTERNAL, {});
++                 return;
++               }
++               if (!base::Base64Decode(*encoded, &png) ||
++                   !png.starts_with("\x89PNG\r\n\x1a\n")) {
++                 self->FinishSnapshot(REARC_INTERNAL, {});
++                 return;
++               }
++               if (png.size() > REARC_MAX_BLOB_BYTES) {
++                 self->FinishSnapshot(REARC_TOO_LARGE, {});
++                 return;
++               }
++               self->FinishSnapshot(REARC_OK, std::move(png));
++             },
++             weak_factory_.GetWeakPtr(), epoch));
++  }
++  void FinishSnapshot(ReArcStatus status, std::string png) {
++    auto callback = snapshot_callback_;
++    snapshot_callback_ = nullptr;
++    ABIPost(base::BindOnce(
++        [](ReArcSnapshotCallback callback, void* context, ReArcStatus status,
++           uint64_t id, uint64_t gen, std::string png) {
++          uint8_t* data = nullptr;
++          if (!status) {
++            data = static_cast<uint8_t*>(malloc(png.size()));
++            if (data) {
++              std::memcpy(data, png.data(), png.size());
++            } else {
++              status = REARC_INTERNAL;
++            }
++          }
++          callback(context, status, id, gen, data, status ? 0 : png.size());
++        },
++        callback, snapshot_context_.get(), status, tab_id_, generation_,
++        std::move(png)));
++  }
++
++  const uint64_t tab_id_, profile_id_, generation_;
++  scoped_refptr<content::DevToolsAgentHost> host_;
++  bool attached_ = false, installing_ = false, peek_installing_ = false,
++       peek_enabled_ = false;
++  int next_message_ = 1;
++  uint64_t document_epoch_ = 0, snapshot_epoch_ = 0;
++  std::string main_frame_, peek_script_id_;
++  std::map<int, std::string> contexts_;
++  std::map<int, std::unique_ptr<Pending>> pending_;
++  std::vector<Script> scripts_, desired_scripts_;
++  std::vector<std::string> script_ids_;
++  ReArcCompletion install_completion_ = nullptr;
++  raw_ptr<void> install_context_ = nullptr;
++  ReArcSnapshotCallback snapshot_callback_ = nullptr;
++  raw_ptr<void> snapshot_context_ = nullptr;
++  base::WeakPtrFactory<PageServices> weak_factory_{this};
++};
++
++ReArcStatus MediaStatus(MediaCommandResult result) {
++  switch (result) {
++    case MediaCommandResult::kAccepted:
++      return REARC_OK;
++    case MediaCommandResult::kInvalidState:
++      return REARC_INVALID_STATE;
++    case MediaCommandResult::kUnsupported:
++      return REARC_UNSUPPORTED;
++  }
++}
++ReArcStatus FindPage(uint64_t id, PageServices** page) {
++  TabSession* s;
++  if (auto status = ABICheckTab(id, &s)) {
++    return status;
++  }
++  auto it = Pages().find(id);
++  if (it == Pages().end() || !it->second->available()) {
++    return REARC_UNSUPPORTED;
++  }
++  *page = it->second.get();
++  return REARC_OK;
++}
++}  // namespace
++
++void ABIAttachServices(uint64_t id) {
++  CHECK(pthread_main_np());
++  auto* s = TabRegistry::Get().FindSession(id);
++  if (!s) {
++    return;
++  }
++  SetServiceEventSink(&Sink());
++  AttachFaviconAdapter(id);
++  AttachMediaAdapter(id);
++  AttachSecurityAdapter(id);
++  Pages().emplace(id, std::make_unique<PageServices>(*s));
++}
++void ABIDetachServices(uint64_t id) {
++  CHECK(pthread_main_np());
++  Pages().erase(id);
++}
++bool ABIHasServiceFeature(const char* feature) {
++  CHECK(pthread_main_np());
++  const std::string_view name(feature);
++  return name == "media_session" || name == "favicon" ||
++         name == "security_state" || name == "user_scripts" ||
++         name == "link_peek" || name == "snapshot_viewport" ||
++         name == "snapshot_full_page";
++}
++}  // namespace rearc
++
++void ReArcEngineSetServiceCallback(ReArcServiceCallback callback,
++                                   void* context) {
++  CHECK(pthread_main_np());
++  rearc::service_callback = callback;
++  rearc::service_context = context;
++}
++ReArcStatus ReArcTabMediaAction(uint64_t id, uint32_t action) {
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  if (action > 5) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  if (action == 5) {
++    // Suspend every registered player in the addressed WebContents, without
++    // relying on a currently focused global session or muting other tabs.
++    if (auto* media = content::MediaSession::GetIfExists(s->web_contents())) {
++      media->Suspend(media_session::mojom::MediaSession::SuspendType::kUI);
++    }
++    return REARC_OK;
++  }
++  return rearc::MediaStatus(rearc::MediaSetPlayback(
++      id, static_cast<rearc::MediaPlaybackAction>(action)));
++}
++ReArcStatus ReArcTabSetMuted(uint64_t id, bool muted) {
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  return rearc::MediaStatus(rearc::MediaSetMuted(id, muted));
++}
++ReArcStatus ReArcEnginePauseAllMedia(void) {
++  CHECK(pthread_main_np());
++  if (!ReArcEngineDefaultProfile()) {
++    return REARC_ENGINE_NOT_READY;
++  }
++  for (uint64_t id : rearc::TabRegistry::Get().SessionIds()) {
++    auto status = ReArcTabMediaAction(id, 5);
++    if (status && status != REARC_INVALID_STATE) {
++      return status;
++    }
++  }
++  return REARC_OK;
++}
++ReArcStatus ReArcTabSetPictureInPicture(uint64_t id, bool active) {
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  return REARC_UNSUPPORTED;
++}
++ReArcStatus ReArcFaviconGet(uint64_t id,
++                            const char* ref,
++                            uint8_t** data,
++                            size_t* size) {
++  CHECK(pthread_main_np());
++  if (data) {
++    *data = nullptr;
++  }
++  if (size) {
++    *size = 0;
++  }
++  if (!data || !size || !ref || !base::IsStringUTF8(ref)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  std::vector<uint8_t> png;
++  auto result = rearc::FaviconGet(id, ref, REARC_MAX_BLOB_BYTES, &png);
++  if (result == rearc::FaviconGetResult::kNotFound) {
++    return REARC_NOT_FOUND;
++  }
++  if (result == rearc::FaviconGetResult::kTooLarge) {
++    return REARC_TOO_LARGE;
++  }
++  *data = static_cast<uint8_t*>(malloc(png.size()));
++  if (!*data) {
++    return REARC_INTERNAL;
++  }
++  std::memcpy(*data, png.data(), png.size());
++  *size = png.size();
++  return REARC_OK;
++}
++ReArcStatus ReArcTabSetScripts(uint64_t id,
++                               const ReArcScript* entries,
++                               size_t count,
++                               ReArcCompletion completion,
++                               void* context) {
++  CHECK(pthread_main_np());
++  if (!completion || (count && !entries)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  if (count > 128) {
++    return REARC_TOO_LARGE;
++  }
++  rearc::PageServices* page;
++  if (auto status = rearc::FindPage(id, &page)) {
++    return status;
++  }
++  if (page->busy()) {
++    return REARC_BUSY;
++  }
++  std::vector<rearc::Script> scripts;
++  std::set<std::string> ids;
++  size_t bytes = 0;
++  auto validate_text = [&bytes](const char* text) -> ReArcStatus {
++    if (!text || !base::IsStringUTF8(text)) {
++      return REARC_INVALID_ARGUMENT;
++    }
++    bytes += std::strlen(text);
++    return bytes > 1048576 ? REARC_TOO_LARGE : REARC_OK;
++  };
++  for (size_t i = 0; i < count; ++i) {
++    const auto& e = entries[i];
++    if (!e.scopes || !e.scope_count || e.scope_count > 32 || e.run_at > 1) {
++      return REARC_INVALID_ARGUMENT;
++    }
++    for (const char* text : {e.id, e.source, e.css}) {
++      if (auto status = validate_text(text)) {
++        return status;
++      }
++    }
++    std::string key(e.id);
++    if (key.empty() || key.size() > 128 || !ids.insert(key).second ||
++        !std::all_of(key.begin(), key.end(), [](char c) {
++          return base::IsAsciiAlpha(c) || base::IsAsciiDigit(c) || c == '_' ||
++                 c == '-';
++        })) {
++      return REARC_INVALID_ARGUMENT;
++    }
++    std::vector<rearc::Scope> scopes;
++    for (size_t j = 0; j < e.scope_count; ++j) {
++      const auto& r = e.scopes[j];
++      if (auto status = validate_text(r.host)) {
++        return status;
++      }
++      if (auto status = validate_text(r.path_prefix)) {
++        return status;
++      }
++      std::string host(r.host), path(r.path_prefix);
++      if ((!path.empty() && path[0] != '/') || !r.scheme_mask ||
++          r.scheme_mask > 3) {
++        return REARC_INVALID_ARGUMENT;
++      }
++      GURL url("https://" + host + "/");
++      if (!url.is_valid() || url.host() != host || !url.username().empty() ||
++          !url.password().empty() || url.has_port() || url.path() != "/") {
++        return REARC_INVALID_ARGUMENT;
++      }
++      if (r.include_subdomains &&
++          net::registry_controlled_domains::GetDomainAndRegistry(
++              host,
++              net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES) !=
++              host) {
++        return REARC_INVALID_ARGUMENT;
++      }
++      scopes.push_back({host, path, r.include_subdomains, r.scheme_mask});
++    }
++    scripts.push_back({key, e.source, e.css, std::move(scopes), e.run_at, i});
++  }
++  page->SetScripts(std::move(scripts), completion, context);
++  return REARC_OK;
++}
++ReArcStatus ReArcTabRefreshStyles(uint64_t id) {
++  rearc::PageServices* page;
++  if (auto status = rearc::FindPage(id, &page)) {
++    return status;
++  }
++  if (page->busy()) {
++    return REARC_BUSY;
++  }
++  page->RefreshStyles();
++  return REARC_OK;
++}
++ReArcStatus ReArcTabSetLinkPeek(uint64_t id,
++                                bool enabled,
++                                ReArcCompletion completion,
++                                void* context) {
++  CHECK(pthread_main_np());
++  if (!completion) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  rearc::PageServices* page;
++  if (auto status = rearc::FindPage(id, &page)) {
++    return status;
++  }
++  if (page->peek_busy()) {
++    return REARC_BUSY;
++  }
++  page->SetPeek(enabled, completion, context);
++  return REARC_OK;
++}
++ReArcStatus ReArcTabCaptureSnapshot(uint64_t id,
++                                    uint32_t scope,
++                                    ReArcSnapshotCallback completion,
++                                    void* context) {
++  CHECK(pthread_main_np());
++  if (!completion || scope > 1) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  rearc::PageServices* page;
++  if (auto status = rearc::FindPage(id, &page)) {
++    return status;
++  }
++  if (page->snapshot_busy()) {
++    return REARC_BUSY;
++  }
++  page->Snapshot(scope, completion, context);
++  return REARC_OK;
++}

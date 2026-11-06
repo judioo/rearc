@@ -1,0 +1,274 @@
+From 35631c50f563bc20bcd01987ebcf8441d867b21d Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Fri, 6 Nov 2026 07:19:35 +0400
+Subject: [PATCH] P-TAB-001 launch: early window callback before browser
+ startup
+
+Launch waits for ready (PostBrowserStart) before the host can show any
+window, so the cached sidebar the shell has prepared stays off screen while
+Chromium creates its threads, profile and services. ABI 1.45 (early_window,
+bridge 0.47.0) adds ReArcEngineSetEarlyWindowCallback, settable between
+Configure and Run. Run calls it once, synchronously on the main thread, at
+the end of InstallReArcAppDelegateAndMenu (the ReArc branch of
+ChromeBrowserMainPartsMac::PreCreateThreads): NSApplication, its delegate
+and the placeholder menu exist, browser threads and profiles do not, and the
+main message loop is not running. The host may create, order front and
+flush AppKit windows there; every other ABI call still answers as before
+ready. The hook lives in the rearc_bridge source set, so no upstream file
+outside framework.exports and framework.order changes. An abi signpost
+interval (EarlyWindow) covers the callback. Existing ABI layouts remain
+unchanged.
+
+Last rebased: 2026-11-06 onto Chromium 156.0.8078.74 (d331de35ca).
+---
+ chrome/app/framework.exports                  |  1 +
+ chrome/app/framework.order                    |  1 +
+ .../rearc_bridge/rearc_app_delegate_mac.h     |  5 ++++
+ .../rearc_bridge/rearc_app_delegate_mac.mm    | 15 +++++++++++
+ .../browser/rearc_bridge/rearc_engine_abi.h   | 21 ++++++++++++++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  | 26 +++++++++++++++++++
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |  2 +-
+ chrome/browser/rearc_bridge/rearc_perf.cc     |  6 +++++
+ chrome/browser/rearc_bridge/rearc_perf.h      |  1 +
+ 9 files changed, 76 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index acc7df312f..cf27c5168e 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -42,6 +42,7 @@ _ReArcEngineSetPageTimingCallback
+ _ReArcEngineSetViewPresentationCallback
+ _ReArcMetricsGetHistogram
+ _ReArcEngineGetProcesses
++_ReArcEngineSetEarlyWindowCallback
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 1b0191ee41..349e6351c4 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -49,6 +49,7 @@ _ReArcEngineSetPageTimingCallback
+ _ReArcEngineSetViewPresentationCallback
+ _ReArcMetricsGetHistogram
+ _ReArcEngineGetProcesses
++_ReArcEngineSetEarlyWindowCallback
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/browser/rearc_bridge/rearc_app_delegate_mac.h b/chrome/browser/rearc_bridge/rearc_app_delegate_mac.h
+index dfcc9c5493..c56b208561 100644
+--- a/chrome/browser/rearc_bridge/rearc_app_delegate_mac.h
++++ b/chrome/browser/rearc_bridge/rearc_app_delegate_mac.h
+@@ -29,6 +29,11 @@ namespace rearc {
+ // host is registered.
+ void InstallReArcAppDelegateAndMenu();
+ 
++// early_window (ABI 1.45): called once at the end of
++// InstallReArcAppDelegateAndMenu(), when the host may create AppKit windows.
++// Set by the ABI in ReArcEngineConfigure; main thread only.
++void SetApplicationReadyHook(void (*hook)());
++
+ // End-of-main-loop bridge finalization. Slice 1 records the transition only;
+ // keepalive release and ordered tab teardown arrive with P-APP-001 later
+ // slices and P-TAB-001. Must not touch AppController.sharedController: a
+diff --git a/chrome/browser/rearc_bridge/rearc_app_delegate_mac.mm b/chrome/browser/rearc_bridge/rearc_app_delegate_mac.mm
+index d2451abc20..214be5384d 100644
+--- a/chrome/browser/rearc_bridge/rearc_app_delegate_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_app_delegate_mac.mm
+@@ -4,6 +4,8 @@
+ 
+ #import "chrome/browser/rearc_bridge/rearc_app_delegate_mac.h"
+ 
++#include <utility>
++
+ #include "base/check_op.h"
+ #include "base/logging.h"
+ #include "chrome/browser/rearc_bridge/rearc_engine_lifecycle.h"
+@@ -35,6 +37,10 @@ - (BOOL)applicationSupportsSecureRestorableState:(NSApplication*)app {
+ 
+ namespace rearc {
+ 
++namespace {
++void (*g_application_ready_hook)() = nullptr;
++}  // namespace
++
+ void InstallReArcAppDelegateAndMenu() {
+   CHECK([NSThread isMainThread]);
+   // Mirrors the upstream PreCreateThreads invariant: nothing may have
+@@ -47,6 +53,15 @@ void InstallReArcAppDelegateAndMenu() {
+   // forwarding arrive in a later P-APP-001 slice; an empty main menu keeps
+   // AppKit consistent without creating Chrome's menu or AppController.
+   NSApp.mainMenu = [[NSMenu alloc] initWithTitle:@"ReArc"];
++  // early_window (ABI 1.45): the host may put up its window from here on.
++  if (auto hook = std::exchange(g_application_ready_hook, nullptr)) {
++    hook();
++  }
++}
++
++void SetApplicationReadyHook(void (*hook)()) {
++  CHECK([NSThread isMainThread]);
++  g_application_ready_hook = hook;
+ }
+ 
+ void FinalizeReArcAppDelegate() {
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index f7b6bf29d5..017fed11b9 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 44, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 45, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -115,6 +115,25 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcEngineShutdown(bool force,
+                                                     void* context);
+ REARC_ENGINE_EXPORT uint64_t ReArcEngineDefaultProfile(void);
+ 
++// Early window (early_window, ABI 1.45). Set after Configure and before Run;
++// a later call returns invalid_state, null clears. During Run the callback is
++// called once, synchronously, on the main thread as soon as the application
++// (the ReArc NSApplication, its delegate and placeholder main menu) exists,
++// in ChromeBrowserMainParts::PreCreateThreads, before browser threads,
++// profiles and services start and long before ready. The host may create,
++// order front, lay out and display AppKit windows there (flush the Core
++// Animation transaction itself to put them on screen), but the main message
++// loop is not running yet: main-queue blocks, timers and input wait until
++// after Run reaches its loop, and time spent in the callback delays ready.
++// Only ReArcEngineABIVersion, ReArcEngineABIMinorVersion, ReArcEngineVersion,
++// ReArcEngineBridgeVersion, ReArcEngineHasFeature and ReArcStatusName may be
++// called from it; everything else behaves as before ready (engine_not_ready,
++// or a default). A run that fails before the application exists never calls it.
++typedef void (*ReArcEarlyWindowCallback)(void* context);
++REARC_ENGINE_EXPORT ReArcStatus
++ReArcEngineSetEarlyWindowCallback(ReArcEarlyWindowCallback callback,
++                                  void* context);
++
+ // Named persistent keys: case-sensitive [A-Za-z0-9_-]{1,64}. No paths.
+ // Accepted opens coalesce by key, callbacks are deferred and exactly once.
+ // Each OTR call creates a unique in-memory profile under a persistent parent.
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index c6ffbae4c9..b176373985 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -35,6 +35,7 @@
+ #include "chrome/browser/rearc_bridge/close_controller.h"
+ #include "chrome/browser/rearc_bridge/ipc_tab_events.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_app_delegate_mac.h"
+ #include "chrome/browser/rearc_bridge/rearc_keep_alive.h"
+ #include "chrome/browser/rearc_bridge/rearc_perf.h"
+ #include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
+@@ -73,6 +74,8 @@
+  public:
+   ReArcCallbacks callbacks{};
+   raw_ptr<void> context = nullptr;
++  ReArcEarlyWindowCallback early_window = nullptr;
++  raw_ptr<void> early_window_context = nullptr;
+   bool configured = false, ran = false, ready = false, stopping = false;
+   bool draining = false, scheduled = false;
+   std::deque<base::OnceClosure> deliveries;
+@@ -132,6 +135,17 @@ void OnEngineReady() override {
+     }));
+   }
+ 
++  // early_window (ABI 1.45): direct, not ABIPost; no loop is running yet.
++  void OnApplicationReady() {
++    CHECK([NSThread isMainThread]);
++    auto callback = early_window;
++    early_window = nullptr;
++    if (callback) {
++      REARC_ABI_INTERVAL(kEarlyWindow);
++      callback(early_window_context);
++    }
++  }
++
+   void OnTabEvent(const TabEvent& event) override {
+     CHECK([NSThread isMainThread]);
+     CHECK(event.profile_id);
+@@ -566,6 +580,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "client_certificates" ||
+          std::string(feature) == "key_equivalent_events" ||
+          std::string(feature) == "perf_metrics" ||
++         std::string(feature) == "early_window" ||
+          std::string(feature) == "pip_embedded" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+@@ -615,10 +630,21 @@ ReArcStatus ReArcEngineConfigure(uint32_t version,
+   ReArcEngineSetLifecycleCallbacks(&rearc::Terminate, &rearc::CancelTerminate,
+                                    nullptr);
+   rearc::SetEngineReadinessSink(&a);
++  rearc::SetApplicationReadyHook([] { ABI::Get().OnApplicationReady(); });
+   rearc::SetTabEventSink(&a);
+   rearc::SetAttachmentEventSink(&a);
+   return REARC_OK;
+ }
++ReArcStatus ReArcEngineSetEarlyWindowCallback(ReArcEarlyWindowCallback callback,
++                                              void* context) {
++  auto& a = ABI::Get();
++  if (!a.configured || a.ran) {
++    return REARC_INVALID_STATE;
++  }
++  a.early_window = callback;
++  a.early_window_context = callback ? context : nullptr;
++  return REARC_OK;
++}
+ int ReArcEngineRun(int argc, const char* const* argv) {
+   auto& a = ABI::Get();
+   if (!a.configured || a.ran || argc < 1 || !argv) {
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 02fe7799b3..aaa99b2a4e 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.46.0";
++  return "0.47.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_perf.cc b/chrome/browser/rearc_bridge/rearc_perf.cc
+index 469216e3ca..9f6f8c3aac 100644
+--- a/chrome/browser/rearc_bridge/rearc_perf.cc
++++ b/chrome/browser/rearc_bridge/rearc_perf.cc
+@@ -74,6 +74,9 @@ ScopedAbiInterval::ScopedAbiInterval(AbiCall call) : call_(call) {
+     case AbiCall::kAutocompleteStart:
+       os_signpost_interval_begin(log, id, "AutocompleteStart");
+       break;
++    case AbiCall::kEarlyWindow:
++      os_signpost_interval_begin(log, id, "EarlyWindow");
++      break;
+   }
+ }
+ 
+@@ -112,6 +115,9 @@ ScopedAbiInterval::~ScopedAbiInterval() {
+     case AbiCall::kAutocompleteStart:
+       os_signpost_interval_end(log, id, "AutocompleteStart");
+       break;
++    case AbiCall::kEarlyWindow:
++      os_signpost_interval_end(log, id, "EarlyWindow");
++      break;
+   }
+ }
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_perf.h b/chrome/browser/rearc_bridge/rearc_perf.h
+index 146bc5b9d3..a3e550b496 100644
+--- a/chrome/browser/rearc_bridge/rearc_perf.h
++++ b/chrome/browser/rearc_bridge/rearc_perf.h
+@@ -30,6 +30,7 @@ enum class AbiCall {
+   kViewSetVisible,
+   kHistoryQuery,
+   kAutocompleteStart,
++  kEarlyWindow,
+ };
+ 
+ class ScopedAbiInterval {
+-- 
+2.54.0 (Apple Git-157)
+

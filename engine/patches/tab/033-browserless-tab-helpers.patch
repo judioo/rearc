@@ -1,0 +1,352 @@
+From 6c227521ff104d877b68fc317061ea5a7618e61b Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Tue, 3 Nov 2026 16:05:38 +0400
+Subject: [PATCH] P-TAB-001 wave 18b: attach audited browser-less tab helpers
+
+Attach Chromium's own ZoomController, profile autofill client (ContentAutofillDriverFactory), ChromePasswordManagerClient (ContentPasswordManagerDriverFactory), HistoryTabHelper for non-OTR profiles, FindTabHelper and the download NavigationMonitor observer to every bridge tab, at creation, adoption and WebContentsCreated so renderer driver bindings find their factories. TabHelpers::AttachTabHelpers and TabFeatures stay unused: they assume a TabInterface and attach prompt helpers owned by later concerns. HistoryTabHelper::IsEligibleTab accepts contents owned by a live bridge TabSession instead of requiring a Browser; OTR and Chromium's URL/transition/redirect rules are unchanged. Save/update prompts still return false without a PasswordsClientUIDelegate.
+
+Advertise history_recording and password_autofill in ABI 1.15 / bridge 0.17.0 with no new symbols and unchanged ABI 1.13/1.14 layouts. Builds p49-p51; the new native helpers host records visits in HistoryService, chrome://history and the History DB, fills a passwordsPrivate-saved credential, submits it by a real click and updates Login Data times_used; all native hosts, G1-G5 and four stress processes / sixteen shutdown tabs pass in gates-tab033.log.
+
+Last rebased: 2026-11-03 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/BUILD.gn                       |   8 ++
+ chrome/browser/history/history_tab_helper.cc  |   9 ++
+ .../rearc_bridge/browserless_tab_helpers.cc   | 101 ++++++++++++++++++
+ .../rearc_bridge/browserless_tab_helpers.h    |  34 ++++++
+ .../browser/rearc_bridge/rearc_engine_abi.h   |   7 +-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   2 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ chrome/browser/rearc_bridge/tab_delegate.cc   |  12 +++
+ chrome/browser/rearc_bridge/tab_delegate.h    |   6 ++
+ chrome/browser/rearc_bridge/tab_session.cc    |  11 +-
+ 10 files changed, 184 insertions(+), 8 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+ create mode 100644 chrome/browser/rearc_bridge/browserless_tab_helpers.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 5b1312adfa..a7725fecbe 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1481,6 +1481,14 @@ source_set("core") {
+     ]
+   }
+ 
++  if (is_mac) {
++    # P-TAB-001 wave 18b: audited browser-less Chromium tab helpers.
++    sources += [
++      "rearc_bridge/browserless_tab_helpers.cc",
++      "rearc_bridge/browserless_tab_helpers.h",
++    ]
++  }
++
+   if (is_win) {
+     sources += [
+       "chrome_browser_main_win.cc",
+diff --git a/chrome/browser/history/history_tab_helper.cc b/chrome/browser/history/history_tab_helper.cc
+index cff7c3955c..176273ad7d 100644
+--- a/chrome/browser/history/history_tab_helper.cc
++++ b/chrome/browser/history/history_tab_helper.cc
+@@ -54,6 +54,9 @@
+ #include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+ #endif
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#endif
+ 
+ namespace {
+ 
+@@ -696,6 +699,12 @@ bool HistoryTabHelper::IsEligibleTab(
+   }
+   return true;
+ #else
++#if BUILDFLAG(IS_MAC)
++  // ReArc browser-less tabs are real tabs owned by the bridge registry.
++  if (rearc::IsBrowserlessTabContents(web_contents())) {
++    return true;
++  }
++#endif
+   // Don't update history if this web contents isn't associated with a tab.
+   return GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+              web_contents()) != nullptr;
+diff --git a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+new file mode 100644
+index 0000000000..fff314b57f
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+@@ -0,0 +1,101 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++
++#include <pthread.h>
++
++#include <memory>
++
++#include "base/check.h"
++#include "chrome/browser/history/history_tab_helper.h"
++#include "chrome/browser/password_manager/chrome_password_manager_client.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_key.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/ui/autofill/autofill_client_provider.h"
++#include "chrome/browser/ui/autofill/autofill_client_provider_factory.h"
++#include "components/download/content/factory/navigation_monitor_factory.h"
++#include "components/download/content/public/download_navigation_observer.h"
++#include "components/find_in_page/find_tab_helper.h"
++#include "components/zoom/zoom_controller.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_user_data.h"
++
++namespace rearc {
++namespace {
++
++// Adoption marker plus owner of helpers that TabFeatures holds as plain
++// members on desktop (no WebContentsUserData of their own).
++class BrowserlessTabHelpers
++    : public content::WebContentsUserData<BrowserlessTabHelpers> {
++ public:
++  ~BrowserlessTabHelpers() override = default;
++
++ private:
++  friend class content::WebContentsUserData<BrowserlessTabHelpers>;
++  explicit BrowserlessTabHelpers(content::WebContents* contents)
++      : content::WebContentsUserData<BrowserlessTabHelpers>(*contents),
++        download_navigation_observer_(
++            std::make_unique<download::DownloadNavigationObserver>(
++                contents,
++                download::NavigationMonitorFactory::GetForKey(
++                    Profile::FromBrowserContext(contents->GetBrowserContext())
++                        ->GetProfileKey()))) {}
++
++  std::unique_ptr<download::DownloadNavigationObserver>
++      download_navigation_observer_;
++
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++
++WEB_CONTENTS_USER_DATA_KEY_IMPL(BrowserlessTabHelpers);
++
++}  // namespace
++
++void AttachBrowserlessTabHelpers(content::WebContents* contents) {
++  CHECK(pthread_main_np());
++  CHECK(contents);
++  if (BrowserlessTabHelpers::FromWebContents(contents)) {
++    return;
++  }
++  BrowserlessTabHelpers::CreateForWebContents(contents);
++  Profile* profile = Profile::FromBrowserContext(contents->GetBrowserContext());
++
++  // Same relative order as TabHelpers::AttachTabHelpers: ChromeAutofillClient
++  // may observe ZoomController, and ChromePasswordManagerClient observes the
++  // ContentAutofillClient's managers.
++  zoom::ZoomController::CreateForWebContents(contents);
++  autofill::AutofillClientProvider& autofill_provider =
++      autofill::AutofillClientProviderFactory::GetForProfile(profile);
++  autofill_provider.CreateClientForWebContents(contents);
++  if (!autofill_provider.uses_platform_autofill()) {
++    // Save/update prompts return false without a PasswordsClientUIDelegate
++    // (ManagePasswordsUIController is not attached); filling, credential
++    // usage bookkeeping and the store are Chromium's.
++    ChromePasswordManagerClient::CreateForWebContents(contents);
++  }
++  // Stock policy: no history helper for off-the-record profiles.
++  if (!profile->IsOffTheRecord()) {
++    HistoryTabHelper::GetOrCreateForWebContents(contents);
++  }
++  find_in_page::FindTabHelper::CreateForWebContents(contents);
++}
++
++bool IsBrowserlessTabContents(const content::WebContents* contents) {
++  CHECK(pthread_main_np());
++  if (!contents) {
++    return false;
++  }
++  auto& registry = TabRegistry::Get();
++  for (uint64_t id : registry.SessionIds()) {
++    TabSession* session = registry.FindSession(id);
++    if (session && session->web_contents() == contents) {
++      return true;
++    }
++  }
++  return false;
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/browserless_tab_helpers.h b/chrome/browser/rearc_bridge/browserless_tab_helpers.h
+new file mode 100644
+index 0000000000..19e1825469
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/browserless_tab_helpers.h
+@@ -0,0 +1,34 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_BROWSERLESS_TAB_HELPERS_H_
++#define CHROME_BROWSER_REARC_BRIDGE_BROWSERLESS_TAB_HELPERS_H_
++
++namespace content {
++class WebContents;
++}  // namespace content
++
++namespace rearc {
++
++// Attaches the audited subset of Chromium tab helpers a browser-less tab
++// needs (wave 18b): ZoomController, the profile's autofill client
++// (ContentAutofillDriverFactory), ChromePasswordManagerClient
++// (ContentPasswordManagerDriverFactory), HistoryTabHelper for non-OTR
++// profiles, FindTabHelper and the download NavigationMonitor observer.
++// TabHelpers::AttachTabHelpers and TabFeatures are deliberately not used:
++// both assume a TabStripModel/TabInterface and attach prompt UI helpers
++// (PermissionRequestManager, ManagePasswordsUIController, TabDialogs) whose
++// browser-less surfaces are separate concerns. Idempotent; main thread only.
++// Call before the first navigation so renderer driver bindings find their
++// factories.
++void AttachBrowserlessTabHelpers(content::WebContents* contents);
++
++// True when `contents` is owned by a live bridge TabSession. Chromium helpers
++// that require a Browser to identify a real tab (HistoryTabHelper) use this
++// as the browser-less equivalent. Main thread only.
++bool IsBrowserlessTabContents(const content::WebContents* contents);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_BROWSERLESS_TAB_HELPERS_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 506dc159d3..9ad91c6fb5 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 14, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 15, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -133,6 +133,11 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileCreateOffTheRecord(
+ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileClose(
+     uint64_t profile_id, bool force, ReArcCompletion completion, void* context);
+ 
++// ABI 1.15 (history_recording, password_autofill): every tab carries Chromium's
++// HistoryTabHelper (non-OTR profiles), autofill client and
++// ChromePasswordManagerClient. Visits reach HistoryService/chrome://history;
++// saved credentials fill and usage updates reach the password store. No
++// save/update prompt surface: new credentials are not saved without one.
+ // IDs are engine allocated, never reused. Any live profile is admitted.
+ // space_id is a nonzero shell label. New tabs stage hidden; attach separately.
+ // null URL keeps the initial empty about:blank document without a synthetic
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 3da06fd876..bb6bc658a9 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -522,6 +522,8 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "navigation" ||
+          std::string(feature) == "navigation_extended" ||
+          std::string(feature) == "webui_daily_pages" ||
++         std::string(feature) == "history_recording" ||
++         std::string(feature) == "password_autofill" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 2b28fd5980..8537462225 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.16.0";
++  return "0.17.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 256a33b510..13179e5afa 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -8,6 +8,7 @@
+ 
+ #include "base/logging.h"
+ #include "base/memory/weak_ptr.h"
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
+ #include "chrome/browser/rearc_bridge/close_controller.h"
+ #include "chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h"
+ #include "chrome/browser/rearc_bridge/tab_adoption.h"
+@@ -129,4 +130,15 @@ ReArcTabDelegate::GetJavaScriptDialogManager(content::WebContents* source) {
+   return GetReArcJavaScriptDialogManager(source);
+ }
+ 
++void ReArcTabDelegate::WebContentsCreated(
++    content::WebContents* source_contents,
++    const content::GlobalRenderFrameHostId& opener_id,
++    const std::string& frame_name,
++    const GURL& target_url,
++    content::WebContents* new_contents) {
++  // Mirrors Browser::WebContentsCreated: renderer driver bindings for the new
++  // frame must find their factories. Unadopted contents die with helpers.
++  AttachBrowserlessTabHelpers(new_contents);
++}
++
+ }  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.h b/chrome/browser/rearc_bridge/tab_delegate.h
+index 55f5cdb45b..c43aa4a8b0 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.h
++++ b/chrome/browser/rearc_bridge/tab_delegate.h
+@@ -64,6 +64,12 @@ class ReArcTabDelegate : public content::WebContentsDelegate {
+   bool TakeFocus(content::WebContents* source, bool reverse) override;
+   content::JavaScriptDialogManager* GetJavaScriptDialogManager(
+       content::WebContents* source) override;
++  // Wave 18b: attach browser-less helpers before the new contents navigates.
++  void WebContentsCreated(content::WebContents* source_contents,
++                          const content::GlobalRenderFrameHostId& opener_id,
++                          const std::string& frame_name,
++                          const GURL& target_url,
++                          content::WebContents* new_contents) override;
+ 
+  private:
+   const uint64_t tab_id_;
+diff --git a/chrome/browser/rearc_bridge/tab_session.cc b/chrome/browser/rearc_bridge/tab_session.cc
+index eadac44d84..505374b3d7 100644
+--- a/chrome/browser/rearc_bridge/tab_session.cc
++++ b/chrome/browser/rearc_bridge/tab_session.cc
+@@ -10,6 +10,7 @@
+ 
+ #include "base/check.h"
+ #include "base/logging.h"
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
+ #include "chrome/browser/rearc_bridge/tab_delegate.h"
+ #include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -78,6 +79,8 @@ TabSession::TabSession(uint64_t tab_id,
+     web_contents_ = content::WebContents::Create(params);
+   }
+   web_contents_->SetDelegate(delegate_.get());
++  // Renderer-created contents normally gained these in WebContentsCreated.
++  AttachBrowserlessTabHelpers(web_contents_.get());
+   // Deliberate synchronous hidden staging, including renderer-created popups.
+   web_contents_->WasHidden();
+ 
+@@ -87,12 +90,8 @@ TabSession::TabSession(uint64_t tab_id,
+   //
+   // R6 helper policy: no TabHelpers::AttachTabHelpers (legacy, warns against
+   // desktop use), no TabFeatures, no PreventFeatureInitializationForTesting
+-  // bypass. The whitelisted per-helper CreateForWebContents set is EMPTY
+-  // day-one: the first candidate (CoreTabHelper) lives in
+-  // //chrome/browser/ui/tab_contents/, and :core cannot dep on
+-  // //chrome/browser/ui (layering runs ui → core), so the whitelist decision
+-  // moves to the S5 service-adapter audits. Recorded in patch tab/007's
+-  // header per the slice plan's "each recorded in the patch header" rule.
++  // bypass. Wave 18b attaches an audited per-helper whitelist instead; see
++  // browserless_tab_helpers.h.
+ }
+ 
+ TabSession::~TabSession() = default;

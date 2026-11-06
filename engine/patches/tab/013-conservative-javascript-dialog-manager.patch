@@ -1,0 +1,189 @@
+# Patch-ID: P-TAB-001 (slice S5, adapter 4) — conservative JS dialogs
+# Area: tab.
+# Rationale: returning null from GetJavaScriptDialogManager does not establish
+#   IPC-CONTRACT section 3's conservative beforeunload confirmation policy.
+#   Return an explicit per-WebContents manager through the planned override.
+# Last-Rebased: 2026-11-02 (Chromium 156.0.8078.74).
+# Audit: content::JavaScriptDialogManager only, owned by WebContentsUserData;
+#   no Chrome dialog/UI/helper dependency or process-wide mutable manager.
+# Policy: ordinary alert/confirm/prompt callbacks complete immediately with
+#   false and empty input; did_suppress_message is false because the callback
+#   is completed here (true would also ask content to synthesize a response).
+#   Beforeunload prompts, including reload, always complete false (stay).
+#   CancelDialogs is idempotent because nothing remains pending; Handle returns
+#   false because there is no outstanding dialog to accept. No close replies,
+#   session destruction, or S6 close-controller behavior is added here.
+# Minimal edits: isolated mac :core sources block, one include and the planned
+#   GetJavaScriptDialogManager body in tab_delegate.cc. Its header, registry,
+#   session, earlier event files and frozen bridge BUILD.gn stay unchanged.
+# This planned override changes tab/007's additive file, so full-series
+#   integrity is checked by sequential newest-first reverse replay in a
+#   temporary index, followed by forward replay (working tree untouched).
+# Gate: build-p14 green attempt 1; final build-p15 green attempt 2 after
+#   include-order cleanup; no compile failures. G1-G5 PASS (G3: grep -qa).
+# nm ReArcJavaScriptDialogManager/GetReArcJavaScriptDialogManager verified.
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index a35021ee3f..e1fd991a93 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1429,6 +1429,14 @@ source_set("core") {
+     deps += [ "//chrome/browser/ui/webui/certificate_manager" ]
+   }
+ 
++  if (is_mac) {
++    # P-TAB-001 S5 (tab/013): conservative JavaScript dialog manager.
++    sources += [
++      "rearc_bridge/rearc_javascript_dialog_manager.cc",
++      "rearc_bridge/rearc_javascript_dialog_manager.h",
++    ]
++  }
++
+   if (!is_android && !is_chromeos) {
+     sources += [ "platform_util.cc" ]
+     deps += [ "//chrome/browser/default_browser" ]
+diff --git a/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.cc b/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.cc
+new file mode 100644
+index 0000000000..df33274e1f
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.cc
+@@ -0,0 +1,84 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h"
++
++#include <pthread.h>
++
++#include <string>
++#include <utility>
++
++#include "base/check.h"
++#include "base/functional/callback.h"
++#include "base/logging.h"
++#include "content/public/browser/javascript_dialog_manager.h"
++#include "content/public/browser/web_contents_user_data.h"
++
++namespace rearc {
++namespace {
++
++class ReArcJavaScriptDialogManager
++    : public content::JavaScriptDialogManager,
++      public content::WebContentsUserData<ReArcJavaScriptDialogManager> {
++ public:
++  ~ReArcJavaScriptDialogManager() override = default;
++
++  void RunJavaScriptDialog(content::WebContents* web_contents,
++                           content::RenderFrameHost* render_frame_host,
++                           content::JavaScriptDialogType dialog_type,
++                           const std::u16string& message_text,
++                           const std::u16string& default_prompt_text,
++                           DialogClosedCallback callback,
++                           bool* did_suppress_message) override {
++    CHECK(pthread_main_np());
++    // We complete the callback ourselves. Setting this true as well would
++    // ask WebContentsImpl to fake a second response after we return.
++    *did_suppress_message = false;
++    std::move(callback).Run(false, std::u16string());
++  }
++
++  void RunBeforeUnloadDialog(content::WebContents* web_contents,
++                             content::RenderFrameHost* render_frame_host,
++                             bool is_reload,
++                             DialogClosedCallback callback) override {
++    CHECK(pthread_main_np());
++    VLOG(1)
++        << "rearc: beforeunload confirmation cancelled (native UI unavailable)";
++    // false is the upstream dialog result for stay/cancel, including reload.
++    // No session destruction or close reply here: S6 owns the close pipeline.
++    std::move(callback).Run(false, std::u16string());
++  }
++
++  bool HandleJavaScriptDialog(content::WebContents* web_contents,
++                              bool accept,
++                              const std::u16string* prompt_override) override {
++    CHECK(pthread_main_np());
++    return false;
++  }
++
++  void CancelDialogs(content::WebContents* web_contents,
++                     bool reset_state) override {
++    CHECK(pthread_main_np());
++    // Every callback completes synchronously; no active or pending UI exists.
++  }
++
++ private:
++  friend class content::WebContentsUserData<ReArcJavaScriptDialogManager>;
++  explicit ReArcJavaScriptDialogManager(content::WebContents* contents)
++      : content::WebContentsUserData<ReArcJavaScriptDialogManager>(*contents) {}
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++
++WEB_CONTENTS_USER_DATA_KEY_IMPL(ReArcJavaScriptDialogManager);
++
++}  // namespace
++
++content::JavaScriptDialogManager* GetReArcJavaScriptDialogManager(
++    content::WebContents* web_contents) {
++  CHECK(pthread_main_np());
++  CHECK(web_contents);
++  return ReArcJavaScriptDialogManager::GetOrCreateForWebContents(web_contents);
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h b/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h
+new file mode 100644
+index 0000000000..a6f31c40ec
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h
+@@ -0,0 +1,22 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_JAVASCRIPT_DIALOG_MANAGER_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_JAVASCRIPT_DIALOG_MANAGER_H_
++
++namespace content {
++class JavaScriptDialogManager;
++class WebContents;
++}  // namespace content
++
++namespace rearc {
++
++// UI-thread, per-WebContents manager. Dismisses ordinary dialogs and vetoes
++// beforeunload prompts synchronously until native confirmation UI exists.
++content::JavaScriptDialogManager* GetReArcJavaScriptDialogManager(
++    content::WebContents* web_contents);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_JAVASCRIPT_DIALOG_MANAGER_H_
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 2df7c424f6..00e364c48e 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -8,6 +8,7 @@
+ 
+ #include "base/logging.h"
+ #include "base/memory/weak_ptr.h"
++#include "chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
+ #include "content/public/browser/web_contents.h"
+@@ -147,14 +148,7 @@ bool ReArcTabDelegate::TakeFocus(content::WebContents* source, bool reverse) {
+ 
+ content::JavaScriptDialogManager*
+ ReArcTabDelegate::GetJavaScriptDialogManager(content::WebContents* source) {
+-  // nullptr day-one = dialogs suppressed WITH completing callbacks (audited
+-  // at pin: WebContentsImpl::RunBeforeUnloadConfirm resolves (false, true)
+-  // with no manager installed; CancelDialogs is null-safe) — a hung callback
+-  // would violate R7. The conservative-cancel native manager is S5's
+-  // rearc_javascript_dialog_manager; per P-TAB-001, "returning null alone is
+-  // not proof of that policy", so S5 must land before dialogs are considered
+-  // handled.
+-  return nullptr;
++  return GetReArcJavaScriptDialogManager(source);
+ }
+ 
+ }  // namespace rearc

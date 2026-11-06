@@ -1,0 +1,264 @@
+# Patch-ID: P-TAB-001 / P-NAV-001 (wave 12, initial document)
+# Area: tab.
+# Rationale: preserve the initial empty document rather than racing a synthetic
+#   about:blank commit with the first real destination. Avoid eager DevTools
+#   access and empty-plan work, while retaining acknowledged registrations over
+#   admitted file/WebUI visits. Hidden/occlusion policy remains unchanged.
+# Last-Rebased: 2026-11-02 (Chromium 156.0.8078.74).
+# Frozen-file exceptions: existing ABI/services only. No renderer retry,
+#   process priority change, helper blanket initialization or visibility bypass.
+#   Internal protocol attachment survives WebUI/file, but host expression and
+#   capture calls reject them; boosts/peek remain http(s)-scoped.
+# Validation: build-p33; smoke-tab022 G1-G5; native core/services/URLs/eval/
+#   HTTP-WebUI-HTTP-file-HTTP hosts; 30 hidden + 30 attached first loads,
+#   zero placeholder commits/timeouts; nm-tab022. Mock-Keychain timing median
+#   remains ~1.25s: this does not claim to cure the real OS authorization wait.
+
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 888276c323..b42772b9d2 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 3, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 4, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -115,7 +115,9 @@ REARC_ENGINE_EXPORT uint64_t ReArcEngineDefaultProfile(void);
+ 
+ // v1 admits only the startup profile. IDs are engine allocated, never reused.
+ // space_id is a nonzero shell label. New tabs stage hidden; attach separately.
+-// null URL means about:blank. Trusted browser-initiated navigation admits
++// null URL keeps the initial empty about:blank document without a synthetic
++// navigation. Explicit creation URLs are queued; an immediate Navigate
++// supersedes that queued destination. Trusted browser-initiated navigation admits
+ // http(s), data, file, chrome://settings, chrome://version, exact about:blank
+ // and view-source:http(s)/file. Other chrome hosts require helper audits.
+ // Other schemes (including javascript, blob, chrome-untrusted) are rejected.
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 6d3b87c57c..3108153fbe 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -10,6 +10,7 @@
+ #include <cstdlib>
+ #include <deque>
+ #include <map>
++#include <set>
+ #include <string>
+ #include <vector>
+ 
+@@ -64,6 +65,7 @@
+   std::deque<base::OnceClosure> deliveries;
+   std::map<uint64_t, Window> windows;
+   std::map<uint64_t, Presentation> presentations;
++  std::set<uint64_t> initial_navigations;
+   size_t live_tabs = 0;
+   std::vector<uint64_t> shutdown_tabs;
+   size_t shutdown_index = 0;
+@@ -533,7 +535,17 @@ ReArcStatus ReArcTabCreate(uint64_t profile_id,
+   *tab_id = rearc::TabRegistry::Get().CreateSession(args);
+   rearc::EmitTabCreatedEvent(*tab_id);
+   rearc::ABIInitializeTab(*tab_id);
+-  return ReArcTabNavigate(*tab_id, url.spec().c_str(), 0);
++  if (!value) {
++    return REARC_OK;
++  }
++  rearc::ABI::Get().initial_navigations.insert(*tab_id);
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce([](uint64_t id, GURL url) {
++        if (ABI::Get().initial_navigations.erase(id)) {
++          ReArcTabNavigate(id, url.spec().c_str(), 0);
++        }
++      }, *tab_id, url));
++  return REARC_OK;
+ }
+ ReArcStatus ReArcTabClose(uint64_t id,
+                           bool force,
+@@ -581,6 +593,8 @@ ReArcStatus ReArcTabNavigate(uint64_t id,
+     default:
+       return REARC_INVALID_ARGUMENT;
+   }
++  // An explicit first destination supersedes the queued creation placeholder.
++  ABI::Get().initial_navigations.erase(id);
+   content::NavigationController::LoadURLParams params(url);
+   params.transition_type = type;
+   s->web_contents()->GetController().LoadURLWithParams(params);
+@@ -624,6 +638,7 @@ ReArcStatus ReArcTabStop(uint64_t id) {
+   if (auto status = rearc::ABICheckTab(id, &s)) {
+     return status;
+   }
++  ABI::Get().initial_navigations.erase(id);
+   s->web_contents()->Stop();
+   return REARC_OK;
+ }
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index a13f70cb90..9efebda600 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.5.0";
++  return "0.6.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 45fc3b3eba..086b8c0481 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -193,7 +193,8 @@ std::string PeekSource(bool enabled) {
+   return std::string(
+              "(()=>{if(window!==window.top)return;"
+              "if(globalThis.__rearcPeek){document.removeEventListener('click',"
+-             "globalThis.__rearcPeek,true);globalThis.__rearcPeek=null;}") +
++             "globalThis.__rearcPeek,true);globalThis.__rearcPeek=null;}"
++             "if(location.protocol!=='http:'&&location.protocol!=='https:')return;") +
+          (enabled ? "globalThis.__rearcPeek=function(e){if(!e.isTrusted||!e."
+                     "shiftKey||e.button!==0)return;"
+                     "const "
+@@ -218,8 +219,8 @@ auto& Pages() {
+ 
+ // Internal, per-WebContents CDP client: no remote debugging server, no protocol
+ // entry point exported to the host. Restricted to the current top-level page;
+-// no browser target, files, WebUI or user-gesture grants. Host evaluation
+-// selects the primary document and an explicit isolated/main world.
++// no browser target, file I/O or user-gesture grants. File/WebUI documents
++// retain future registrations but cannot receive host evaluations or boosts.
+ class PageServices : public content::DevToolsAgentHostClient,
+                      public content::WebContentsObserver {
+  public:
+@@ -228,19 +229,8 @@ class PageServices : public content::DevToolsAgentHostClient,
+       : content::WebContentsObserver(s.web_contents()),
+         tab_id_(s.tab_id()),
+         profile_id_(s.profile_id()),
+-        generation_(s.content_generation()),
+-        host_(content::DevToolsAgentHost::GetOrCreateFor(s.web_contents())) {
++        generation_(s.content_generation()) {
+     CHECK(pthread_main_np());
+-    attached_ = host_->AttachClient(this);
+-    if (attached_) {
+-      Send("Page.enable", {}, {});
+-      Send("Runtime.enable", {}, {});
+-      Send("Runtime.addBinding",
+-           base::DictValue()
+-               .Set("name", "rearcLinkPeek")
+-               .Set("executionContextName", "rearc.host"),
+-           {});
+-    }
+   }
+   ~PageServices() override {
+     CHECK(pthread_main_np());
+@@ -254,8 +244,13 @@ class PageServices : public content::DevToolsAgentHostClient,
+   bool MayReadLocalFiles() override { return false; }
+   bool MayWriteLocalFiles() override { return false; }
+   bool MayAttachToURL(const GURL& url, bool webui) override {
+-    return !webui && (url.is_empty() || url.SchemeIsHTTPOrHTTPS() || url.SchemeIs("data") ||
+-                      url.spec() == "about:blank");
++    // The internal client survives admitted scheme changes to preserve future
++    // registrations. Actual evaluation/refresh/capture enforce document policy.
++    return url.is_empty() || url.SchemeIsHTTPOrHTTPS() || url.SchemeIs("data") ||
++           url.SchemeIsFile() ||
++           (url.SchemeIs("chrome") &&
++            (url.host() == "settings" || url.host() == "version")) ||
++           url.spec() == "about:blank";
+   }
+   bool MayAttachToRenderFrameHost(content::RenderFrameHost* frame) override {
+     return content::DevToolsAgentHostClient::MayAttachToRenderFrameHost(frame);
+@@ -375,13 +370,20 @@ class PageServices : public content::DevToolsAgentHostClient,
+     }
+   }
+ 
+-  bool available() const { return attached_; }
++  bool available() const { return !host_ || attached_; }
+   bool busy() const { return installing_; }
+   bool snapshot_busy() const { return snapshot_callback_ != nullptr; }
+ 
+   void SetScripts(std::vector<Script> scripts,
+                   ReArcCompletion completion,
+                   void* context) {
++    // No client has ever installed anything in this contents: the empty plan
++    // is already satisfied without touching its initial empty document.
++    if (!host_ && scripts.empty()) {
++      Complete(completion, context, REARC_OK);
++      return;
++    }
++    EnsureInitialDocument();
+     installing_ = true;
+     install_completion_ = completion;
+     install_context_ = context;
+@@ -392,6 +394,9 @@ class PageServices : public content::DevToolsAgentHostClient,
+   }
+   void RefreshStyles() {
+     CHECK(pthread_main_np());
++    if (!host_ && scripts_.empty()) {
++      return;
++    }
+     std::string cleanup = "(()=>{const ids=new Set([";
+     for (const auto& s : scripts_) {
+       cleanup += Quote("rearc-boost-" + s.id) + ",";
+@@ -407,6 +412,11 @@ class PageServices : public content::DevToolsAgentHostClient,
+     }
+   }
+   void SetPeek(bool enabled, ReArcCompletion completion, void* context) {
++    if (!host_ && !enabled) {
++      Complete(completion, context, REARC_OK);
++      return;
++    }
++    EnsureInitialDocument();
+     peek_installing_ = true;
+     // Replacing a listener must also replace its future-document registration.
+     if (!peek_script_id_.empty()) {
+@@ -492,8 +502,28 @@ class PageServices : public content::DevToolsAgentHostClient,
+     return s && s->content_generation() == generation_ &&
+            s->close_state() == TabSession::CloseState::kOpen;
+   }
++  void EnsureInitialDocument() {
++    if (web_contents()->GetLastCommittedURL().is_empty() &&
++        !web_contents()->GetController().GetPendingEntry()) {
++      content::NavigationController::LoadURLParams params(GURL("about:blank"));
++      web_contents()->GetController().LoadURLWithParams(params);
++    }
++  }
+   void Send(std::string method, base::DictValue params, Reply reply) {
+     CHECK(pthread_main_np());
++    if (!host_) {
++      // Attaching DevTools accesses the initial empty document. Defer it until
++      // needed, so ordinary first navigation can reuse that document/process.
++      host_ = content::DevToolsAgentHost::GetOrCreateFor(web_contents());
++      attached_ = host_->AttachClient(this);
++      if (attached_) {
++        Send("Page.enable", {}, {});
++        Send("Runtime.enable", {}, {});
++        Send("Runtime.addBinding", base::DictValue()
++                 .Set("name", "rearcLinkPeek")
++                 .Set("executionContextName", "rearc.host"), {});
++      }
++    }
+     if (!attached_) {
+       if (reply) {
+         std::move(reply).Run(REARC_INVALID_STATE, {});
+@@ -664,6 +694,9 @@ class PageServices : public content::DevToolsAgentHostClient,
+     Complete(callback, install_context_, status);
+   }
+   void Evaluate(std::string world, std::string expression) {
++    if (!web_contents()->GetLastCommittedURL().SchemeIsHTTPOrHTTPS()) {
++      return;
++    }
+     // Discover top frame at use time (also works before first frameNavigated).
+     Send("Page.getFrameTree", {},
+          base::BindOnce(
+@@ -1116,6 +1149,9 @@ ReArcStatus ReArcTabCaptureSnapshot(uint64_t id,
+   if (auto status = rearc::FindPage(id, &page)) {
+     return status;
+   }
++  if (!page->evaluation_allowed()) {
++    return REARC_UNSUPPORTED;
++  }
+   if (page->snapshot_busy()) {
+     return REARC_BUSY;
+   }

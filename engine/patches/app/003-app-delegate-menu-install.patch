@@ -1,0 +1,59 @@
+Patch-ID: P-APP-001 (wave-5 slice 1) — ReArcAppDelegate and menu installation
+at the PreCreateThreads seam.
+Rationale: second milestone of engine/docs/patches/P-APP-001.md, patch-map row
+"chrome_browser_main_mac.mm PreCreateThreads(): replace the
+nil-delegate/AppController/BuildMainMenu/mainMenuCreated block with bridge
+delegate/menu installation". When an engine lifecycle host is registered
+(ReArcEngineSetLifecycleCallbacks, patch app/002), PreCreateThreads now
+installs the retained ReArcAppDelegate plus the placeholder bridge menu via
+rearc::InstallReArcAppDelegateAndMenu() and returns, so AppController is never
+instantiated (its sharedController identity CHECK forbids a second delegate
+owner). When no host is registered the gate is off and the stock
+AppController/BuildMainMenu block runs bit-identically. The menu surface stays
+the slice-1 placeholder (empty NSMenu titled "ReArc"); shell-owned menu
+construction is a later slice. chrome::BuildMainMenu and app_controller_mac.h
+remain referenced by the stock path; no includes are removed.
+Gate: rearc::GetEngineLifecycleHost() != nullptr. Bit-identical stock behavior
+with the gate off is the acceptance invariant; validated with Chromium
+--version only (no interactive runs this wave).
+Drift check @ 156.0.8078.74 (2026-11-01): none. The PreCreateThreads
+nil-delegate/AppController/BuildMainMenu/mainMenuCreated block is at
+chrome_browser_main_mac.mm:159-174 after this patch (was :151-166 pre-patch,
+as recorded in the P-APP-001 drift log); InstallReArcAppDelegateAndMenu()
+keeps the upstream CHECK_EQ(nil, NSApp.delegate) invariant.
+Upstream hunks: chrome/browser/chrome_browser_main_mac.mm only (two rearc
+includes + the gated installation block). No BUILD.gn change: patch 002
+already wired the //chrome/browser/rearc_bridge dep into the is_mac block of
+the target owning this file (chrome/browser/BUILD.gn:1553).
+Last rebased: 2026-11-01 @ 156.0.8078.74.
+
+diff --git a/chrome/browser/chrome_browser_main_mac.mm b/chrome/browser/chrome_browser_main_mac.mm
+index b269f1610a..e93ab07125 100644
+--- a/chrome/browser/chrome_browser_main_mac.mm
++++ b/chrome/browser/chrome_browser_main_mac.mm
+@@ -30,6 +30,8 @@
+ #include "chrome/browser/first_run/first_run.h"
+ #include "chrome/browser/mac/install_from_dmg.h"
+ #include "chrome/browser/mac/metrics.h"
++#import "chrome/browser/rearc_bridge/rearc_app_delegate_mac.h"
++#include "chrome/browser/rearc_bridge/rearc_engine_lifecycle.h"
+ #include "chrome/browser/ui/cocoa/main_menu_builder.h"
+ #include "chrome/browser/ui/cocoa/renderer_context_menu/chrome_swizzle_services_menu_updater.h"
+ #include "chrome/browser/updater/updater.h"
+@@ -154,6 +156,16 @@
+     return ret;
+   }
+ 
++  // P-APP-001 (patch app/003): with an engine lifecycle host registered, the
++  // bridge owns the application delegate and menu surface. AppController must
++  // not be instantiated — its sharedController identity CHECK forbids a
++  // second delegate owner — so the stock delegate/menu block below is skipped
++  // entirely. Without a host, the stock path runs unchanged.
++  if (rearc::GetEngineLifecycleHost()) {
++    rearc::InstallReArcAppDelegateAndMenu();
++    return content::RESULT_CODE_NORMAL_EXIT;
++  }
++
+   // Create the app delegate by requesting the shared AppController.
+   CHECK_EQ(nil, NSApp.delegate);
+   AppController* app_controller = AppController.sharedController;

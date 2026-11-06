@@ -1,0 +1,418 @@
+From 1434c7b8338ed1fb094ed604c341a8583db1e607 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 10:44:39 +0400
+Subject: [PATCH] P-TAB-001 wave 18d: discard browser-less documents while
+ preserving tabs
+
+Enable the guarded preserving WebContents discard path for embedded startup, retain navigation/helpers/leases and reload on presentation or activation. Emit additive discard state event kinds, cancel document work, and exclude non-tab pages from TabHandle-only discard notifications. ABI 1.25 / bridge 0.27.0; build p68, repeated native discard/reload, boost/history/identity/sibling preservation, cancellation, shutdown and explicit feature disable pass.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/browser/BUILD.gn                       |  1 +
+ .../browser/rearc_bridge/discard_adapter.cc   | 51 +++++++++++++++++++
+ chrome/browser/rearc_bridge/ipc_tab_events.cc | 11 ++++
+ chrome/browser/rearc_bridge/ipc_tab_events.h  |  6 ++-
+ .../browser/rearc_bridge/rearc_abi_internal.h |  2 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   | 15 +++++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  | 12 +++++
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |  2 +-
+ chrome/browser/rearc_bridge/rearc_find_abi.cc |  5 ++
+ .../rearc_bridge/rearc_services_abi.cc        | 18 +++++++
+ chrome/browser/rearc_bridge/tab_observer.cc   | 23 +++++++++
+ chrome/browser/rearc_bridge/tab_observer.h    |  3 ++
+ .../decorators/tab_page_decorator.cc          |  6 +++
+ 13 files changed, 150 insertions(+), 5 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/discard_adapter.cc
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 57c04f1136..6aa6446be3 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1488,6 +1488,7 @@ source_set("core") {
+       "rearc_bridge/browserless_tab_helpers.h",
+       "rearc_bridge/rearc_downloads_abi.cc",
+       "rearc_bridge/rearc_history_abi.cc",
++      "rearc_bridge/discard_adapter.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+       "rearc_bridge/rearc_file_chooser.cc",
+       "rearc_bridge/rearc_file_chooser.h",
+diff --git a/chrome/browser/rearc_bridge/discard_adapter.cc b/chrome/browser/rearc_bridge/discard_adapter.cc
+new file mode 100644
+index 0000000000..fc5d49b8d6
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/discard_adapter.cc
+@@ -0,0 +1,51 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <pthread.h>
++#include "base/check.h"
++#include "base/feature_list.h"
++#include "base/functional/callback_helpers.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/visibility.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/common/content_features.h"
++
++ReArcStatus ReArcTabGetDiscardState(uint64_t tab, bool* discarded) {
++  CHECK(pthread_main_np());
++  if (discarded) *discarded = false;
++  if (!discarded) return REARC_INVALID_ARGUMENT;
++  rearc::TabSession* session;
++  if (auto status = rearc::ABICheckTab(tab, &session)) return status;
++  *discarded = session->web_contents()->WasDiscarded();
++  return REARC_OK;
++}
++ReArcStatus ReArcTabDiscard(uint64_t tab) {
++  rearc::TabSession* session;
++  if (auto status = rearc::ABICheckTab(tab, &session)) return status;
++  // Run enables the preserving path in embedded mode. An explicit host
++  // --disable-features=WebContentsDiscard remains authoritative.
++  if (!base::FeatureList::IsEnabled(features::kWebContentsDiscard))
++    return REARC_UNSUPPORTED;
++  auto* contents = session->web_contents();
++  auto& controller = contents->GetController();
++  if (contents->WasDiscarded() || rearc::ABIHasVisibilityIntent(tab) ||
++      contents->GetVisibility() != content::Visibility::HIDDEN ||
++      contents->IsLoading() || controller.GetPendingEntry() ||
++      contents->HasUncommittedNavigationInPrimaryMainFrame() ||
++      !controller.GetLastCommittedEntry() || contents->IsCrashed() ||
++      !contents->GetPrimaryMainFrame()->IsRenderFrameLive() ||
++      contents->IsBeingCaptured() || contents->IsCurrentlyAudible() ||
++      contents->HasPictureInPictureVideo() || contents->HasPictureInPictureDocument() ||
++      contents->IsFullscreen() || contents->NeedToFireBeforeUnloadOrUnloadEvents())
++    return REARC_INVALID_STATE;
++  if (rearc::ABIDiscardServicesBusy(tab)) return REARC_BUSY;
++  // Never kill a RenderProcessHost: unrelated tabs may share its process.
++  // Preserving discard releases the document asynchronously and flushes BFCache
++  // while keeping navigation entries, helpers and the stable native container.
++  contents->Discard(base::DoNothing());
++  return contents->WasDiscarded() ? REARC_OK : REARC_BUSY;
++}
+diff --git a/chrome/browser/rearc_bridge/ipc_tab_events.cc b/chrome/browser/rearc_bridge/ipc_tab_events.cc
+index 2fe1ab4993..446477363a 100644
+--- a/chrome/browser/rearc_bridge/ipc_tab_events.cc
++++ b/chrome/browser/rearc_bridge/ipc_tab_events.cc
+@@ -40,6 +40,10 @@ const char* TabEventKindName(TabEventKind kind) {
+       return "navigation.committed";
+     case TabEventKind::kNavigationFailed:
+       return "navigation.failed";
++    case TabEventKind::kTabDiscarded:
++      return "tab.discarded";
++    case TabEventKind::kTabDiscardCleared:
++      return "tab.discard_cleared";
+   }
+ }
+ 
+@@ -123,6 +127,13 @@ void EmitInitialSnapshotEvent(uint64_t tab_id) {
+   event.has_can_go_forward = true;
+   event.can_go_forward = controller.CanGoForward();
+   EmitTabEvent(std::move(event));
++  TabEvent discard;
++  discard.kind = contents->WasDiscarded() ? TabEventKind::kTabDiscarded
++                                         : TabEventKind::kTabDiscardCleared;
++  discard.tab_id = tab_id;
++  discard.url = contents->GetVisibleURL().spec();
++  discard.title = contents->GetTitle();
++  EmitTabEvent(std::move(discard));
+ }
+ 
+ }  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/ipc_tab_events.h b/chrome/browser/rearc_bridge/ipc_tab_events.h
+index 85b6c1fd2a..92aa2699d0 100644
+--- a/chrome/browser/rearc_bridge/ipc_tab_events.h
++++ b/chrome/browser/rearc_bridge/ipc_tab_events.h
+@@ -30,6 +30,8 @@ enum class TabEventKind {
+   kTabClosed,
+   kNavigationCommitted,
+   kNavigationFailed,
++  kTabDiscarded,
++  kTabDiscardCleared,
+ };
+ 
+ // Wire names per rearc.ipc.v1: "tab.created", "tab.updated", "tab.closed",
+@@ -48,8 +50,8 @@ struct TabEvent {
+   TabEventKind kind;
+   uint64_t tab_id = 0;
+   // Staleness key: TabSession::content_generation at emission. Consumers
+-  // reject completions from a stale generation (§3 generation rules; S7's
+-  // discard rebinds the generation).
++  // reject completions from a stale generation (§3 generation rules).
++  // Contents replacement advances it; preserving discard retains it.
+   uint64_t content_generation = 0;
+ 
+   // All events carry the engine profile ID, including terminal events.
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index f82a945df0..1cf82524f4 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -34,5 +34,7 @@ void ABICancelJavaScriptDialogs(uint64_t tab_id);
+ void ABIAttachDownloads(Profile* profile, uint64_t profile_id);
+ void ABIDetachDownloads(uint64_t profile_id);
+ void ABICancelHistory(uint64_t profile_id);
++bool ABIHasVisibilityIntent(uint64_t tab_id);
++bool ABIDiscardServicesBusy(uint64_t tab_id);
+ }  // namespace rearc
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index a392185de6..d288c081f0 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,9 +42,11 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 24, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 25, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
++// ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
++// These carry URL/title, retain identity, and leave the legacy struct intact.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+ // can_go_back=32, can_go_forward=64. Other fields apply by kind.
+ // disposition: 0 shell, 1 foreground_tab, 2 background_tab, 3 popup.
+@@ -208,6 +210,15 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcTabGoForward(uint64_t tab_id);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabStop(uint64_t tab_id);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabRefreshState(uint64_t tab_id);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabActivate(uint64_t tab_id);
++// tab_discard (ABI 1.25): hidden, nonloading tabs with a committed entry only.
++// Rejects presented tabs, capture/media/PiP/fullscreen and unload handlers.
++// Preserves WebContents, navigation entries, services and attachment identity.
++// OK means logical discard; renderer resources are released asynchronously.
++// Presenting/activating or explicit navigation/reload restores the document.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabDiscard(uint64_t tab_id);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetDiscardState(uint64_t tab_id,
++                                                        bool* discarded);
++
+ 
+ // Register a +0 NSWindow* before attachment; engine retains until Closed/Run
+ // returns. Duplicate/zero IDs rejected. Closing a window keeps its tabs alive.
+@@ -417,7 +428,7 @@ REARC_ENGINE_EXPORT void ReArcEngineSetPageMessageCallback(
+ // active_ordinal (0 none) and final_update; ignore non-current sessions.
+ // Every session ends with exactly one terminal event: reason 1 navigated
+ // (primary cross-document commit), 2 closed (before tab.closed), 3 stopped,
+-// 4 replaced; terminal events are final with match_count/active_ordinal -1.
++// 4 replaced, 5 discarded; terminal events are final with match_count/active_ordinal -1.
+ // stop action: 0 clear selection, 1 keep selection, 2 activate selection.
+ enum { REARC_FIND_FORWARD = 1, REARC_FIND_MATCH_CASE = 2 };
+ typedef struct ReArcFindEvent {
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 5f15cd8564..a70607724c 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -490,6 +490,10 @@ void ABITabDestroyed(uint64_t profile_id) {
+   }
+ }
+ ReArcStatus ABIValidateNavigationURL(const GURL& url) { GURL checked; return CheckURL(url.spec().c_str(), &checked); }
++bool ABIHasVisibilityIntent(uint64_t tab) {
++  auto it = ABI::Get().presentations.find(tab);
++  return it != ABI::Get().presentations.end() && it->second.intent;
++}
+ bool ABIIsTrustedWebUI(const GURL& url) {
+   return url.SchemeIs("chrome") &&
+          (url.host() == "settings" || url.host() == "version" ||
+@@ -534,6 +538,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "permission_prompts" ||
+          std::string(feature) == "context_menu" ||
+          std::string(feature) == "password_prompts" ||
++         std::string(feature) == "tab_discard" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+@@ -593,6 +598,7 @@ int ReArcEngineRun(int argc, const char* const* argv) {
+   }
+   std::vector<std::string> args;
+   bool profile = false;
++  std::string enabled_features = "WebContentsDiscard";
+   for (int i = 0; i < argc; ++i) {
+     if (!argv[i]) {
+       return -REARC_INVALID_ARGUMENT;
+@@ -605,8 +611,13 @@ int ReArcEngineRun(int argc, const char* const* argv) {
+     if (arg.starts_with("--profile-directory=")) {
+       profile = true;
+     }
++    if (arg.starts_with("--enable-features=")) {
++      enabled_features += "," + arg.substr(18);
++      continue;
++    }
+     args.push_back(arg);
+   }
++  args.push_back("--enable-features=" + enabled_features);
+   args.push_back("--no-startup-window");
+   args.push_back("--no-first-run");
+   args.push_back("--no-default-browser-check");
+@@ -920,6 +931,7 @@ ReArcStatus ReArcTabActivate(uint64_t id) {
+       !w->second.native.visible || w->second.native.miniaturized) {
+     return REARC_INVALID_STATE;
+   }
++  s->web_contents()->GetController().LoadIfNecessary();
+   s->web_contents()->Focus();
+   return REARC_OK;
+ }
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 891ccb6b9d..8c649057d2 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.26.0";
++  return "0.27.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_find_abi.cc b/chrome/browser/rearc_bridge/rearc_find_abi.cc
+index ba2775e6d8..5ccacc1532 100644
+--- a/chrome/browser/rearc_bridge/rearc_find_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_find_abi.cc
+@@ -46,6 +46,7 @@ enum Reason : uint32_t {
+   kClosed = 2,
+   kStopped = 3,
+   kReplaced = 4,
++  kDiscarded = 5,
+ };
+ 
+ void Publish(ReArcFindEvent event) {
+@@ -109,6 +110,9 @@ class FindSession : public content::WebContentsObserver,
+   }
+ 
+   // content::WebContentsObserver:
++  void AboutToBeDiscarded(content::WebContents*) override {
++    End(kDiscarded, find_in_page::SelectionAction::kClear);
++  }
+   void DidFinishNavigation(content::NavigationHandle* handle) override {
+     // Like Chromium's find bar: a new primary document ends the session.
+     if (handle->IsInPrimaryMainFrame() && handle->HasCommitted() &&
+@@ -163,6 +167,7 @@ ReArcStatus FindTab(uint64_t id, FindSession** find) {
+   if (auto status = ABICheckTab(id, &s)) {
+     return status;
+   }
++  if (s->web_contents()->WasDiscarded()) return REARC_INVALID_STATE;
+   auto it = Finds().find(id);
+   if (it == Finds().end() || !it->second->helper()) {
+     return REARC_UNSUPPORTED;
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 9edcc6a177..65ec030f59 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -310,6 +310,19 @@ class PageServices : public content::DevToolsAgentHostClient,
+     message_contexts_.clear();
+     CancelPending(REARC_CANCELLED);
+   }
++  void AboutToBeDiscarded(content::WebContents*) override {
++    ++document_epoch_;
++    contexts_.clear();
++    message_contexts_.clear();
++    if (evaluation_busy())
++      FinishEvaluation(REARC_CANCELLED, {}, "discarded", "Document discarded");
++    if (snapshot_callback_) FinishSnapshot(REARC_CANCELLED, {});
++    ABICancelPasswords(tab_id_);
++    ABICancelContextMenu(tab_id_);
++    ABICancelPermissions(tab_id_);
++    ABICancelFileChooser(tab_id_);
++    ABICancelJavaScriptDialogs(tab_id_);
++  }
+   void DidStartNavigation(content::NavigationHandle* handle) override {
+     CHECK(pthread_main_np());
+     if (handle->IsInPrimaryMainFrame() && !handle->IsSameDocument()) {
+@@ -1055,6 +1068,7 @@ ReArcStatus FindPage(uint64_t id, PageServices** page) {
+   if (auto status = ABICheckTab(id, &s)) {
+     return status;
+   }
++  if (s->web_contents()->WasDiscarded()) return REARC_INVALID_STATE;
+   auto it = Pages().find(id);
+   if (it == Pages().end() || !it->second->available()) {
+     return REARC_UNSUPPORTED;
+@@ -1064,6 +1078,10 @@ ReArcStatus FindPage(uint64_t id, PageServices** page) {
+ }
+ }  // namespace
+ 
++bool ABIDiscardServicesBusy(uint64_t id) {
++  auto it = Pages().find(id);
++  return it != Pages().end() && (it->second->busy() || it->second->peek_busy());
++}
+ void ABIAttachServices(uint64_t id) {
+   CHECK(pthread_main_np());
+   auto* s = TabRegistry::Get().FindSession(id);
+diff --git a/chrome/browser/rearc_bridge/tab_observer.cc b/chrome/browser/rearc_bridge/tab_observer.cc
+index 2a33a87ee7..42df3c1cc5 100644
+--- a/chrome/browser/rearc_bridge/tab_observer.cc
++++ b/chrome/browser/rearc_bridge/tab_observer.cc
+@@ -108,6 +108,29 @@ void TabObserver::DidFinishNavigation(
+   EmitInitialSnapshotEvent(tab_id_);
+ }
+ 
++void TabObserver::WasDiscarded() {
++  // NotifyWasDiscarded also runs when content rejects the operation.
++  if (!web_contents()->WasDiscarded()) return;
++  discarded_ = true;
++  TabEvent event;
++  event.kind = TabEventKind::kTabDiscarded;
++  event.tab_id = tab_id_;
++  event.url = web_contents()->GetVisibleURL().spec();
++  event.title = web_contents()->GetTitle();
++  EmitTabEvent(std::move(event));
++}
++void TabObserver::DidStartNavigation(content::NavigationHandle* handle) {
++  if (discarded_ && handle->IsInPrimaryMainFrame() && !handle->IsSameDocument()) {
++    discarded_ = false;
++    TabEvent event;
++    event.kind = TabEventKind::kTabDiscardCleared;
++    event.tab_id = tab_id_;
++    event.url = web_contents()->GetVisibleURL().spec();
++    event.title = web_contents()->GetTitle();
++    EmitTabEvent(std::move(event));
++  }
++}
++
+ void TabObserver::DidStartLoading() {
+   TabEvent event;
+   event.kind = TabEventKind::kTabUpdated;
+diff --git a/chrome/browser/rearc_bridge/tab_observer.h b/chrome/browser/rearc_bridge/tab_observer.h
+index fc0de8bb59..3047a0972b 100644
+--- a/chrome/browser/rearc_bridge/tab_observer.h
++++ b/chrome/browser/rearc_bridge/tab_observer.h
+@@ -47,6 +47,8 @@ class TabObserver : public content::WebContentsObserver {
+   // content::WebContentsObserver:
+   void DidFinishNavigation(
+       content::NavigationHandle* navigation_handle) override;
++  void DidStartNavigation(content::NavigationHandle*) override;
++  void WasDiscarded() override;
+   void DidStartLoading() override;
+   void DidStopLoading() override;
+   void LoadProgressChanged(double progress) override;
+@@ -57,6 +59,7 @@ class TabObserver : public content::WebContentsObserver {
+ 
+  private:
+   const uint64_t tab_id_;
++  bool discarded_ = false;
+   // Last-known content generation, sampled at attach and after every emitted
+   // event, so tab.closed can be stamped even after the session is gone.
+   uint64_t last_known_generation_ = 0;
+diff --git a/components/performance_manager/decorators/tab_page_decorator.cc b/components/performance_manager/decorators/tab_page_decorator.cc
+index 3a979d2ba1..c2d66b3ccf 100644
+--- a/components/performance_manager/decorators/tab_page_decorator.cc
++++ b/components/performance_manager/decorators/tab_page_decorator.cc
+@@ -127,6 +127,12 @@ void TabPageDecorator::OnBeforePageNodeRemoved(const PageNode* page_node) {
+ void TabPageDecorator::OnAboutToBeDiscarded(const PageNode* page_node,
+                                             const PageNode* new_page_node) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  // Preserving WebContents discard also supports non-TabStripModel contents.
++  // Such pages have no TabHandle to transfer or notify tab observers about.
++  if (page_node->GetType() != performance_manager::PageType::kTab) {
++    CHECK_EQ(page_node, new_page_node);
++    return;
++  }
+   CHECK_EQ(page_node->GetType(), performance_manager::PageType::kTab);
+ 
+   // When kWebContentsDiscard is disabled new_page_node will be different from
+-- 
+2.54.0 (Apple Git-157)
+

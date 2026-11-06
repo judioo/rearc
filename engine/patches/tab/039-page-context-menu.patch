@@ -1,0 +1,467 @@
+From 72067026d0df0372cc0a9a8a5c819820fd73e997 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 09:57:39 +0400
+Subject: [PATCH] P-TAB-001 wave 18c: expose page context menus and native
+ commands
+
+Forward sanitized ContextMenuParams from the browser-less view delegate to deferred host events, retain weak-document identity and cancel stale requests. Dispatch link/edit/image/navigation commands through Chromium; SaveFrameWithHeaders retains image download context and referrer policy. No menu is rendered by Chromium. Inspect returns unsupported because DevToolsWindow requires Browser UI. ABI 1.21 / bridge 0.23.0. Builds p60-p61; native context host covers payload, link/edit/navigation commands and cancellation. Full image-command runtime evidence follows in the wave report.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/browser/BUILD.gn                       |   2 +
+ .../browser/rearc_bridge/rearc_abi_internal.h |   2 +
+ .../rearc_bridge/rearc_context_menu.cc        | 270 ++++++++++++++++++
+ .../browser/rearc_bridge/rearc_context_menu.h |  16 ++
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  30 +-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   2 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_services_abi.cc        |   1 +
+ .../web_contents_view_delegate_mac.mm         |   4 +-
+ 9 files changed, 325 insertions(+), 4 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_context_menu.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_context_menu.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index ba535580f4..5b79f2417a 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1492,6 +1492,8 @@ source_set("core") {
+       "rearc_bridge/rearc_file_chooser.h",
+       "rearc_bridge/rearc_permission_prompt.cc",
+       "rearc_bridge/rearc_permission_prompt.h",
++      "rearc_bridge/rearc_context_menu.cc",
++      "rearc_bridge/rearc_context_menu.h",
+     ]
+   }
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 256f318e80..79d108dca7 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -24,6 +24,8 @@ bool ABIHasServiceFeature(const char* feature);
+ // Wave 18b find in page (rearc_find_abi.cc), driven by the services hooks.
+ void ABIAttachFind(uint64_t tab_id);
+ void ABIDetachFind(uint64_t tab_id);
++ReArcStatus ABIValidateNavigationURL(const GURL&);
++void ABICancelContextMenu(uint64_t tab_id);
+ void ABICancelPermissions(uint64_t tab_id);
+ void ABICancelFileChooser(uint64_t tab_id);
+ void ABICancelJavaScriptDialogs(uint64_t tab_id);
+diff --git a/chrome/browser/rearc_bridge/rearc_context_menu.cc b/chrome/browser/rearc_bridge/rearc_context_menu.cc
+new file mode 100644
+index 0000000000..44eeda32c0
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_context_menu.cc
+@@ -0,0 +1,270 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_context_menu.h"
++
++#include <pthread.h>
++
++#include <map>
++#include <optional>
++#include <string>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "content/public/browser/context_menu_params.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/weak_document_ptr.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "content/public/common/referrer.h"
++#include "third_party/blink/public/common/context_menu_data/edit_flags.h"
++#include "third_party/blink/public/common/loader/network_utils.h"
++#include "third_party/blink/public/mojom/context_menu/context_menu.mojom.h"
++#include "ui/base/clipboard/scoped_clipboard_writer.h"
++namespace rearc {
++namespace {
++class Menu;
++ReArcContextMenuCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0, next_id = 1;
++auto& Pending() {
++  static base::NoDestructor<std::map<uint64_t, base::WeakPtr<Menu>>> map;
++  return *map;
++}
++class Menu : public content::WebContentsObserver,
++             public content::WebContentsUserData<Menu> {
++ public:
++  ~Menu() override { End(true); }
++  void Start(TabSession& s,
++             content::RenderFrameHost& frame,
++             const content::ContextMenuParams& params) {
++    End(true);
++    if (!host) {
++      return;
++    }
++    id_ = next_id++;
++    params_ = params;
++    frame_ = frame.GetWeakDocumentPtr();
++    event_ = {s.profile_id(),
++              s.tab_id(),
++              s.content_generation(),
++              id_,
++              0,
++              static_cast<uint32_t>(params.media_type),
++              static_cast<uint32_t>(params.edit_flags),
++              params.x,
++              params.y,
++              params.is_editable,
++              params.has_image_contents,
++              nullptr,
++              nullptr,
++              nullptr,
++              nullptr,
++              nullptr};
++    Pending().emplace(id_, weak_.GetWeakPtr());
++    web_contents()->SetShowingContextMenu(true);
++    Publish(0);
++  }
++  void End(bool cancel, const GURL& followed = GURL()) {
++    if (!id_) {
++      return;
++    }
++    if (cancel) {
++      Publish(1);
++    }
++    Pending().erase(id_);
++    id_ = 0;
++    params_.reset();
++    web_contents()->SetShowingContextMenu(false);
++    web_contents()->NotifyContextMenuClosed(followed);
++  }
++  ReArcStatus Command(uint32_t action) {
++    auto* frame = frame_.AsRenderFrameHostIfValid();
++    if (!frame) {
++      End(true);
++      return REARC_NOT_FOUND;
++    }
++    const auto p = *params_;
++    auto* c = web_contents();
++    uint64_t tab = event_.tab_id;
++    if (action > 12) {
++      return REARC_INVALID_ARGUMENT;
++    }
++    if (action == 8) {
++      return REARC_UNSUPPORTED;
++    }
++    uint32_t flag = action == 2   ? blink::ContextMenuDataEditFlags::kCanCopy
++                    : action == 3 ? blink::ContextMenuDataEditFlags::kCanPaste
++                    : action == 4 ? blink::ContextMenuDataEditFlags::kCanCut
++                    : action == 5
++                        ? blink::ContextMenuDataEditFlags::kCanSelectAll
++                        : 0;
++    if (flag && !(p.edit_flags & flag)) {
++      return REARC_INVALID_STATE;
++    }
++    if ((action < 2 && p.link_url.is_empty()) ||
++        ((action == 6 || action == 7) && !p.has_image_contents)) {
++      return REARC_INVALID_STATE;
++    }
++    if (action == 0) {
++      auto status = ABIValidateNavigationURL(p.link_url);
++      if (status) {
++        return status;
++      }
++      End(false, p.link_url);
++      return ReArcTabNavigate(tab, p.link_url.spec().c_str(), 1);
++    }
++    if (action == 9 && !c->GetController().CanGoBack()) {
++      return REARC_INVALID_STATE;
++    }
++    if (action == 10 && !c->GetController().CanGoForward()) {
++      return REARC_INVALID_STATE;
++    }
++    End(false);
++    switch (action) {
++      case 1: {
++        ui::ScopedClipboardWriter writer(ui::ClipboardBuffer::kCopyPaste);
++        writer.WriteText(base::UTF8ToUTF16(p.unfiltered_link_url.spec()));
++        break;
++      }
++      case 2:
++        c->Copy();
++        break;
++      case 3:
++        c->Paste();
++        break;
++      case 4:
++        c->Cut();
++        break;
++      case 5:
++        c->SelectAll();
++        break;
++      case 6:
++        if (p.src_url.is_empty() ||
++            p.media_type == blink::mojom::ContextMenuDataMediaType::kCanvas) {
++          frame->SaveImageAt(p.x, p.y);
++        } else {
++          c->SaveFrameWithHeaders(
++              p.src_url,
++              content::Referrer::SanitizeForRequest(
++                  p.src_url, content::Referrer(p.frame_url, p.referrer_policy)),
++              "Accept: " +
++                  std::string(blink::network_utils::ImageAcceptHeader()) +
++                  "\r\n",
++              p.suggested_filename, frame, !p.is_image_media_plugin_document);
++        }
++        break;
++      case 7:
++        frame->CopyImageAt(p.x, p.y);
++        break;
++      case 9:
++        return ReArcTabGoBack(tab);
++      case 10:
++        return ReArcTabGoForward(tab);
++      case 11:
++        return ReArcTabReload(tab, false);
++      case 12:
++        break;
++      default:
++        return REARC_INVALID_ARGUMENT;
++    }
++    return REARC_OK;
++  }
++  void DidStartNavigation(content::NavigationHandle* h) override {
++    if (h->IsInPrimaryMainFrame() && !h->IsSameDocument()) {
++      End(true);
++    }
++  }
++  void DidFinishNavigation(content::NavigationHandle*) override {
++    if (id_ && !frame_.AsRenderFrameHostIfValid()) {
++      End(true);
++    }
++  }
++  void WebContentsDestroyed() override { End(true); }
++  void RenderFrameDeleted(content::RenderFrameHost*) override {
++    if (id_ && !frame_.AsRenderFrameHostIfValid()) {
++      End(true);
++    }
++  }
++
++ private:
++  friend class content::WebContentsUserData<Menu>;
++  explicit Menu(content::WebContents* c)
++      : content::WebContentsObserver(c),
++        content::WebContentsUserData<Menu>(*c) {}
++  void Publish(uint32_t phase) {
++    auto event = event_;
++    event.phase = phase;
++    ABIPost(base::BindOnce(
++        [](uint64_t expected, ReArcContextMenuEvent e,
++           content::ContextMenuParams p) {
++          if (!host || expected != epoch ||
++              (!e.phase && !Pending().contains(e.request_id))) {
++            return;
++          }
++          auto selection = base::UTF16ToUTF8(p.selection_text);
++          e.link_url = p.link_url.spec().c_str();
++          e.src_url = p.src_url.spec().c_str();
++          e.selection_text = selection.c_str();
++          e.page_url = p.page_url.spec().c_str();
++          e.frame_url = p.frame_url.spec().c_str();
++          host(host_context, &e);
++        },
++        epoch, event, *params_));
++  }
++  uint64_t id_ = 0;
++  ReArcContextMenuEvent event_{};
++  std::optional<content::ContextMenuParams> params_;
++  content::WeakDocumentPtr frame_;
++  base::WeakPtrFactory<Menu> weak_{this};
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(Menu);
++}  // namespace
++void ShowHostContextMenu(content::WebContents* c,
++                         content::RenderFrameHost& f,
++                         const content::ContextMenuParams& p) {
++  for (auto id : TabRegistry::Get().SessionIds()) {
++    auto* s = TabRegistry::Get().FindSession(id);
++    if (s->web_contents() == c) {
++      Menu::GetOrCreateForWebContents(c)->Start(*s, f, p);
++      return;
++    }
++  }
++}
++void ABICancelContextMenu(uint64_t tab) {
++  if (auto* s = TabRegistry::Get().FindSession(tab)) {
++    if (auto* m = Menu::FromWebContents(s->web_contents())) {
++      m->End(true);
++    }
++  }
++}
++}  // namespace rearc
++void ReArcEngineSetContextMenuCallback(ReArcContextMenuCallback cb, void* ctx) {
++  CHECK(pthread_main_np());
++  auto pending = rearc::Pending();
++  for (auto& [id, m] : pending) {
++    if (m) {
++      m->End(true);
++    }
++  }
++  ++rearc::epoch;
++  rearc::host = cb;
++  rearc::host_context = ctx;
++}
++ReArcStatus ReArcContextMenuCommand(uint64_t id, uint32_t action) {
++  CHECK(pthread_main_np());
++  auto it = rearc::Pending().find(id);
++  if (it == rearc::Pending().end() || !it->second) {
++    return REARC_NOT_FOUND;
++  }
++  return it->second->Command(action);
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_context_menu.h b/chrome/browser/rearc_bridge/rearc_context_menu.h
+new file mode 100644
+index 0000000000..ea5f01abbd
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_context_menu.h
+@@ -0,0 +1,16 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_CONTEXT_MENU_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_CONTEXT_MENU_H_
++namespace content {
++class WebContents;
++class RenderFrameHost;
++struct ContextMenuParams;
++}  // namespace content
++namespace rearc {
++void ShowHostContextMenu(content::WebContents*,
++                         content::RenderFrameHost&,
++                         const content::ContextMenuParams&);
++}
++#endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 76b343658f..5edff637aa 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 20, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 21, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -505,6 +505,34 @@ REARC_ENGINE_EXPORT void ReArcEngineSetPermissionCallback(
+ REARC_ENGINE_EXPORT ReArcStatus ReArcPermissionRespond(
+     uint64_t request_id, uint32_t decision, bool persist);
+ 
++// Page context menus (context_menu, ABI 1.21). phase 0 request, 1 cancelled.
++// Coordinates are Chromium RenderView-local DIP, media_type is Blink's
++// ContextMenuDataMediaType, edit_flags are Blink context_menu_data/edit_flags.
++// URLs/selection are page data. Shell supplies all menu UI. New menu,
++// navigation, frame destruction, close or callback replacement invalidate IDs.
++typedef struct ReArcContextMenuEvent {
++  uint64_t profile_id, tab_id, content_generation, request_id;
++  uint32_t phase, media_type, edit_flags;
++  int32_t x, y;
++  bool is_editable, has_image_contents;
++  const char* link_url;
++  const char* src_url;
++  const char* selection_text;
++  const char* page_url;
++  const char* frame_url;
++} ReArcContextMenuEvent;
++typedef void (*ReArcContextMenuCallback)(void*, const ReArcContextMenuEvent*);
++REARC_ENGINE_EXPORT void ReArcEngineSetContextMenuCallback(
++    ReArcContextMenuCallback callback, void* context);
++// action: 0 open link in this tab, 1 copy link, 2 copy, 3 paste, 4 cut,
++// 5 select all, 6 save image (Chromium download), 7 copy image,
++// 8 inspect (unsupported: browser-less DevTools frontend not wired),
++// 9 back, 10 forward, 11 reload, 12 dismiss. Success consumes the ID.
++// Invalid/disabled/unsupported actions leave it pending. Shell can Create a
++// separate tab using link_url for its open-in-new-tab menu item.
++REARC_ENGINE_EXPORT ReArcStatus ReArcContextMenuCommand(
++    uint64_t request_id, uint32_t action);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 81b919b987..6be654ed5e 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -489,6 +489,7 @@ void ABITabDestroyed(uint64_t profile_id) {
+     a.FinishShutdown();
+   }
+ }
++ReArcStatus ABIValidateNavigationURL(const GURL& url) { GURL checked; return CheckURL(url.spec().c_str(), &checked); }
+ bool ABIIsTrustedWebUI(const GURL& url) {
+   return url.SchemeIs("chrome") &&
+          (url.host() == "settings" || url.host() == "version" ||
+@@ -529,6 +530,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "javascript_dialogs" ||
+          std::string(feature) == "file_chooser" ||
+          std::string(feature) == "permission_prompts" ||
++         std::string(feature) == "context_menu" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index f7302447a2..89c5848b2c 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.22.0";
++  return "0.23.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 413404081f..cf91589766 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -1079,6 +1079,7 @@ void ABIAttachServices(uint64_t id) {
+ }
+ void ABIDetachServices(uint64_t id) {
+   CHECK(pthread_main_np());
++  ABICancelContextMenu(id);
+   ABICancelPermissions(id);
+   ABICancelFileChooser(id);
+   ABICancelJavaScriptDialogs(id);
+diff --git a/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.mm b/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.mm
+index 7ee793ecd2..991917f981 100644
+--- a/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.mm
++++ b/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.mm
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/rearc_bridge/web_contents_view_delegate_mac.h"
++#include "chrome/browser/rearc_bridge/rearc_context_menu.h"
+ 
+ #include <pthread.h>
+ 
+@@ -78,8 +79,7 @@ explicit ReArcWebContentsViewDelegate(content::WebContents* web_contents)
+ 
+   void ShowContextMenu(content::RenderFrameHost& render_frame_host,
+                        const content::ContextMenuParams& params) override {
+-    VLOG(1) << "ReArc bridge: context menu suppressed (no shell menu channel "
+-               "yet).";
++    ShowHostContextMenu(web_contents_, render_frame_host, params);
+   }
+ 
+   void OnPerformingDrop(const content::DropData& drop_data,
+-- 
+2.54.0 (Apple Git-157)
+

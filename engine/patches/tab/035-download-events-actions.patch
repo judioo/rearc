@@ -1,0 +1,525 @@
+From 1708e96dbe23a694556500072cae8ce49f17c9bd Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Tue, 3 Nov 2026 16:31:35 +0400
+Subject: [PATCH] P-TAB-001 wave 18b: surface Chromium downloads to the host
+
+Observe each bridge profile's DownloadManager with Chromium's AllDownloadItemNotifier and report created, updated, completed, interrupted, cancelled and removed transitions. Each event carries id, GUID, initiating tab, URL, target path, MIME type, received and total bytes, state, danger type and interrupt reason. Pause, resume, cancel, open, reveal and remove call DownloadItem's own methods. ReArcDownloadSetPolicy writes Chromium's DownloadPrefs directory and disables prompting. In embedded mode, ChromeDownloadManagerDelegate opens downloads with the platform handler instead of creating a Chrome window, and never shows its file picker: preference and save-as confirmations continue at the suggested path, all others cancel. The DownloadManager stays the source of truth for history, safety checks, auto-resumption and chrome://downloads.
+
+Advertise downloads in ABI 1.17 / bridge 0.19.0 with additive symbols only and unchanged ABI 1.13/1.14 layouts. Build p53; the new native downloads host covers policy, completion into the directory, pause/resume/cancel/remove, interruption and a picker-free OTR download. All native hosts, G1-G5 and four stress processes / sixteen shutdown tabs pass in gates-tab035.log.
+
+Last rebased: 2026-11-03 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/BUILD.gn                       |   1 +
+ .../chrome_download_manager_delegate.cc       |  26 +-
+ .../browser/rearc_bridge/rearc_abi_internal.h |   4 +
+ .../rearc_bridge/rearc_downloads_abi.cc       | 304 ++++++++++++++++++
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  47 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_profile_registry.cc    |   3 +
+ 8 files changed, 385 insertions(+), 3 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index bf3536042d..5d7b2273d8 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1486,6 +1486,7 @@ source_set("core") {
+     sources += [
+       "rearc_bridge/browserless_tab_helpers.cc",
+       "rearc_bridge/browserless_tab_helpers.h",
++      "rearc_bridge/rearc_downloads_abi.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+     ]
+   }
+diff --git a/chrome/browser/download/chrome_download_manager_delegate.cc b/chrome/browser/download/chrome_download_manager_delegate.cc
+index 0cfc34d1e0..d1c4f87792 100644
+--- a/chrome/browser/download/chrome_download_manager_delegate.cc
++++ b/chrome/browser/download/chrome_download_manager_delegate.cc
+@@ -52,6 +52,9 @@
+ #include "chrome/browser/platform_util.h"
+ #include "chrome/browser/policy/chrome_policy_blocklist_service_factory.h"
+ #include "chrome/browser/profiles/profile.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/engine_mode.h"
++#endif
+ #include "chrome/browser/tab_group_sync/tab_group_sync_tab_state.h"
+ #include "chrome/browser/ui/chrome_pages.h"
+ #include "chrome/browser/ui/scoped_tabbed_browser_displayer.h"
+@@ -1419,7 +1422,12 @@ void ChromeDownloadManagerDelegate::OpenDownload(DownloadItem* download) {
+   DownloadUtils::OpenDownload(download, DownloadOpenSource::kUnknown);
+ #else
+ 
+-  if (!DownloadItemModel(download).ShouldPreferOpeningInBrowser()) {
++  // ReArc embeds browser-less tabs: never create a Chrome window to open.
++  if (!DownloadItemModel(download).ShouldPreferOpeningInBrowser()
++#if BUILDFLAG(IS_MAC)
++      || rearc::IsEngineEmbeddedMode()
++#endif
++  ) {
+     RecordDownloadOpen(DOWNLOAD_OPEN_METHOD_DEFAULT_PLATFORM,
+                        download->GetMimeType());
+     OpenDownloadUsingPlatformHandler(download);
+@@ -1713,6 +1721,22 @@ void ChromeDownloadManagerDelegate::RequestConfirmation(
+   return;
+ 
+ #else   // BUILDFLAG(IS_ANDROID)
++#if BUILDFLAG(IS_MAC)
++  // ReArc embedding has no file picker surface yet: save at the suggested
++  // path when only a preference or save-as asked, otherwise cancel.
++  if (rearc::IsEngineEmbeddedMode()) {
++    if (reason == DownloadConfirmationReason::PREFERENCE ||
++        reason == DownloadConfirmationReason::SAVE_AS) {
++      std::move(callback).Run(
++          DownloadConfirmationResult::CONTINUE_WITHOUT_CONFIRMATION,
++          ui::SelectedFileInfo(suggested_path));
++    } else {
++      std::move(callback).Run(DownloadConfirmationResult::CANCELED,
++                              ui::SelectedFileInfo());
++    }
++    return;
++  }
++#endif
+   ShowFilePickerWithUserTakeover(download, suggested_path, std::move(callback));
+ #endif  // BUILDFLAG(IS_ANDROID)
+ }
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 1ccbdebe3c..1dbaff9cc4 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -9,6 +9,7 @@
+ #include "base/functional/callback.h"
+ #include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
+ class GURL;
++class Profile;
+ namespace rearc {
+ bool ABIIsTrustedWebUI(const GURL& url);
+ class TabSession;
+@@ -23,5 +24,8 @@ bool ABIHasServiceFeature(const char* feature);
+ // Wave 18b find in page (rearc_find_abi.cc), driven by the services hooks.
+ void ABIAttachFind(uint64_t tab_id);
+ void ABIDetachFind(uint64_t tab_id);
++// Wave 18b downloads (rearc_downloads_abi.cc), per registered bridge profile.
++void ABIAttachDownloads(Profile* profile, uint64_t profile_id);
++void ABIDetachDownloads(uint64_t profile_id);
+ }  // namespace rearc
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_downloads_abi.cc b/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+new file mode 100644
+index 0000000000..4a4435ecc0
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+@@ -0,0 +1,304 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Wave 18b downloads: Chromium's DownloadManager (via AllDownloadItemNotifier)
++// is the source of truth; the bridge maps item state transitions to events
++// and forwards actions to DownloadItem / ChromeDownloadManagerDelegate.
++
++#include <pthread.h>
++
++#include <map>
++#include <memory>
++#include <string>
++#include <utility>
++
++#include "base/check.h"
++#include "base/files/file_path.h"
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_util.h"
++#include "chrome/browser/download/download_prefs.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
++#include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "chrome/common/pref_names.h"
++#include "components/download/content/public/all_download_item_notifier.h"
++#include "components/download/public/common/download_item.h"
++#include "components/prefs/pref_service.h"
++#include "content/public/browser/download_item_utils.h"
++#include "content/public/browser/download_manager.h"
++
++namespace rearc {
++namespace {
++
++ReArcDownloadCallback download_callback = nullptr;
++void* download_context = nullptr;
++
++enum Kind : uint32_t {
++  kCreated = 0,
++  kUpdated = 1,
++  kCompleted = 2,
++  kInterrupted = 3,
++  kCancelled = 4,
++  kRemoved = 5,
++};
++
++struct Snapshot {
++  uint32_t kind;
++  uint64_t profile_id, tab_id;
++  uint32_t download_id;
++  std::string guid, url, target_path, mime_type;
++  int64_t received_bytes, total_bytes;
++  uint32_t state, danger_type, interrupt_reason;
++  bool paused, can_resume;
++};
++
++uint64_t TabIdFor(download::DownloadItem* item) {
++  content::WebContents* contents =
++      content::DownloadItemUtils::GetWebContents(item);
++  if (!contents) {
++    return 0;
++  }
++  auto& registry = TabRegistry::Get();
++  for (uint64_t id : registry.SessionIds()) {
++    TabSession* session = registry.FindSession(id);
++    if (session && session->web_contents() == contents) {
++      return id;
++    }
++  }
++  return 0;
++}
++
++void Publish(uint32_t kind, uint64_t profile_id, download::DownloadItem* item) {
++  Snapshot s{kind, profile_id, TabIdFor(item), item->GetId(),
++             item->GetGuid(), item->GetURL().spec(),
++             item->GetTargetFilePath().value(), item->GetMimeType(),
++             item->GetReceivedBytes(), item->GetTotalBytes(),
++             static_cast<uint32_t>(item->GetState()),
++             static_cast<uint32_t>(item->GetDangerType()),
++             static_cast<uint32_t>(item->GetLastReason()), item->IsPaused(),
++             item->CanResume()};
++  ABIPost(base::BindOnce(
++      [](Snapshot s) {
++        CHECK(pthread_main_np());
++        if (!download_callback) {
++          return;
++        }
++        ReArcDownloadEvent e{};
++        e.kind = s.kind;
++        e.profile_id = s.profile_id;
++        e.download_id = s.download_id;
++        e.tab_id = s.tab_id;
++        e.guid = s.guid.c_str();
++        e.url = s.url.c_str();
++        e.target_path = s.target_path.c_str();
++        e.mime_type = s.mime_type.c_str();
++        e.received_bytes = s.received_bytes;
++        e.total_bytes = s.total_bytes;
++        e.state = s.state;
++        e.danger_type = s.danger_type;
++        e.interrupt_reason = s.interrupt_reason;
++        e.paused = s.paused;
++        e.can_resume = s.can_resume;
++        download_callback(download_context, &e);
++      },
++      std::move(s)));
++}
++
++class ProfileDownloads : public download::AllDownloadItemNotifier::Observer {
++ public:
++  ProfileDownloads(Profile* profile, uint64_t profile_id)
++      : profile_id_(profile_id), notifier_(profile->GetDownloadManager(), this) {}
++
++  content::DownloadManager* manager() const { return notifier_.GetManager(); }
++
++  // download::AllDownloadItemNotifier::Observer:
++  void OnDownloadCreated(content::DownloadManager*,
++                         download::DownloadItem* item) override {
++    if (item->IsTransient()) {
++      return;
++    }
++    states_[item->GetId()] = item->GetState();
++    Publish(kCreated, profile_id_, item);
++  }
++  void OnDownloadUpdated(content::DownloadManager*,
++                         download::DownloadItem* item) override {
++    auto it = states_.find(item->GetId());
++    if (it == states_.end()) {
++      return;
++    }
++    const auto state = item->GetState();
++    uint32_t kind = kUpdated;
++    if (state != it->second) {
++      switch (state) {
++        case download::DownloadItem::COMPLETE:
++          kind = kCompleted;
++          break;
++        case download::DownloadItem::CANCELLED:
++          kind = kCancelled;
++          break;
++        case download::DownloadItem::INTERRUPTED:
++          kind = kInterrupted;
++          break;
++        default:
++          break;
++      }
++      it->second = state;
++    }
++    Publish(kind, profile_id_, item);
++  }
++  void OnDownloadRemoved(content::DownloadManager*,
++                         download::DownloadItem* item) override {
++    if (states_.erase(item->GetId())) {
++      Publish(kRemoved, profile_id_, item);
++    }
++  }
++  void OnDownloadDestroyed(content::DownloadManager*,
++                           download::DownloadItem* item) override {
++    states_.erase(item->GetId());
++  }
++
++  // Null when unknown, transient or already removed.
++  download::DownloadItem* Find(uint32_t id) {
++    if (!states_.contains(id) || !manager()) {
++      return nullptr;
++    }
++    return manager()->GetDownload(id);
++  }
++
++ private:
++  const uint64_t profile_id_;
++  std::map<uint32_t, download::DownloadItem::DownloadState> states_;
++  download::AllDownloadItemNotifier notifier_;
++};
++
++auto& Downloads() {
++  static base::NoDestructor<std::map<uint64_t, std::unique_ptr<ProfileDownloads>>>
++      downloads;
++  return *downloads;
++}
++
++ReArcStatus Available() {
++  // Any accepted tab call implies a ready, non-stopping engine.
++  return ReArcEngineDefaultProfile() ? REARC_OK : REARC_ENGINE_NOT_READY;
++}
++
++}  // namespace
++
++void ABIAttachDownloads(Profile* profile, uint64_t profile_id) {
++  CHECK(pthread_main_np());
++  Downloads()[profile_id] = std::make_unique<ProfileDownloads>(profile, profile_id);
++}
++void ABIDetachDownloads(uint64_t profile_id) {
++  CHECK(pthread_main_np());
++  Downloads().erase(profile_id);
++}
++
++}  // namespace rearc
++
++void ReArcEngineSetDownloadCallback(ReArcDownloadCallback callback,
++                                    void* context) {
++  CHECK(pthread_main_np());
++  rearc::download_callback = callback;
++  rearc::download_context = context;
++}
++ReArcStatus ReArcDownloadSetPolicy(uint64_t profile_id,
++                                   const char* directory,
++                                   uint32_t prompt) {
++  CHECK(pthread_main_np());
++  if (auto status = rearc::Available()) {
++    return status;
++  }
++  Profile* profile = rearc::FindBridgeProfile(profile_id);
++  if (!profile) {
++    return REARC_PROFILE_NOT_FOUND;
++  }
++  if (prompt > 1) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  base::FilePath path;
++  if (directory) {
++    const std::string value(directory);
++    path = base::FilePath(value);
++    if (value.empty() || value.size() > 4096 || !base::IsStringUTF8(value) ||
++        !path.IsAbsolute() || path.ReferencesParent()) {
++      return REARC_INVALID_ARGUMENT;
++    }
++  }
++  // Chromium's file picker is the later file-chooser concern.
++  if (prompt == 1) {
++    return REARC_UNSUPPORTED;
++  }
++  DownloadPrefs* prefs = DownloadPrefs::FromBrowserContext(profile);
++  if (!prefs) {
++    return REARC_INTERNAL;
++  }
++  if (directory) {
++    // Chromium creates a missing directory on first use; unwritable targets
++    // cancel rather than prompting in embedded mode.
++    prefs->SetDownloadPath(path);
++  }
++  profile->GetPrefs()->SetBoolean(prefs::kPromptForDownload, false);
++  return REARC_OK;
++}
++ReArcStatus ReArcDownloadAction(uint64_t profile_id,
++                                uint32_t download_id,
++                                uint32_t action) {
++  CHECK(pthread_main_np());
++  if (auto status = rearc::Available()) {
++    return status;
++  }
++  auto it = rearc::Downloads().find(profile_id);
++  if (it == rearc::Downloads().end()) {
++    return REARC_PROFILE_NOT_FOUND;
++  }
++  if (action > 5) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  download::DownloadItem* item = it->second->Find(download_id);
++  if (!item) {
++    return REARC_NOT_FOUND;
++  }
++  const auto state = item->GetState();
++  switch (action) {
++    case 0:  // pause
++      if (state != download::DownloadItem::IN_PROGRESS || item->IsPaused()) {
++        return REARC_INVALID_STATE;
++      }
++      item->Pause();
++      return REARC_OK;
++    case 1:  // resume
++      if (!item->CanResume()) {
++        return REARC_INVALID_STATE;
++      }
++      item->Resume(/*user_resume=*/true);
++      return REARC_OK;
++    case 2:  // cancel
++      if (item->IsDone()) {
++        return REARC_INVALID_STATE;
++      }
++      item->Cancel(/*user_cancel=*/true);
++      return REARC_OK;
++    case 3:  // open with the platform handler (embedded mode)
++      if (state != download::DownloadItem::COMPLETE ||
++          !item->CanOpenDownload()) {
++        return REARC_INVALID_STATE;
++      }
++      item->OpenDownload();
++      return REARC_OK;
++    case 4:  // reveal in Finder
++      if (item->GetTargetFilePath().empty()) {
++        return REARC_INVALID_STATE;
++      }
++      item->ShowDownloadInShell();
++      return REARC_OK;
++    case 5:  // remove from Chromium's list/history (cancels if in progress)
++      item->Remove();
++      return REARC_OK;
++  }
++  return REARC_INVALID_ARGUMENT;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index aef8a13de3..047476f1af 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 16, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 17, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -396,6 +396,51 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcTabFindNext(uint64_t tab_id, bool forward);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabFindStop(uint64_t tab_id,
+                                                  uint32_t action);
+ 
++// Downloads (downloads, ABI 1.17). Chromium's DownloadManager stays the source
++// of truth (history, chrome://downloads, safety checks). Events cover every
++// non-transient item of each live bridge profile, including items restored
++// from history at profile load (kind 0 with their current state).
++// kind: 0 created, 1 updated, 2 completed, 3 interrupted, 4 cancelled,
++// 5 removed. state: 0 in_progress, 1 complete, 2 cancelled, 3 interrupted.
++// download_id is Chromium's per-profile item ID; tab_id is the initiating live
++// bridge tab or 0. total_bytes 0 means unknown. danger_type and
++// interrupt_reason are Chromium's download::DownloadDangerType and
++// DownloadInterruptReason values (0 = none). target_path is empty until
++// Chromium determines it.
++typedef struct ReArcDownloadEvent {
++  uint32_t kind;
++  uint64_t profile_id;
++  uint32_t download_id;
++  uint64_t tab_id;
++  const char* guid;
++  const char* url;
++  const char* target_path;
++  const char* mime_type;
++  int64_t received_bytes, total_bytes;
++  uint32_t state, danger_type, interrupt_reason;
++  bool paused, can_resume;
++} ReArcDownloadEvent;
++typedef void (*ReArcDownloadCallback)(void* context,
++                                      const ReArcDownloadEvent* event);
++// Null disables delivery, including already queued events.
++REARC_ENGINE_EXPORT void ReArcEngineSetDownloadCallback(
++    ReArcDownloadCallback callback, void* context);
++// directory: absolute UTF-8 path without '..' (null keeps Chromium's current
++// default); persisted in the profile's Chromium download prefs. prompt: 0 save
++// without asking (the only mode in 1.17); 1 Chromium's location picker is
++// unsupported until the file chooser ABI. Embedded mode never shows Chromium's
++// picker or opens a Chrome window: confirmations Chromium would ask for are
++// accepted at the suggested path (preference/save-as) or cancelled.
++REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadSetPolicy(uint64_t profile_id,
++                                                       const char* directory,
++                                                       uint32_t prompt);
++// action: 0 pause, 1 resume, 2 cancel, 3 open (platform handler), 4 reveal in
++// Finder, 5 remove from Chromium's list (cancels an active item). Unknown or
++// removed item: not_found; action not valid in the item's state: invalid_state.
++REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadAction(uint64_t profile_id,
++                                                    uint32_t download_id,
++                                                    uint32_t action);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index b5e0f102b1..44cfe3543d 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -525,6 +525,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "password_autofill" ||
+          std::string(feature) == "find_in_page" ||
++         std::string(feature) == "downloads" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 155115ec24..0022d190d2 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.18.0";
++  return "0.19.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.cc b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+index 02c4c36b56..01cb95a5b6 100644
+--- a/chrome/browser/rearc_bridge/rearc_profile_registry.cc
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+@@ -45,9 +45,12 @@ void RegisterBridgeProfile(Profile* profile, bool initial) {
+   if (initial && !default_id) {
+     default_id = id;
+   }
++  ABIAttachDownloads(profile, id);
+ }
+ void UnregisterBridgeProfile(Profile* profile) {
+   CHECK(pthread_main_np());
++  // Before the profile (and its DownloadManager) can be destroyed.
++  ABIDetachDownloads(BridgeProfileId(profile));
+   if (BridgeProfileId(profile) == default_id) {
+     default_id = 0;
+   }

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <!-- ReArc Monochrome Mark: single colour via currentColor; the arc is separated from the sun by a knockout gap -->
+  <g transform="translate(256.0 256.0) scale(0.64) translate(-512 -493)"><defs>
+  <mask id="mono-ko" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="2000">
+    <rect x="-500" y="-500" width="2000" height="2000" fill="#fff"/>
+    <path d="M 212.6 666.0 A 380 380 0 0 1 485.5 520.9" fill="none" stroke="#000" stroke-width="226" stroke-linecap="round"/>
+    <path d="M 420.1 531.3 A 380 380 0 0 1 811.4 666.0" fill="none" stroke="#000" stroke-width="226" stroke-linecap="round"/>
+  </mask>
+  <clipPath id="mono-above"><path d="M 0 0 H 1024 V 1100 H 0 Z M 132 900 a 380 380 0 1 0 760 0 a 380 380 0 1 0 -760 0 Z" clip-rule="evenodd"/></clipPath>
+</defs>
+<g mask="url(#mono-ko)"><g clip-path="url(#mono-above)"><circle cx="512" cy="480" r="225" fill="currentColor"/></g></g>
+<path d="M 212.6 666.0 A 380 380 0 0 1 485.5 520.9" fill="none" stroke="currentColor" stroke-width="130" stroke-linecap="round"/>
+<path d="M 420.1 531.3 A 380 380 0 0 1 811.4 666.0" fill="none" stroke="currentColor" stroke-width="130" stroke-linecap="round"/></g>
+</svg>

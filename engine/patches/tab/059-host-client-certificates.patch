@@ -1,0 +1,562 @@
+From e1bb6df2aa8ddf2255d24389c2533e0620a4e3ce Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 17:31:58 +0400
+Subject: [PATCH] P-TAB-001 wave 18h: route client certificate selection to the
+ host
+
+Registry tabs hand ChromeContentBrowserClient::SelectClientCertificate's identity list and ClientCertificateDelegate to a bounded host request/response channel after Chromium's enterprise auto-select policy runs. The host sees challenger origin plus per-identity subject, issuer, expiry and SHA-256 leaf fingerprint, never key or certificate bytes. A listed fingerprint acquires the private key asynchronously through SelfOwningAcquirePrivateKey; cancel, no callback, navigation, close, replacement, 30-second deadline and SSL-handler cancellation drop the delegate (abort, never a cached no-certificate choice), including while acquisition is in flight. Error-page auto-reload no longer retries ERR_SSL_CLIENT_AUTH_CERT_NEEDED, which would re-ask after every abort. A test-only memory ClientCertStore over net/data identities exists only in !NDEBUG non-official builds and only with --rearc-test-client-cert-dir plus --use-mock-keychain in embedded mode; no Keychain identity is read. ABI 1.41 / bridge 0.43.0 (client_certificates); loopback mutual-TLS selection, cancel, invalid fingerprint, cache, navigation/close/acquisition/signing/replacement/shutdown cases pass with no outside connection.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/app/framework.exports                  |   2 +
+ chrome/app/framework.order                    |   2 +
+ chrome/browser/BUILD.gn                       |   3 +
+ .../browser/chrome_content_browser_client.cc  |   8 +
+ .../rearc_client_cert_test_store.cc           | 114 +++++++++++
+ .../rearc_bridge/rearc_client_certificates.cc | 179 ++++++++++++++++++
+ .../rearc_bridge/rearc_client_certificates.h  |  23 +++
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  31 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_profile_registry.cc    |   2 +
+ .../rearc_bridge/rearc_services_abi.cc        |   2 +
+ .../browser/net_error_auto_reloader.cc        |   3 +
+ 13 files changed, 370 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_client_cert_test_store.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_client_certificates.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_client_certificates.h
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 1b0004eccf..e4c16e73fb 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -28,6 +28,8 @@ _ReArcEngineABIMinorVersion
+ _ReArcEngineVersion
+ _ReArcEngineHasFeature
+ _ReArcStatusName
++_ReArcEngineSetClientCertificateCallback
++_ReArcClientCertificateRespond
+ _ReArcTabOpenDevTools
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index c93b467a5d..a08aa712ee 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -35,6 +35,8 @@ _ReArcEngineABIMinorVersion
+ _ReArcEngineVersion
+ _ReArcEngineHasFeature
+ _ReArcStatusName
++_ReArcEngineSetClientCertificateCallback
++_ReArcClientCertificateRespond
+ _ReArcTabOpenDevTools
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index f4caac3aed..939e95f78e 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1506,6 +1506,9 @@ source_set("core") {
+       "rearc_bridge/rearc_password_leak_abi.cc",
+       "rearc_bridge/rearc_extension_windows.cc",
+       "rearc_bridge/rearc_autofill_save.cc",
++      "rearc_bridge/rearc_client_certificates.cc",
++      "rearc_bridge/rearc_client_certificates.h",
++      "rearc_bridge/rearc_client_cert_test_store.cc",
+       "rearc_bridge/rearc_devtools.cc",
+       "rearc_bridge/rearc_devtools.h",
+       "rearc_bridge/rearc_http_auth.cc",
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index ec6ee59395..146d67ae10 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -6,6 +6,8 @@
+ 
+ #if BUILDFLAG(IS_MAC)
+ #include "chrome/browser/rearc_bridge/rearc_devtools.h"
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#include "chrome/browser/rearc_bridge/rearc_client_certificates.h"
+ #endif
+ 
+ #include <algorithm>
+@@ -4373,6 +4375,12 @@ base::OnceClosure ChromeContentBrowserClient::SelectClientCertificate(
+       !matching_certificates.empty() ? std::move(matching_certificates)
+                                      : std::move(nonmatching_certificates);
+ 
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsBrowserlessTabContents(web_contents)) {
++    return rearc::SelectHostClientCertificate(web_contents, cert_request_info,
++        std::move(client_cert_choices), std::move(delegate));
++  }
++#endif
+   return ShowSSLClientCertificateSelector(web_contents, cert_request_info,
+                                           std::move(client_cert_choices),
+                                           std::move(delegate));
+diff --git a/chrome/browser/rearc_bridge/rearc_client_cert_test_store.cc b/chrome/browser/rearc_bridge/rearc_client_cert_test_store.cc
+new file mode 100644
+index 0000000000..f18d448495
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_client_cert_test_store.cc
+@@ -0,0 +1,114 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_client_certificates.h"
++
++// Compiled only into debug, non-official builds (never release/packaged), and
++// active only with --rearc-test-client-cert-dir plus --use-mock-keychain.
++#if !defined(NDEBUG) && !defined(OFFICIAL_BUILD)
++#include "base/command_line.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/memory/weak_ptr.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/task/thread_pool.h"
++#include "chrome/browser/net/profile_network_context_service.h"
++#include "chrome/browser/net/profile_network_context_service_factory.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/rearc_bridge/engine_mode.h"
++#include "crypto/keypair.h"
++#include "net/cert/x509_certificate.h"
++#include "net/ssl/client_cert_store.h"
++#include "net/ssl/crypto_private_key.h"
++#include "net/ssl/ssl_private_key.h"
++
++namespace rearc {
++namespace {
++// Fixture keys are plain net/data keys. No SecIdentity, SecKey or Keychain API
++// is invoked, including during signing. Every delayed operation owns its inputs.
++class DelayedKey : public net::SSLPrivateKey {
++ public:
++  explicit DelayedKey(scoped_refptr<net::SSLPrivateKey> key) : key_(std::move(key)) {}
++  std::string GetProviderName() override { return "ReArc test memory key"; }
++  std::vector<uint16_t> GetAlgorithmPreferences() override { return key_->GetAlgorithmPreferences(); }
++  void Sign(uint16_t algorithm, base::span<const uint8_t> input, SignCallback callback) override {
++    LOG(WARNING) << "TEST CLIENT CERT signing started";
++    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(FROM_HERE,
++        base::BindOnce([](scoped_refptr<net::SSLPrivateKey> key, uint16_t algorithm,
++                          std::vector<uint8_t> input, SignCallback callback) {
++          LOG(WARNING) << "TEST CLIENT CERT signing resumed";
++          key->Sign(algorithm, input, std::move(callback));
++        }, key_, algorithm, std::vector<uint8_t>(input.begin(), input.end()), std::move(callback)),
++        base::Milliseconds(1000));
++  }
++ private:
++  ~DelayedKey() override = default;
++  scoped_refptr<net::SSLPrivateKey> key_;
++};
++class TestIdentity : public net::ClientCertIdentity {
++ public:
++  TestIdentity(scoped_refptr<net::X509Certificate> cert, scoped_refptr<net::SSLPrivateKey> key)
++      : ClientCertIdentity(std::move(cert)), key_(std::move(key)) {}
++  void AcquirePrivateKey(base::OnceCallback<void(scoped_refptr<net::SSLPrivateKey>)> callback) override {
++    LOG(WARNING) << "TEST CLIENT CERT acquiring private key";
++    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(FROM_HERE,
++        base::BindOnce(std::move(callback), key_), base::Milliseconds(500));
++  }
++ private:
++  scoped_refptr<net::SSLPrivateKey> key_;
++};
++net::ClientCertIdentityList ReadIdentities(base::FilePath directory) {
++  net::ClientCertIdentityList identities;
++  for (const char* name : {"client_1", "client_2"}) {
++    std::string pem, key_bytes, ca;
++    if (!base::ReadFileToString(directory.AppendASCII(std::string(name) + ".pem"), &pem) ||
++        !base::ReadFileToString(directory.AppendASCII(std::string(name) + "_ca.pem"), &ca) ||
++        !base::ReadFileToString(directory.AppendASCII(std::string(name) + ".pk8"), &key_bytes)) return {};
++    auto certs = net::X509Certificate::CreateCertificateListFromBytes(base::as_byte_span(pem), net::X509Certificate::FORMAT_AUTO);
++    auto issuers = net::X509Certificate::CreateCertificateListFromBytes(base::as_byte_span(ca), net::X509Certificate::FORMAT_AUTO);
++    auto key = crypto::keypair::PrivateKey::FromPrivateKeyInfo(base::as_byte_span(key_bytes));
++    if (certs.size() != 1 || issuers.size() != 1 || !key) return {};
++    std::vector<bssl::UniquePtr<CRYPTO_BUFFER>> chain;
++    chain.push_back(bssl::UpRef(issuers[0]->cert_buffer()));
++    auto cert = certs[0]->CloneWithDifferentIntermediates(std::move(chain));
++    identities.push_back(std::make_unique<TestIdentity>(std::move(cert),
++        base::MakeRefCounted<DelayedKey>(net::WrapCryptoPrivateKey(std::move(*key)))));
++  }
++  return identities;
++}
++class TestStore : public net::ClientCertStore {
++ public:
++  explicit TestStore(base::FilePath directory) : directory_(std::move(directory)) {}
++  void GetClientCerts(scoped_refptr<const net::SSLCertRequestInfo>, ClientCertListCallback callback) override {
++    LOG(WARNING) << "TEST CLIENT CERT memory store (no Keychain)";
++    base::ThreadPool::PostTaskAndReplyWithResult(FROM_HERE, {base::MayBlock()},
++        base::BindOnce(&ReadIdentities, directory_),
++        base::BindOnce([](base::WeakPtr<TestStore> store, ClientCertListCallback callback,
++                          net::ClientCertIdentityList identities) {
++          if (store) std::move(callback).Run(std::move(identities));
++        }, weak_.GetWeakPtr(), std::move(callback)));
++  }
++ private:
++  base::FilePath directory_;
++  base::WeakPtrFactory<TestStore> weak_{this};
++};
++}  // namespace
++void InstallTestClientCertStore(Profile* profile) {
++  const auto* command = base::CommandLine::ForCurrentProcess();
++  // Deliberately absent in NDEBUG builds, opt-in, embedded-only, and requires
++  // the same mock-Keychain switch as every native harness process.
++  if (!IsEngineEmbeddedMode() || !command->HasSwitch("use-mock-keychain") ||
++      !command->HasSwitch("rearc-test-client-cert-dir")) return;
++  auto directory = command->GetSwitchValuePath("rearc-test-client-cert-dir");
++  ProfileNetworkContextServiceFactory::GetForContext(profile)
++      ->set_client_cert_store_factory_for_testing(base::BindRepeating(
++          [](base::FilePath directory) -> std::unique_ptr<net::ClientCertStore> {
++            return std::make_unique<TestStore>(std::move(directory));
++          }, directory));
++}
++}  // namespace rearc
++#else
++namespace rearc { void InstallTestClientCertStore(Profile*) {} }
++#endif
+diff --git a/chrome/browser/rearc_bridge/rearc_client_certificates.cc b/chrome/browser/rearc_bridge/rearc_client_certificates.cc
+new file mode 100644
+index 0000000000..28bb648e58
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_client_certificates.cc
+@@ -0,0 +1,179 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_client_certificates.h"
++
++#include <pthread.h>
++#include <cstring>
++#include <map>
++#include <string>
++#include <vector>
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/timer/timer.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "content/public/browser/client_certificate_delegate.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "net/cert/x509_certificate.h"
++#include "net/ssl/ssl_cert_request_info.h"
++#include "net/ssl/ssl_private_key.h"
++
++namespace rearc {
++namespace {
++class Request;
++ReArcClientCertificateCallback host = nullptr;
++void* host_context = nullptr;
++// Distinct from other request channels, so cross-channel IDs never resolve.
++uint64_t epoch = 0, next_id = uint64_t{1} << 56;
++auto& Pending() {
++  static base::NoDestructor<std::map<uint64_t, std::unique_ptr<Request>>> requests;
++  return *requests;
++}
++// Removes the request before it is destroyed. Destroying it drops the
++// delegate, which aborts the handshake; content can synchronously run the
++// returned cancellation closure, which then finds nothing.
++void Retire(uint64_t id, bool withdraw);
++void Withdraw(uint64_t id) { Retire(id, true); }
++struct Entry {
++  std::string fingerprint, subject, issuer;
++  int64_t expiry_us;
++};
++class Request : public content::WebContentsObserver {
++ public:
++  Request(TabSession* session, net::SSLCertRequestInfo* info,
++          net::ClientCertIdentityList identities,
++          std::unique_ptr<content::ClientCertificateDelegate> delegate)
++      : content::WebContentsObserver(session->web_contents()),
++        event_{session->profile_id(), session->tab_id(), session->content_generation(),
++               next_id++, 0, nullptr, nullptr, 0},
++        origin_("https://" + info->host_and_port.ToString()),
++        identities_(std::move(identities)), delegate_(std::move(delegate)) {
++    for (const auto& identity : identities_) {
++      const auto* cert = identity->certificate();
++      entries_.push_back({base::HexEncode(net::X509Certificate::CalculateFingerprint256(cert->cert_buffer())),
++                         cert->subject().GetDisplayName(), cert->issuer().GetDisplayName(),
++                         (cert->valid_expiry() - base::Time::UnixEpoch()).InMicroseconds()});
++    }
++    deadline_.Start(FROM_HERE, base::Seconds(30), base::BindOnce(&Withdraw, event_.request_id));
++  }
++  uint64_t id() const { return event_.request_id; }
++  uint64_t tab() const { return event_.tab_id; }
++  void Publish(uint32_t phase) {
++    auto event = event_; event.phase = phase;
++    ABIPost(base::BindOnce([](uint64_t expected, ReArcClientCertificateEvent event,
++                             std::string origin, std::vector<Entry> entries) {
++      if (!host || epoch != expected || (!event.phase && !Pending().contains(event.request_id))) return;
++      std::vector<ReArcClientCertificateIdentity> list;
++      for (const auto& e : entries) list.push_back({e.fingerprint.c_str(), e.subject.c_str(), e.issuer.c_str(), e.expiry_us});
++      event.origin = origin.c_str(); event.identities = list.empty() ? nullptr : list.data();
++      event.identity_count = list.size(); host(host_context, &event);
++    }, epoch, event, origin_, entries_));
++  }
++  // Only for a listed, still-unanswered request. nullptr cancels.
++  ReArcStatus Respond(const char* fingerprint) {
++    if (responded_) return REARC_NOT_FOUND;
++    if (!fingerprint) {
++      Retire(id(), /*withdraw=*/false);  // Destroys this.
++      return REARC_OK;
++    }
++    size_t index = 0;
++    while (index < entries_.size() && entries_[index].fingerprint != fingerprint) ++index;
++    if (index == entries_.size()) return REARC_INVALID_ARGUMENT;
++    responded_ = true;
++    // The response returns before private-key/provider code runs. Retirement
++    // still owns the delegate while asynchronous acquisition is in flight.
++    ABIPost(base::BindOnce(&Request::Acquire, weak_.GetWeakPtr(), index));
++    return REARC_OK;
++  }
++
++ private:
++  void Acquire(size_t index) {
++    scoped_refptr<net::X509Certificate> cert = identities_[index]->certificate();
++    net::ClientCertIdentity::SelfOwningAcquirePrivateKey(std::move(identities_[index]),
++        base::BindOnce(&Request::Acquired, weak_.GetWeakPtr(), std::move(cert)));
++  }
++  void Acquired(scoped_refptr<net::X509Certificate> cert, scoped_refptr<net::SSLPrivateKey> key);
++  void DidStartNavigation(content::NavigationHandle* navigation) override {
++    if (navigation->IsInPrimaryMainFrame() && !navigation->IsSameDocument()) Withdraw(id());
++  }
++  void WebContentsDestroyed() override { Withdraw(id()); }
++  ReArcClientCertificateEvent event_;
++  std::string origin_;
++  std::vector<Entry> entries_;
++  net::ClientCertIdentityList identities_;
++  std::unique_ptr<content::ClientCertificateDelegate> delegate_;
++  bool responded_ = false;
++  base::OneShotTimer deadline_;
++  base::WeakPtrFactory<Request> weak_{this};
++};
++
++void Retire(uint64_t id, bool withdraw) {
++  auto it = Pending().find(id);
++  if (it == Pending().end()) return;
++  std::unique_ptr<Request> request = std::move(it->second);
++  Pending().erase(it);
++  if (withdraw) request->Publish(1);
++  // Weak key-acquisition completion is now harmless. Never substitutes a
++  // cached ContinueWithCertificate(nullptr) for cancellation.
++}
++
++void Request::Acquired(scoped_refptr<net::X509Certificate> cert,
++                       scoped_refptr<net::SSLPrivateKey> key) {
++  const uint64_t request_id = id();
++  if (!key) {
++    Withdraw(request_id);  // Destroys this.
++    return;
++  }
++  std::unique_ptr<Request> self = std::move(Pending().at(request_id));
++  Pending().erase(request_id);
++  auto delegate = std::move(delegate_);
++  self.reset();  // Destroys this; only locals are used below.
++  // Content caches this selection for the host and port and can synchronously
++  // run the cancellation closure, which then finds no request.
++  delegate->ContinueWithCertificate(std::move(cert), std::move(key));
++}
++}  // namespace
++
++base::OnceClosure SelectHostClientCertificate(content::WebContents* contents,
++    net::SSLCertRequestInfo* info, net::ClientCertIdentityList identities,
++    std::unique_ptr<content::ClientCertificateDelegate> delegate) {
++  CHECK(pthread_main_np());
++  // Returning without a closure destroys the delegate: content aborts.
++  if (!host || Pending().size() >= 64 || identities.size() > 256) return {};
++  for (uint64_t id : TabRegistry::Get().SessionIds()) {
++    auto* session = TabRegistry::Get().FindSession(id);
++    if (session->web_contents() != contents || session->close_state() != TabSession::CloseState::kOpen) continue;
++    auto request = std::make_unique<Request>(session, info, std::move(identities), std::move(delegate));
++    const uint64_t request_id = request->id();
++    Pending().emplace(request_id, std::move(request));
++    Pending().at(request_id)->Publish(0);
++    return base::BindOnce(&Withdraw, request_id);
++  }
++  return {};
++}
++void ABICancelClientCertificates(uint64_t tab_id) {
++  std::vector<uint64_t> ids;
++  for (const auto& [id, request] : Pending()) if (request->tab() == tab_id) ids.push_back(id);
++  for (uint64_t id : ids) Withdraw(id);
++}
++}  // namespace rearc
++
++void ReArcEngineSetClientCertificateCallback(ReArcClientCertificateCallback callback, void* context) {
++  CHECK(pthread_main_np());
++  // Withdrawals queued here are suppressed by the epoch, as for http_auth.
++  while (!rearc::Pending().empty()) rearc::Withdraw(rearc::Pending().begin()->first);
++  ++rearc::epoch; rearc::host = callback; rearc::host_context = context;
++}
++ReArcStatus ReArcClientCertificateRespond(uint64_t id, const char* fingerprint) {
++  CHECK(pthread_main_np());
++  if (fingerprint && strnlen(fingerprint, 65) != 64) return REARC_INVALID_ARGUMENT;
++  auto it = rearc::Pending().find(id);
++  if (it == rearc::Pending().end()) return REARC_NOT_FOUND;
++  return it->second->Respond(fingerprint);
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_client_certificates.h b/chrome/browser/rearc_bridge/rearc_client_certificates.h
+new file mode 100644
+index 0000000000..45cabea04f
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_client_certificates.h
+@@ -0,0 +1,23 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_CLIENT_CERTIFICATES_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_CLIENT_CERTIFICATES_H_
++#include <cstdint>
++#include <memory>
++#include "base/functional/callback.h"
++#include "net/ssl/client_cert_identity.h"
++namespace content { class WebContents; class ClientCertificateDelegate; }
++namespace net { class SSLCertRequestInfo; }
++class Profile;
++namespace rearc {
++base::OnceClosure SelectHostClientCertificate(content::WebContents*,
++    net::SSLCertRequestInfo*, net::ClientCertIdentityList,
++    std::unique_ptr<content::ClientCertificateDelegate>);
++void ABICancelClientCertificates(uint64_t tab_id);
++// Test-only seam: compiled only into !NDEBUG, non-official builds and active
++// only with --rearc-test-client-cert-dir and --use-mock-keychain in embedded
++// mode. Reads net/data identities; never Keychain. No-op in release builds.
++void InstallTestClientCertStore(Profile*);
++}
++#endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 7c5127d81f..d25a68010e 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 40, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 41, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -1002,6 +1002,35 @@ REARC_ENGINE_EXPORT void ReArcEngineSetHttpAuthCallback(ReArcHttpAuthCallback, v
+ // each, including empty strings. Repeated/stale request_id => not_found.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcHttpAuthRespond(uint64_t request_id, bool cancel, const char* username, const char* password);
+ 
++// TLS client-certificate selection (client_certificates, ABI 1.41).
++// Borrowed display names and SHA-256 fingerprint of leaf DER (64 uppercase hex
++// digits); expiry_us is Unix microseconds. No private key or cert bytes cross
++// the ABI. Identity list is scoped to this request (0..256 entries).
++typedef struct ReArcClientCertificateIdentity {
++  const char* fingerprint;
++  const char* subject;
++  const char* issuer;
++  int64_t expiry_us;
++} ReArcClientCertificateIdentity;
++typedef struct ReArcClientCertificateEvent {
++  uint64_t profile_id, tab_id, content_generation, request_id;
++  uint32_t phase;  // 0 request, 1 withdrawn (also during key acquisition);
++                   // a host's own cancel is not echoed as a withdrawal.
++  const char* origin;  // HTTPS challenger including port, not the page URL.
++  const ReArcClientCertificateIdentity* identities;
++  size_t identity_count;
++} ReArcClientCertificateEvent;
++typedef void (*ReArcClientCertificateCallback)(void*, const ReArcClientCertificateEvent*);
++// Replacing/unregistering cancels requests. No callback aborts without UI.
++REARC_ENGINE_EXPORT void ReArcEngineSetClientCertificateCallback(ReArcClientCertificateCallback, void*);
++// nullptr fingerprint cancels (does NOT cache a no-certificate choice); the
++// ERR_SSL_CLIENT_AUTH_CERT_NEEDED error page is not auto-reloaded/re-asked.
++// A listed fingerprint selects, then acquires the private key asynchronously.
++// Invalid fingerprint => invalid_argument, leaves pending; accepted/stale id =>
++// not_found. Navigation, close, replacement, 30-second deadline and SSL-handler
++// cancellation retire the request, including while acquisition is in flight.
++REARC_ENGINE_EXPORT ReArcStatus ReArcClientCertificateRespond(uint64_t request_id, const char* fingerprint);
++
+ // Registry-hosted bundled DevTools (devtools, ABI 1.40). Always creates a NEW
+ // frontend tab in the target's exact profile/space, returns its id before
+ // tab.created (foreground disposition, opener = target). Attach/close as any
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 882902d32c..987cfbc5da 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -554,6 +554,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "http_auth" ||
+          std::string(feature) == "link_open_requests" ||
+          std::string(feature) == "devtools" ||
++         std::string(feature) == "client_certificates" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 5410fc4101..88370e1f38 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.42.0";
++  return "0.43.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.cc b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+index db956547e1..499819857e 100644
+--- a/chrome/browser/rearc_bridge/rearc_profile_registry.cc
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++#include "chrome/browser/rearc_bridge/rearc_client_certificates.h"
+ 
+ #include <pthread.h>
+ 
+@@ -47,6 +48,7 @@ void RegisterBridgeProfile(Profile* profile, bool initial) {
+   if (initial && !default_id) {
+     default_id = id;
+   }
++  InstallTestClientCertStore(profile);
+   ABIAttachDownloads(profile, id);
+   AttachExtensionActions(profile);
+ }
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 45f37c9ed9..5e9f4c3544 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -34,6 +34,7 @@
+ #include "chrome/browser/rearc_bridge/media_adapter.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
+ #include "chrome/browser/rearc_bridge/rearc_http_auth.h"
++#include "chrome/browser/rearc_bridge/rearc_client_certificates.h"
+ #include "chrome/browser/rearc_bridge/rearc_autofill_save.h"
+ #include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
+ #include "chrome/browser/rearc_bridge/rearc_pip.h"
+@@ -1103,6 +1104,7 @@ void ABIDetachServices(uint64_t id) {
+   CHECK(pthread_main_np());
+   ABICancelPasswords(id);
+   ABICancelHttpAuth(id);
++  ABICancelClientCertificates(id);
+   ABICancelAutofillSave(id);
+   ABICancelExtensionPrompts(id, 0);
+   ABICancelExtensionTabs(id, 0);
+diff --git a/components/error_page/content/browser/net_error_auto_reloader.cc b/components/error_page/content/browser/net_error_auto_reloader.cc
+index 8f2bc61a1b..f2c7c239b4 100644
+--- a/components/error_page/content/browser/net_error_auto_reloader.cc
++++ b/components/error_page/content/browser/net_error_auto_reloader.cc
+@@ -34,6 +34,9 @@ bool ShouldAutoReload(content::NavigationHandle* handle) {
+          // Do not trigger if the server rejects a client certificate.
+          // https://crbug.com/431387
+          !net::IsClientCertificateError(net_error) &&
++         // Aborted client-certificate selection is not cached; a reload would
++         // only ask again.
++         net_error != net::ERR_SSL_CLIENT_AUTH_CERT_NEEDED &&
+          // Some servers reject client certificates with a generic
+          // handshake_failure alert.
+          // https://crbug.com/431387
+-- 
+2.54.0 (Apple Git-157)
+

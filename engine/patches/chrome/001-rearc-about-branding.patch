@@ -1,0 +1,52 @@
+P-BUILD-001 (branding slice 1) — UA product token and client-hints brand "ReArc".
+
+Warm-up for the overlay pipeline: the smallest real divergence from stock
+Chromium. Two mechanical hunks:
+1. components/version_info/version_info_with_user_agent.cc — the User-Agent
+   product token becomes "ReArc/<version>" (was "Chrome/<version>"), full and
+   reduced UA forms.
+2. components/embedder_support/user_agent_utils.cc — the base-project brand in
+   the Sec-CH-UA brand list becomes "ReArc" (was "Chromium").
+No behavior change beyond advertised tokens. NOTE: both touched files live in
+components/, so patches/README.md area rules would place this under
+components/; it is kept at the task-specified chrome/ path.
+
+Drift note (2026-11-01): components/version_info/version_info.cc no longer
+exists at this pin; product naming moved to generated
+base/version_info/version_info_values.h (PRODUCT_NAME), which rule 6 forbids
+patching. The UA token functions above are the compilable branding surface.
+
+Last rebased: 2026-11-01 @ Chromium 156.0.8078.74
+(d331de35ca8ab1358c7a17e4bd41627d55eaef51).
+
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index e699a6a394..ff0f3b491c 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -513,7 +513,7 @@ blink::UserAgentBrandList GenerateBrandVersionList(
+ 
+   blink::UserAgentBrandVersion greasey_bv =
+       GetGreasedUserAgentBrandVersion(seed, output_version_type);
+-  blink::UserAgentBrandVersion chromium_bv = {"Chromium", version};
++  blink::UserAgentBrandVersion chromium_bv = {"ReArc", version};
+ 
+   blink::UserAgentBrandList brand_version_list = {std::move(greasey_bv),
+                                                   std::move(chromium_bv)};
+diff --git a/components/version_info/version_info_with_user_agent.cc b/components/version_info/version_info_with_user_agent.cc
+index 49bdf4acbd..d4b2f728ce 100644
+--- a/components/version_info/version_info_with_user_agent.cc
++++ b/components/version_info/version_info_with_user_agent.cc
+@@ -10,11 +10,11 @@
+ namespace version_info {
+ 
+ std::string GetProductNameAndVersionForReducedUserAgent() {
+-  return base::StrCat({"Chrome/", GetMajorVersionNumber(), ".0.0.0"});
++  return base::StrCat({"ReArc/", GetMajorVersionNumber(), ".0.0.0"});
+ }
+ 
+ std::string GetProductNameAndVersionForUserAgent() {
+-  return base::StrCat({"Chrome/", GetVersionNumber()});
++  return base::StrCat({"ReArc/", GetVersionNumber()});
+ }
+ 
+ }  // namespace version_info

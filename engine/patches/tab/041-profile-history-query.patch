@@ -1,0 +1,307 @@
+From 0638fbe4ec4c8c55942faa522f61284066edbb0e Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 10:33:02 +0400
+Subject: [PATCH] P-TAB-001 wave 18d: query and delete profile history through
+ HistoryService
+
+Add bounded recent/text history queries and URL/range removal with deferred callbacks, profile cancellation and explicit OTR rejection. ABI 1.23 / bridge 0.25.0; build p65 and native history isolation, exact range boundaries and cancellation pass.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/browser/BUILD.gn                       |   1 +
+ .../browser/rearc_bridge/rearc_abi_internal.h |   1 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  30 +++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../browser/rearc_bridge/rearc_history_abi.cc | 168 ++++++++++++++++++
+ .../rearc_bridge/rearc_profile_registry.cc    |   1 +
+ 7 files changed, 202 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_history_abi.cc
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 74e7ccdfa9..57c04f1136 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1487,6 +1487,7 @@ source_set("core") {
+       "rearc_bridge/browserless_tab_helpers.cc",
+       "rearc_bridge/browserless_tab_helpers.h",
+       "rearc_bridge/rearc_downloads_abi.cc",
++      "rearc_bridge/rearc_history_abi.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+       "rearc_bridge/rearc_file_chooser.cc",
+       "rearc_bridge/rearc_file_chooser.h",
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 524a5e52bc..f82a945df0 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -33,5 +33,6 @@ void ABICancelJavaScriptDialogs(uint64_t tab_id);
+ // Wave 18b downloads (rearc_downloads_abi.cc), per registered bridge profile.
+ void ABIAttachDownloads(Profile* profile, uint64_t profile_id);
+ void ABIDetachDownloads(uint64_t profile_id);
++void ABICancelHistory(uint64_t profile_id);
+ }  // namespace rearc
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 185b5493ce..c344627f54 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 22, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 23, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -133,6 +133,34 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileCreateOffTheRecord(
+ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileClose(
+     uint64_t profile_id, bool force, ReArcCompletion completion, void* context);
+ 
++// HistoryService queries/deletions (history_query, ABI 1.23). No OTR access.
++// Empty text returns recent unique URLs, newest first. UTF-8 <=4096 bytes;
++// limit 1..1000. visit_time_us is microseconds since Unix epoch; visit_count
++// is Chromium's total URL visit count. Strings/rows are borrowed in callback.
++// Accepted calls complete once, deferred; profile release cancels observation
++// (deletion already dispatched can still take effect). At most 64 pending.
++typedef struct ReArcHistoryEntry {
++  const char* title;
++  const char* url;
++  int64_t visit_time_us;
++  int32_t visit_count;
++} ReArcHistoryEntry;
++typedef void (*ReArcHistoryCallback)(void* context, ReArcStatus status,
++                                    uint64_t profile_id,
++                                    const ReArcHistoryEntry* entries,
++                                    size_t count);
++REARC_ENGINE_EXPORT ReArcStatus ReArcHistoryQuery(
++    uint64_t profile_id, const char* text, uint32_t limit,
++    ReArcHistoryCallback completion, void* context);
++REARC_ENGINE_EXPORT ReArcStatus ReArcHistoryDeleteURL(
++    uint64_t profile_id, const char* url, ReArcCompletion completion,
++    void* context);
++// [begin_us,end_us), Unix microseconds, nonnegative; zero endpoint means
++// unbounded in that direction. Nonzero end must be greater than begin.
++REARC_ENGINE_EXPORT ReArcStatus ReArcHistoryDeleteRange(
++    uint64_t profile_id, int64_t begin_us, int64_t end_us,
++    ReArcCompletion completion, void* context);
++
+ // ABI 1.15 (history_recording, password_autofill): every tab carries Chromium's
+ // HistoryTabHelper (non-OTR profiles), autofill client and
+ // ChromePasswordManagerClient. Visits reach HistoryService/chrome://history;
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 2307c36305..08ccb5e20b 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -524,6 +524,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "navigation_extended" ||
+          std::string(feature) == "webui_daily_pages" ||
+          std::string(feature) == "history_recording" ||
++         std::string(feature) == "history_query" ||
+          std::string(feature) == "password_autofill" ||
+          std::string(feature) == "find_in_page" ||
+          std::string(feature) == "downloads" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 631da0c6f1..5a47112f22 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.24.0";
++  return "0.25.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_history_abi.cc b/chrome/browser/rearc_bridge/rearc_history_abi.cc
+new file mode 100644
+index 0000000000..7e76265c6b
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_history_abi.cc
+@@ -0,0 +1,168 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <pthread.h>
++#include <map>
++#include <memory>
++#include <optional>
++#include <set>
++#include <string>
++#include <vector>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "base/memory/raw_ptr.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/cancelable_task_tracker.h"
++#include "base/time/time.h"
++#include "chrome/browser/history/history_service_factory.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++#include "components/history/core/browser/history_service.h"
++#include "components/history/core/browser/history_types.h"
++#include "url/gurl.h"
++
++namespace rearc {
++namespace {
++struct Request {
++  uint64_t profile_id;
++  ReArcHistoryCallback query = nullptr;
++  ReArcCompletion mutation = nullptr;
++  raw_ptr<void> context = nullptr;
++  base::CancelableTaskTracker tracker;
++};
++auto& Requests() {
++  static base::NoDestructor<std::map<uint64_t, std::unique_ptr<Request>>> requests;
++  return *requests;
++}
++uint64_t next_id = 1;
++struct Row {
++  std::string title, url;
++  int64_t time;
++  int32_t visits;
++};
++void Finish(uint64_t id, ReArcStatus status, std::vector<Row> rows = {}) {
++  auto it = Requests().find(id);
++  if (it == Requests().end()) return;
++  auto request = std::move(it->second);
++  Requests().erase(it);
++  ABIPost(base::BindOnce([](std::unique_ptr<Request> request, ReArcStatus status,
++                           std::vector<Row> rows) {
++    if (request->query) {
++      std::vector<ReArcHistoryEntry> entries;
++      for (const auto& row : rows)
++        entries.push_back({row.title.c_str(), row.url.c_str(), row.time, row.visits});
++      request->query(request->context.get(), status, request->profile_id,
++                     entries.empty() ? nullptr : entries.data(), entries.size());
++    } else {
++      request->mutation(request->context.get(), status, false);
++    }
++  }, std::move(request), status, std::move(rows)));
++}
++ReArcStatus Service(uint64_t profile_id, history::HistoryService** service) {
++  CHECK(pthread_main_np());
++  if (!ReArcEngineDefaultProfile()) return REARC_ENGINE_NOT_READY;
++  Profile* profile = FindBridgeProfile(profile_id);
++  if (!profile) return REARC_PROFILE_NOT_FOUND;
++  // Never ask the factory for OTR: EXPLICIT_ACCESS can resolve its original.
++  if (profile->IsOffTheRecord()) return REARC_UNSUPPORTED;
++  *service = HistoryServiceFactory::GetForProfile(profile, ServiceAccessType::EXPLICIT_ACCESS);
++  if (!*service) return REARC_UNSUPPORTED;
++  return Requests().size() >= 64 ? REARC_BUSY : REARC_OK;
++}
++uint64_t Add(uint64_t profile, ReArcHistoryCallback query,
++             ReArcCompletion mutation, void* context) {
++  uint64_t id = next_id++;
++  auto request = std::make_unique<Request>();
++  request->profile_id = profile;
++  request->query = query;
++  request->mutation = mutation;
++  request->context = context;
++  Requests()[id] = std::move(request);
++  return id;
++}
++ReArcStatus Delete(uint64_t profile, const std::set<GURL>& urls,
++                   base::Time begin, base::Time end,
++                   ReArcCompletion completion, void* context) {
++  history::HistoryService* service;
++  if (auto status = Service(profile, &service)) return status;
++  if (!completion) return REARC_INVALID_ARGUMENT;
++  uint64_t id = Add(profile, nullptr, completion, context);
++  if (!urls.empty()) {
++    service->DeleteURLs(std::vector<GURL>(urls.begin(), urls.end()));
++    // DeleteURLs has no reply. A bounded query on the same sequenced backend
++    // is a completion barrier, including deletion of URL metadata.
++    history::QueryOptions barrier;
++    barrier.max_count = 1;
++    service->QueryHistory(u"", barrier,
++        base::BindOnce([](uint64_t id, history::QueryResults) { Finish(id, REARC_OK); }, id),
++        &Requests().at(id)->tracker);
++  } else {
++    service->ExpireHistoryBetween({}, std::nullopt, begin, end, true,
++        base::BindOnce([](uint64_t id) { Finish(id, REARC_OK); }, id),
++        &Requests().at(id)->tracker);
++  }
++  return REARC_OK;
++}
++}  // namespace
++void ABICancelHistory(uint64_t profile_id) {
++  std::vector<uint64_t> ids;
++  for (const auto& [id, request] : Requests())
++    if (request->profile_id == profile_id) ids.push_back(id);
++  for (uint64_t id : ids) Finish(id, REARC_CANCELLED);
++}
++}  // namespace rearc
++
++ReArcStatus ReArcHistoryQuery(uint64_t profile, const char* text, uint32_t limit,
++                              ReArcHistoryCallback completion, void* context) {
++  history::HistoryService* service;
++  if (auto status = rearc::Service(profile, &service)) return status;
++  if (!completion || !text || !limit || limit > 1000) return REARC_INVALID_ARGUMENT;
++  std::string query(text);
++  if (query.size() > 4096 || !base::IsStringUTF8(query)) return REARC_INVALID_ARGUMENT;
++  uint64_t id = rearc::Add(profile, completion, nullptr, context);
++  history::QueryOptions options;
++  options.max_count = limit;
++  options.policy_for_404_visits = history::VisitQuery404sPolicy::kExclude404s;
++  options.duplicate_policy = history::QueryOptions::REMOVE_ALL_DUPLICATES;
++  service->QueryHistory(base::UTF8ToUTF16(query), options,
++      base::BindOnce([](uint64_t id, history::QueryResults results) {
++        std::vector<rearc::Row> rows;
++        size_t bytes = 0;
++        for (const auto& result : results) {
++          rearc::Row row{base::UTF16ToUTF8(result.title()), result.url().spec(),
++              (result.visit_time() - base::Time::UnixEpoch()).InMicroseconds(),
++              result.visit_count()};
++          bytes += row.title.size() + row.url.size();
++          if (bytes > 8 * 1024 * 1024) { rearc::Finish(id, REARC_TOO_LARGE); return; }
++          rows.push_back(std::move(row));
++        }
++        rearc::Finish(id, REARC_OK, std::move(rows));
++      }, id), &rearc::Requests().at(id)->tracker);
++  return REARC_OK;
++}
++ReArcStatus ReArcHistoryDeleteURL(uint64_t profile, const char* value,
++                                  ReArcCompletion completion, void* context) {
++  CHECK(pthread_main_np());
++  if (!value || !base::IsStringUTF8(value) || std::string(value).size() > 65536)
++    return REARC_INVALID_URL;
++  GURL url(value);
++  if (!url.is_valid()) return REARC_INVALID_URL;
++  return rearc::Delete(profile, {url}, base::Time(), base::Time(), completion, context);
++}
++ReArcStatus ReArcHistoryDeleteRange(uint64_t profile, int64_t begin, int64_t end,
++                                    ReArcCompletion completion, void* context) {
++  CHECK(pthread_main_np());
++  // Bound to year 9999, avoiding saturated Time arithmetic on invalid input.
++  constexpr int64_t kMaxTime = 253402300799999999;
++  if (begin < 0 || end < 0 || begin > kMaxTime || end > kMaxTime ||
++      (end && end <= begin)) return REARC_INVALID_ARGUMENT;
++  return rearc::Delete(profile, {},
++      begin ? base::Time::UnixEpoch() + base::Microseconds(begin) : base::Time(),
++      end ? base::Time::UnixEpoch() + base::Microseconds(end) : base::Time(),
++      completion, context);
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.cc b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+index 01cb95a5b6..e13740e2bb 100644
+--- a/chrome/browser/rearc_bridge/rearc_profile_registry.cc
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+@@ -50,6 +50,7 @@ void RegisterBridgeProfile(Profile* profile, bool initial) {
+ void UnregisterBridgeProfile(Profile* profile) {
+   CHECK(pthread_main_np());
+   // Before the profile (and its DownloadManager) can be destroyed.
++  ABICancelHistory(BridgeProfileId(profile));
+   ABIDetachDownloads(BridgeProfileId(profile));
+   if (BridgeProfileId(profile) == default_id) {
+     default_id = 0;
+-- 
+2.54.0 (Apple Git-157)
+

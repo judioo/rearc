@@ -1,0 +1,1619 @@
+# Patch-ID: P-TAB-001 / P-APP-001 / P-NAV-001 (wave 10, core C ABI)
+# Area: tab.
+# Rationale: Swift needs a C-only exported interface for browser-less tabs,
+#   navigation, profile identity, native attachment ownership and orderly quit.
+# Last-Rebased: 2026-11-02 (Chromium 156.0.8078.74).
+# Frozen-file exceptions: profile registry gains monotonic IDs/keepalives;
+#   TabSession captures profile ID; typed tab/service emitters stamp identity;
+#   close_controller captures profile before removal and signals real destruction.
+#   TabRegistry adds ID enumeration for shutdown; adoption uses common observer
+#   initialization; observer refreshes URL/history after navigation and captures
+#   terminal identity. These dormant seams cannot be connected additively alone.
+#   attachment_lease gains occlusion and uses UpdateWebContentsVisibility: the
+#   public API explicitly requires it for first VISIBLE at this pin. Earlier
+#   entry version now CHECKs main and reports the new implementation version.
+#   No earlier bridge BUILD.gn edit; minimal browser :core source block and
+#   framework export/order lists only. All other upstream C++ untouched.
+# Policy: C ABI 1 is an in-process adapter, synchronous returns replace create/
+#   attach replies; all callbacks are queued and copied on Chromium UI. Startup
+#   wrapper uses upstream no-startup-window policy, never creates Browser UI.
+#   Only startup profile admitted. HTTP(S)/about:blank navigation; no JS/file/
+#   chrome navigation capability. Physical upstream app/helper layout required.
+# Gate: build-p21 green attempt 2, post-format p22 green; G1-G5 PASS;
+#   assembled native ABI lifecycle PASS runtime-tab017c.log; C header PASS.
+#   nm -gU: 27 definitions in libchrome_dll (component framework reexport stub);
+#   dlsym through framework PASS all 27, nm-tab017.log. Release lists updated;
+#   non-component build/standalone Swift packaging not claimed.
+# Integrity: sequential full-series temporary-index reverse/forward replay.
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index c951442f9a..469e9016d3 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -21,3 +21,30 @@ _ChromeMain
+ _ChromeWebAppShortcutCopierMain
+ _ReArcEngineBridgeVersion
+ _ReArcEngineSetLifecycleCallbacks
++
++# ReArc C ABI (P-TAB-001 wave 10).
++_ReArcEngineABIVersion
++_ReArcEngineVersion
++_ReArcEngineHasFeature
++_ReArcStatusName
++_ReArcEngineConfigure
++_ReArcEngineRun
++_ReArcEngineShutdown
++_ReArcEngineDefaultProfile
++_ReArcTabCreate
++_ReArcTabClose
++_ReArcTabNavigate
++_ReArcTabReload
++_ReArcTabGoBack
++_ReArcTabGoForward
++_ReArcTabStop
++_ReArcTabRefreshState
++_ReArcTabActivate
++_ReArcWindowRegister
++_ReArcWindowClosed
++_ReArcViewAttach
++_ReArcViewDetach
++_ReArcViewResize
++_ReArcViewSetVisible
++_ReArcViewRelease
++_ReArcBufferFree
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 6dbc3aeff3..9a6f9a063d 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -29,5 +29,32 @@ _ChromeAppModeStart_v8
+ # Entry point for the web app shortcut copier.
+ _ChromeWebAppShortcutCopierMain
+ 
++# ReArc C ABI (P-TAB-001 wave 10).
++_ReArcEngineABIVersion
++_ReArcEngineVersion
++_ReArcEngineHasFeature
++_ReArcStatusName
++_ReArcEngineConfigure
++_ReArcEngineRun
++_ReArcEngineShutdown
++_ReArcEngineDefaultProfile
++_ReArcTabCreate
++_ReArcTabClose
++_ReArcTabNavigate
++_ReArcTabReload
++_ReArcTabGoBack
++_ReArcTabGoForward
++_ReArcTabStop
++_ReArcTabRefreshState
++_ReArcTabActivate
++_ReArcWindowRegister
++_ReArcWindowClosed
++_ReArcViewAttach
++_ReArcViewDetach
++_ReArcViewResize
++_ReArcViewSetVisible
++_ReArcViewRelease
++_ReArcBufferFree
++
+ # _ChromeMain must be listed last.  That's the whole point of this file.
+ _ChromeMain
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 852ccd249a..1b26f2ab94 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1454,6 +1454,15 @@ source_set("core") {
+     ]
+   }
+ 
++  if (is_mac) {
++    # P-TAB-001 wave 10: exported in-process C ABI.
++    sources += [
++      "rearc_bridge/rearc_abi_internal.h",
++      "rearc_bridge/rearc_engine_abi.h",
++      "rearc_bridge/rearc_engine_abi.mm",
++    ]
++  }
++
+   if (enable_on_device_translation) {
+     deps += [
+       "//chrome/browser/on_device_translation",
+diff --git a/chrome/browser/rearc_bridge/attachment_lease.cc b/chrome/browser/rearc_bridge/attachment_lease.cc
+index db500e5e3e..ca25e78c78 100644
+--- a/chrome/browser/rearc_bridge/attachment_lease.cc
++++ b/chrome/browser/rearc_bridge/attachment_lease.cc
+@@ -16,6 +16,7 @@
+ #include "chrome/browser/rearc_bridge/tab_session.h"
+ #include "chrome/browser/rearc_bridge/web_contents_view_delegate_mac.h"
+ #include "content/public/browser/web_contents.h"
++#include "content/public/browser/visibility.h"
+ 
+ namespace rearc {
+ 
+@@ -159,7 +160,7 @@ bool AttachmentLeaseRegistry::DetachView(uint64_t tab_id,
+   TabSession* session = TabRegistry::Get().FindSession(tab_id);
+   content::WebContents* contents = session ? session->web_contents() : nullptr;
+   if (lease->visible && contents) {
+-    contents->WasHidden();
++    contents->UpdateWebContentsVisibility(content::Visibility::HIDDEN);
+   }
+   if (contents) {
+     ClearReArcNativeWindowProvider(contents, lease->provider.get());
+@@ -212,15 +213,29 @@ bool AttachmentLeaseRegistry::SetViewVisible(uint64_t tab_id,
+     // §6 / web_contents.h:1043 guidance: visibility transitions drive
+     // WasShown/WasHidden, only on actual transitions.
+     if (visible) {
+-      contents->WasShown();
++      contents->UpdateWebContentsVisibility(content::Visibility::VISIBLE);
+     } else {
+-      contents->WasHidden();
++      contents->UpdateWebContentsVisibility(content::Visibility::HIDDEN);
+     }
+   }
+   lease->visible = visible;
+   return true;
+ }
+ 
++bool AttachmentLeaseRegistry::SetViewOccluded(uint64_t tab_id,
++                                               uint64_t attachment_id,
++                                               bool occluded) {
++  CHECK(pthread_main_np());
++  Lease* lease = FindLease(tab_id, attachment_id);
++  if (!lease) return false;
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (session && lease->visible) {
++    session->web_contents()->UpdateWebContentsVisibility(
++        occluded ? content::Visibility::OCCLUDED : content::Visibility::VISIBLE);
++  }
++  return true;
++}
++
+ uint64_t AttachmentLeaseRegistry::AttachmentIdForTab(uint64_t tab_id) const {
+   CHECK(pthread_main_np());
+   auto it = leases_.find(tab_id);
+@@ -241,7 +256,7 @@ void AttachmentLeaseRegistry::InvalidateLeasesForTab(
+   TabSession* session = TabRegistry::Get().FindSession(tab_id);
+   content::WebContents* contents = session ? session->web_contents() : nullptr;
+   if (lease->visible && contents) {
+-    contents->WasHidden();
++    contents->UpdateWebContentsVisibility(content::Visibility::HIDDEN);
+   }
+   if (contents) {
+     ClearReArcNativeWindowProvider(contents, lease->provider.get());
+diff --git a/chrome/browser/rearc_bridge/attachment_lease.h b/chrome/browser/rearc_bridge/attachment_lease.h
+index f7097eb7ab..949a0c5e53 100644
+--- a/chrome/browser/rearc_bridge/attachment_lease.h
++++ b/chrome/browser/rearc_bridge/attachment_lease.h
+@@ -115,6 +115,8 @@ class AttachmentLeaseRegistry {
+   // only on actual transitions. False for unknown/stale ids.
+   bool SetViewVisible(uint64_t tab_id, uint64_t attachment_id, bool visible);
+ 
++  bool SetViewOccluded(uint64_t tab_id, uint64_t attachment_id, bool occluded);
++
+   // 0 when the tab has no live attachment.
+   uint64_t AttachmentIdForTab(uint64_t tab_id) const;
+ 
+diff --git a/chrome/browser/rearc_bridge/close_controller.cc b/chrome/browser/rearc_bridge/close_controller.cc
+index d4453d8f54..fbf8b36045 100644
+--- a/chrome/browser/rearc_bridge/close_controller.cc
++++ b/chrome/browser/rearc_bridge/close_controller.cc
+@@ -23,6 +23,7 @@
+ #include "chrome/browser/rearc_bridge/media_adapter.h"
+ #include "chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h"
+ #include "chrome/browser/rearc_bridge/security_adapter.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
+ #include "chrome/browser/rearc_bridge/tab_observer.h"
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
+ #include "content/public/browser/javascript_dialog_manager.h"
+@@ -39,6 +40,7 @@ enum class Phase { kBeforeUnload, kUnload, kCancelled, kFinalizing };
+ 
+ struct PendingClose {
+   uint64_t generation = 0;
++  uint64_t profile_id = 0;
+   Phase phase = Phase::kBeforeUnload;
+   TabClosedReason reason = TabClosedReason::kShell;
+   bool teardown_started = false;
+@@ -69,6 +71,7 @@ PendingClose& AddPending(TabSession& session,
+                          CloseCallback callback = {}) {
+   auto pending = std::make_unique<PendingClose>();
+   pending->generation = session.content_generation();
++  pending->profile_id = session.profile_id();
+   pending->reason = reason;
+   pending->callback = std::move(callback);
+   auto [it, inserted] =
+@@ -224,6 +227,7 @@ void FinalizeTabClose(uint64_t tab_id, uint64_t generation) {
+   // This task runs after delegate/observer callbacks unwind. Detach the S3
+   // observer so destruction cannot produce a duplicate tab.closed, and stop
+   // S5 subscriptions/receivers before removing native children/content.
++  ABIDetachServices(tab_id);
+   DetachTabObserver(tab_id);
+   DetachFaviconAdapter(tab_id);
+   DetachMediaAdapter(tab_id);
+@@ -241,18 +245,21 @@ void DidDestroyTab(uint64_t tab_id, uint64_t content_generation) {
+   PendingClose* pending = FindPending(tab_id, content_generation);
+   CHECK(pending && pending->teardown_started);
+   const TabClosedReason reason = pending->reason;
++  const uint64_t profile_id = pending->profile_id;
+   CloseCallback callback = std::move(pending->callback);
+   PendingCloses().erase(tab_id);
+   TabEvent event;
+   event.kind = TabEventKind::kTabClosed;
+   event.tab_id = tab_id;
+   event.content_generation = content_generation;
++  event.profile_id = profile_id;
+   event.closed_reason = reason;
+   EmitTabEvent(std::move(event));
+   VLOG(1) << "rearc: tab.close.reply closed tab_id=" << tab_id;
+   if (callback) {
+     std::move(callback).Run(CloseOutcome::kClosed);
+   }
++  ABITabDestroyed();
+ }
+ 
+ }  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/ipc_service_events.cc b/chrome/browser/rearc_bridge/ipc_service_events.cc
+index fdcace3e3d..befe3c90fc 100644
+--- a/chrome/browser/rearc_bridge/ipc_service_events.cc
++++ b/chrome/browser/rearc_bridge/ipc_service_events.cc
+@@ -81,6 +81,7 @@ void EmitServiceEvent(ServiceEvent event) {
+             << " for unknown tab_id " << event.tab_id;
+     return;
+   }
++  event.profile_id = session->profile_id();
+   ServiceEventSink* sink = GetServiceEventSinkSlot();
+   if (!sink) {
+     VLOG(1) << "rearc: no ServiceEventSink registered; dropping service event "
+diff --git a/chrome/browser/rearc_bridge/ipc_service_events.h b/chrome/browser/rearc_bridge/ipc_service_events.h
+index dd060bd1dd..4038a83d6c 100644
+--- a/chrome/browser/rearc_bridge/ipc_service_events.h
++++ b/chrome/browser/rearc_bridge/ipc_service_events.h
+@@ -51,6 +51,7 @@ const char* MediaPlaybackName(MediaPlayback playback);
+ struct ServiceEvent {
+   ServiceEventKind kind;
+   uint64_t tab_id = 0;
++  uint64_t profile_id = 0;
+   // Captured at adapter attachment; never restamped at completion.
+   uint64_t content_generation = 0;
+ 
+diff --git a/chrome/browser/rearc_bridge/ipc_tab_events.cc b/chrome/browser/rearc_bridge/ipc_tab_events.cc
+index 3d9cb75a62..2fe1ab4993 100644
+--- a/chrome/browser/rearc_bridge/ipc_tab_events.cc
++++ b/chrome/browser/rearc_bridge/ipc_tab_events.cc
+@@ -54,6 +54,7 @@ void EmitTabEvent(TabEvent event) {
+   TabSession* session = registry.FindSession(event.tab_id);
+   if (session) {
+     event.content_generation = session->content_generation();
++    event.profile_id = session->profile_id();
+   } else if (event.kind != TabEventKind::kTabClosed) {
+     // Unknown or already-destroyed session: only tab.closed may legally race
+     // session teardown (the observer emits it from WebContentsDestroyed with
+@@ -82,11 +83,9 @@ void EmitTabCreatedEvent(uint64_t tab_id) {
+   event.kind = TabEventKind::kTabCreated;
+   event.tab_id = tab_id;
+   event.space_id = session->space_id();
+-  // profile_id stays 0 day-one (see ipc_tab_events.h); stamping lands with
+-  // the profile-registry integration.
+   content::WebContents* contents = session->web_contents();
+   if (contents) {
+-    event.url = contents->GetLastCommittedURL().spec();
++    event.url = contents->GetVisibleURL().spec();
+   }
+   EmitTabEvent(std::move(event));
+ }
+@@ -109,7 +108,7 @@ void EmitInitialSnapshotEvent(uint64_t tab_id) {
+   event.kind = TabEventKind::kTabUpdated;
+   event.tab_id = tab_id;
+   event.has_url = true;
+-  event.url = contents->GetLastCommittedURL().spec();
++  event.url = contents->GetVisibleURL().spec();
+   event.has_title = true;
+   event.title = contents->GetTitle();
+   event.has_is_loading = true;
+diff --git a/chrome/browser/rearc_bridge/ipc_tab_events.h b/chrome/browser/rearc_bridge/ipc_tab_events.h
+index 95912fee6e..85b6c1fd2a 100644
+--- a/chrome/browser/rearc_bridge/ipc_tab_events.h
++++ b/chrome/browser/rearc_bridge/ipc_tab_events.h
+@@ -52,11 +52,10 @@ struct TabEvent {
+   // discard rebinds the generation).
+   uint64_t content_generation = 0;
+ 
++  // All events carry the engine profile ID, including terminal events.
+   // tab.created (§3):
+   uint64_t space_id = 0;
+-  // 0 day-one: stamped when the profile-registry integration lands. 0 is an
+-  // invalid ID on the wire (§1) — events carrying it must never reach the
+-  // shell; the transport slice must not ship before stamping real ids.
++  // Captured from the profile registry; never expose 0 through the C ABI.
+   uint64_t profile_id = 0;
+   // 0 omits the source tab; the actual script opener may be suppressed by
+   // Chromium's noopener/COOP policy and is never synthesized from this ID.
+diff --git a/chrome/browser/rearc_bridge/module.modulemap b/chrome/browser/rearc_bridge/module.modulemap
+new file mode 100644
+index 0000000000..72849ad4d1
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/module.modulemap
+@@ -0,0 +1,4 @@
++module ReArcEngine {
++  header "rearc_engine_abi.h"
++  export *
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+new file mode 100644
+index 0000000000..c07f7e525b
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -0,0 +1,21 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_ABI_INTERNAL_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_ABI_INTERNAL_H_
++#include <cstdint>
++
++#include "base/functional/callback.h"
++#include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
++namespace rearc {
++class TabSession;
++ReArcStatus ABICheckTab(uint64_t tab_id, TabSession** session);
++void ABIPost(base::OnceClosure callback);
++void ABIInitializeTab(uint64_t tab_id);
++void ABITabDestroyed();
++// Services extend these hooks in tab/018.
++void ABIAttachServices(uint64_t tab_id);
++void ABIDetachServices(uint64_t tab_id);
++}  // namespace rearc
++#endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+new file mode 100644
+index 0000000000..b14109e4e2
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -0,0 +1,165 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_ENGINE_ABI_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_ENGINE_ABI_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "rearc_engine_entry_mac.h"
++
++// ABI 1. All functions, frees and callbacks are main-thread-only (CHECKed).
++// Configure once before NSApplication exists; Run blocks until teardown.
++// Events/completions are serialized Chromium UI tasks, never inline in a
++// mutation/delegate stack. Callback pointers/strings are borrowed for the
++// callback duration. Copy strings before returning. Inputs are borrowed only
++// for the call. No restart or framework unload is supported.
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef int32_t ReArcStatus;
++enum {
++  REARC_OK = 0,
++  REARC_TAB_NOT_FOUND = 1,
++  REARC_WINDOW_NOT_FOUND = 2,
++  REARC_PROFILE_NOT_FOUND = 3,
++  REARC_NOT_FOUND = 4,
++  REARC_INVALID_URL = 5,
++  REARC_INVALID_ARGUMENT = 6,
++  REARC_INVALID_STATE = 7,
++  REARC_ENGINE_NOT_READY = 8,
++  REARC_VERSION_MISMATCH = 9,
++  REARC_UNSUPPORTED = 10,
++  REARC_BUSY = 11,
++  REARC_ALREADY_ATTACHED = 12,
++  REARC_STALE_ATTACHMENT = 13,
++  REARC_TOO_LARGE = 14,
++  REARC_CANCELLED = 15,
++  REARC_INTERNAL = 16
++};
++enum { REARC_ABI_VERSION = 1, REARC_MAX_BLOB_BYTES = 16777216 };
++
++// kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
++// changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
++// can_go_back=32, can_go_forward=64. Other fields apply by kind.
++// disposition: 0 shell, 1 foreground_tab, 2 background_tab, 3 popup.
++// transition: 0 typed, 1 link, 2 reload, 3 generated, 4 other.
++// closed_reason: 0 shell, 1 page, 2 engine.
++typedef struct ReArcTabEvent {
++  uint32_t kind;
++  uint64_t profile_id, tab_id, content_generation, space_id, opener_tab_id;
++  uint32_t disposition, changes;
++  const char* url;
++  const char* title;
++  bool is_loading, is_crashed, can_go_back, can_go_forward;
++  double load_progress;
++  uint32_t closed_reason;
++  uint64_t navigation_id;
++  bool is_main_frame, is_same_document, is_error_page;
++  uint32_t transition, transition_flags;
++  int32_t error_code;
++  const char* error_text;
++} ReArcTabEvent;
++
++// reason: 0 tab_closed, 1 window_closed, 2 content_replaced, 3 engine_stopped.
++typedef struct ReArcViewEvent {
++  uint64_t profile_id, tab_id, content_generation, attachment_id;
++  uint32_t reason;
++} ReArcViewEvent;
++
++typedef struct ReArcCallbacks {
++  void (*ready)(void* context, uint64_t default_profile_id);
++  void (*tab_event)(void* context, const ReArcTabEvent* event);
++  void (*view_invalidated)(void* context, const ReArcViewEvent* event);
++  // Notification only: call Shutdown to quit. Never exits from Cocoa.
++  void (*terminate_requested)(void* context);
++} ReArcCallbacks;
++
++// Accepted async operations invoke completion exactly once. Synchronous
++// rejection invokes no completion. cancelled=true means a beforeunload veto.
++// Successful shutdown completes after Run returns, as the last callback.
++typedef void (*ReArcCompletion)(void* context,
++                                ReArcStatus status,
++                                bool cancelled);
++
++typedef struct ReArcAttachment {
++  uint64_t attachment_id, content_generation;
++  // +1 retained NSView*. Release with ReArcViewRelease after dismantling.
++  // Retain survives invalidation, which empties this stable wrapper first.
++  void* native_view;
++} ReArcAttachment;
++
++REARC_ENGINE_EXPORT uint32_t ReArcEngineABIVersion(void);
++REARC_ENGINE_EXPORT const char* ReArcEngineVersion(void);
++REARC_ENGINE_EXPORT bool ReArcEngineHasFeature(const char* feature);
++REARC_ENGINE_EXPORT const char* ReArcStatusName(ReArcStatus status);
++REARC_ENGINE_EXPORT ReArcStatus
++ReArcEngineConfigure(uint32_t abi_version,
++                     const ReArcCallbacks* callbacks,
++                     void* context);
++// For browser invocation only; helpers call upstream ChromeMain directly.
++// Adds --no-startup-window, --no-first-run, --no-default-browser-check and
++// --profile-directory=Default unless a profile directory was supplied.
++REARC_ENGINE_EXPORT int ReArcEngineRun(int argc, const char* const* argv);
++REARC_ENGINE_EXPORT ReArcStatus ReArcEngineShutdown(bool force,
++                                                    ReArcCompletion completion,
++                                                    void* context);
++REARC_ENGINE_EXPORT uint64_t ReArcEngineDefaultProfile(void);
++
++// v1 admits only the startup profile. IDs are engine allocated, never reused.
++// space_id is a nonzero shell label. New tabs stage hidden; attach separately.
++// null URL means about:blank. Allowed navigation: http(s), about:blank.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabCreate(uint64_t profile_id,
++                                               uint64_t space_id,
++                                               const char* url,
++                                               uint64_t* tab_id);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabClose(uint64_t tab_id,
++                                              bool force,
++                                              ReArcCompletion completion,
++                                              void* context);
++// transition: 0 typed, 1 link, 3 generated. Other values are rejected.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabNavigate(uint64_t tab_id,
++                                                 const char* url,
++                                                 uint32_t transition);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabReload(uint64_t tab_id,
++                                               bool ignore_cache);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabGoBack(uint64_t tab_id);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabGoForward(uint64_t tab_id);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabStop(uint64_t tab_id);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabRefreshState(uint64_t tab_id);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabActivate(uint64_t tab_id);
++
++// Register a +0 NSWindow* before attachment; engine retains until Closed/Run
++// returns. Duplicate/zero IDs rejected. Closing a window keeps its tabs alive.
++REARC_ENGINE_EXPORT ReArcStatus ReArcWindowRegister(uint64_t window_id,
++                                                    void* ns_window);
++REARC_ENGINE_EXPORT ReArcStatus ReArcWindowClosed(uint64_t window_id);
++REARC_ENGINE_EXPORT ReArcStatus ReArcViewAttach(uint64_t tab_id,
++                                                uint64_t window_id,
++                                                double width,
++                                                double height,
++                                                double scale,
++                                                ReArcAttachment* attachment);
++REARC_ENGINE_EXPORT ReArcStatus ReArcViewDetach(uint64_t tab_id,
++                                                uint64_t attachment_id);
++REARC_ENGINE_EXPORT ReArcStatus ReArcViewResize(uint64_t tab_id,
++                                                uint64_t attachment_id,
++                                                double width,
++                                                double height,
++                                                double scale);
++// Call after parenting the returned NSView. Window visibility/occlusion is
++// observed automatically. All presented split panes may be visible.
++REARC_ENGINE_EXPORT ReArcStatus ReArcViewSetVisible(uint64_t tab_id,
++                                                    uint64_t attachment_id,
++                                                    bool visible);
++REARC_ENGINE_EXPORT void ReArcViewRelease(void* native_view);
++// Frees engine-allocated binary results; never free borrowed callback strings.
++REARC_ENGINE_EXPORT void ReArcBufferFree(void* buffer);
++
++#ifdef __cplusplus
++}  // extern "C"
++#endif
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_ENGINE_ABI_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+new file mode 100644
+index 0000000000..aef5cc561e
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -0,0 +1,767 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
++
++#import <AppKit/AppKit.h>
++
++#include <cmath>
++#include <cstdlib>
++#include <deque>
++#include <map>
++#include <string>
++#include <vector>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/lifetime/application_lifetime_desktop.h"
++#include "chrome/browser/lifetime/browser_shutdown.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/rearc_bridge/attachment_lease.h"
++#include "chrome/browser/rearc_bridge/close_controller.h"
++#include "chrome/browser/rearc_bridge/ipc_tab_events.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_keep_alive.h"
++#include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++#include "chrome/browser/rearc_bridge/rearc_readiness.h"
++#include "chrome/browser/rearc_bridge/tab_observer.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "components/version_info/version_info.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/base/page_transition_types.h"
++#include "url/gurl.h"
++
++extern "C" int ChromeMain(int argc, const char** argv);
++
++namespace rearc {
++namespace {
++
++struct Window {
++  NSWindow* __strong native = nil;
++  id __strong observer = nil;
++};
++struct Presentation {
++  uint64_t window_id;
++  uint64_t attachment_id;
++  bool intent = false;
++};
++
++// NoDestructor keeps callback/ObjC storage alive through ChromeMain teardown.
++class ABI final : public EngineReadinessSink,
++                  public TabEventSink,
++                  public AttachmentEventSink {
++ public:
++  ReArcCallbacks callbacks{};
++  raw_ptr<void> context = nullptr;
++  bool configured = false, ran = false, ready = false, stopping = false;
++  bool draining = false, scheduled = false;
++  std::deque<base::OnceClosure> deliveries;
++  std::map<uint64_t, Window> windows;
++  std::map<uint64_t, Presentation> presentations;
++  size_t live_tabs = 0;
++  std::vector<uint64_t> shutdown_tabs;
++  size_t shutdown_index = 0;
++  bool shutdown_force = false;
++  ReArcCompletion shutdown_completion = nullptr;
++  raw_ptr<void> shutdown_context = nullptr;
++
++  static ABI& Get() {
++    CHECK([NSThread isMainThread]);
++    static base::NoDestructor<ABI> state;
++    return *state;
++  }
++
++  void Drain() {
++    CHECK([NSThread isMainThread]);
++    scheduled = false;
++    // Callbacks may enter a nested native loop; never interleave deliveries.
++    if (draining) {
++      return;
++    }
++    draining = true;
++    while (!deliveries.empty()) {
++      auto callback = std::move(deliveries.front());
++      deliveries.pop_front();
++      std::move(callback).Run();
++    }
++    draining = false;
++  }
++
++  void OnEngineReady() override {
++    CHECK([NSThread isMainThread]);
++    CHECK(DefaultBridgeProfileId());
++    AcquireShellKeepAlive();
++    ready = true;
++    ABIPost(base::BindOnce([] {
++      auto& a = Get();
++      if (a.callbacks.ready) {
++        a.callbacks.ready(a.context, DefaultBridgeProfileId());
++      }
++    }));
++  }
++
++  void OnTabEvent(const TabEvent& event) override {
++    CHECK([NSThread isMainThread]);
++    CHECK(event.profile_id);
++    if (event.kind == TabEventKind::kTabCreated) {
++      ++live_tabs;
++    }
++    ABIPost(base::BindOnce(
++        [](TabEvent e) {
++          auto& a = Get();
++          if (!a.callbacks.tab_event) {
++            return;
++          }
++          const std::string title = base::UTF16ToUTF8(e.title);
++          ReArcTabEvent c{};
++          c.kind = static_cast<uint32_t>(e.kind);
++          c.profile_id = e.profile_id;
++          c.tab_id = e.tab_id;
++          c.content_generation = e.content_generation;
++          c.space_id = e.space_id;
++          c.opener_tab_id = e.opener_tab_id;
++          c.disposition = static_cast<uint32_t>(e.disposition);
++          c.changes = e.has_url | (e.has_title << 1) | (e.has_is_loading << 2) |
++                      (e.has_load_progress << 3) | (e.has_is_crashed << 4) |
++                      (e.has_can_go_back << 5) | (e.has_can_go_forward << 6);
++          c.url = e.url.c_str();
++          c.title = title.c_str();
++          c.is_loading = e.is_loading;
++          c.is_crashed = e.is_crashed;
++          c.can_go_back = e.can_go_back;
++          c.can_go_forward = e.can_go_forward;
++          c.load_progress = e.load_progress;
++          c.closed_reason = static_cast<uint32_t>(e.closed_reason);
++          c.navigation_id = e.navigation_id;
++          c.is_main_frame = e.is_main_frame;
++          c.is_same_document = e.is_same_document;
++          c.is_error_page = e.is_error_page;
++          c.transition = static_cast<uint32_t>(e.transition);
++          c.transition_flags = e.transition_flags;
++          c.error_code = e.error_code;
++          c.error_text = e.error_text.c_str();
++          a.callbacks.tab_event(a.context, &c);
++        },
++        event));
++  }
++
++  void OnLeaseInvalidated(uint64_t id,
++                          uint64_t lease,
++                          LeaseInvalidatedReason reason) override {
++    CHECK([NSThread isMainThread]);
++    presentations.erase(id);
++    auto* s = TabRegistry::Get().FindSession(id);
++    CHECK(s);
++    ReArcViewEvent event{s->profile_id(), id, s->content_generation(), lease,
++                         static_cast<uint32_t>(reason)};
++    ABIPost(base::BindOnce(
++        [](ReArcViewEvent e) {
++          auto& a = Get();
++          if (a.callbacks.view_invalidated) {
++            a.callbacks.view_invalidated(a.context, &e);
++          }
++        },
++        event));
++  }
++
++  void Reconcile(uint64_t id) {
++    auto p = presentations.find(id);
++    if (p == presentations.end()) {
++      return;
++    }
++    auto w = windows.find(p->second.window_id);
++    if (w == windows.end()) {
++      return;
++    }
++    NSWindow* window = w->second.native;
++    const bool visible =
++        p->second.intent && window.visible && !window.miniaturized;
++    auto& leases = AttachmentLeaseRegistry::Get();
++    leases.SetViewVisible(id, p->second.attachment_id, visible);
++    leases.SetViewOccluded(
++        id, p->second.attachment_id,
++        !(window.occlusionState & NSWindowOcclusionStateVisible));
++  }
++
++  void ReconcileWindow(uint64_t id) {
++    // No C callback is delivered by this synchronous native reconciliation.
++    for (const auto& [tab_id, p] : presentations) {
++      if (p.window_id == id) {
++        Reconcile(tab_id);
++      }
++    }
++  }
++
++  void ContinueShutdown() {
++    // Sequential close allows cancellation without starting later unloads.
++    while (shutdown_index < shutdown_tabs.size()) {
++      uint64_t id = shutdown_tabs[shutdown_index++];
++      if (!TabRegistry::Get().FindSession(id)) {
++        continue;
++      }
++      auto result = RequestTabClose(
++          id, shutdown_force, base::BindOnce([](CloseOutcome outcome) {
++            auto& a = Get();
++            if (outcome == CloseOutcome::kCancelled) {
++              a.stopping = false;
++              auto completion = a.shutdown_completion;
++              a.shutdown_completion = nullptr;
++              ABIPost(base::BindOnce(completion, a.shutdown_context.get(),
++                                     REARC_OK, true));
++            } else {
++              a.ContinueShutdown();
++            }
++          }));
++      CHECK(result == CloseRequestResult::kStarted);
++      return;
++    }
++    // DidDestroyTab runs after the contents destructor and posts tab.closed.
++    // It calls FinishShutdown when the final live contents has gone away.
++    if (!live_tabs) {
++      FinishShutdown();
++    }
++  }
++
++  void FinishShutdown() {
++    if (!ready) {
++      return;
++    }
++    ready = false;
++    CHECK_EQ(live_tabs, 0u);
++    CHECK_EQ(TabRegistry::Get().session_count(), 0u);
++    ReleaseBridgeProfiles();
++    // Run this after queued terminal tab/view events and close replies.
++    ABIPost(base::BindOnce([] {
++      browser_shutdown::SetTryingToQuit(true);
++      chrome::OnAppExiting();
++      ReleaseShellKeepAlive();
++    }));
++  }
++};
++
++bool Terminate(void*) {
++  ABIPost(base::BindOnce([] {
++    auto& a = ABI::Get();
++    if (a.callbacks.terminate_requested) {
++      a.callbacks.terminate_requested(a.context);
++    }
++  }));
++  return true;
++}
++bool CancelTerminate(void*) {
++  return true;
++}
++
++ReArcStatus Available() {
++  auto& a = ABI::Get();
++  return a.ready && !a.stopping ? REARC_OK : REARC_ENGINE_NOT_READY;
++}
++ReArcStatus CheckURL(const char* value, GURL* url) {
++  if (!value || !base::IsStringUTF8(value)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  *url = GURL(value);
++  if (!url->is_valid() ||
++      !(url->SchemeIsHTTPOrHTTPS() || url->spec() == "about:blank")) {
++    return REARC_INVALID_URL;
++  }
++  return REARC_OK;
++}
++bool ValidSize(double w, double h, double scale) {
++  return std::isfinite(w) && std::isfinite(h) && std::isfinite(scale) &&
++         w >= 0 && h >= 0 && w <= 32768 && h <= 32768 && scale > 0 &&
++         scale <= 16;
++}
++ReArcStatus CloseError(CloseRequestResult r) {
++  switch (r) {
++    case CloseRequestResult::kStarted:
++      return REARC_OK;
++    case CloseRequestResult::kBusy:
++      return REARC_BUSY;
++    case CloseRequestResult::kTabNotFound:
++      return REARC_TAB_NOT_FOUND;
++  }
++}
++}  // namespace
++
++void ABIPost(base::OnceClosure callback) {
++  auto& a = ABI::Get();
++  a.deliveries.push_back(std::move(callback));
++  if (a.draining || a.scheduled) {
++    return;
++  }
++  a.scheduled = true;
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce([] { ABI::Get().Drain(); }));
++}
++ReArcStatus ABICheckTab(uint64_t id, TabSession** session) {
++  CHECK([NSThread isMainThread]);
++  auto status = Available();
++  if (status) {
++    return status;
++  }
++  *session = TabRegistry::Get().FindSession(id);
++  if (!*session) {
++    return REARC_TAB_NOT_FOUND;
++  }
++  return (*session)->close_state() == TabSession::CloseState::kOpen
++             ? REARC_OK
++             : REARC_INVALID_STATE;
++}
++void ABIInitializeTab(uint64_t id) {
++  CHECK([NSThread isMainThread]);
++  AttachTabObserver(id);
++  EmitInitialSnapshotEvent(id);
++  ABIAttachServices(id);
++}
++// Replaced by tab/018 with the services implementation.
++void ABIAttachServices(uint64_t) {}
++void ABIDetachServices(uint64_t) {}
++void ABITabDestroyed() {
++  auto& a = ABI::Get();
++  CHECK(a.live_tabs);
++  --a.live_tabs;
++  if (a.stopping && a.shutdown_index == a.shutdown_tabs.size() &&
++      !a.live_tabs) {
++    a.FinishShutdown();
++  }
++}
++}  // namespace rearc
++
++using rearc::ABI;
++
++uint32_t ReArcEngineABIVersion(void) {
++  CHECK([NSThread isMainThread]);
++  return REARC_ABI_VERSION;
++}
++const char* ReArcEngineVersion(void) {
++  CHECK([NSThread isMainThread]);
++  return version_info::GetVersionNumber().data();
++}
++bool ReArcEngineHasFeature(const char* feature) {
++  CHECK([NSThread isMainThread]);
++  if (!feature) {
++    return false;
++  }
++  return std::string(feature) == "native_view" ||
++         std::string(feature) == "navigation";
++}
++const char* ReArcStatusName(ReArcStatus status) {
++  CHECK([NSThread isMainThread]);
++  static const char* const names[] = {"ok",
++                                      "tab_not_found",
++                                      "window_not_found",
++                                      "profile_not_found",
++                                      "not_found",
++                                      "invalid_url",
++                                      "invalid_argument",
++                                      "invalid_state",
++                                      "engine_not_ready",
++                                      "version_mismatch",
++                                      "unsupported",
++                                      "busy",
++                                      "already_attached",
++                                      "stale_attachment",
++                                      "too_large",
++                                      "cancelled",
++                                      "internal"};
++  return status >= 0 && status <= REARC_INTERNAL ? names[status] : "internal";
++}
++ReArcStatus ReArcEngineConfigure(uint32_t version,
++                                 const ReArcCallbacks* callbacks,
++                                 void* context) {
++  auto& a = ABI::Get();
++  if (version != REARC_ABI_VERSION) {
++    return REARC_VERSION_MISMATCH;
++  }
++  if (!callbacks || !callbacks->ready) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  if (a.configured || NSApp) {
++    return REARC_INVALID_STATE;
++  }
++  a.configured = true;
++  a.callbacks = *callbacks;
++  a.context = context;
++  ReArcEngineSetLifecycleCallbacks(&rearc::Terminate, &rearc::CancelTerminate,
++                                   nullptr);
++  rearc::SetEngineReadinessSink(&a);
++  rearc::SetTabEventSink(&a);
++  rearc::SetAttachmentEventSink(&a);
++  return REARC_OK;
++}
++int ReArcEngineRun(int argc, const char* const* argv) {
++  auto& a = ABI::Get();
++  if (!a.configured || a.ran || argc < 1 || !argv) {
++    return -REARC_INVALID_STATE;
++  }
++  std::vector<std::string> args;
++  bool profile = false;
++  for (int i = 0; i < argc; ++i) {
++    if (!argv[i]) {
++      return -REARC_INVALID_ARGUMENT;
++    }
++    std::string arg(argv[i]);
++    if (arg.starts_with("--type") || arg.starts_with("--headless") ||
++        arg == "--incognito" || arg == "--guest") {
++      return -REARC_UNSUPPORTED;
++    }
++    if (arg.starts_with("--profile-directory=")) {
++      profile = true;
++    }
++    args.push_back(arg);
++  }
++  args.push_back("--no-startup-window");
++  args.push_back("--no-first-run");
++  args.push_back("--no-default-browser-check");
++  if (!profile) {
++    args.push_back("--profile-directory=Default");
++  }
++  std::vector<const char*> pointers;
++  for (auto& arg : args) {
++    pointers.push_back(arg.c_str());
++  }
++  a.ran = true;
++  const int result =
++      ChromeMain(static_cast<int>(pointers.size()), pointers.data());
++  // The scheduler no longer exists. Flush any already captured deliveries
++  // directly, then deliver the terminal lifecycle result from this host frame.
++  a.ready = false;
++  a.Drain();
++  for (auto& [id, window] : a.windows) {
++    [[NSNotificationCenter defaultCenter] removeObserver:window.observer];
++  }
++  a.windows.clear();
++  if (a.shutdown_completion) {
++    auto completion = a.shutdown_completion;
++    a.shutdown_completion = nullptr;
++    completion(a.shutdown_context, result == 0 ? REARC_OK : REARC_INTERNAL,
++               false);
++  }
++  return result;
++}
++uint64_t ReArcEngineDefaultProfile(void) {
++  CHECK([NSThread isMainThread]);
++  return ABI::Get().ready ? rearc::DefaultBridgeProfileId() : 0;
++}
++ReArcStatus ReArcEngineShutdown(bool force,
++                                ReArcCompletion completion,
++                                void* context) {
++  auto& a = ABI::Get();
++  if (!completion) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  if (a.stopping) {
++    return REARC_BUSY;
++  }
++  if (!a.ready) {
++    return REARC_ENGINE_NOT_READY;
++  }
++  // Snapshot the bridge's live IDs without exposing pointers across tasks.
++  a.shutdown_tabs.clear();
++  // Id allocation is monotonic, but the registry owns the authoritative set.
++  for (uint64_t id : rearc::TabRegistry::Get().SessionIds()) {
++    auto* s = rearc::TabRegistry::Get().FindSession(id);
++    if (s->close_state() != rearc::TabSession::CloseState::kOpen) {
++      return REARC_BUSY;
++    }
++    a.shutdown_tabs.push_back(id);
++  }
++  a.stopping = true;
++  a.shutdown_index = 0;
++  a.shutdown_force = force;
++  a.shutdown_completion = completion;
++  a.shutdown_context = context;
++  a.ContinueShutdown();
++  return REARC_OK;
++}
++ReArcStatus ReArcTabCreate(uint64_t profile_id,
++                           uint64_t space_id,
++                           const char* value,
++                           uint64_t* tab_id) {
++  CHECK([NSThread isMainThread]);
++  if (tab_id) {
++    *tab_id = 0;
++  }
++  if (auto status = rearc::Available()) {
++    return status;
++  }
++  if (!space_id || !tab_id) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  auto* profile = rearc::FindBridgeProfile(profile_id);
++  if (!profile || profile_id != rearc::DefaultBridgeProfileId()) {
++    return REARC_PROFILE_NOT_FOUND;
++  }
++  GURL url;
++  if (auto status = rearc::CheckURL(value ? value : "about:blank", &url)) {
++    return status;
++  }
++  rearc::TabSession::CreateArgs args;
++  args.browser_context = profile;
++  args.space_id = space_id;
++  *tab_id = rearc::TabRegistry::Get().CreateSession(args);
++  rearc::EmitTabCreatedEvent(*tab_id);
++  rearc::ABIInitializeTab(*tab_id);
++  return ReArcTabNavigate(*tab_id, url.spec().c_str(), 0);
++}
++ReArcStatus ReArcTabClose(uint64_t id,
++                          bool force,
++                          ReArcCompletion completion,
++                          void* context) {
++  CHECK([NSThread isMainThread]);
++  if (!completion) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  if (auto status = rearc::Available()) {
++    return status;
++  }
++  return rearc::CloseError(rearc::RequestTabClose(
++      id, force,
++      base::BindOnce(
++          [](ReArcCompletion done, void* ctx, rearc::CloseOutcome outcome) {
++            rearc::ABIPost(
++                base::BindOnce(done, ctx, REARC_OK,
++                               outcome == rearc::CloseOutcome::kCancelled));
++          },
++          completion, context)));
++}
++ReArcStatus ReArcTabNavigate(uint64_t id,
++                             const char* value,
++                             uint32_t transition) {
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  GURL url;
++  if (auto status = rearc::CheckURL(value, &url)) {
++    return status;
++  }
++  ui::PageTransition type;
++  switch (transition) {
++    case 0:
++      type = ui::PAGE_TRANSITION_TYPED;
++      break;
++    case 1:
++      type = ui::PAGE_TRANSITION_LINK;
++      break;
++    case 3:
++      type = ui::PAGE_TRANSITION_GENERATED;
++      break;
++    default:
++      return REARC_INVALID_ARGUMENT;
++  }
++  content::NavigationController::LoadURLParams params(url);
++  params.transition_type = type;
++  s->web_contents()->GetController().LoadURLWithParams(params);
++  return REARC_OK;
++}
++ReArcStatus ReArcTabReload(uint64_t id, bool ignore_cache) {
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  s->web_contents()->GetController().Reload(
++      ignore_cache ? content::ReloadType::BYPASSING_CACHE
++                   : content::ReloadType::NORMAL,
++      false);
++  return REARC_OK;
++}
++ReArcStatus ReArcTabGoBack(uint64_t id) {
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  auto& c = s->web_contents()->GetController();
++  if (c.CanGoBack()) {
++    c.GoBack();
++  }
++  return REARC_OK;
++}
++ReArcStatus ReArcTabGoForward(uint64_t id) {
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  auto& c = s->web_contents()->GetController();
++  if (c.CanGoForward()) {
++    c.GoForward();
++  }
++  return REARC_OK;
++}
++ReArcStatus ReArcTabStop(uint64_t id) {
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  s->web_contents()->Stop();
++  return REARC_OK;
++}
++ReArcStatus ReArcTabRefreshState(uint64_t id) {
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  rearc::EmitInitialSnapshotEvent(id);
++  return REARC_OK;
++}
++ReArcStatus ReArcTabActivate(uint64_t id) {
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  auto& a = ABI::Get();
++  auto p = a.presentations.find(id);
++  if (p == a.presentations.end() || !p->second.intent) {
++    return REARC_INVALID_STATE;
++  }
++  auto w = a.windows.find(p->second.window_id);
++  if (w == a.windows.end() || !w->second.native.keyWindow ||
++      !w->second.native.visible || w->second.native.miniaturized) {
++    return REARC_INVALID_STATE;
++  }
++  s->web_contents()->Focus();
++  return REARC_OK;
++}
++ReArcStatus ReArcWindowRegister(uint64_t id, void* native) {
++  CHECK([NSThread isMainThread]);
++  if (auto status = rearc::Available()) {
++    return status;
++  }
++  NSWindow* window = (__bridge NSWindow*)native;
++  if (!id || !window || ![window isKindOfClass:[NSWindow class]]) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  auto& a = ABI::Get();
++  if (a.windows.contains(id)) {
++    return REARC_INVALID_STATE;
++  }
++  rearc::Window record;
++  record.native = window;
++  record.observer = [[NSNotificationCenter defaultCenter]
++      addObserverForName:nil
++                  object:window
++                   queue:nil
++              usingBlock:^(NSNotification* note) {
++                CHECK([NSThread isMainThread]);
++                if ([note.name isEqualToString:NSWindowWillCloseNotification]) {
++                  ReArcWindowClosed(id);
++                } else {
++                  ABI::Get().ReconcileWindow(id);
++                }
++              }];
++  a.windows.emplace(id, std::move(record));
++  return REARC_OK;
++}
++ReArcStatus ReArcWindowClosed(uint64_t id) {
++  CHECK([NSThread isMainThread]);
++  auto& a = ABI::Get();
++  auto it = a.windows.find(id);
++  if (it == a.windows.end()) {
++    return REARC_WINDOW_NOT_FOUND;
++  }
++  std::vector<uint64_t> tabs;
++  for (const auto& [tab, p] : a.presentations) {
++    if (p.window_id == id) {
++      tabs.push_back(tab);
++    }
++  }
++  for (auto tab : tabs) {
++    rearc::AttachmentLeaseRegistry::Get().InvalidateLeasesForTab(
++        tab, rearc::LeaseInvalidatedReason::kWindowClosed);
++  }
++  [[NSNotificationCenter defaultCenter] removeObserver:it->second.observer];
++  a.windows.erase(it);
++  return REARC_OK;
++}
++ReArcStatus ReArcViewAttach(uint64_t id,
++                            uint64_t window_id,
++                            double width,
++                            double height,
++                            double scale,
++                            ReArcAttachment* out) {
++  CHECK([NSThread isMainThread]);
++  if (out) {
++    *out = {};
++  }
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  if (!out || !rearc::ValidSize(width, height, scale)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  if (!ABI::Get().windows.contains(window_id)) {
++    return REARC_WINDOW_NOT_FOUND;
++  }
++  auto result = rearc::AttachmentLeaseRegistry::Get().AttachView(id, width,
++                                                                 height, scale);
++  if (result.error == rearc::AttachError::kAlreadyAttached) {
++    return REARC_ALREADY_ATTACHED;
++  }
++  if (result.error != rearc::AttachError::kNone) {
++    return REARC_TAB_NOT_FOUND;
++  }
++  out->attachment_id = result.attachment_id;
++  out->content_generation = s->content_generation();
++  out->native_view = const_cast<void*>(CFRetain(result.host_view));
++  ABI::Get().presentations.emplace(
++      id, rearc::Presentation{window_id, result.attachment_id});
++  return REARC_OK;
++}
++ReArcStatus ReArcViewDetach(uint64_t id, uint64_t lease) {
++  CHECK([NSThread isMainThread]);
++  if (!rearc::AttachmentLeaseRegistry::Get().DetachView(id, lease)) {
++    return REARC_STALE_ATTACHMENT;
++  }
++  ABI::Get().presentations.erase(id);
++  return REARC_OK;
++}
++ReArcStatus ReArcViewResize(uint64_t id,
++                            uint64_t lease,
++                            double w,
++                            double h,
++                            double scale) {
++  CHECK([NSThread isMainThread]);
++  if (!rearc::ValidSize(w, h, scale)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  return rearc::AttachmentLeaseRegistry::Get().ResizeView(id, lease, w, h,
++                                                          scale)
++             ? REARC_OK
++             : REARC_STALE_ATTACHMENT;
++}
++ReArcStatus ReArcViewSetVisible(uint64_t id, uint64_t lease, bool visible) {
++  CHECK([NSThread isMainThread]);
++  auto& a = ABI::Get();
++  auto p = a.presentations.find(id);
++  if (p == a.presentations.end() || p->second.attachment_id != lease) {
++    return REARC_STALE_ATTACHMENT;
++  }
++  NSWindow* window = a.windows.at(p->second.window_id).native;
++  auto* s = rearc::TabRegistry::Get().FindSession(id);
++  NSView* content =
++      s ? s->web_contents()->GetNativeView().GetNativeNSView() : nil;
++  if (visible && content.window != window) {
++    return REARC_INVALID_STATE;
++  }
++  p->second.intent = visible;
++  a.Reconcile(id);
++  return REARC_OK;
++}
++void ReArcViewRelease(void* view) {
++  CHECK([NSThread isMainThread]);
++  if (view) {
++    CFRelease(view);
++  }
++}
++void ReArcBufferFree(void* buffer) {
++  CHECK([NSThread isMainThread]);
++  free(buffer);
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 7e0f4c3bae..e12d8a6bfa 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -44,7 +44,8 @@ bool HandleTerminateCancel() override {
+ }  // namespace
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+-  return "0.1.0";
++  CHECK([NSThread isMainThread]);
++  return "0.2.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.cc b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+index 7e5ecf756a..bcd2442b06 100644
+--- a/chrome/browser/rearc_bridge/rearc_profile_registry.cc
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+@@ -6,42 +6,78 @@
+ 
+ #include <pthread.h>
+ 
+-#include <set>
++#include <map>
++#include <memory>
+ 
+ #include "base/check.h"
+-#include "base/logging.h"
+-
++#include "base/no_destructor.h"
++#include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
++#include "chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h"
++#include "chrome/browser/profiles/profile.h"
+ namespace rearc {
+-
+ namespace {
+-
+-// Main-thread only; PostProfileInit and the future unregister path run on
+-// BrowserThread::UI. Stores opaque handles only — see the header for why
+-// Profile stays forward-declared here.
+-std::set<Profile*> g_registered_profiles;
+-
++struct Entry {
++  uint64_t id;
++  std::unique_ptr<ScopedProfileKeepAlive> keep_alive;
++};
++auto& Profiles() {
++  static base::NoDestructor<std::map<Profile*, Entry>> profiles;
++  return *profiles;
++}
++uint64_t next_id = 1;
++uint64_t default_id = 0;
+ }  // namespace
+-
+-void RegisterBridgeProfile(Profile* profile, bool is_initial_profile) {
++void RegisterBridgeProfile(Profile* profile, bool initial) {
+   CHECK(pthread_main_np());
+   CHECK(profile);
+-  bool inserted = g_registered_profiles.insert(profile).second;
+-  VLOG(1) << "ReArc bridge: profile registered (initial=" << is_initial_profile
+-          << ", new=" << inserted
+-          << ", count=" << g_registered_profiles.size() << ").";
++  if (Profiles().contains(profile) || profile->IsOffTheRecord()) {
++    return;
++  }
++  auto keep_alive = ScopedProfileKeepAlive::TryAcquire(
++      profile, ProfileKeepAliveOrigin::kAppWindow);
++  CHECK(keep_alive);
++  const uint64_t id = next_id++;
++  Profiles().emplace(profile, Entry{id, std::move(keep_alive)});
++  if (initial && !default_id) {
++    default_id = id;
++  }
+ }
+-
+ void UnregisterBridgeProfile(Profile* profile) {
+   CHECK(pthread_main_np());
+-  g_registered_profiles.erase(profile);
++  if (BridgeProfileId(profile) == default_id) {
++    default_id = 0;
++  }
++  Profiles().erase(profile);
++}
++uint64_t BridgeProfileId(Profile* profile) {
++  CHECK(pthread_main_np());
++  auto it = Profiles().find(profile);
++  return it == Profiles().end() ? 0 : it->second.id;
++}
++uint64_t DefaultBridgeProfileId() {
++  CHECK(pthread_main_np());
++  return default_id;
++}
++Profile* FindBridgeProfile(uint64_t id) {
++  CHECK(pthread_main_np());
++  for (const auto& [profile, entry] : Profiles()) {
++    if (entry.id == id) {
++      return profile;
++    }
++  }
++  return nullptr;
++}
++void ReleaseBridgeProfiles() {
++  CHECK(pthread_main_np());
++  default_id = 0;
++  Profiles().clear();
+ }
+-
+ size_t GetRegisteredBridgeProfileCount() {
+-  return g_registered_profiles.size();
++  CHECK(pthread_main_np());
++  return Profiles().size();
+ }
+-
+ bool IsBridgeProfileRegistered(Profile* profile) {
+-  return g_registered_profiles.find(profile) != g_registered_profiles.end();
++  CHECK(pthread_main_np());
++  return Profiles().contains(profile);
+ }
+-
+ }  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.h b/chrome/browser/rearc_bridge/rearc_profile_registry.h
+index 68401554b1..ae58dc43f7 100644
+--- a/chrome/browser/rearc_bridge/rearc_profile_registry.h
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.h
+@@ -6,6 +6,7 @@
+ #define CHROME_BROWSER_REARC_BRIDGE_REARC_PROFILE_REGISTRY_H_
+ 
+ #include <cstddef>
++#include <cstdint>
+ 
+ class Profile;
+ 
+@@ -25,6 +26,13 @@ namespace rearc {
+ void RegisterBridgeProfile(Profile* profile, bool is_initial_profile);
+ void UnregisterBridgeProfile(Profile* profile);
+ 
++// Session-scoped, monotonic engine IDs. 0/null means unknown.
++uint64_t BridgeProfileId(Profile* profile);
++uint64_t DefaultBridgeProfileId();
++Profile* FindBridgeProfile(uint64_t profile_id);
++// Only after every WebContents has been destroyed.
++void ReleaseBridgeProfiles();
++
+ // Observability for later slices and tests.
+ size_t GetRegisteredBridgeProfileCount();
+ bool IsBridgeProfileRegistered(Profile* profile);
+diff --git a/chrome/browser/rearc_bridge/tab_adoption.cc b/chrome/browser/rearc_bridge/tab_adoption.cc
+index 8173cd2fff..8ceab11fde 100644
+--- a/chrome/browser/rearc_bridge/tab_adoption.cc
++++ b/chrome/browser/rearc_bridge/tab_adoption.cc
+@@ -11,7 +11,7 @@
+ #include "base/check.h"
+ #include "base/logging.h"
+ #include "chrome/browser/rearc_bridge/ipc_tab_events.h"
+-#include "chrome/browser/rearc_bridge/tab_observer.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
+ #include "content/public/browser/web_contents.h"
+ #include "url/gurl.h"
+@@ -75,13 +75,10 @@ content::WebContents* AdoptNewTabContents(
+   event.opener_tab_id = has_opener ? source_tab_id : 0;
+   event.disposition = placement;
+   event.url = weak_contents->GetVisibleURL().spec();
+-  // As in S3, profile_id remains internal scaffolding until transport stamps
+-  // the real profile ID. Never expose this event directly on the wire yet.
+   EmitTabEvent(std::move(event));
+   // A sink can synchronously request destruction; never attach after removal.
+   if (TabRegistry::Get().FindSession(tab_id)) {
+-    AttachTabObserver(tab_id);
+-    EmitInitialSnapshotEvent(tab_id);
++    ABIInitializeTab(tab_id);
+   }
+   return weak_contents.get();
+ }
+diff --git a/chrome/browser/rearc_bridge/tab_observer.cc b/chrome/browser/rearc_bridge/tab_observer.cc
+index 43a49ecbb8..2a33a87ee7 100644
+--- a/chrome/browser/rearc_bridge/tab_observer.cc
++++ b/chrome/browser/rearc_bridge/tab_observer.cc
+@@ -60,6 +60,7 @@ TabObserver::TabObserver(content::WebContents* web_contents, uint64_t tab_id)
+   CHECK(pthread_main_np());
+   if (TabSession* session = TabRegistry::Get().FindSession(tab_id_)) {
+     last_known_generation_ = session->content_generation();
++    profile_id_ = session->profile_id();
+   }
+ }
+ 
+@@ -73,6 +74,7 @@ void TabObserver::DidFinishNavigation(
+   }
+   if (TabSession* session = TabRegistry::Get().FindSession(tab_id_)) {
+     last_known_generation_ = session->content_generation();
++    profile_id_ = session->profile_id();
+   }
+ 
+   TabEvent event;
+@@ -82,6 +84,7 @@ void TabObserver::DidFinishNavigation(
+   event.navigation_id =
+       static_cast<uint64_t>(navigation_handle->GetNavigationId());
+   event.is_main_frame = true;
++  event.url = navigation_handle->GetURL().spec();
+ 
+   if (navigation_handle->HasCommitted()) {
+     event.kind = TabEventKind::kNavigationCommitted;
+@@ -102,6 +105,7 @@ void TabObserver::DidFinishNavigation(
+     event.error_text = net::ErrorToString(error);
+   }
+   EmitTabEvent(std::move(event));
++  EmitInitialSnapshotEvent(tab_id_);
+ }
+ 
+ void TabObserver::DidStartLoading() {
+@@ -164,6 +168,7 @@ void TabObserver::WebContentsDestroyed() {
+   event.kind = TabEventKind::kTabClosed;
+   event.tab_id = tab_id_;
+   event.content_generation = last_known_generation_;
++  event.profile_id = profile_id_;
+   event.closed_reason = TabClosedReason::kEngine;
+   EmitTabEvent(std::move(event));
+ 
+diff --git a/chrome/browser/rearc_bridge/tab_observer.h b/chrome/browser/rearc_bridge/tab_observer.h
+index 3c3d1ce604..fc0de8bb59 100644
+--- a/chrome/browser/rearc_bridge/tab_observer.h
++++ b/chrome/browser/rearc_bridge/tab_observer.h
+@@ -60,6 +60,7 @@ class TabObserver : public content::WebContentsObserver {
+   // Last-known content generation, sampled at attach and after every emitted
+   // event, so tab.closed can be stamped even after the session is gone.
+   uint64_t last_known_generation_ = 0;
++  uint64_t profile_id_ = 0;
+ 
+   base::WeakPtrFactory<TabObserver> weak_factory_{this};
+ };
+diff --git a/chrome/browser/rearc_bridge/tab_registry.cc b/chrome/browser/rearc_bridge/tab_registry.cc
+index 49340185d2..59bffdce5d 100644
+--- a/chrome/browser/rearc_bridge/tab_registry.cc
++++ b/chrome/browser/rearc_bridge/tab_registry.cc
+@@ -116,6 +116,13 @@ void TabRegistry::DestroyAllSessions() {
+   }
+ }
+ 
++std::vector<uint64_t> TabRegistry::SessionIds() const {
++  CHECK(pthread_main_np());
++  std::vector<uint64_t> ids;
++  for (const auto& [id, session] : sessions_) ids.push_back(id);
++  return ids;
++}
++
+ void TabRegistry::ApplyCommand(const Command& command) {
+   switch (command.type) {
+     case Command::Type::kCreate: {
+diff --git a/chrome/browser/rearc_bridge/tab_registry.h b/chrome/browser/rearc_bridge/tab_registry.h
+index 581a61036d..107c1993b6 100644
+--- a/chrome/browser/rearc_bridge/tab_registry.h
++++ b/chrome/browser/rearc_bridge/tab_registry.h
+@@ -10,6 +10,7 @@
+ #include <deque>
+ #include <map>
+ #include <memory>
++#include <vector>
+ 
+ #include "base/memory/raw_ptr.h"
+ #include "chrome/browser/rearc_bridge/tab_session.h"
+@@ -89,6 +90,8 @@ class TabRegistry {
+   // engine shutdown.
+   void DestroyAllSessions();
+ 
++  std::vector<uint64_t> SessionIds() const;
++
+   size_t session_count() const { return sessions_.size(); }
+ 
+  private:
+diff --git a/chrome/browser/rearc_bridge/tab_session.cc b/chrome/browser/rearc_bridge/tab_session.cc
+index 03f8522ed9..eadac44d84 100644
+--- a/chrome/browser/rearc_bridge/tab_session.cc
++++ b/chrome/browser/rearc_bridge/tab_session.cc
+@@ -11,6 +11,8 @@
+ #include "base/check.h"
+ #include "base/logging.h"
+ #include "chrome/browser/rearc_bridge/tab_delegate.h"
++#include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++#include "chrome/browser/profiles/profile.h"
+ #include "content/public/browser/web_contents.h"
+ 
+ namespace rearc {
+@@ -64,6 +66,7 @@ TabSession::TabSession(uint64_t tab_id,
+                        const CreateArgs& args,
+                        std::unique_ptr<content::WebContents> contents)
+     : tab_id_(tab_id),
++      profile_id_(BridgeProfileId(Profile::FromBrowserContext(args.browser_context))),
+       space_id_(args.space_id),
+       order_index_(args.order_index) {
+   delegate_ = std::make_unique<ReArcTabDelegate>(tab_id_);
+diff --git a/chrome/browser/rearc_bridge/tab_session.h b/chrome/browser/rearc_bridge/tab_session.h
+index 9b8f5241b5..9430cdc4ad 100644
+--- a/chrome/browser/rearc_bridge/tab_session.h
++++ b/chrome/browser/rearc_bridge/tab_session.h
+@@ -77,6 +77,7 @@ class TabSession {
+   TabSession& operator=(const TabSession&) = delete;
+ 
+   uint64_t tab_id() const { return tab_id_; }
++  uint64_t profile_id() const { return profile_id_; }
+ 
+   // Shell space/order metadata (IPC-CONTRACT §3 tab.move semantics; pure
+   // metadata day-one — membership never reparents a view by itself).
+@@ -105,6 +106,7 @@ class TabSession {
+              std::unique_ptr<content::WebContents> contents);
+ 
+   const uint64_t tab_id_;
++  const uint64_t profile_id_;
+   uint64_t space_id_;
+   int32_t order_index_;
+   CloseState close_state_ = CloseState::kOpen;

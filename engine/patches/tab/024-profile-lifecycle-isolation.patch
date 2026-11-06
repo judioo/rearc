@@ -1,0 +1,608 @@
+From 4222b927283fae8c3a5fe56cdb3667619210b0d5 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Mon, 2 Nov 2026 18:13:40 +0400
+Subject: [PATCH] P-PROF-001 wave 14: isolate named and off-the-record profiles
+
+Use ProfileManager initialization and named OTR contexts with original-profile keepalives. Close tabs sequentially, await actual contents and OTR destruction, restore availability on veto, and cancel pending opens on shutdown. Preserve ABI 1.5 layouts and default-profile behavior; advertise additive profile APIs in ABI 1.6.
+
+Last rebased: 2026-11-02 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/app/framework.exports                  |   3 +
+ chrome/app/framework.order                    |   3 +
+ chrome/browser/chrome_browser_main_mac.mm     |   6 +-
+ .../browser/rearc_bridge/close_controller.cc  |   2 +-
+ .../browser/rearc_bridge/rearc_abi_internal.h |   2 +-
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  19 +-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  | 182 +++++++++++++++++-
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_profile_registry.cc    |  71 ++++++-
+ .../rearc_bridge/rearc_profile_registry.h     |  19 +-
+ chrome/browser/rearc_bridge/tab_adoption.cc   |   3 +
+ 11 files changed, 280 insertions(+), 32 deletions(-)
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index dfd4a84835..d0c960fd1f 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -32,6 +32,9 @@ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+ _ReArcEngineDefaultProfile
++_ReArcProfileOpen
++_ReArcProfileCreateOffTheRecord
++_ReArcProfileClose
+ _ReArcTabCreate
+ _ReArcTabClose
+ _ReArcTabNavigate
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index b340320d9d..6eec453ff6 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -39,6 +39,9 @@ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+ _ReArcEngineDefaultProfile
++_ReArcProfileOpen
++_ReArcProfileCreateOffTheRecord
++_ReArcProfileClose
+ _ReArcTabCreate
+ _ReArcTabClose
+ _ReArcTabNavigate
+diff --git a/chrome/browser/chrome_browser_main_mac.mm b/chrome/browser/chrome_browser_main_mac.mm
+index 5957fd1811..1c55ccc347 100644
+--- a/chrome/browser/chrome_browser_main_mac.mm
++++ b/chrome/browser/chrome_browser_main_mac.mm
+@@ -219,8 +219,10 @@
+   // and teardown; no real profile work (prefs, KeyedServices, session
+   // restore) happens here. Without a host nothing runs and stock behavior is
+   // unchanged.
+-  if (rearc::GetEngineLifecycleHost()) {
+-    rearc::RegisterBridgeProfile(profile, is_initial_profile);
++  // Additional profiles register only in accepted ABI initialization replies;
++  // a cancelled open must never reacquire a keepalive during shutdown.
++  if (rearc::GetEngineLifecycleHost() && is_initial_profile) {
++    rearc::RegisterBridgeProfile(profile, true);
+   }
+ }
+ 
+diff --git a/chrome/browser/rearc_bridge/close_controller.cc b/chrome/browser/rearc_bridge/close_controller.cc
+index fbf8b36045..0b7467ce12 100644
+--- a/chrome/browser/rearc_bridge/close_controller.cc
++++ b/chrome/browser/rearc_bridge/close_controller.cc
+@@ -256,10 +256,10 @@ void DidDestroyTab(uint64_t tab_id, uint64_t content_generation) {
+   event.closed_reason = reason;
+   EmitTabEvent(std::move(event));
+   VLOG(1) << "rearc: tab.close.reply closed tab_id=" << tab_id;
++  ABITabDestroyed(profile_id);
+   if (callback) {
+     std::move(callback).Run(CloseOutcome::kClosed);
+   }
+-  ABITabDestroyed();
+ }
+ 
+ }  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 52713e9e35..4e41425888 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -13,7 +13,7 @@ class TabSession;
+ ReArcStatus ABICheckTab(uint64_t tab_id, TabSession** session);
+ void ABIPost(base::OnceClosure callback);
+ void ABIInitializeTab(uint64_t tab_id);
+-void ABITabDestroyed();
++void ABITabDestroyed(uint64_t profile_id);
+ // Services extend these hooks in tab/018.
+ void ABIAttachServices(uint64_t tab_id);
+ void ABIDetachServices(uint64_t tab_id);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index de143489ca..3a86136b1c 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 5, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 6, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -113,7 +113,22 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcEngineShutdown(bool force,
+                                                     void* context);
+ REARC_ENGINE_EXPORT uint64_t ReArcEngineDefaultProfile(void);
+ 
+-// v1 admits only the startup profile. IDs are engine allocated, never reused.
++// Named persistent keys: case-sensitive [A-Za-z0-9_-]{1,64}. No paths.
++// Accepted opens coalesce by key, callbacks are deferred and exactly once.
++// Each OTR call creates a unique in-memory profile under a persistent parent.
++typedef void (*ReArcProfileCallback)(void* context, ReArcStatus status,
++                                     uint64_t profile_id, bool off_the_record);
++REARC_ENGINE_EXPORT ReArcStatus ReArcProfileOpen(
++    const char* name, ReArcProfileCallback completion, void* context);
++REARC_ENGINE_EXPORT ReArcStatus ReArcProfileCreateOffTheRecord(
++    uint64_t parent_id, ReArcProfileCallback completion, void* context);
++// Sequential tab close, beforeunload veto restores availability. Close children
++// first; parent with live OTR children is busy. Default close is invalid_state.
++// Completes after tab callbacks, leases and OTR BrowserContext destruction.
++REARC_ENGINE_EXPORT ReArcStatus ReArcProfileClose(
++    uint64_t profile_id, bool force, ReArcCompletion completion, void* context);
++
++// IDs are engine allocated, never reused. Any live profile is admitted.
+ // space_id is a nonzero shell label. New tabs stage hidden; attach separately.
+ // null URL keeps the initial empty about:blank document without a synthetic
+ // navigation. Explicit creation URLs are queued; an immediate Navigate
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 3108153fbe..b1e24d7b41 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -6,6 +6,7 @@
+ 
+ #import <AppKit/AppKit.h>
+ 
++#include <algorithm>
+ #include <cmath>
+ #include <cstdlib>
+ #include <deque>
+@@ -19,6 +20,10 @@
+ #include "base/memory/raw_ptr.h"
+ #include "base/no_destructor.h"
+ #include "base/strings/utf_string_conversions.h"
++#include "base/strings/string_util.h"
++#include "base/strings/string_number_conversions.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/profiles/profile_manager.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "chrome/browser/lifetime/application_lifetime_desktop.h"
+ #include "chrome/browser/lifetime/browser_shutdown.h"
+@@ -47,6 +52,10 @@
+   NSWindow* __strong native = nil;
+   id __strong observer = nil;
+ };
++struct ProfileRequest {
++  ReArcProfileCallback callback;
++  raw_ptr<void> context;
++};
+ struct Presentation {
+   uint64_t window_id;
+   uint64_t attachment_id;
+@@ -66,6 +75,15 @@
+   std::map<uint64_t, Window> windows;
+   std::map<uint64_t, Presentation> presentations;
+   std::set<uint64_t> initial_navigations;
++  std::map<std::string, std::vector<ProfileRequest>> profile_opens;
++  uint64_t closing_profile = 0;
++  std::vector<uint64_t> profile_tabs;
++  size_t profile_index = 0;
++  bool profile_force = false;
++  ReArcCompletion profile_completion = nullptr;
++  raw_ptr<void> profile_context = nullptr;
++  std::map<uint64_t, size_t> profile_live_tabs;
++  bool profile_waiting = false;
+   size_t live_tabs = 0;
+   std::vector<uint64_t> shutdown_tabs;
+   size_t shutdown_index = 0;
+@@ -113,6 +131,7 @@ void OnTabEvent(const TabEvent& event) override {
+     CHECK(event.profile_id);
+     if (event.kind == TabEventKind::kTabCreated) {
+       ++live_tabs;
++      ++profile_live_tabs[event.profile_id];
+     }
+     ABIPost(base::BindOnce(
+         [](TabEvent e) {
+@@ -200,6 +219,53 @@ void ReconcileWindow(uint64_t id) {
+     }
+   }
+ 
++  void CompleteProfileOpen(std::string key, uint64_t id, bool otr) {
++    auto it = profile_opens.find(key);
++    if (it == profile_opens.end()) return;  // Shutdown cancelled this request.
++    auto requests = std::move(it->second);
++    profile_opens.erase(it);
++    for (const auto& request : requests) {
++      // Reentrant shutdown from an earlier coalesced callback cancels the rest.
++      const ReArcStatus status = stopping ? REARC_CANCELLED :
++                                  id ? REARC_OK : REARC_INTERNAL;
++      request.callback(request.context, status, status ? 0 : id, otr);
++    }
++  }
++
++  void ContinueProfileClose() {
++    while (profile_index < profile_tabs.size()) {
++      uint64_t id = profile_tabs[profile_index++];
++      if (!TabRegistry::Get().FindSession(id)) continue;
++      auto result = RequestTabClose(id, profile_force,
++          base::BindOnce([](CloseOutcome outcome) {
++            auto& a = Get();
++            if (outcome == CloseOutcome::kCancelled) {
++              a.closing_profile = 0;
++              ABIPost(base::BindOnce(a.profile_completion,
++                  a.profile_context.get(), REARC_OK, true));
++              a.profile_completion = nullptr;
++            } else {
++              a.ContinueProfileClose();
++            }
++          }));
++      // Another page can close itself while an earlier tab unloads. It is
++      // already serialized by close_controller; wait for actual destruction.
++      if (result == CloseRequestResult::kStarted) return;
++    }
++    if (profile_live_tabs.contains(closing_profile)) {
++      profile_waiting = true;
++      return;
++    }
++    ReleaseBridgeProfile(closing_profile, base::BindOnce([] {
++      auto& a = Get();
++      a.closing_profile = 0;
++      auto completion = a.profile_completion;
++      a.profile_completion = nullptr;
++      // OTR destruction is done and all terminal tab/service replies drained.
++      completion(a.profile_context, REARC_OK, false);
++    }));
++  }
++
+   void ContinueShutdown() {
+     // Sequential close allows cancellation without starting later unloads.
+     while (shutdown_index < shutdown_tabs.size()) {
+@@ -220,8 +286,7 @@ void ContinueShutdown() {
+               a.ContinueShutdown();
+             }
+           }));
+-      CHECK(result == CloseRequestResult::kStarted);
+-      return;
++      if (result == CloseRequestResult::kStarted) return;
+     }
+     // DidDestroyTab runs after the contents destructor and posts tab.closed.
+     // It calls FinishShutdown when the final live contents has gone away.
+@@ -237,9 +302,8 @@ void FinishShutdown() {
+     ready = false;
+     CHECK_EQ(live_tabs, 0u);
+     CHECK_EQ(TabRegistry::Get().session_count(), 0u);
+-    ReleaseBridgeProfiles();
+-    // Run this after queued terminal tab/view events and close replies.
+-    ABIPost(base::BindOnce([] {
++    // Run this after OTR destruction, terminal tab/view events and replies.
++    ReleaseBridgeProfiles(base::BindOnce([] {
+       browser_shutdown::SetTryingToQuit(true);
+       chrome::OnAppExiting();
+       ReleaseShellKeepAlive();
+@@ -329,6 +393,7 @@ ReArcStatus ABICheckTab(uint64_t id, TabSession** session) {
+   if (!*session) {
+     return REARC_TAB_NOT_FOUND;
+   }
++  if (ABI::Get().closing_profile == (*session)->profile_id()) return REARC_BUSY;
+   return (*session)->close_state() == TabSession::CloseState::kOpen
+              ? REARC_OK
+              : REARC_INVALID_STATE;
+@@ -339,8 +404,15 @@ void ABIInitializeTab(uint64_t id) {
+   EmitInitialSnapshotEvent(id);
+   ABIAttachServices(id);
+ }
+-void ABITabDestroyed() {
++void ABITabDestroyed(uint64_t profile_id) {
+   auto& a = ABI::Get();
++  auto it = a.profile_live_tabs.find(profile_id);
++  CHECK(it != a.profile_live_tabs.end() && it->second);
++  if (!--it->second) a.profile_live_tabs.erase(it);
++  if (a.closing_profile == profile_id && a.profile_waiting) {
++    a.profile_waiting = false;
++    ABIPost(base::BindOnce([] { ABI::Get().ContinueProfileClose(); }));
++  }
+   CHECK(a.live_tabs);
+   --a.live_tabs;
+   if (a.stopping && a.shutdown_index == a.shutdown_tabs.size() &&
+@@ -372,6 +444,8 @@ bool ReArcEngineHasFeature(const char* feature) {
+   return std::string(feature) == "native_view" ||
+          std::string(feature) == "navigation" ||
+          std::string(feature) == "navigation_extended" ||
++         std::string(feature) == "profiles" ||
++         std::string(feature) == "profile_off_the_record" ||
+          rearc::ABIHasServiceFeature(feature);
+ }
+ const char* ReArcStatusName(ReArcStatus status) {
+@@ -483,7 +557,7 @@ ReArcStatus ReArcEngineShutdown(bool force,
+   if (!completion) {
+     return REARC_INVALID_ARGUMENT;
+   }
+-  if (a.stopping) {
++  if (a.stopping || a.closing_profile) {
+     return REARC_BUSY;
+   }
+   if (!a.ready) {
+@@ -499,7 +573,16 @@ ReArcStatus ReArcEngineShutdown(bool force,
+     }
+     a.shutdown_tabs.push_back(id);
+   }
++  if (a.live_tabs != a.shutdown_tabs.size()) return REARC_BUSY;
+   a.stopping = true;
++  auto opens = std::move(a.profile_opens);
++  a.profile_opens.clear();
++  for (auto& [key, requests] : opens) {
++    for (const auto& request : requests) {
++      rearc::ABIPost(base::BindOnce(request.callback, request.context.get(),
++                                   REARC_CANCELLED, uint64_t{0}, false));
++    }
++  }
+   a.shutdown_index = 0;
+   a.shutdown_force = force;
+   a.shutdown_completion = completion;
+@@ -507,6 +590,86 @@ ReArcStatus ReArcEngineShutdown(bool force,
+   a.ContinueShutdown();
+   return REARC_OK;
+ }
++ReArcStatus ReArcProfileOpen(const char* name, ReArcProfileCallback completion,
++                               void* context) {
++  if (auto status = rearc::Available()) return status;
++  if (!name || !completion) return REARC_INVALID_ARGUMENT;
++  std::string key(name);
++  if (key.empty() || key.size() > 64 ||
++      !std::ranges::all_of(key, [](unsigned char c) {
++        return base::IsAsciiAlpha(c) || base::IsAsciiDigit(c) || c == '_' || c == '-';
++      })) return REARC_INVALID_ARGUMENT;
++  auto& a = ABI::Get();
++  if (a.closing_profile) return REARC_BUSY;
++  auto& requests = a.profile_opens[key];
++  requests.push_back({completion, context});
++  if (requests.size() > 1) return REARC_OK;
++  auto* manager = g_browser_process->profile_manager();
++  // Hex keys preserve case-sensitive identity on case-insensitive macOS disks.
++  auto path = manager->user_data_dir().AppendASCII(
++      "ReArcProfile-" + base::HexEncode(key));
++  manager->CreateProfileAsync(path, base::BindOnce([](std::string key, Profile* p) {
++    auto& a = ABI::Get();
++    if (!a.profile_opens.contains(key)) return;
++    if (p) rearc::RegisterBridgeProfile(p, false);
++    rearc::ABIPost(base::BindOnce([](std::string key, uint64_t id) {
++      ABI::Get().CompleteProfileOpen(std::move(key), id, false);
++    }, std::move(key), p ? rearc::BridgeProfileId(p) : 0));
++  }, std::move(key)));
++  return REARC_OK;
++}
++ReArcStatus ReArcProfileCreateOffTheRecord(uint64_t parent_id,
++    ReArcProfileCallback completion, void* context) {
++  if (auto status = rearc::Available()) return status;
++  if (!completion) return REARC_INVALID_ARGUMENT;
++  auto& a = ABI::Get();
++  if (a.closing_profile) return REARC_BUSY;
++  auto* parent = rearc::FindBridgeProfile(parent_id);
++  if (!parent) return REARC_PROFILE_NOT_FOUND;
++  if (parent->IsOffTheRecord()) return REARC_INVALID_ARGUMENT;
++  // No extension integration in the browser-less host: use non-primary OTR.
++  auto* profile = parent->GetOffTheRecordProfile(
++      Profile::OTRProfileID::CreateUnique("rearc.space"), true);
++  rearc::RegisterBridgeProfile(profile, false);
++  uint64_t id = rearc::BridgeProfileId(profile);
++  std::string key = "@otr-" + std::to_string(id);
++  a.profile_opens[key].push_back({completion, context});
++  rearc::ABIPost(base::BindOnce([](std::string key, uint64_t id) {
++    ABI::Get().CompleteProfileOpen(std::move(key), id, true);
++  }, std::move(key), id));
++  return REARC_OK;
++}
++ReArcStatus ReArcProfileClose(uint64_t id, bool force,
++                              ReArcCompletion completion, void* context) {
++  if (auto status = rearc::Available()) return status;
++  if (!completion) return REARC_INVALID_ARGUMENT;
++  auto& a = ABI::Get();
++  if (!rearc::FindBridgeProfile(id)) return REARC_PROFILE_NOT_FOUND;
++  if (id == rearc::DefaultBridgeProfileId()) return REARC_INVALID_STATE;
++  if (a.closing_profile || !a.profile_opens.empty() ||
++      rearc::BridgeProfileHasChildren(id)) return REARC_BUSY;
++  a.profile_tabs.clear();
++  for (uint64_t tab : rearc::TabRegistry::Get().SessionIds()) {
++    auto* s = rearc::TabRegistry::Get().FindSession(tab);
++    if (s->profile_id() != id) continue;
++    if (s->close_state() != rearc::TabSession::CloseState::kOpen) return REARC_BUSY;
++    a.profile_tabs.push_back(tab);
++  }
++  // The registry removes sessions one task before their contents destructor.
++  // A reentrant lease invalidation callback must not release that context.
++  auto live = a.profile_live_tabs.find(id);
++  if (live != a.profile_live_tabs.end() && live->second != a.profile_tabs.size())
++    return REARC_BUSY;
++  a.closing_profile = id;
++  a.profile_waiting = false;
++  a.profile_index = 0;
++  a.profile_force = force;
++  a.profile_completion = completion;
++  a.profile_context = context;
++  // Defer even an empty persistent close; never callback inside this call.
++  rearc::ABIPost(base::BindOnce([] { ABI::Get().ContinueProfileClose(); }));
++  return REARC_OK;
++}
+ ReArcStatus ReArcTabCreate(uint64_t profile_id,
+                            uint64_t space_id,
+                            const char* value,
+@@ -522,9 +685,10 @@ ReArcStatus ReArcTabCreate(uint64_t profile_id,
+     return REARC_INVALID_ARGUMENT;
+   }
+   auto* profile = rearc::FindBridgeProfile(profile_id);
+-  if (!profile || profile_id != rearc::DefaultBridgeProfileId()) {
++  if (!profile) {
+     return REARC_PROFILE_NOT_FOUND;
+   }
++  if (ABI::Get().closing_profile == profile_id) return REARC_BUSY;
+   GURL url;
+   if (auto status = rearc::CheckURL(value ? value : "about:blank", &url)) {
+     return status;
+@@ -558,6 +722,8 @@ ReArcStatus ReArcTabClose(uint64_t id,
+   if (auto status = rearc::Available()) {
+     return status;
+   }
++  auto* session = rearc::TabRegistry::Get().FindSession(id);
++  if (session && ABI::Get().closing_profile == session->profile_id()) return REARC_BUSY;
+   return rearc::CloseError(rearc::RequestTabClose(
+       id, force,
+       base::BindOnce(
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 109130e017..932cf8178c 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.7.0";
++  return "0.8.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.cc b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+index bcd2442b06..02c4c36b56 100644
+--- a/chrome/browser/rearc_bridge/rearc_profile_registry.cc
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+@@ -10,6 +10,10 @@
+ #include <memory>
+ 
+ #include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/supports_user_data.h"
++#include "chrome/browser/profiles/profile_destroyer.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
+ #include "base/no_destructor.h"
+ #include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+ #include "chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h"
+@@ -30,11 +34,11 @@ uint64_t default_id = 0;
+ void RegisterBridgeProfile(Profile* profile, bool initial) {
+   CHECK(pthread_main_np());
+   CHECK(profile);
+-  if (Profiles().contains(profile) || profile->IsOffTheRecord()) {
++  if (Profiles().contains(profile)) {
+     return;
+   }
+   auto keep_alive = ScopedProfileKeepAlive::TryAcquire(
+-      profile, ProfileKeepAliveOrigin::kAppWindow);
++      profile->GetOriginalProfile(), ProfileKeepAliveOrigin::kAppWindow);
+   CHECK(keep_alive);
+   const uint64_t id = next_id++;
+   Profiles().emplace(profile, Entry{id, std::move(keep_alive)});
+@@ -67,10 +71,67 @@ Profile* FindBridgeProfile(uint64_t id) {
+   }
+   return nullptr;
+ }
+-void ReleaseBridgeProfiles() {
++bool BridgeProfileHasChildren(uint64_t id) {
++  Profile* original = FindBridgeProfile(id);
++  for (const auto& [profile, entry] : Profiles()) {
++    if (profile != original && profile->GetOriginalProfile() == original) {
++      return true;
++    }
++  }
++  return false;
++}
++namespace {
++const char kDestructionCompletion = 0;
++// SupportsUserData is destroyed after the BrowserContext/KeyedServices. Keep
++// the parent alive until the OTR destruction and its callback have unwound.
++class DestructionCompletion final : public base::SupportsUserData::Data {
++ public:
++  DestructionCompletion(std::unique_ptr<ScopedProfileKeepAlive> keep_alive,
++                        base::OnceClosure completion)
++      : keep_alive_(std::move(keep_alive)), completion_(std::move(completion)) {}
++  ~DestructionCompletion() override {
++    ABIPost(base::BindOnce(
++        [](std::unique_ptr<ScopedProfileKeepAlive>, base::OnceClosure done) {
++          std::move(done).Run();
++        }, std::move(keep_alive_), std::move(completion_)));
++  }
++ private:
++  std::unique_ptr<ScopedProfileKeepAlive> keep_alive_;
++  base::OnceClosure completion_;
++};
++}  // namespace
++void ReleaseBridgeProfile(uint64_t id, base::OnceClosure completion) {
+   CHECK(pthread_main_np());
+-  default_id = 0;
+-  Profiles().clear();
++  Profile* profile = FindBridgeProfile(id);
++  CHECK(profile);
++  CHECK(!BridgeProfileHasChildren(id));
++  if (profile->IsOffTheRecord()) {
++    profile->SetUserData(&kDestructionCompletion,
++        std::make_unique<DestructionCompletion>(
++            std::move(Profiles().at(profile).keep_alive), std::move(completion)));
++    UnregisterBridgeProfile(profile);
++    ProfileDestroyer::DestroyOTRProfileWhenAppropriate(profile);
++  } else {
++    UnregisterBridgeProfile(profile);
++    ABIPost(std::move(completion));
++  }
++}
++void ReleaseBridgeProfiles(base::OnceClosure completion) {
++  CHECK(pthread_main_np());
++  if (Profiles().empty()) {
++    ABIPost(std::move(completion));
++    return;
++  }
++  // Destroy all OTRs before any original, including delayed renderer cleanup.
++  Profile* next = Profiles().begin()->first;
++  for (const auto& [profile, entry] : Profiles()) {
++    if (profile->IsOffTheRecord()) {
++      next = profile;
++      break;
++    }
++  }
++  ReleaseBridgeProfile(BridgeProfileId(next),
++      base::BindOnce(&ReleaseBridgeProfiles, std::move(completion)));
+ }
+ size_t GetRegisteredBridgeProfileCount() {
+   CHECK(pthread_main_np());
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.h b/chrome/browser/rearc_bridge/rearc_profile_registry.h
+index ae58dc43f7..9852f1a611 100644
+--- a/chrome/browser/rearc_bridge/rearc_profile_registry.h
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.h
+@@ -8,21 +8,14 @@
+ #include <cstddef>
+ #include <cstdint>
+ 
++#include "base/functional/callback_forward.h"
++
+ class Profile;
+ 
+ namespace rearc {
+ 
+-// Profile-registration seam (P-APP-001 sequence step 4: "Register the
+-// default profile with the bridge"). Scaffolding only (patch app/005): the
+-// registry records which profiles Chromium has brought up so later slices can
+-// hang readiness gating, per-profile shell state and teardown ordering off
+-// it. No real profile work happens here — no prefs, no KeyedServices, no
+-// session-restore or startup-window interaction.
+-//
+-// Profile stays forward-declared on purpose: this header is consumed from
+-// chrome_browser_main_mac.mm without dragging the full Profile definition
+-// into the bridge's dependency surface. Handles are opaque; the registry
+-// never dereferences them.
++// Main-thread profile identity and keepalive ownership. OTR entries retain
++// their original profile; Chromium owns each Profile object.
+ void RegisterBridgeProfile(Profile* profile, bool is_initial_profile);
+ void UnregisterBridgeProfile(Profile* profile);
+ 
+@@ -31,7 +24,9 @@ uint64_t BridgeProfileId(Profile* profile);
+ uint64_t DefaultBridgeProfileId();
+ Profile* FindBridgeProfile(uint64_t profile_id);
+ // Only after every WebContents has been destroyed.
+-void ReleaseBridgeProfiles();
++void ReleaseBridgeProfile(uint64_t profile_id, base::OnceClosure completion);
++void ReleaseBridgeProfiles(base::OnceClosure completion);
++bool BridgeProfileHasChildren(uint64_t profile_id);
+ 
+ // Observability for later slices and tests.
+ size_t GetRegisteredBridgeProfileCount();
+diff --git a/chrome/browser/rearc_bridge/tab_adoption.cc b/chrome/browser/rearc_bridge/tab_adoption.cc
+index 8ceab11fde..c30191ce57 100644
+--- a/chrome/browser/rearc_bridge/tab_adoption.cc
++++ b/chrome/browser/rearc_bridge/tab_adoption.cc
+@@ -55,6 +55,9 @@ content::WebContents* AdoptNewTabContents(
+       return nullptr;
+   }
+ 
++  TabSession* checked;
++  if (ABICheckTab(source_tab_id, &checked) != REARC_OK) return nullptr;
++
+   TabSession::CreateArgs args;
+   args.browser_context = source->GetBrowserContext();
+   args.space_id = parent->space_id();
+-- 
+2.54.0 (Apple Git-157)
+

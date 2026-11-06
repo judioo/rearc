@@ -1,0 +1,27 @@
+# ReArc engine — pinned upstream Chromium version.
+#
+# This file is the single source of truth for which upstream Chromium
+# release the ReArc engine is built from. engine/scripts/fetch.sh reads
+# the last non-comment line of this file and syncs the checkout at
+# engine/chromium/ to that exact tag.
+#
+# BUMP PROCEDURE (do all steps in one commit):
+#   1. Pick a new version from the Chrome stable channel
+#      (see https://chromiumdash.appspot.com/releases?platform=Mac).
+#      Prefer small increments (one or two milestones at a time) — the
+#      patch overlay is rebased by hand and large jumps multiply
+#      conflicts.
+#   2. Replace the version line below with the new full version
+#      (MAJOR.MINOR.BUILD.PATCH, matching the upstream git tag exactly).
+#   3. Run engine/scripts/fetch.sh to sync engine/chromium/ to the tag.
+#   4. Rebase the patch overlay following the checklist in
+#      engine/patches/README.md. Refresh any patch that fails to apply
+#      and commit the refreshed patches alongside this file.
+#   5. Run engine/scripts/build.sh and smoke-test shell integration
+#      (tab create/navigate/close, favicon+title events, media state).
+#   6. Update engine/docs/IPC-CONTRACT.md if any engine behavior the
+#      shell depends on changed.
+#
+# NOTE: the IPC contract version is versioned independently of this pin.
+# A Chromium bump does not imply an IPC contract bump.
+156.0.8078.74

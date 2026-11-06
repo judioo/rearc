@@ -1,0 +1,744 @@
+# Patch-ID: P-TAB-001 (slice S4) — native content host + attachment lease
+# Area: tab.
+# Rationale: IPC-CONTRACT §6's view.attach / view.detach / view.resize /
+#   view.invalidate verbs need an engine-side native surface and a lease
+#   enforcing its rules. S4 ships both, wiring the S1
+#   ReArcNativeWindowProvider seam (tab/006) so content's GetNativeWindow()
+#   consults resolve to the host's window once a tab is attached.
+# Additive only. Files:
+#   - content_host_mac.{h,mm} — ReArcContentHostView, a deliberately
+#     layerless plain NSView (compositing stays on content's side) owning
+#     exactly one content view: the tab's WebContentsView container,
+#     anchored via WebContents::GetNativeView() (R8's stable anchor, never
+#     GetContentNativeView()/RWHVMac). The header is pure C++: an opaque
+#     ReArcContentHostRef (void*) handle plus gfx::NativeView/NativeWindow
+#     values (C++ classes usable outside ObjC TUs); every AppKit touch is in
+#     the .mm. Create retains via CFBridgingRetain; Release drops ONLY the
+#     engine's retain (§6: the shell may retain the emptied NSView until it
+#     dismantles its scaffolding). DIP→points rounding with scale-as-hint.
+#   - attachment_lease.{h,cc} — AttachmentLeaseRegistry singleton
+#     (NoDestructor friend pattern, same as tab/007). §6 rules enforced:
+#     at most one live attachment per tab (second attach fails
+#     kAlreadyAttached; a lease never grants a second superview);
+#     attachments start hidden and WasShown/WasHidden fire only on
+#     visibility transitions; engine-allocated monotonic attachment_id
+#     from 1 (§1); shell-initiated DetachView empties the host on the main
+#     thread and invalidates the id with NO event; engine-initiated
+#     InvalidateLeasesForTab empties the host FIRST, releases the engine's
+#     retain, then reports view.invalidated to the AttachmentEventSink with
+#     the wire-literal reason names ("tab_closed", "window_closed",
+#     "content_replaced", "engine_stopped"); expired ids fail (stale
+#     attachment) with a VLOG. LeaseWindowProvider backs tab/006's
+#     GetNativeWindow() consult with the host's window.
+# No call sites are wired in this slice: AttachView/DetachView/ResizeView/
+# SetViewVisible are the transport slice's verb handlers;
+# InvalidateLeasesForTab(kTabClosed/kContentReplaced/kEngineStopped) is
+# invoked by S6's close pipeline, S7's discard, and engine teardown —
+# those call sites live in frozen files and arrive via later seams.
+# Hunk placement: the BUILD.gn sources block sits after
+# "shutdown_watchdog_mac.h" at the end of the is_mac sources list — a -U3
+# window fully disjoint from app/005's block (three unchanged lines:
+# shell_integration_mac.mm, shutdown_watchdog_mac.cc/.h).
+# Gate: build-p9 green on attempt 3 (attempt 1: Cocoa import typo; attempt
+# 2: ObjC class declared inside a C++ namespace — declarations must be at
+# global scope). nm: full AttachmentLeaseRegistry API + all nine
+# ReArcContentHost* entry points present in libchrome_dll.dylib as
+# non-external symbols. strings: all four invalidation-reason literals
+# present exactly once. --version: 156.0.8078.74.
+# Smoke (engine/docs/SMOKE-TEST.md): G1 PASS, G2 PASS, G4 PASS, G5 PASS.
+# G3 unchanged: the documented command still trips the BSD grep -q defect
+# reported with tab/008 (build-independent); gate intent green (valid PNG
+# produced; LC_ALL=C grep -qa PNG PASS).
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 6e64609977..1b2c358028 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1571,6 +1571,13 @@ source_set("core") {
+       "shell_integration_mac.mm",
+       "shutdown_watchdog_mac.cc",
+       "shutdown_watchdog_mac.h",
++      # P-TAB-001 slice S4 (patch tab/009): native content host + attachment
++      # lease. Same additive-seam pattern as tab/006-008 (series-mechanics
++      # invariant); context window disjoint from app/005's block above.
++      "rearc_bridge/attachment_lease.cc",
++      "rearc_bridge/attachment_lease.h",
++      "rearc_bridge/content_host_mac.h",
++      "rearc_bridge/content_host_mac.mm",
+     ]
+ 
+     deps += [
+diff --git a/chrome/browser/rearc_bridge/attachment_lease.cc b/chrome/browser/rearc_bridge/attachment_lease.cc
+new file mode 100644
+index 0000000000..411d1c2854
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/attachment_lease.cc
+@@ -0,0 +1,289 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/attachment_lease.h"
++
++#include <utility>
++#include <vector>
++
++#include <pthread.h>
++
++#include "base/check.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "chrome/browser/rearc_bridge/web_contents_view_delegate_mac.h"
++#include "content/public/browser/web_contents.h"
++
++namespace rearc {
++
++namespace {
++
++AttachmentEventSink*& GetAttachmentEventSinkSlot() {
++  // A plain static: the slot is trivially initialized and never torn down.
++  static AttachmentEventSink* sink = nullptr;
++  return sink;
++}
++
++// Answers content's GetNativeWindow() consults (via tab/006's
++// ReArcWebContentsViewDelegate) with the host's window. One per lease;
++// destroyed with it after ClearReArcNativeWindowProvider.
++class LeaseWindowProvider : public ReArcNativeWindowProvider {
++ public:
++  explicit LeaseWindowProvider(ReArcContentHostRef host)
++      : host_(reinterpret_cast<uintptr_t>(host)) {}
++
++  gfx::NativeWindow GetAttachedNativeWindow() override {
++    return ReArcContentHostGetWindow(
++        reinterpret_cast<ReArcContentHostRef>(host_));
++  }
++
++ private:
++  // Borrowed: owned by the Lease, which outlives the provider registration
++  // (cleared before destruction). Stored as an integer so the class carries
++  // no raw pointer members.
++  uintptr_t host_ = 0;
++};
++
++}  // namespace
++
++struct AttachmentLeaseRegistry::Lease {
++  uint64_t attachment_id = 0;
++  uint64_t tab_id = 0;
++  // Engine-retained host (ReArcContentHostCreate/Release). Stored as an
++  // integer so the struct carries no raw pointer members.
++  uintptr_t host = 0;
++  std::unique_ptr<LeaseWindowProvider> provider;
++  // Weak, auto-nulling handle to the WebContentsView container (R8's stable
++  // anchor). Never dereferenced after invalidation.
++  gfx::NativeView content;
++  double width_dip = 0.0;
++  double height_dip = 0.0;
++  double scale_hint = 1.0;
++  bool visible = false;
++
++  ReArcContentHostRef host_ref() const {
++    return reinterpret_cast<ReArcContentHostRef>(host);
++  }
++};
++
++const char* LeaseInvalidatedReasonName(LeaseInvalidatedReason reason) {
++  switch (reason) {
++    case LeaseInvalidatedReason::kTabClosed:
++      return "tab_closed";
++    case LeaseInvalidatedReason::kWindowClosed:
++      return "window_closed";
++    case LeaseInvalidatedReason::kContentReplaced:
++      return "content_replaced";
++    case LeaseInvalidatedReason::kEngineStopped:
++      return "engine_stopped";
++  }
++}
++
++void SetAttachmentEventSink(AttachmentEventSink* sink) {
++  CHECK(pthread_main_np());
++  GetAttachmentEventSinkSlot() = sink;
++}
++
++// static
++AttachmentLeaseRegistry& AttachmentLeaseRegistry::Get() {
++  CHECK(pthread_main_np());
++  static base::NoDestructor<AttachmentLeaseRegistry> registry;
++  return *registry;
++}
++
++AttachmentLeaseRegistry::AttachmentLeaseRegistry() = default;
++AttachmentLeaseRegistry::~AttachmentLeaseRegistry() = default;
++
++AttachResult AttachmentLeaseRegistry::AttachView(uint64_t tab_id,
++                                                 double width_dip,
++                                                 double height_dip,
++                                                 double scale_hint) {
++  CHECK(pthread_main_np());
++  AttachResult result;
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (!session || !session->web_contents()) {
++    result.error = AttachError::kTabNotFound;
++    return result;
++  }
++  if (leases_.contains(tab_id)) {
++    // §6: at most one live attachment per tab.
++    result.error = AttachError::kAlreadyAttached;
++    return result;
++  }
++
++  content::WebContents* contents = session->web_contents();
++  auto lease = std::make_unique<Lease>();
++  lease->attachment_id = next_attachment_id_++;
++  lease->tab_id = tab_id;
++  lease->host =
++      reinterpret_cast<uintptr_t>(ReArcContentHostCreate());
++  // R8: anchor on the WebContentsView container.
++  lease->content = contents->GetNativeView();
++  lease->width_dip = width_dip;
++  lease->height_dip = height_dip;
++  lease->scale_hint = scale_hint;
++  lease->visible = false;
++
++  ReArcContentHostAttachContent(lease->host_ref(), lease->content);
++  ReArcContentHostSetSizeDip(lease->host_ref(), width_dip, height_dip,
++                             scale_hint);
++  // §6: attachments start hidden — the host was created hidden and no
++  // WasShown is issued until the first SetViewVisible(true).
++  ReArcContentHostSetHidden(lease->host_ref(), true);
++
++  lease->provider =
++      std::make_unique<LeaseWindowProvider>(lease->host_ref());
++  SetReArcNativeWindowProvider(contents, lease->provider.get());
++
++  result.attachment_id = lease->attachment_id;
++  result.host_view = ReArcContentHostGetView(lease->host_ref());
++  leases_.emplace(tab_id, std::move(lease));
++  return result;
++}
++
++bool AttachmentLeaseRegistry::DetachView(uint64_t tab_id,
++                                         uint64_t attachment_id) {
++  CHECK(pthread_main_np());
++  Lease* lease = FindLease(tab_id, attachment_id);
++  if (!lease) {
++    // §6: expired ids fail stale_attachment (day-one: plain false; the
++    // transport slice maps it onto the wire error).
++    VLOG(1) << "rearc: DetachView for stale attachment tab_id=" << tab_id
++            << " attachment_id=" << attachment_id;
++    return false;
++  }
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  content::WebContents* contents = session ? session->web_contents() : nullptr;
++  if (lease->visible && contents) {
++    contents->WasHidden();
++  }
++  if (contents) {
++    ClearReArcNativeWindowProvider(contents, lease->provider.get());
++  }
++  // §6: detach empties the host on the main thread, then the reply
++  // invalidates the id — no event.
++  ReArcContentHostEmptyContent(lease->host_ref());
++  ReArcContentHostRelease(lease->host_ref());
++  leases_.erase(tab_id);
++  return true;
++}
++
++bool AttachmentLeaseRegistry::ResizeView(uint64_t tab_id,
++                                         uint64_t attachment_id,
++                                         double width_dip,
++                                         double height_dip,
++                                         double scale_hint) {
++  CHECK(pthread_main_np());
++  Lease* lease = FindLease(tab_id, attachment_id);
++  if (!lease) {
++    VLOG(1) << "rearc: ResizeView for stale attachment tab_id=" << tab_id
++            << " attachment_id=" << attachment_id;
++    return false;
++  }
++  lease->width_dip = width_dip;
++  lease->height_dip = height_dip;
++  lease->scale_hint = scale_hint;
++  ReArcContentHostSetSizeDip(lease->host_ref(), width_dip, height_dip,
++                             scale_hint);
++  return true;
++}
++
++bool AttachmentLeaseRegistry::SetViewVisible(uint64_t tab_id,
++                                             uint64_t attachment_id,
++                                             bool visible) {
++  CHECK(pthread_main_np());
++  Lease* lease = FindLease(tab_id, attachment_id);
++  if (!lease) {
++    VLOG(1) << "rearc: SetViewVisible for stale attachment tab_id=" << tab_id
++            << " attachment_id=" << attachment_id;
++    return false;
++  }
++  if (lease->visible == visible) {
++    return true;
++  }
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  content::WebContents* contents = session ? session->web_contents() : nullptr;
++  ReArcContentHostSetHidden(lease->host_ref(), !visible);
++  if (contents) {
++    // §6 / web_contents.h:1043 guidance: visibility transitions drive
++    // WasShown/WasHidden, only on actual transitions.
++    if (visible) {
++      contents->WasShown();
++    } else {
++      contents->WasHidden();
++    }
++  }
++  lease->visible = visible;
++  return true;
++}
++
++uint64_t AttachmentLeaseRegistry::AttachmentIdForTab(uint64_t tab_id) const {
++  CHECK(pthread_main_np());
++  auto it = leases_.find(tab_id);
++  return it == leases_.end() ? 0 : it->second->attachment_id;
++}
++
++void AttachmentLeaseRegistry::InvalidateLeasesForTab(
++    uint64_t tab_id,
++    LeaseInvalidatedReason reason) {
++  CHECK(pthread_main_np());
++  auto it = leases_.find(tab_id);
++  if (it == leases_.end()) {
++    return;
++  }
++  Lease* lease = it->second.get();
++  const uint64_t attachment_id = lease->attachment_id;
++
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  content::WebContents* contents = session ? session->web_contents() : nullptr;
++  if (lease->visible && contents) {
++    contents->WasHidden();
++  }
++  if (contents) {
++    ClearReArcNativeWindowProvider(contents, lease->provider.get());
++  }
++  // §6 engine-initiated invalidation: the host is ALREADY emptied before the
++  // event; the shell may retain the empty NSView until it dismantles its
++  // scaffolding; the engine releases only its own retain; the id dies now.
++  ReArcContentHostEmptyContent(lease->host_ref());
++  ReArcContentHostRelease(lease->host_ref());
++  leases_.erase(it);
++
++  AttachmentEventSink* sink = GetAttachmentEventSinkSlot();
++  if (sink) {
++    sink->OnLeaseInvalidated(tab_id, attachment_id, reason);
++  } else {
++    VLOG(1) << "rearc: no AttachmentEventSink; lease invalidated tab_id="
++            << tab_id << " attachment_id=" << attachment_id << " reason="
++            << LeaseInvalidatedReasonName(reason);
++  }
++}
++
++void AttachmentLeaseRegistry::InvalidateAllLeases(
++    LeaseInvalidatedReason reason) {
++  CHECK(pthread_main_np());
++  // Copy the ids first: each invalidation erases from the map.
++  std::vector<uint64_t> tab_ids;
++  tab_ids.reserve(leases_.size());
++  for (const auto& [tab_id, lease] : leases_) {
++    tab_ids.push_back(tab_id);
++  }
++  for (uint64_t tab_id : tab_ids) {
++    InvalidateLeasesForTab(tab_id, reason);
++  }
++}
++
++AttachmentLeaseRegistry::Lease* AttachmentLeaseRegistry::FindLease(
++    uint64_t tab_id,
++    uint64_t attachment_id) {
++  auto it = leases_.find(tab_id);
++  if (it == leases_.end() || it->second->attachment_id != attachment_id) {
++    return nullptr;
++  }
++  return it->second.get();
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/attachment_lease.h b/chrome/browser/rearc_bridge/attachment_lease.h
+new file mode 100644
+index 0000000000..f7097eb7ab
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/attachment_lease.h
+@@ -0,0 +1,149 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_ATTACHMENT_LEASE_H_
++#define CHROME_BROWSER_REARC_BRIDGE_ATTACHMENT_LEASE_H_
++
++#include <cstdint>
++#include <map>
++#include <memory>
++
++#include "chrome/browser/rearc_bridge/content_host_mac.h"
++
++namespace base {
++template <typename T>
++class NoDestructor;
++}  // namespace base
++
++namespace rearc {
++
++// Attachment lease registry (P-TAB-001 slice S4), implementing IPC-CONTRACT
++// §6's rules over the S1 ReArcNativeWindowProvider seam and the S4 native
++// host:
++//  * At most ONE live attachment per tab; a second view.attach fails
++//    already_attached. A lease never grants a second superview.
++//  * Attachments start hidden; WebContents::WasShown/WasHidden are called
++//    only on visibility transitions.
++//  * Shell-initiated view.detach empties the host on the main thread and
++//    invalidates the attachment id (the reply carries it) — NO event.
++//  * Engine-initiated invalidation (tab closed, window closed, content
++//    replaced, engine stopped) empties the host FIRST, releases the
++//    engine's retain, then reports view.invalidated; the shell may retain
++//    the emptied NSView until it dismantles its scaffolding; the id is
++//    dead immediately. Content replacement invalidates BEFORE the
++//    replacement and requires a fresh attach.
++//  * Expired ids fail stale_attachment.
++//  * The lease anchors on the WebContentsView container
++//    (WebContents::GetNativeView(), web_contents.h:1241) — never
++//    GetContentNativeView()/RWHVMac.
++//
++// All native ops are main-thread-only (Chromium BrowserThread::UI); every
++// entry point CHECKs.
++
++// IPC-CONTRACT §6 failure vocabulary for view.attach.
++enum class AttachError {
++  kNone,
++  kTabNotFound,
++  kAlreadyAttached,
++};
++
++// IPC-CONTRACT §6 view.invalidated `reason` enum. Wire names via
++// LeaseInvalidatedReasonName: "tab_closed", "window_closed",
++// "content_replaced", "engine_stopped".
++enum class LeaseInvalidatedReason {
++  kTabClosed,
++  kWindowClosed,
++  kContentReplaced,
++  kEngineStopped,
++};
++
++const char* LeaseInvalidatedReasonName(LeaseInvalidatedReason reason);
++
++struct AttachResult {
++  AttachError error = AttachError::kNone;
++  // Engine-allocated, monotonic from 1 (§1: E allocates attachment_id; 0 is
++  // invalid). 0 on failure.
++  uint64_t attachment_id = 0;
++  // The host NSView as an opaque handle for the shell's in-process typed
++  // bridge to embed (§6: no NSView over data messages). Null on failure.
++  ReArcContentHostRef host_view = nullptr;
++};
++
++// Sink for engine-initiated lease invalidations (view.invalidated). Main
++// thread only; the sink must outlive its registration.
++class AttachmentEventSink {
++ public:
++  virtual ~AttachmentEventSink() = default;
++  virtual void OnLeaseInvalidated(uint64_t tab_id,
++                                  uint64_t attachment_id,
++                                  LeaseInvalidatedReason reason) = 0;
++};
++
++void SetAttachmentEventSink(AttachmentEventSink* sink);
++
++class AttachmentLeaseRegistry {
++ public:
++  static AttachmentLeaseRegistry& Get();
++
++  AttachmentLeaseRegistry(const AttachmentLeaseRegistry&) = delete;
++  AttachmentLeaseRegistry& operator=(const AttachmentLeaseRegistry&) = delete;
++
++  // view.attach. Registers the S1 native-window provider for the tab's
++  // WebContents so content's GetNativeWindow() consults resolve to the
++  // host's window. Starts hidden; no WasShown until the first
++  // SetViewVisible(true).
++  AttachResult AttachView(uint64_t tab_id,
++                          double width_dip,
++                          double height_dip,
++                          double scale_hint);
++
++  // view.detach (shell-initiated): empties the host on the main thread,
++  // drops the provider and the engine's retain, invalidates the id. No
++  // event is emitted (§6). False for unknown/stale ids.
++  bool DetachView(uint64_t tab_id, uint64_t attachment_id);
++
++  // view.resize: DIP in, points rounded inside the host; scale is a hint.
++  // False for unknown/stale ids.
++  bool ResizeView(uint64_t tab_id,
++                  uint64_t attachment_id,
++                  double width_dip,
++                  double height_dip,
++                  double scale_hint);
++
++  // Visibility transitions drive WasShown/WasHidden on the WebContents —
++  // only on actual transitions. False for unknown/stale ids.
++  bool SetViewVisible(uint64_t tab_id, uint64_t attachment_id, bool visible);
++
++  // 0 when the tab has no live attachment.
++  uint64_t AttachmentIdForTab(uint64_t tab_id) const;
++
++  // Engine-initiated invalidation of one tab's lease (§6): empties the host
++  // first, releases the engine's retain, then reports view.invalidated with
++  // `reason`. No-op when the tab has no live attachment. S7's content
++  // replacement calls this with kContentReplaced BEFORE swapping the
++  // WebContents; S6's close pipeline calls it with kTabClosed before
++  // destruction; engine teardown uses kEngineStopped. kWindowClosed is for
++  // the shell window lifecycle integration.
++  void InvalidateLeasesForTab(uint64_t tab_id, LeaseInvalidatedReason reason);
++
++  // Engine-stopped teardown: invalidates every live lease with `reason`.
++  void InvalidateAllLeases(LeaseInvalidatedReason reason);
++
++ private:
++  friend class base::NoDestructor<AttachmentLeaseRegistry>;
++  AttachmentLeaseRegistry();
++  ~AttachmentLeaseRegistry();
++
++  // Defined in the .cc (keeps WebContents-facing types out of this header).
++  struct Lease;
++  Lease* FindLease(uint64_t tab_id, uint64_t attachment_id);
++
++  uint64_t next_attachment_id_ = 1;
++  // tab_id -> lease (at most one per tab, §6).
++  std::map<uint64_t, std::unique_ptr<Lease>> leases_;
++};
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_ATTACHMENT_LEASE_H_
+diff --git a/chrome/browser/rearc_bridge/content_host_mac.h b/chrome/browser/rearc_bridge/content_host_mac.h
+new file mode 100644
+index 0000000000..cdbdb9310a
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/content_host_mac.h
+@@ -0,0 +1,80 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_CONTENT_HOST_MAC_H_
++#define CHROME_BROWSER_REARC_BRIDGE_CONTENT_HOST_MAC_H_
++
++#include "ui/gfx/native_ui_types.h"
++
++namespace rearc {
++
++// Native content host (P-TAB-001 slice S4) — the engine side of IPC-CONTRACT
++// §6's view.attach / view.detach / view.resize / view.invalidate verbs.
++//
++// A host is an NSView subclass instance (ReArcContentHostView, defined in the
++// .mm) that owns exactly one content view: the WebContentsView container of
++// an attached tab, anchored via WebContents::GetNativeView() — R8's stable
++// anchor, never GetContentNativeView()/RWHVMac. This header is a pure C++
++// surface (opaque handle + gfx::NativeView/NativeWindow values, both of
++// which are C++ classes usable outside ObjC TUs); every AppKit touch lives
++// in content_host_mac.mm.
++//
++// Ownership: Create retains the NSView on the engine's behalf
++// (CFBridgingRetain); Release drops THAT retain only. Per IPC-CONTRACT §6,
++// after an engine-initiated invalidation the shell may retain the emptied
++// NSView until it dismantles its scaffolding — Release never destroys a
++// view the shell still holds.
++//
++// All calls are main thread (Chromium BrowserThread::UI) only.
++
++// Opaque retained handle to a ReArcContentHostView. Never dereferenced
++// outside content_host_mac.mm.
++using ReArcContentHostRef = void*;
++
++// Creates a hidden, empty host. The engine holds one retain; the shell
++// receives the view via ReArcContentHostGetView and retains it itself if it
++// embeds it.
++ReArcContentHostRef ReArcContentHostCreate();
++
++// Drops the engine's retain. `host` must not be used afterwards; the NSView
++// itself stays alive as long as the shell retains it.
++void ReArcContentHostRelease(ReArcContentHostRef host);
++
++// Parents `content` (a tab's WebContentsView container) inside the host,
++// pinned to the host's bounds by autoresizing. No layer touches: the host
++// is a plain NSView so compositing stays entirely on content's side. Any
++// previously attached content is removed first. A null `content` is
++// equivalent to ReArcContentHostEmptyContent.
++void ReArcContentHostAttachContent(ReArcContentHostRef host,
++                                   gfx::NativeView content);
++
++// Removes the hosted content view (IPC-CONTRACT §6 "empties the host").
++// Idempotent.
++void ReArcContentHostEmptyContent(ReArcContentHostRef host);
++
++// Sizes the host. IPC-CONTRACT §6: sizes arrive in DIP and are rounded to
++// points; `scale_hint` is a hint only (the display's backing scale factor
++// wins day-one; recorded for the transport slice's validation).
++void ReArcContentHostSetSizeDip(ReArcContentHostRef host,
++                                double width_dip,
++                                double height_dip,
++                                double scale_hint);
++
++// Hidden/shown. A fresh host starts hidden (§6); visibility transitions are
++// driven by the attachment lease in lockstep with WebContents::WasShown /
++// WasHidden.
++void ReArcContentHostSetHidden(ReArcContentHostRef host, bool hidden);
++
++// The NSWindow the host is currently in, or gfx::NativeWindow() when the
++// host is not in any window. Backs the S1 ReArcNativeWindowProvider seam.
++gfx::NativeWindow ReArcContentHostGetWindow(ReArcContentHostRef host);
++
++// The host NSView itself as an opaque handle (NSView*), for the shell's
++// in-process typed bridge to embed. The shell must retain it (and per §6,
++// no NSView pointer ever travels over data messages).
++void* ReArcContentHostGetView(ReArcContentHostRef host);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_CONTENT_HOST_MAC_H_
+diff --git a/chrome/browser/rearc_bridge/content_host_mac.mm b/chrome/browser/rearc_bridge/content_host_mac.mm
+new file mode 100644
+index 0000000000..712c1cedb1
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/content_host_mac.mm
+@@ -0,0 +1,133 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/content_host_mac.h"
++
++#import <Cocoa/Cocoa.h>
++#import <CoreFoundation/CoreFoundation.h>
++
++#include <cmath>
++#include <pthread.h>
++
++#include "base/check.h"
++#include "base/logging.h"
++
++// The engine-side host view for one attached tab (IPC-CONTRACT §6). Plain
++// NSView — deliberately layerless: compositing stays on content's side and
++// the host never interposes a CALayer between the shell's hierarchy and the
++// WebContentsView container. File-scoped at global scope (ObjC declarations
++// may not appear inside a C++ namespace).
++@interface ReArcContentHostView : NSView {
++ @private
++  // Strong: while attached, the host is the content view's owner on the
++  // engine side. Emptied on detach/invalidate BEFORE the engine releases
++  // its own retain, per §6's "engine has already emptied the host" rule.
++  NSView* _contentView;
++  // Recorded day-one for the transport slice's validation; the display's
++  // backing scale factor wins for rendering.
++  double _scaleHint;
++}
++
++- (void)attachContent:(NSView*)content;
++- (void)setSizeDip:(NSSize)size scaleHint:(double)scaleHint;
++
++@end
++
++@implementation ReArcContentHostView
++
++- (instancetype)init {
++  self = [super initWithFrame:NSZeroRect];
++  if (self) {
++    _contentView = nil;
++    _scaleHint = 1.0;
++    // IPC-CONTRACT §6: attachments start hidden.
++    [self setHidden:YES];
++  }
++  return self;
++}
++
++- (void)attachContent:(NSView*)content {
++  if (_contentView == content) {
++    return;
++  }
++  [_contentView removeFromSuperview];
++  _contentView = content;
++  if (content) {
++    [content setFrame:[self bounds]];
++    [content setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
++    [self addSubview:content];
++  }
++}
++
++- (void)setSizeDip:(NSSize)size scaleHint:(double)scaleHint {
++  _scaleHint = scaleHint > 0.0 ? scaleHint : 1.0;
++  // §6: DIP are rounded to points; scale is a hint.
++  [self setFrameSize:NSMakeSize(std::round(size.width),
++                                std::round(size.height))];
++}
++
++@end
++
++namespace rearc {
++namespace {
++
++ReArcContentHostView* AsHostView(ReArcContentHostRef host) {
++  DCHECK(host);
++  return (__bridge ReArcContentHostView*)host;
++}
++
++}  // namespace
++
++ReArcContentHostRef ReArcContentHostCreate() {
++  CHECK(pthread_main_np());
++  ReArcContentHostView* view = [[ReArcContentHostView alloc] init];
++  // Engine-side retain crossing into the pure-C++ world as an opaque handle.
++  return (ReArcContentHostRef)CFBridgingRetain(view);
++}
++
++void ReArcContentHostRelease(ReArcContentHostRef host) {
++  CHECK(pthread_main_np());
++  if (!host) {
++    return;
++  }
++  // Drops only the engine's retain; a shell-retained view stays alive.
++  CFBridgingRelease(host);
++}
++
++void ReArcContentHostAttachContent(ReArcContentHostRef host,
++                                   gfx::NativeView content) {
++  CHECK(pthread_main_np());
++  [AsHostView(host) attachContent:content.GetNativeNSView()];
++}
++
++void ReArcContentHostEmptyContent(ReArcContentHostRef host) {
++  CHECK(pthread_main_np());
++  [AsHostView(host) attachContent:nil];
++}
++
++void ReArcContentHostSetSizeDip(ReArcContentHostRef host,
++                                double width_dip,
++                                double height_dip,
++                                double scale_hint) {
++  CHECK(pthread_main_np());
++  [AsHostView(host) setSizeDip:NSMakeSize(width_dip, height_dip)
++                     scaleHint:scale_hint];
++}
++
++void ReArcContentHostSetHidden(ReArcContentHostRef host, bool hidden) {
++  CHECK(pthread_main_np());
++  [AsHostView(host) setHidden:hidden];
++}
++
++gfx::NativeWindow ReArcContentHostGetWindow(ReArcContentHostRef host) {
++  CHECK(pthread_main_np());
++  return gfx::NativeWindow([AsHostView(host) window]);
++}
++
++void* ReArcContentHostGetView(ReArcContentHostRef host) {
++  CHECK(pthread_main_np());
++  return (__bridge void*)AsHostView(host);
++}
++
++}  // namespace rearc

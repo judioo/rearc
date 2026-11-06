@@ -1,0 +1,827 @@
+# Patch-ID: P-TAB-001 (slice S2) — browser-less TabRegistry + TabSession + delegate skeleton
+# Area: tab (area dir introduced by tab/006; see its header).
+# Rationale: The centerpiece decision of P-TAB-001-SLICES §2: a browser-less
+#   registry, NOT a BrowserWindowInterface adapter. TabFeatures::Init CHECKs a
+#   BrowserWindowInterface (tab_features.cc:276) and reaching it requires
+#   TabStripModel → tabs::TabModel, i.e. ~69 virtuals of browser-window
+#   semantics ReArc does not have — the fake-window route is forbidden (R6).
+#   The registry route never reaches the CHECK: TabSession owns a
+#   content::WebContents created directly via WebContents::Create.
+# Additive only: no upstream hunks. Files:
+#   - tab_registry.{h,cc} — singleton registry: engine-side monotonic uint64
+#     tab_id allocation (IPC-CONTRACT §3: "E allocates tab_id"), session map,
+#     FIFO command envelope + in-order application (producers arrive with
+#     S3's IPC layer; day-one nothing posts), idempotent DestroySession with
+#     DEFERRED destruction (posted, so delegate/observer callbacks unwind
+#     first — P-TAB-001's destruction-from-callback prohibition), and
+#     DestroyAllSessions as the teardown-ordering primitive (sessions die
+#     before profile release; the call site lands in a later slice because
+#     P-APP-001's finalization file is frozen).
+#   - tab_session.{h,cc} — one unique_ptr<content::WebContents> + one
+#     ReArcTabDelegate (created first, set immediately after Create), space/
+#     order metadata, guarded close-state machine (kOpen → kCloseRequested →
+#     kUnloadPending → kClosed, veto paths back to kOpen; S6 owns the real
+#     pipeline), monotonic content-generation counter. Start hidden: a fresh
+#     WebContents is hidden by default and only the S4 lease makes it
+#     visible. Never exposes WebContents* across the bridge boundary
+#     (web_contents() is bridge-internal; shell identity is tab_id only).
+#   - tab_delegate.{h,cc} — ReArcTabDelegate : content::WebContentsDelegate,
+#     ONE PER SESSION (never a singleton: delegate callbacks carry no tab
+#     identity beyond the WebContents*). Day-one override set is exactly the
+#     set P-TAB-001 lists, each with an audited safe default (R7: cancel
+#     through upstream callbacks, never hang):
+#       OpenURLFromTab — CURRENT_TAB routed for real (content-shell pattern,
+#         shell.cc:473-478: LoadURLWithParams + navigation-handle callback +
+#         return source); NEW_*/SINGLETON rejected (nullptr + VLOG; S6 owns
+#         adoption); OFF_THE_RECORD/SAVE_TO_DISK/IGNORE_ACTION rejected.
+#       AddNewContents — predictable rejection: nullptr, *was_blocked=true,
+#         moved-in WebContents destroyed on scope exit (S6 owns adoption).
+#       ActivateContents — no-op + VLOG (no focus stealing).
+#       IsContentsActive — true (content's documented browser-less semantic,
+#         restated explicitly).
+#       CloseContents — no-op + VLOG (shell owns tab lifetime; "Window.close
+#         only detaches/hides tabs" — detachment is S6).
+#       BeforeUnloadFired — *proceed_to_fire_unload = false (conservative
+#         cancel; content's default allows).
+#       NavigationStateChanged / LoadingStateChanged — deliberately quiet
+#         (S3's observer surface owns events).
+#       TakeFocus — false (content default; lease routing arrives with S4).
+#       GetJavaScriptDialogManager — nullptr (audited at pin:
+#         RunBeforeUnloadConfirm resolves (false, true) with no manager;
+#         CancelDialogs null-safe — callbacks complete, beforeunload vetoed).
+#         S5's rearc_javascript_dialog_manager is the real manager; per
+#         P-TAB-001, "returning null alone is not proof of that policy".
+# R6 helper policy (recorded here per the slice plan's "each recorded in the
+#   patch header" rule): NO TabHelpers::AttachTabHelpers (legacy), NO
+#   TabFeatures, NO PreventFeatureInitializationForTesting bypass. The
+#   whitelisted per-helper CreateForWebContents set is EMPTY day-one: the
+#   first candidate (CoreTabHelper) lives in //chrome/browser/ui/tab_contents/
+#   and :core cannot dep on //chrome/browser/ui (layering runs ui → core), so
+#   the whitelist decision moves to the S5 service-adapter audits.
+# Profile keepalive: TabSession stores the BrowserContext borrowed (caller
+#   guarantees it outlives the session; DestroyAllSessions runs before
+#   profile release). ScopedProfileKeepAlive
+#   (chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h) wiring
+#   lands with the embedded-startup integration wave; S2 records the
+#   dependency instead of faking a keepalive it cannot correctly own yet.
+#   Recorded in the P-TAB-001-SLICES drift log.
+# S4 attachment lease: deliberately NOT a TabSession member — tab/007's files
+#   freeze at landing (series-mechanics invariant), so S4 associates leases
+#   through its own tab_id-keyed map, same additive pattern as tab/006's
+#   native-window provider seam.
+# Hunk placement (series mechanics): the only upstream-file hunk is a sources
+#   block in chrome/browser/BUILD.gn's is_mac list between
+#   "browser_process_platform_part_mac.mm" and
+#   "chrome_browser_application_mac.mm" — disjoint -U3 windows from tab/006's
+#   block (icon_loader→memory_details) and app/005's block. Sources join
+#   :core (rearc_bridge/BUILD.gn is app/002's frozen file); no new deps
+#   (:core already has //base and content).
+# Compile-level only: scaffolding skeleton; runtime tab creation additionally
+#   needs the P-APP-001 embedded-startup profile seam (a loaded
+#   Profile*/BrowserContext to pass in) — per slice-plan §5, no live-tab
+#   validation this wave.
+# Last rebased: Chromium 156.0.8078.74 (d331de35ca8a) + overlay 001-006.
+# Gate evidence: engine/build-p7.log exit 0 (attempt 2; attempt 1 added the
+#   base::NoDestructor friend declaration).
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index a86aa5a53c..a6dde903cd 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1521,6 +1521,17 @@ source_set("core") {
+     sources += [
+       "app_controller_mac.mm",
+       "browser_process_platform_part_mac.mm",
++      # P-TAB-001 slice S2 (patch tab/007): browser-less tab registry
++      # sources. Same :core placement rationale as tab/006's block below
++      # (app/002's rearc_bridge target is frozen by the series-mechanics
++      # invariant); inserted here, not adjacent to tab/006's entries, to keep
++      # the two hunks' -U3 context windows disjoint.
++      "rearc_bridge/tab_delegate.cc",
++      "rearc_bridge/tab_delegate.h",
++      "rearc_bridge/tab_registry.cc",
++      "rearc_bridge/tab_registry.h",
++      "rearc_bridge/tab_session.cc",
++      "rearc_bridge/tab_session.h",
+       "chrome_browser_application_mac.mm",
+       "chrome_browser_main_mac.mm",
+       "file_select_helper_mac.mm",
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+new file mode 100644
+index 0000000000..2df7c424f6
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -0,0 +1,160 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/tab_delegate.h"
++
++#include <utility>
++
++#include "base/logging.h"
++#include "base/memory/weak_ptr.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/base/window_open_disposition.h"
++#include "url/gurl.h"
++
++namespace rearc {
++
++ReArcTabDelegate::ReArcTabDelegate(uint64_t tab_id) : tab_id_(tab_id) {}
++
++ReArcTabDelegate::~ReArcTabDelegate() = default;
++
++content::WebContents* ReArcTabDelegate::OpenURLFromTab(
++    content::WebContents* source,
++    const content::OpenURLParams& params,
++    base::OnceCallback<void(content::NavigationHandle&)>
++        navigation_handle_callback) {
++  switch (params.disposition) {
++    case WindowOpenDisposition::CURRENT_TAB: {
++      // Real same-tab routing from day one, following the minimal-embedder
++      // pattern (content/shell/browser/shell.cc:473-478): navigate through
++      // the controller — never OpenURL(), which would re-enter this
++      // delegate — complete the navigation-handle callback, return source.
++      base::WeakPtr<content::NavigationHandle> navigation_handle =
++          source->GetController().LoadURLWithParams(
++              content::NavigationController::LoadURLParams(params));
++      if (navigation_handle_callback && navigation_handle) {
++        std::move(navigation_handle_callback).Run(*navigation_handle);
++      }
++      return source;
++    }
++    case WindowOpenDisposition::NEW_POPUP:
++    case WindowOpenDisposition::NEW_WINDOW:
++    case WindowOpenDisposition::NEW_BACKGROUND_TAB:
++    case WindowOpenDisposition::NEW_FOREGROUND_TAB:
++    case WindowOpenDisposition::SINGLETON_TAB:
++      // Predictable rejection day-one: adoption of page-created contents
++      // (preserving opener, BrowserContext and disposition, with a valid
++      // native parent or deliberate hidden staging established before
++      // returning) is S6's tab_adoption. Returning nullptr tells content the
++      // URL was not opened; nothing hangs.
++      VLOG(1) << "ReArc bridge: tab " << tab_id_
++              << " denied OpenURLFromTab disposition "
++              << static_cast<int>(params.disposition) << " (" << params.url
++              << ") — S6 adoption pending.";
++      return nullptr;
++    default:
++      // OFF_THE_RECORD / SAVE_TO_DISK / IGNORE_ACTION / unknown: unsupported
++      // here; reject predictably.
++      VLOG(1) << "ReArc bridge: tab " << tab_id_
++              << " denied OpenURLFromTab unsupported disposition "
++              << static_cast<int>(params.disposition) << " (" << params.url
++              << ").";
++      return nullptr;
++  }
++}
++
++content::WebContents* ReArcTabDelegate::AddNewContents(
++    content::WebContents* source,
++    std::unique_ptr<content::WebContents> new_contents,
++    const GURL& target_url,
++    WindowOpenDisposition disposition,
++    const blink::mojom::WindowFeatures& window_features,
++    bool user_gesture,
++    bool* was_blocked) {
++  // Predictable rejection day-one (S6 owns adoption — a later SwiftUI update
++  // is not synchronous reparenting). The moved-in WebContents is destroyed
++  // with this scope: an explicit, immediate rejection, not a leak or a hang.
++  // was_blocked is set honestly — no tab was created.
++  if (was_blocked) {
++    *was_blocked = true;
++  }
++  VLOG(1) << "ReArc bridge: tab " << tab_id_ << " rejected AddNewContents ("
++          << target_url << ", disposition " << static_cast<int>(disposition)
++          << ", user_gesture " << user_gesture
++          << ") — S6 adoption pending.";
++  return nullptr;
++}
++
++void ReArcTabDelegate::ActivateContents(content::WebContents* contents) {
++  // No focus stealing day-one: page-initiated activation (window.focus()) is
++  // not honored until S4's host view and S6's focus policy wire AppKit
++  // first-responder routing through the attachment lease.
++  VLOG(1) << "ReArc bridge: tab " << tab_id_
++          << " ActivateContents ignored (no focus-stealing policy).";
++}
++
++bool ReArcTabDelegate::IsContentsActive(content::WebContents* contents) {
++  // content's documented browser-less semantic — "WebContents outside a
++  // browser are always considered active" — restated explicitly so the
++  // day-one surface states the policy rather than inheriting it silently.
++  return true;
++}
++
++void ReArcTabDelegate::CloseContents(content::WebContents* source) {
++  // The shell owns tab lifetime; page-initiated close (window.close,
++  // ClosePage) must not destroy the session. P-TAB-001: "Window.close only
++  // detaches/hides tabs" — detachment lands with S6's close_controller. No
++  // upstream callback exists here, so nothing hangs.
++  VLOG(1) << "ReArc bridge: tab " << tab_id_
++          << " CloseContents ignored (shell owns tab lifetime; S6 close "
++             "controller pending).";
++}
++
++void ReArcTabDelegate::BeforeUnloadFired(content::WebContents* tab,
++                                         bool proceed,
++                                         bool* proceed_to_fire_unload) {
++  // Conservative cancel day-one (R7): veto the close by refusing to fire
++  // unload — the tab survives every close attempt until S6's close
++  // controller implements the real DispatchBeforeUnload → honor veto →
++  // ClosePage → await CloseContents pipeline. content's default would set
++  // *proceed_to_fire_unload = true (allow the close).
++  *proceed_to_fire_unload = false;
++  VLOG(1) << "ReArc bridge: tab " << tab_id_ << " BeforeUnloadFired(proceed="
++          << proceed << ") vetoed (S6 close controller pending).";
++}
++
++void ReArcTabDelegate::NavigationStateChanged(
++    content::WebContents* source,
++    content::InvalidateTypes changed_flags) {
++  // Deliberately quiet day-one (high-frequency notification): S3's
++  // tab_observer emits tab.updated events over the IPC surface; the delegate
++  // stays out of the event path.
++}
++
++void ReArcTabDelegate::LoadingStateChanged(content::WebContents* source,
++                                           bool should_show_loading_ui) {
++  // Deliberately quiet day-one: S3's observer surface owns loading events.
++}
++
++bool ReArcTabDelegate::TakeFocus(content::WebContents* source, bool reverse) {
++  // Not handled day-one: returning false lets content continue its default
++  // traversal. AppKit first-responder round-trip through the lease's host
++  // view arrives with S4.
++  return false;
++}
++
++content::JavaScriptDialogManager*
++ReArcTabDelegate::GetJavaScriptDialogManager(content::WebContents* source) {
++  // nullptr day-one = dialogs suppressed WITH completing callbacks (audited
++  // at pin: WebContentsImpl::RunBeforeUnloadConfirm resolves (false, true)
++  // with no manager installed; CancelDialogs is null-safe) — a hung callback
++  // would violate R7. The conservative-cancel native manager is S5's
++  // rearc_javascript_dialog_manager; per P-TAB-001, "returning null alone is
++  // not proof of that policy", so S5 must land before dialogs are considered
++  // handled.
++  return nullptr;
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.h b/chrome/browser/rearc_bridge/tab_delegate.h
+new file mode 100644
+index 0000000000..55f5cdb45b
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/tab_delegate.h
+@@ -0,0 +1,74 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_TAB_DELEGATE_H_
++#define CHROME_BROWSER_REARC_BRIDGE_TAB_DELEGATE_H_
++
++#include <cstdint>
++#include <memory>
++
++#include "content/public/browser/web_contents_delegate.h"
++
++namespace rearc {
++
++// Per-session WebContentsDelegate (P-TAB-001 slice S2 skeleton).
++//
++// R7: the delegate surface exists before any observer ships, so unsupported
++// operations are cancelled through upstream callbacks rather than hanging.
++// One instance per TabSession — never a singleton: close serialization,
++// generation counters and adoption state are per-tab, and delegate callbacks
++// carry no tab identity beyond the WebContents*, so the owning session's
++// tab_id is the natural dispatch key.
++//
++// Day-one override set — exactly the set P-TAB-001 lists, each with an
++// audited safe default (deny / cancel / no-op-with-explicit-policy), upgraded
++// to real routing in S3/S6 without modifying this file's contract:
++//   OpenURLFromTab, AddNewContents, ActivateContents, IsContentsActive,
++//   CloseContents, BeforeUnloadFired, NavigationStateChanged,
++//   LoadingStateChanged, TakeFocus, GetJavaScriptDialogManager.
++// Everything else inherits content::WebContentsDelegate's defaults, which
++// were audited at the pin for browser-less safety.
++class ReArcTabDelegate : public content::WebContentsDelegate {
++ public:
++  explicit ReArcTabDelegate(uint64_t tab_id);
++  ReArcTabDelegate(const ReArcTabDelegate&) = delete;
++  ReArcTabDelegate& operator=(const ReArcTabDelegate&) = delete;
++  ~ReArcTabDelegate() override;
++
++  // content::WebContentsDelegate (day-one safe-deny set):
++  content::WebContents* OpenURLFromTab(
++      content::WebContents* source,
++      const content::OpenURLParams& params,
++      base::OnceCallback<void(content::NavigationHandle&)>
++          navigation_handle_callback) override;
++  content::WebContents* AddNewContents(
++      content::WebContents* source,
++      std::unique_ptr<content::WebContents> new_contents,
++      const GURL& target_url,
++      WindowOpenDisposition disposition,
++      const blink::mojom::WindowFeatures& window_features,
++      bool user_gesture,
++      bool* was_blocked) override;
++  void ActivateContents(content::WebContents* contents) override;
++  bool IsContentsActive(content::WebContents* contents) override;
++  void CloseContents(content::WebContents* source) override;
++  void BeforeUnloadFired(content::WebContents* tab,
++                         bool proceed,
++                         bool* proceed_to_fire_unload) override;
++  void NavigationStateChanged(
++      content::WebContents* source,
++      content::InvalidateTypes changed_flags) override;
++  void LoadingStateChanged(content::WebContents* source,
++                           bool should_show_loading_ui) override;
++  bool TakeFocus(content::WebContents* source, bool reverse) override;
++  content::JavaScriptDialogManager* GetJavaScriptDialogManager(
++      content::WebContents* source) override;
++
++ private:
++  const uint64_t tab_id_;
++};
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_TAB_DELEGATE_H_
+diff --git a/chrome/browser/rearc_bridge/tab_registry.cc b/chrome/browser/rearc_bridge/tab_registry.cc
+new file mode 100644
+index 0000000000..fc67b02cd9
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/tab_registry.cc
+@@ -0,0 +1,131 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++
++#include <pthread.h>
++
++#include <utility>
++#include <vector>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/task/sequenced_task_runner.h"
++
++namespace rearc {
++
++// static
++TabRegistry& TabRegistry::Get() {
++  CHECK(pthread_main_np());
++  static base::NoDestructor<TabRegistry> registry;
++  return *registry;
++}
++
++void TabRegistry::PostCommand(Command command) {
++  CHECK(pthread_main_np());
++  pending_commands_.push_back(std::move(command));
++}
++
++void TabRegistry::DrainCommands() {
++  CHECK(pthread_main_np());
++  while (!pending_commands_.empty()) {
++    Command command = std::move(pending_commands_.front());
++    pending_commands_.pop_front();
++    ApplyCommand(command);
++  }
++}
++
++uint64_t TabRegistry::CreateSession(const TabSession::CreateArgs& args) {
++  CHECK(pthread_main_np());
++  const uint64_t tab_id = next_tab_id_++;
++  sessions_.emplace(tab_id, TabSession::Create(tab_id, args));
++  VLOG(1) << "ReArc bridge: created tab session " << tab_id << " (space "
++          << args.space_id << ", order " << args.order_index << ").";
++  return tab_id;
++}
++
++TabSession* TabRegistry::FindSession(uint64_t tab_id) const {
++  CHECK(pthread_main_np());
++  auto it = sessions_.find(tab_id);
++  return it == sessions_.end() ? nullptr : it->second.get();
++}
++
++bool TabRegistry::RequestClose(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  TabSession* session = FindSession(tab_id);
++  if (!session || session->close_state() == TabSession::CloseState::kClosed) {
++    VLOG(1) << "ReArc bridge: close requested for unknown/closed tab "
++            << tab_id << ".";
++    return false;
++  }
++  if (session->close_state() == TabSession::CloseState::kOpen) {
++    session->SetCloseState(TabSession::CloseState::kCloseRequested);
++  }
++  // The real pipeline (DispatchBeforeUnload → honor veto → ClosePage → await
++  // CloseContents) is S6's close_controller; day-one this only records the
++  // request in the close-state machine.
++  VLOG(1) << "ReArc bridge: tab " << tab_id
++          << " close requested (S6 close pipeline pending).";
++  return true;
++}
++
++void TabRegistry::DestroySession(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  auto it = sessions_.find(tab_id);
++  if (it == sessions_.end()) {
++    VLOG(1) << "ReArc bridge: destroy requested for unknown tab " << tab_id
++            << ".";
++    return;
++  }
++  std::unique_ptr<TabSession> session = std::move(it->second);
++  sessions_.erase(it);
++  if (session->close_state() != TabSession::CloseState::kClosed) {
++    session->SetCloseState(TabSession::CloseState::kClosed);
++  }
++  // Deferred destruction: delegate/observer callbacks must unwind before the
++  // WebContents dies (P-TAB-001's destruction-from-callback prohibition).
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce([](std::unique_ptr<TabSession> doomed_session) {},
++                     std::move(session)));
++}
++
++void TabRegistry::DestroyAllSessions() {
++  CHECK(pthread_main_np());
++  // Pending commands reference sessions that are about to die; drop them —
++  // teardown is the final word on tab lifetime.
++  pending_commands_.clear();
++  std::vector<uint64_t> ids;
++  ids.reserve(sessions_.size());
++  for (const auto& [tab_id, session] : sessions_) {
++    ids.push_back(tab_id);
++  }
++  for (uint64_t tab_id : ids) {
++    DestroySession(tab_id);
++  }
++}
++
++void TabRegistry::ApplyCommand(const Command& command) {
++  switch (command.type) {
++    case Command::Type::kCreate: {
++      CHECK(command.browser_context);
++      TabSession::CreateArgs args;
++      args.browser_context = command.browser_context;
++      args.space_id = command.space_id;
++      args.order_index = command.order_index;
++      CreateSession(args);
++      return;
++    }
++    case Command::Type::kRequestClose:
++      RequestClose(command.tab_id);
++      return;
++    case Command::Type::kDestroy:
++      DestroySession(command.tab_id);
++      return;
++  }
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/tab_registry.h b/chrome/browser/rearc_bridge/tab_registry.h
+new file mode 100644
+index 0000000000..f0d8060a0a
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/tab_registry.h
+@@ -0,0 +1,109 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_TAB_REGISTRY_H_
++#define CHROME_BROWSER_REARC_BRIDGE_TAB_REGISTRY_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <deque>
++#include <map>
++#include <memory>
++
++#include "base/memory/raw_ptr.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++
++namespace base {
++template <typename T>
++class NoDestructor;
++}  // namespace base
++
++namespace content {
++class BrowserContext;
++}  // namespace content
++
++namespace rearc {
++
++// Browser-less tab registry (P-TAB-001 slice S2; the centerpiece decision per
++// P-TAB-001-SLICES §2: registry, NOT a BrowserWindowInterface adapter — the
++// ~69-virtual fake window object is forbidden by R6).
++//
++// Owns: engine-side monotonic tab_id allocation (IPC-CONTRACT §3: "E
++// allocates tab_id"), the TabSession map, FIFO command application, and
++// teardown ordering (all sessions destroyed before profile release via
++// DestroyAllSessions, called from the P-APP-001 DidEndMainMessageLoop
++// finalization seam — wired in a later slice because the call site lives in
++// an earlier patch's frozen file).
++//
++// Main thread (Chromium BrowserThread::UI) only; every entry point CHECKs.
++class TabRegistry {
++ public:
++  // FIFO command envelope. Producers (S3's IPC layer) post; application is
++  // strictly in-order on the main thread. Day-one nothing posts yet — the
++  // queue and drain path ship now so the command-ordering contract is real
++  // from the start.
++  struct Command {
++    enum class Type { kCreate, kRequestClose, kDestroy };
++
++    Type type = Type::kCreate;
++    // kCreate fields (browser_context borrowed; see
++    // TabSession::CreateArgs::browser_context):
++    raw_ptr<content::BrowserContext> browser_context = nullptr;
++    uint64_t space_id = 0;
++    int32_t order_index = 0;
++    // kRequestClose / kDestroy field:
++    uint64_t tab_id = 0;
++  };
++
++  static TabRegistry& Get();
++
++  TabRegistry(const TabRegistry&) = delete;
++  TabRegistry& operator=(const TabRegistry&) = delete;
++
++  // Appends to the FIFO without applying. Main thread only.
++  void PostCommand(Command command);
++  // Applies every pending command in FIFO order. Main thread only.
++  void DrainCommands();
++
++  // Creates a session and returns its newly allocated tab_id. Main thread
++  // only.
++  uint64_t CreateSession(const TabSession::CreateArgs& args);
++
++  // Bridge-internal lookup; nullptr for unknown ids.
++  TabSession* FindSession(uint64_t tab_id) const;
++
++  // Advances the session's close-state skeleton to kCloseRequested (the real
++  // beforeunload/unload pipeline is S6). Idempotent for already-closing
++  // sessions; false for unknown or fully closed tabs.
++  bool RequestClose(uint64_t tab_id);
++
++  // Idempotent. Removes the session from the registry immediately but posts
++  // its destruction so delegate/observer callbacks unwind first (P-TAB-001's
++  // destruction-from-callback prohibition).
++  void DestroySession(uint64_t tab_id);
++
++  // Teardown-ordering primitive: clears pending commands and destroys every
++  // session (deferred as above). Must run before profile release during
++  // engine shutdown.
++  void DestroyAllSessions();
++
++  size_t session_count() const { return sessions_.size(); }
++
++ private:
++  friend class base::NoDestructor<TabRegistry>;
++
++  TabRegistry() = default;
++  ~TabRegistry() = default;
++
++  void ApplyCommand(const Command& command);
++
++  // Monotonic, engine-allocated per IPC-CONTRACT §3.
++  uint64_t next_tab_id_ = 1;
++  std::map<uint64_t, std::unique_ptr<TabSession>> sessions_;
++  std::deque<Command> pending_commands_;
++};
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_TAB_REGISTRY_H_
+diff --git a/chrome/browser/rearc_bridge/tab_session.cc b/chrome/browser/rearc_bridge/tab_session.cc
+new file mode 100644
+index 0000000000..4394bdf77c
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/tab_session.cc
+@@ -0,0 +1,98 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/tab_session.h"
++
++#include <pthread.h>
++
++#include "base/check.h"
++#include "base/logging.h"
++#include "chrome/browser/rearc_bridge/tab_delegate.h"
++#include "content/public/browser/web_contents.h"
++
++namespace rearc {
++
++namespace {
++
++bool IsValidCloseTransition(TabSession::CloseState from,
++                            TabSession::CloseState to) {
++  switch (from) {
++    case TabSession::CloseState::kOpen:
++      // kClosed directly: forced teardown (TabRegistry::DestroySession)
++      // skips the beforeunload pipeline.
++      return to == TabSession::CloseState::kCloseRequested ||
++             to == TabSession::CloseState::kClosed;
++    case TabSession::CloseState::kCloseRequested:
++      // Back to kOpen: close vetoed (beforeunload or policy).
++      return to == TabSession::CloseState::kOpen ||
++             to == TabSession::CloseState::kUnloadPending ||
++             to == TabSession::CloseState::kClosed;
++    case TabSession::CloseState::kUnloadPending:
++      // Back to kOpen: unload cancelled mid-pipeline.
++      return to == TabSession::CloseState::kOpen ||
++             to == TabSession::CloseState::kClosed;
++    case TabSession::CloseState::kClosed:
++      return false;
++  }
++}
++
++}  // namespace
++
++// static
++std::unique_ptr<TabSession> TabSession::Create(uint64_t tab_id,
++                                               const CreateArgs& args) {
++  CHECK(pthread_main_np());
++  CHECK(args.browser_context);
++  return std::unique_ptr<TabSession>(new TabSession(tab_id, args));
++}
++
++TabSession::TabSession(uint64_t tab_id, const CreateArgs& args)
++    : tab_id_(tab_id),
++      space_id_(args.space_id),
++      order_index_(args.order_index) {
++  delegate_ = std::make_unique<ReArcTabDelegate>(tab_id_);
++  content::WebContents::CreateParams params(args.browser_context);
++  web_contents_ = content::WebContents::Create(params);
++  web_contents_->SetDelegate(delegate_.get());
++
++  // Start hidden (P-TAB-001): a fresh WebContents is hidden by default and
++  // becomes visible only through the S4 attachment lease's explicit
++  // view.set_visible — never implicitly at creation.
++  //
++  // R6 helper policy: no TabHelpers::AttachTabHelpers (legacy, warns against
++  // desktop use), no TabFeatures, no PreventFeatureInitializationForTesting
++  // bypass. The whitelisted per-helper CreateForWebContents set is EMPTY
++  // day-one: the first candidate (CoreTabHelper) lives in
++  // //chrome/browser/ui/tab_contents/, and :core cannot dep on
++  // //chrome/browser/ui (layering runs ui → core), so the whitelist decision
++  // moves to the S5 service-adapter audits. Recorded in patch tab/007's
++  // header per the slice plan's "each recorded in the patch header" rule.
++}
++
++TabSession::~TabSession() = default;
++
++void TabSession::SetSpaceId(uint64_t space_id) {
++  CHECK(pthread_main_np());
++  space_id_ = space_id;
++}
++
++void TabSession::SetOrderIndex(int32_t order_index) {
++  CHECK(pthread_main_np());
++  order_index_ = order_index;
++}
++
++void TabSession::SetCloseState(CloseState next) {
++  CHECK(pthread_main_np());
++  CHECK(IsValidCloseTransition(close_state_, next))
++      << "ReArc bridge: tab " << tab_id_ << " illegal close transition "
++      << static_cast<int>(close_state_) << " -> " << static_cast<int>(next);
++  close_state_ = next;
++}
++
++void TabSession::NoteContentsReplaced() {
++  CHECK(pthread_main_np());
++  ++content_generation_;
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/tab_session.h b/chrome/browser/rearc_bridge/tab_session.h
+new file mode 100644
+index 0000000000..cb8b30ab21
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/tab_session.h
+@@ -0,0 +1,112 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_TAB_SESSION_H_
++#define CHROME_BROWSER_REARC_BRIDGE_TAB_SESSION_H_
++
++#include <cstdint>
++#include <memory>
++
++#include "base/memory/raw_ptr.h"
++
++namespace content {
++class BrowserContext;
++class WebContents;
++}  // namespace content
++
++namespace rearc {
++
++class ReArcTabDelegate;
++
++// One browser-less tab (P-TAB-001 slice S2). Owns exactly one
++// content::WebContents created directly via WebContents::Create — no
++// TabStripModel, no tabs::TabModel, no TabFeatures, no BrowserWindowInterface
++// adapter. The registry route never reaches TabFeatures' BrowserWindowInterface
++// CHECK (tab_features.cc:276); see P-TAB-001-SLICES §2 for the full decision
++// record.
++//
++// Identity is the engine-allocated, monotonic tab_id (IPC-CONTRACT §3). The
++// WebContents* is never exposed across the bridge/shell boundary — the
++// web_contents() accessor is strictly bridge-internal (TabRegistry and the
++// S3 observer / S4 lease / S6 adoption collaborators in this same target);
++// shell-facing identity is the opaque tab_id only.
++//
++// The S4 attachment lease is deliberately NOT a member: this file is frozen
++// once patch tab/007 lands (series-mechanics invariant), so S4 associates at
++// most one lease per tab through its own tab_id-keyed map in
++// attachment_lease.cc — same additive pattern as S1's native-window provider
++// seam.
++class TabSession {
++ public:
++  // Close-state machine skeleton. The real pipeline (DispatchBeforeUnload →
++  // honor veto → ClosePage → await CloseContents; forced-close path that
++  // still detaches native children and cancels observers) is S6's
++  // close_controller; S2 ships the states and guarded transitions only.
++  enum class CloseState {
++    kOpen,            // Normal operation.
++    kCloseRequested,  // tab.close received; beforeunload not yet dispatched.
++    kUnloadPending,   // beforeunload/unload pipeline running.
++    kClosed,          // Fully closed; destruction scheduled.
++  };
++
++  struct CreateArgs {
++    // Borrowed: the caller (via TabRegistry) guarantees the BrowserContext
++    // outlives the session — teardown ordering destroys all sessions before
++    // profile release (P-APP-001's DidEndMainMessageLoop finalization seam).
++    // Proper ScopedProfileKeepAlive wiring
++    // (chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h) lands
++    // with the embedded-startup integration wave; S2 records the dependency
++    // explicitly instead of faking a keepalive it cannot correctly own yet.
++    raw_ptr<content::BrowserContext> browser_context = nullptr;
++    uint64_t space_id = 0;    // Shell space membership (IPC-CONTRACT §3).
++    int32_t order_index = 0;  // Shell order metadata within the space.
++  };
++
++  // Main thread only. `args.browser_context` must be non-null.
++  static std::unique_ptr<TabSession> Create(uint64_t tab_id,
++                                            const CreateArgs& args);
++  ~TabSession();
++
++  TabSession(const TabSession&) = delete;
++  TabSession& operator=(const TabSession&) = delete;
++
++  uint64_t tab_id() const { return tab_id_; }
++
++  // Shell space/order metadata (IPC-CONTRACT §3 tab.move semantics; pure
++  // metadata day-one — membership never reparents a view by itself).
++  uint64_t space_id() const { return space_id_; }
++  void SetSpaceId(uint64_t space_id);
++  int32_t order_index() const { return order_index_; }
++  void SetOrderIndex(int32_t order_index);
++
++  CloseState close_state() const { return close_state_; }
++  // Advances the close state; CHECKs the transition is legal. Main thread
++  // only.
++  void SetCloseState(CloseState next);
++
++  // Monotonic per-tab generation, incremented whenever the WebContents is
++  // replaced (S6 adoption edge cases; S7 discard). Consumers (S3 event
++  // serialization, S4 lease) reject completions from a stale generation.
++  uint64_t content_generation() const { return content_generation_; }
++  void NoteContentsReplaced();
++
++  // Bridge-internal access — never crosses the shell/IPC boundary.
++  content::WebContents* web_contents() const { return web_contents_.get(); }
++
++ private:
++  TabSession(uint64_t tab_id, const CreateArgs& args);
++
++  const uint64_t tab_id_;
++  uint64_t space_id_;
++  int32_t order_index_;
++  CloseState close_state_ = CloseState::kOpen;
++  uint64_t content_generation_ = 1;
++
++  std::unique_ptr<ReArcTabDelegate> delegate_;
++  std::unique_ptr<content::WebContents> web_contents_;
++};
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_TAB_SESSION_H_

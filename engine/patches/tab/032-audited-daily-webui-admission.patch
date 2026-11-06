@@ -1,0 +1,220 @@
+From b0cc7b4ec6f884a1e8921673a43f22878c8e96c4 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Tue, 3 Nov 2026 15:23:25 +0400
+Subject: [PATCH] P-TAB-001 wave 18: admit audited daily-use WebUI pages
+
+Admit history, downloads, password-manager and extensions through one exact-host predicate shared by trusted navigation and the internal registration client. Keep privileged evaluation/capture denied and retain acknowledged HTTP script plans across WebUI visits. Disable browser-dependent Journeys without TabInterface; guard password shortcut, batch-upload and relaunch actions without a Browser. Keep flags rejected because its relaunch is outside the embedding lifecycle.
+
+Advertise webui_daily_pages in ABI 1.14 / bridge 0.16.0 with unchanged ABI 1.13 structs and symbols. Builds p47/p48, the native WebUI handler host and all original native hosts, G1-G5 and four stress processes / sixteen shutdown tabs pass in gates-tab032.log.
+
+Last rebased: 2026-11-03 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ .../passwords_private_delegate_impl.cc             |  4 +++-
+ chrome/browser/rearc_bridge/rearc_abi_internal.h   |  2 ++
+ chrome/browser/rearc_bridge/rearc_engine_abi.h     |  4 ++--
+ chrome/browser/rearc_bridge/rearc_engine_abi.mm    | 10 ++++++++--
+ .../browser/rearc_bridge/rearc_engine_entry_mac.mm |  2 +-
+ chrome/browser/rearc_bridge/rearc_services_abi.cc  |  3 +--
+ chrome/browser/ui/webui/history/history_ui.cc      | 14 +++++++++++---
+ .../password_manager/notification_cards_handler.cc |  8 +++++++-
+ .../ui/webui/password_manager/sync_handler.cc      |  4 +++-
+ 9 files changed, 38 insertions(+), 13 deletions(-)
+
+diff --git a/chrome/browser/extensions/api/passwords_private/passwords_private_delegate_impl.cc b/chrome/browser/extensions/api/passwords_private/passwords_private_delegate_impl.cc
+index ff2ef365d8..84f353bc46 100644
+--- a/chrome/browser/extensions/api/passwords_private/passwords_private_delegate_impl.cc
++++ b/chrome/browser/extensions/api/passwords_private/passwords_private_delegate_impl.cc
+@@ -889,7 +889,9 @@ void PasswordsPrivateDelegateImpl::ShowAddShortcutDialog(
+     content::WebContents* web_contents) {
+   BrowserWindowInterface* browser =
+       GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(web_contents);
+-  DCHECK(browser);
++  if (!browser) {
++    return;
++  }
+   web_app::CreateWebAppFromCurrentWebContents(
+       browser, web_app::WebAppInstallFlow::kInstallSite);
+   base::UmaHistogramEnumeration(
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 4e41425888..203722fea1 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -8,7 +8,9 @@
+ 
+ #include "base/functional/callback.h"
+ #include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
++class GURL;
+ namespace rearc {
++bool ABIIsTrustedWebUI(const GURL& url);
+ class TabSession;
+ ReArcStatus ABICheckTab(uint64_t tab_id, TabSession** session);
+ void ABIPost(base::OnceClosure callback);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 9d2b13b488..506dc159d3 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 13, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 14, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -138,7 +138,7 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileClose(
+ // null URL keeps the initial empty about:blank document without a synthetic
+ // navigation. Explicit creation URLs are queued; an immediate Navigate
+ // supersedes that queued destination. Trusted browser-initiated navigation admits
+-// http(s), data, file, chrome://settings, chrome://version, exact about:blank
++// http(s), data, file, audited chrome:// hosts (webui_daily_pages), about:blank
+ // and view-source:http(s)/file. Other chrome hosts require helper audits.
+ // Other schemes (including javascript, blob, chrome-untrusted) are rejected.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabCreate(uint64_t profile_id,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 1a65fdc8d7..3da06fd876 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -404,8 +404,7 @@ bool AllowedURL(const GURL& url) {
+   }
+   if (url.SchemeIsHTTPOrHTTPS() || url.SchemeIs("data") ||
+       url.SchemeIsFile() ||
+-      (url.SchemeIs("chrome") &&
+-       (url.host() == "settings" || url.host() == "version")) ||
++      ABIIsTrustedWebUI(url) ||
+       url.spec() == "about:blank") {
+     return true;
+   }
+@@ -490,6 +489,12 @@ void ABITabDestroyed(uint64_t profile_id) {
+     a.FinishShutdown();
+   }
+ }
++bool ABIIsTrustedWebUI(const GURL& url) {
++  return url.SchemeIs("chrome") &&
++         (url.host() == "settings" || url.host() == "version" ||
++          url.host() == "history" || url.host() == "downloads" ||
++          url.host() == "password-manager" || url.host() == "extensions");
++}
+ }  // namespace rearc
+ 
+ using rearc::ABI;
+@@ -516,6 +521,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "shutdown_pending_closes" ||
+          std::string(feature) == "navigation" ||
+          std::string(feature) == "navigation_extended" ||
++         std::string(feature) == "webui_daily_pages" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 6a79e45658..2b28fd5980 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.15.0";
++  return "0.16.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 9ad8dfdd05..bccd791f4c 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -297,8 +297,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+     // registrations. Actual evaluation/refresh/capture enforce document policy.
+     return url.is_empty() || url.SchemeIsHTTPOrHTTPS() || url.SchemeIs("data") ||
+            url.SchemeIsFile() ||
+-           (url.SchemeIs("chrome") &&
+-            (url.host() == "settings" || url.host() == "version")) ||
++           ABIIsTrustedWebUI(url) ||
+            url.spec() == "about:blank";
+   }
+   bool MayAttachToRenderFrameHost(content::RenderFrameHost* frame) override {
+diff --git a/chrome/browser/ui/webui/history/history_ui.cc b/chrome/browser/ui/webui/history/history_ui.cc
+index 9891bee001..af03ac5168 100644
+--- a/chrome/browser/ui/webui/history/history_ui.cc
++++ b/chrome/browser/ui/webui/history/history_ui.cc
+@@ -175,6 +175,12 @@ HistoryUI::HistoryUI(content::WebUI* web_ui)
+   Profile* profile = Profile::FromWebUI(web_ui);
+   content::WebUIDataSource* data_source =
+       CreateAndAddHistoryUIHTMLSource(profile);
++#if !BUILDFLAG(IS_ANDROID)
++  // Journeys requires a desktop TabInterface for grouping and browser actions.
++  if (!tabs::TabInterface::MaybeGetFromContents(web_ui->GetWebContents())) {
++    data_source->AddBoolean("isHistoryClustersEnabled", false);
++  }
++#endif
+   history::InitializePlatformHandlers(web_ui, data_source);
+   history::InitializePlatformRegistrars(
+       pref_change_registrar_, profile,
+@@ -236,12 +242,14 @@ void HistoryUI::BindInterface(
+ void HistoryUI::CreatePageHandler(
+     mojo::PendingRemote<history_clusters::mojom::Page> page,
+     mojo::PendingReceiver<history_clusters::mojom::PageHandler> receiver) {
++  auto* tab = tabs::TabInterface::MaybeGetFromContents(web_ui()->GetWebContents());
++  if (!tab) {
++    return;
++  }
+   history_clusters_handler_ =
+       std::make_unique<history_clusters::HistoryClustersHandler>(
+           std::move(receiver), std::move(page), Profile::FromWebUI(web_ui()),
+-          web_ui()->GetWebContents(),
+-          // HistoryUI should always be in a tab. Look it up unconditionally.
+-          tabs::TabInterface::GetFromContents(web_ui()->GetWebContents()));
++          web_ui()->GetWebContents(), tab);
+ }
+ #endif  // !BUILDFLAG(IS_ANDROID)
+ 
+diff --git a/chrome/browser/ui/webui/password_manager/notification_cards_handler.cc b/chrome/browser/ui/webui/password_manager/notification_cards_handler.cc
+index 4daf771492..e9f69cc1a4 100644
+--- a/chrome/browser/ui/webui/password_manager/notification_cards_handler.cc
++++ b/chrome/browser/ui/webui/password_manager/notification_cards_handler.cc
+@@ -15,10 +15,12 @@
+ #include "chrome/browser/lifetime/application_lifetime.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/sync/sync_service_factory.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+ #include "chrome/browser/ui/webui/password_manager/notification_card.h"
+ #include "components/password_manager/core/common/password_manager_pref_names.h"
+ #include "components/prefs/scoped_user_pref_update.h"
+ #include "components/signin/public/base/signin_buildflags.h"
++#include "content/public/browser/web_ui.h"
+ #include "ui/base/l10n/l10n_util.h"
+ 
+ #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+@@ -224,7 +226,11 @@ void NotificationCardsHandler::RegisterMessages() {
+ }
+ 
+ void NotificationCardsHandler::RestartChrome(const base::ListValue& args) {
+-  chrome::AttemptRestart();
++  // Embedded hosts own process relaunch and have no Chrome Browser to restart.
++  if (GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
++          web_ui()->GetWebContents())) {
++    chrome::AttemptRestart();
++  }
+ }
+ 
+ void NotificationCardsHandler::HandleGetAvailableNotificationCard(
+diff --git a/chrome/browser/ui/webui/password_manager/sync_handler.cc b/chrome/browser/ui/webui/password_manager/sync_handler.cc
+index 6a345fb2e4..b5cce58e65 100644
+--- a/chrome/browser/ui/webui/password_manager/sync_handler.cc
++++ b/chrome/browser/ui/webui/password_manager/sync_handler.cc
+@@ -204,7 +204,9 @@ void SyncHandler::HandleOpenBatchUploadDialog(const base::ListValue& args) {
+   CHECK(batch_upload);
+   BrowserWindowInterface* browser =
+       ProfileBrowserCollection::GetForProfile(profile_)->GetLastActiveBrowser();
+-  batch_upload->OpenBatchUpload(browser, entry_point);
++  if (browser) {
++    batch_upload->OpenBatchUpload(browser, entry_point);
++  }
+ }
+ #endif
+ 
+-- 
+2.54.0 (Apple Git-157)
+

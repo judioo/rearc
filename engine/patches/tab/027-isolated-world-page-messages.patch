@@ -1,0 +1,323 @@
+From d733c456f1e494e3652955d42b71b6db0e49a2a4 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Mon, 2 Nov 2026 18:51:37 +0400
+Subject: [PATCH] P-TAB-001 wave 14: deliver bounded isolated-world page
+ messages
+
+Inject a bounded JSON sender only into installed boost or explicitly evaluated isolated worlds. Validate primary-frame context, profile/document identity, rate and queue limits, with stale delivery cancellation and callback registration generations. Preserve surviving world identities after aborted navigation. Add isolated_page_messages in ABI 1.9.
+
+Last rebased: 2026-11-02 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/app/framework.exports                  |   1 +
+ chrome/app/framework.order                    |   1 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  19 ++-
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_services_abi.cc        | 111 +++++++++++++++++-
+ 5 files changed, 129 insertions(+), 5 deletions(-)
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index d9ea6af22e..911e1f098c 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -64,6 +64,7 @@ _ReArcTabSetScripts
+ _ReArcTabRefreshStyles
+ _ReArcTabSetLinkPeek
+ _ReArcTabCaptureSnapshot
++_ReArcEngineSetPageMessageCallback
+ _ReArcEngineSetZoomCallback
+ _ReArcTabGetZoomFactor
+ _ReArcTabSetZoomFactor
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index d46f09acf6..2eb3aa59f1 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -75,6 +75,7 @@ _ReArcTabSetScripts
+ _ReArcTabRefreshStyles
+ _ReArcTabSetLinkPeek
+ _ReArcTabCaptureSnapshot
++_ReArcEngineSetPageMessageCallback
+ _ReArcEngineSetZoomCallback
+ _ReArcTabGetZoomFactor
+ _ReArcTabSetZoomFactor
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index e0eac5f0f7..1647efee5d 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 8, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 9, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -339,6 +339,23 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetZoomFactor(uint64_t tab_id,
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetZoomFactor(uint64_t tab_id,
+                                                       double factor);
+ 
++// Installed boost and explicitly evaluated isolated worlds get
++// rearcPostMessage(JSON.stringify(value)). Never injected into the main world.
++// Top-frame http(s) only; valid UTF-8 RFC JSON <=64 KiB, <=60 attempts/sec/tab,
++// <=60 queued deliveries/tab. Excess/malformed/stale messages are dropped.
++// Borrowed event/strings. Messages are data, never trusted shell commands.
++typedef struct ReArcPageMessage {
++  ReArcDocumentIdentity document;
++  const char* boost_id;  // editor, installed ID, or host-evaluated isolated ID.
++  const char* json;
++} ReArcPageMessage;
++typedef void (*ReArcPageMessageCallback)(void* context,
++                                         const ReArcPageMessage* message);
++// Null disables delivery, including already queued messages. Register before
++// installing scripts/evaluating the editor. No polling or per-message reply.
++REARC_ENGINE_EXPORT void ReArcEngineSetPageMessageCallback(
++    ReArcPageMessageCallback callback, void* context);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 4dfc721dec..8929e3d694 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.10.0";
++  return "0.11.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 29196308a0..9ad8dfdd05 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -27,6 +27,7 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/timer/timer.h"
++#include "base/time/time.h"
+ #include "base/values.h"
+ #include "chrome/browser/rearc_bridge/favicon_adapter.h"
+ #include "chrome/browser/rearc_bridge/ipc_service_events.h"
+@@ -52,6 +53,9 @@
+ namespace rearc {
+ namespace {
+ 
++ReArcPageMessageCallback message_callback = nullptr;
++void* message_context = nullptr;
++uint64_t message_registration = 0;
+ ReArcZoomCallback zoom_callback = nullptr;
+ void* zoom_context = nullptr;
+ ReArcServiceCallback service_callback = nullptr;
+@@ -112,6 +116,21 @@ std::string Quote(const std::string& value) {
+   return base::WriteJson(base::Value(value)).value();
+ }
+ 
++std::string MessageBootstrap() {
++  return R"JS((()=>{
++    if(window!==window.top||!/^https?:$/.test(location.protocol)||
++       typeof globalThis.rearcPostMessage==='function')return;
++    const send=globalThis.__rearcPostJSON;if(typeof send!=='function')return;
++    delete globalThis.__rearcPostJSON;
++    let start=performance.now(),count=0;
++    Object.defineProperty(globalThis,'rearcPostMessage',{value(json){
++      if(typeof json!=='string'||json.length>65536)return false;
++      const now=performance.now();if(now-start>=1000){start=now;count=0;}
++      if(count++>=60||new TextEncoder().encode(json).byteLength>65536)return false;
++      send(json);return true;
++    }});
++  })();)JS";
++}
+ struct Scope {
+   std::string host, path;
+   bool subdomains;
+@@ -181,7 +200,7 @@ std::string ScriptSource(const Script& s, bool css_only) {
+       "globalThis.__rearcCSSListener=true;}globalThis.__rearcApplyCSS=css;"
+       "function run(){css();if(!eligible()||globalThis.__rearcRan)return;"
+       "globalThis.__rearcRan=true;try{\n" +
+-      s.source + "\n}catch(e){console.error('[ReArc Boost]',e);}}";
++      MessageBootstrap() + s.source + "\n}catch(e){console.error('[ReArc Boost]',e);}}";
+   if (s.run_at == 0) {
+     body +=
+         "run();if(!document.documentElement)"
+@@ -289,6 +308,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+     CHECK(pthread_main_np());
+     attached_ = false;
+     contexts_.clear();
++    message_contexts_.clear();
+     CancelPending(REARC_CANCELLED);
+   }
+   void DidStartNavigation(content::NavigationHandle* handle) override {
+@@ -296,6 +316,9 @@ class PageServices : public content::DevToolsAgentHostClient,
+     if (handle->IsInPrimaryMainFrame() && !handle->IsSameDocument()) {
+       ++document_epoch_;
+       contexts_.clear();
++      // Retain message context identities until CDP reports destruction: an
++      // aborted navigation can leave the same document/world alive. Pending
++      // navigation rejects new sends; document_epoch_ cancels queued ones.
+       if (evaluation_busy()) {
+         FinishEvaluation(REARC_CANCELLED, {}, "navigation", "Document navigated");
+       }
+@@ -371,6 +394,12 @@ class PageServices : public content::DevToolsAgentHostClient,
+       const auto* name = c->FindString("name");
+       const auto* aux = c->FindDict("auxData");
+       auto id = c->FindInt("id");
++      if (name && name->starts_with("rearc.boost.") && aux && id &&
++          !aux->FindBool("isDefault").value_or(true)) {
++        if (const auto* frame = aux->FindString("frameId")) {
++          message_contexts_[*id] = {*frame, name->substr(12)};
++        }
++      }
+       if (name && *name == "rearc.host" && aux && id) {
+         if (const auto* frame = aux->FindString("frameId")) {
+           contexts_[*id] = *frame;
+@@ -379,9 +408,15 @@ class PageServices : public content::DevToolsAgentHostClient,
+     } else if (*method == "Runtime.executionContextDestroyed") {
+       if (auto id = params->FindInt("executionContextId")) {
+         contexts_.erase(*id);
++        message_contexts_.erase(*id);
+       }
+     } else if (*method == "Runtime.executionContextsCleared") {
+       contexts_.clear();
++      message_contexts_.clear();
++    } else if (*method == "Runtime.bindingCalled" &&
++               params->FindString("name") &&
++               *params->FindString("name") == "__rearcPostJSON") {
++      ReceiveMessage(*params);
+     } else if (*method == "Runtime.bindingCalled" && peek_enabled_) {
+       const auto* name = params->FindString("name");
+       const auto* payload = params->FindString("payload");
+@@ -409,6 +444,39 @@ class PageServices : public content::DevToolsAgentHostClient,
+     }
+   }
+ 
++  void ReceiveMessage(const base::DictValue& params) {
++    auto id = params.FindInt("executionContextId");
++    const auto* payload = params.FindString("payload");
++    if (!id || !payload || !message_callback || !Current() || navigation_pending() ||
++        !web_contents()->GetLastCommittedURL().SchemeIsHTTPOrHTTPS() ||
++        !message_contexts_.contains(*id) ||
++        message_contexts_.at(*id).first != main_frame_) return;
++    const auto now = base::TimeTicks::Now();
++    if (now - message_window_ >= base::Seconds(1)) {
++      message_window_ = now;
++      message_attempts_ = 0;
++    }
++    if (message_attempts_ >= 60) return;
++    ++message_attempts_;  // Invalid/oversize attempts also consume the budget.
++    if (payload->size() > 65536 || queued_messages_ >= 60 ||
++        !base::IsStringUTF8(*payload) ||
++        !base::JSONReader::Read(*payload, base::JSON_PARSE_RFC)) return;
++    ++queued_messages_;
++    auto identity = document();
++    ABIPost(base::BindOnce([](base::WeakPtr<PageServices> self,
++        ReArcDocumentIdentity identity, uint64_t epoch, uint64_t registration,
++        std::string boost, std::string json) {
++      if (!self) return;
++      --self->queued_messages_;
++      if (!self->Current() || !message_callback || registration != message_registration ||
++          self->document_epoch_ != epoch ||
++          self->document().document_generation != identity.document_generation)
++        return;
++      ReArcPageMessage message{identity, boost.c_str(), json.c_str()};
++      message_callback(message_context, &message);
++    }, weak_factory_.GetWeakPtr(), identity, document_epoch_, message_registration,
++       message_contexts_.at(*id).second, *payload));
++  }
+   bool available() const { return !host_ || attached_; }
+   bool busy() const { return installing_; }
+   bool snapshot_busy() const { return snapshot_callback_ != nullptr; }
+@@ -507,6 +575,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+                                    "context", "Primary frame unavailable", std::move(result));
+             return;
+           }
++          self->main_frame_ = *frame;
+           self->Send("Page.createIsolatedWorld", base::DictValue()
+               .Set("frameId", *frame).Set("worldName", world)
+               .Set("grantUniveralAccess", false), base::BindOnce(
+@@ -519,7 +588,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+                                          "context", "Isolated world unavailable", std::move(result));
+                   return;
+                 }
+-                self->RunEvaluation(request, std::move(source), *id);
++                self->RunIsolatedEvaluation(request, std::move(source), *id);
+               }, self, request, std::move(source)));
+         }, weak_factory_.GetWeakPtr(), request, std::move(source), std::move(world)));
+   }
+@@ -615,6 +684,19 @@ class PageServices : public content::DevToolsAgentHostClient,
+   bool EvaluationCurrent(uint64_t request) const {
+     return evaluation_busy() && evaluation_request_ == request;
+   }
++  void RunIsolatedEvaluation(uint64_t request, std::string source, int context_id) {
++    Send("Runtime.addBinding", base::DictValue()
++        .Set("name", "__rearcPostJSON").Set("executionContextId", context_id),
++        base::BindOnce([](base::WeakPtr<PageServices> self, uint64_t request,
++            std::string source, int context_id, ReArcStatus status, base::DictValue) {
++          if (!self || !self->EvaluationCurrent(request)) return;
++          if (status) {
++            self->FinishEvaluation(status, {}, "binding", "Message binding unavailable");
++          } else {
++            self->RunEvaluation(request, MessageBootstrap() + "\n" + source, context_id);
++          }
++        }, weak_factory_.GetWeakPtr(), request, std::move(source), context_id));
++  }
+   void RunEvaluation(uint64_t request, std::string source, int context_id) {
+     base::DictValue params;
+     params.Set("expression", std::move(source));
+@@ -709,6 +791,18 @@ class PageServices : public content::DevToolsAgentHostClient,
+       FinishInstall(REARC_OK);
+       return;
+     }
++    const auto& s = desired_scripts_[scripts_.size()];
++    Send("Runtime.addBinding", base::DictValue()
++        .Set("name", "__rearcPostJSON")
++        .Set("executionContextName", "rearc.boost." + s.id),
++        base::BindOnce([](base::WeakPtr<PageServices> self, ReArcStatus status,
++                         base::DictValue) {
++          if (!self) return;
++          if (status) self->FinishInstall(status);
++          else self->RegisterNextScript();
++        }, weak_factory_.GetWeakPtr()));
++  }
++  void RegisterNextScript() {
+     const auto& s = desired_scripts_[scripts_.size()];
+     Send("Page.addScriptToEvaluateOnNewDocument",
+          base::DictValue()
+@@ -927,6 +1021,9 @@ class PageServices : public content::DevToolsAgentHostClient,
+   uint64_t document_epoch_ = 0, snapshot_epoch_ = 0;
+   std::string main_frame_, peek_script_id_;
+   std::map<int, std::string> contexts_;
++  std::map<int, std::pair<std::string, std::string>> message_contexts_;
++  base::TimeTicks message_window_;
++  size_t message_attempts_ = 0, queued_messages_ = 0;
+   std::map<int, std::unique_ptr<Pending>> pending_;
+   std::vector<Script> scripts_, desired_scripts_;
+   std::vector<std::string> script_ids_;
+@@ -990,7 +1087,7 @@ bool ABIHasServiceFeature(const char* feature) {
+   return name == "media_session" || name == "media_metadata_snapshot" || name == "favicon" ||
+          name == "security_state" || name == "user_scripts" ||
+          name == "link_peek" || name == "snapshot_viewport" ||
+-         name == "snapshot_full_page" || name == "script_evaluation" || name == "script_evaluation_identity" || name == "page_zoom";
++         name == "snapshot_full_page" || name == "script_evaluation" || name == "script_evaluation_identity" || name == "page_zoom" || name == "isolated_page_messages";
+ }
+ }  // namespace rearc
+ 
+@@ -1277,3 +1374,11 @@ ReArcStatus ReArcTabSetZoomFactor(uint64_t id, double factor) {
+   if (auto status = rearc::FindPage(id, &page)) return status;
+   return page->SetZoom(factor) ? REARC_OK : REARC_INVALID_STATE;
+ }
++
++void ReArcEngineSetPageMessageCallback(ReArcPageMessageCallback callback,
++                                      void* context) {
++  CHECK(pthread_main_np());
++  ++rearc::message_registration;
++  rearc::message_callback = callback;
++  rearc::message_context = context;
++}
+-- 
+2.54.0 (Apple Git-157)
+

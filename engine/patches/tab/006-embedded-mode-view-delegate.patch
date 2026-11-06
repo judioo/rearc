@@ -1,0 +1,363 @@
+# Patch-ID: P-TAB-001 (slice S1) — embedded-mode flag + GetWebContentsViewDelegate branch
+# Area: tab (new area dir; app/ precedent — P-TAB-001's slice files live under
+#       chrome/browser/rearc_bridge/ but are tracked separately from P-APP-001's
+#       app/ patches; area-deviation recorded here per patches/README conventions).
+# Rationale: First seam of the browser-less tab model. Content consults
+#   ChromeContentBrowserClient::GetWebContentsViewDelegate synchronously inside
+#   WebContents::Create (content/browser/web_contents/web_contents_impl.cc:4537)
+#   and at four later call sites (:3476/:3629/:3662/:3775), so the embedded-mode
+#   decision must be ambient — post-Create tagging is too late (P-TAB-001-SLICES
+#   §3). Adds rearc::IsEngineEmbeddedMode() plus ReArcWebContentsViewDelegate
+#   (additive, under chrome/browser/rearc_bridge/) and the ~5-line upstream
+#   branch in chrome_content_browser_client.cc.
+# Gate: Branch taken only when rearc::IsEngineEmbeddedMode() is true, i.e. a
+#   ReArc lifecycle host is installed (P-APP-001 app/002). Standalone Chromium
+#   takes the stock path bit-identically.
+# Deviation from plan (recorded in P-TAB-001-SLICES.md drift log): the slice
+#   plan sketched an explicit std::atomic<bool> + SetEngineEmbeddedMode() set
+#   from rearc_engine_entry_mac.mm. That file is created by patch app/002 and
+#   frozen by the series-mechanics invariant (later patches never modify
+#   earlier patches' files), so no legal setter site exists. The predicate is
+#   derived instead: GetEngineLifecycleHost() != nullptr — identical
+#   semantics, same source of truth as every P-APP-001 gate.
+# Hunk placement (series mechanics): the upstream-file hunks sit in
+#   chrome_content_browser_client.cc (untouched by any other patch) and in
+#   chrome/browser/BUILD.gn between "icon_loader_mac.mm" and
+#   "memory_details_mac.cc" — NOT at the alphabetical position after
+#   "process_singleton_mac.mm" — to keep this hunk's -U3 context window
+#   disjoint from app/005's sources hunk (comment + rearc entries, ~1533-1543)
+#   and from app/002's deps hunk (~1564). New sources join :core (not
+#   :rearc_bridge) because rearc_bridge/BUILD.gn is app/002's frozen file;
+#   fold back at the next pin rebase.
+# Platform guards: chrome_content_browser_client.cc compiles on all platforms
+#   while the rearc_bridge sources are mac-only, so the include block and the
+#   branch are #if BUILDFLAG(IS_MAC)-guarded (~9 LOC with guards vs the plan's
+#   ~5 unguarded sketch — recorded as drift).
+# Compile-level only: scaffolding seam. Day-one behavior: GetNativeWindow()
+#   nil (provider registration is S4's attachment lease); context menus
+#   suppressed; OnPerformingDrop aborted with std::nullopt (content's default
+#   performs the drop) — callbacks always complete, never hang (R7).
+# Upstream hunks: chrome/browser/chrome_content_browser_client.cc (includes +
+#   GetWebContentsViewDelegate body), chrome/browser/BUILD.gn (sources).
+# Last rebased: Chromium 156.0.8078.74 (d331de35ca8a) + overlay 001-005.
+# Gate evidence: engine/build-p6.log exit 0 (attempt 4; attempts 1-3 fixed
+#   header drift: native_ui_types.h, drop_data.h, base/functional/callback.h).
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index aec8479415..a86aa5a53c 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1527,6 +1527,15 @@ source_set("core") {
+       "fullscreen_mac.mm",
+       "global_keyboard_shortcuts_mac.mm",
+       "icon_loader_mac.mm",
++      # P-TAB-001 slice S1 (patch tab/006): embedded-mode seam sources join
++      # :core, not :rearc_bridge, because app/002's files are frozen by the
++      # series-mechanics invariant (see the app/005 note below). Placed here —
++      # not at the alphabetical position after "process_singleton_mac.mm" —
++      # to keep this hunk's -U3 context window disjoint from app/005's hunk.
++      "rearc_bridge/engine_mode.cc",
++      "rearc_bridge/engine_mode.h",
++      "rearc_bridge/web_contents_view_delegate_mac.h",
++      "rearc_bridge/web_contents_view_delegate_mac.mm",
+       "memory_details_mac.cc",
+       "platform_util_mac.mm",
+       "process_singleton_mac.mm",
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index aa8b16f467..25e6ded1e1 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -168,6 +168,13 @@
+ #include "chrome/browser/profiles/renderer_updater.h"
+ #include "chrome/browser/profiles/renderer_updater_factory.h"
+ #include "chrome/browser/pwc/privileged_web_contents.h"
++#if BUILDFLAG(IS_MAC)
++// P-TAB-001 slice S1 (patch tab/006): embedded-mode view delegate. mac-only
++// like the rearc_bridge sources it references; guarded so the file keeps
++// compiling on other platforms.
++#include "chrome/browser/rearc_bridge/engine_mode.h"
++#include "chrome/browser/rearc_bridge/web_contents_view_delegate_mac.h"
++#endif
+ #include "chrome/browser/renderer_host/chrome_navigation_ui_data.h"
+ #include "chrome/browser/renderer_preferences_util.h"
+ #include "chrome/browser/safe_browsing/url_checker_delegate_impl.h"
+@@ -1848,6 +1855,18 @@ ChromeContentBrowserClient::GetStoragePartitionConfigForSite(
+ std::unique_ptr<content::WebContentsViewDelegate>
+ ChromeContentBrowserClient::GetWebContentsViewDelegate(
+     content::WebContents* web_contents) {
++#if BUILDFLAG(IS_MAC)
++  // P-TAB-001 slice S1 (patch tab/006): ambient embedded-mode branch.
++  // Content consults this factory synchronously inside WebContents::Create
++  // (web_contents_impl.cc:4537) and at four later call sites
++  // (:3476/:3629/:3662/:3775), so the decision must be ambient — post-Create
++  // tagging is too late. With no ReArc lifecycle host installed (standalone
++  // Chromium) the predicate is false and the stock path is preserved
++  // bit-identically.
++  if (rearc::IsEngineEmbeddedMode()) {
++    return rearc::CreateReArcWebContentsViewDelegate(web_contents);
++  }
++#endif
+   return CreateWebContentsViewDelegate(web_contents);
+ }
+ 
+diff --git a/chrome/browser/rearc_bridge/engine_mode.cc b/chrome/browser/rearc_bridge/engine_mode.cc
+new file mode 100644
+index 0000000000..43ec439ccf
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/engine_mode.cc
+@@ -0,0 +1,19 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/engine_mode.h"
++
++#include <pthread.h>
++
++#include "base/check.h"
++#include "chrome/browser/rearc_bridge/rearc_engine_lifecycle.h"
++
++namespace rearc {
++
++bool IsEngineEmbeddedMode() {
++  CHECK(pthread_main_np());
++  return GetEngineLifecycleHost() != nullptr;
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/engine_mode.h b/chrome/browser/rearc_bridge/engine_mode.h
+new file mode 100644
+index 0000000000..0069f98303
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/engine_mode.h
+@@ -0,0 +1,39 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_ENGINE_MODE_H_
++#define CHROME_BROWSER_REARC_BRIDGE_ENGINE_MODE_H_
++
++namespace rearc {
++
++// Ambient engine-mode predicate (P-TAB-001 slice S1).
++//
++// Returns true when the engine runs embedded under the ReArc shell, i.e. when
++// a lifecycle host is installed (P-APP-001, patch app/002). Content consults
++// ChromeContentBrowserClient::GetWebContentsViewDelegate synchronously inside
++// WebContents::Create (content/browser/web_contents/web_contents_impl.cc
++// :4537) and at four later call sites (:3476/:3629/:3662/:3775 — inner-
++// WebContents attach/detach and view recreation), so the mode decision cannot
++// be per-tab or per-call-site: it must be an ambient, process-wide predicate.
++// ReArc never creates Chrome Browser windows, so a process-wide mode loses
++// nothing.
++//
++// Deviation from the P-TAB-001-SLICES sketch (recorded in that document's
++// drift log): the plan called for an explicit std::atomic<bool> plus
++// SetEngineEmbeddedMode(bool) driven from rearc_engine_entry_mac.mm. That
++// file is created by patch app/002 and is frozen by the series-mechanics
++// invariant (later patches may never modify files created by earlier
++// patches), so no legal setter site exists. The predicate is therefore
++// derived from the same source of truth P-APP-001 already gates on:
++// GetEngineLifecycleHost() != nullptr. Semantics are identical to the planned
++// flag (host installed at entry => embedded; absent => standalone) and stock
++// behavior is preserved bit-identically when no host is installed.
++//
++// Main thread only (Chromium BrowserThread::UI), matching the lifecycle
++// host's threading contract.
++bool IsEngineEmbeddedMode();
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_ENGINE_MODE_H_
+diff --git a/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.h b/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.h
+new file mode 100644
+index 0000000000..f28a3fe9d2
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.h
+@@ -0,0 +1,61 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_WEB_CONTENTS_VIEW_DELEGATE_MAC_H_
++#define CHROME_BROWSER_REARC_BRIDGE_WEB_CONTENTS_VIEW_DELEGATE_MAC_H_
++
++#include <memory>
++
++#include "ui/gfx/native_ui_types.h"
++
++namespace content {
++class WebContents;
++class WebContentsViewDelegate;
++}  // namespace content
++
++namespace rearc {
++
++// Provider seam for the S4 attachment lease (P-TAB-001 slice S1 scaffolding).
++//
++// ReArcWebContentsViewDelegate::GetNativeWindow() answers through the
++// provider registered for its WebContents. Slice S1 deliberately registers
++// nothing, so GetNativeWindow() returns gfx::NativeWindow() — content's
++// documented "not in any window" state. Slice S4 (attachment lease) registers
++// one provider per attached tab, additively, without modifying this file
++// (series-mechanics invariant: later patches never edit earlier patches'
++// files).
++class ReArcNativeWindowProvider {
++ public:
++  virtual ~ReArcNativeWindowProvider() = default;
++
++  // Returns the NSWindow the WebContents is currently attached to, or
++  // gfx::NativeWindow() when unattached.
++  virtual gfx::NativeWindow GetAttachedNativeWindow() = 0;
++};
++
++// Registers (or replaces) the native-window provider for `web_contents`.
++// Main thread only; the provider must outlive its registration and be cleared
++// (ClearReArcNativeWindowProvider) before it is destroyed. The registration
++// is also dropped automatically when the WebContents' view delegate is
++// destroyed, so provider teardown only needs to happen before the *provider*
++// dies, not before the WebContents.
++void SetReArcNativeWindowProvider(content::WebContents* web_contents,
++                                  ReArcNativeWindowProvider* provider);
++
++// Clears the provider registration for `web_contents`, but only if
++// `provider` is the currently registered provider (guards against clearing a
++// replacement). Main thread only.
++void ClearReArcNativeWindowProvider(content::WebContents* web_contents,
++                                    ReArcNativeWindowProvider* provider);
++
++// Factory for the embedded-mode WebContentsViewDelegate, called from
++// ChromeContentBrowserClient::GetWebContentsViewDelegate when
++// rearc::IsEngineEmbeddedMode() is true (patch tab/006's upstream hunk).
++// Consulted synchronously inside WebContents::Create, on the main thread.
++std::unique_ptr<content::WebContentsViewDelegate>
++CreateReArcWebContentsViewDelegate(content::WebContents* web_contents);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_WEB_CONTENTS_VIEW_DELEGATE_MAC_H_
+diff --git a/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.mm b/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.mm
+new file mode 100644
+index 0000000000..7ee793ecd2
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.mm
+@@ -0,0 +1,119 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/web_contents_view_delegate_mac.h"
++
++#include <pthread.h>
++
++#include <map>
++#include <optional>
++#include <utility>
++
++#include "base/check.h"
++#include "base/functional/callback.h"
++#include "base/logging.h"
++#include "base/memory/raw_ptr.h"
++#include "content/public/browser/web_contents_view_delegate.h"
++#include "content/public/common/drop_data.h"
++
++namespace rearc {
++
++namespace {
++
++// Main-thread only: registrations happen during tab attach/detach and reads
++// happen from content's view-delegate call sites, all on BrowserThread::UI.
++// The delegate erases its own entry on destruction, so keys never outlive
++// their WebContents.
++std::map<content::WebContents*, raw_ptr<ReArcNativeWindowProvider>>
++    g_native_window_providers;
++
++// Embedded-mode view delegate (P-TAB-001 slice S1). Replaces the stock
++// desktop delegate (chrome/browser/ui/views/tab_contents/
++// chrome_web_contents_view_delegate_views.cc), which is unusable browser-
++// lessly: it resolves GlobalBrowserCollection::FindBrowserWithTab() — always
++// null in registry mode — and its context-menu path is Views-based.
++//
++// Day-one behavior (upgraded by later slices without modifying this file —
++// the S4 lease plugs in through the provider seam above):
++//  - GetNativeWindow(): answers through the registered provider; nil until
++//    S4 wires the attachment lease. Nil is content's documented "not in any
++//    window" state and must stay consistent with TabSession's start-hidden
++//    visibility policy.
++//  - ShowContextMenu(): suppressed — the stock Cocoa menu must never appear
++//    in the shell. The shell-side menu channel (IPC-CONTRACT §6 typed side
++//    channel) arrives with a later slice; until then the policy is "fallback
++//    dismiss" per the slice plan.
++//  - OnPerformingDrop(): aborted with std::nullopt. The content:: default
++//    *performs* the drop (runs the callback with the drop data), which is
++//    wrong day-one; aborting still completes the callback — cancel through
++//    upstream callbacks, never hang (R7).
++//  - Focus methods (StoreFocus/RestoreFocus/ResetStoredFocus/Focus/
++//    TakeFocus): content defaults day-one; AppKit first-responder routing
++//    through the lease's host view arrives with S4.
++//  - GetDelegateForHost(): content default (nil) — responder-chain extras,
++//    not required for presentation; audit before enabling.
++//  - GetDragDestDelegate(): content default (nullptr) — bookmark-handler
++//    interception is a Chrome-browser feature, out of scope.
++class ReArcWebContentsViewDelegate : public content::WebContentsViewDelegate {
++ public:
++  explicit ReArcWebContentsViewDelegate(content::WebContents* web_contents)
++      : web_contents_(web_contents) {}
++  ReArcWebContentsViewDelegate(const ReArcWebContentsViewDelegate&) = delete;
++  ReArcWebContentsViewDelegate& operator=(const ReArcWebContentsViewDelegate&) =
++      delete;
++
++  ~ReArcWebContentsViewDelegate() override {
++    g_native_window_providers.erase(web_contents_);
++  }
++
++  // content::WebContentsViewDelegate:
++  gfx::NativeWindow GetNativeWindow() override {
++    auto it = g_native_window_providers.find(web_contents_);
++    if (it != g_native_window_providers.end() && it->second) {
++      return it->second->GetAttachedNativeWindow();
++    }
++    return gfx::NativeWindow();
++  }
++
++  void ShowContextMenu(content::RenderFrameHost& render_frame_host,
++                       const content::ContextMenuParams& params) override {
++    VLOG(1) << "ReArc bridge: context menu suppressed (no shell menu channel "
++               "yet).";
++  }
++
++  void OnPerformingDrop(const content::DropData& drop_data,
++                        DropCompletionCallback callback) override {
++    VLOG(1) << "ReArc bridge: drop aborted (no shell drop policy yet).";
++    std::move(callback).Run(std::nullopt);
++  }
++
++ private:
++  // Owned by content; the delegate is destroyed with the WebContents' view,
++  // so the owner always outlives this pointer.
++  raw_ptr<content::WebContents> web_contents_;
++};
++
++}  // namespace
++
++void SetReArcNativeWindowProvider(content::WebContents* web_contents,
++                                  ReArcNativeWindowProvider* provider) {
++  CHECK(pthread_main_np());
++  g_native_window_providers[web_contents] = provider;
++}
++
++void ClearReArcNativeWindowProvider(content::WebContents* web_contents,
++                                    ReArcNativeWindowProvider* provider) {
++  CHECK(pthread_main_np());
++  auto it = g_native_window_providers.find(web_contents);
++  if (it != g_native_window_providers.end() && it->second == provider) {
++    g_native_window_providers.erase(it);
++  }
++}
++
++std::unique_ptr<content::WebContentsViewDelegate>
++CreateReArcWebContentsViewDelegate(content::WebContents* web_contents) {
++  return std::make_unique<ReArcWebContentsViewDelegate>(web_contents);
++}
++
++}  // namespace rearc

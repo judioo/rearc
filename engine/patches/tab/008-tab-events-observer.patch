@@ -1,0 +1,625 @@
+# Patch-ID: P-TAB-001 (slice S3) — typed tab/navigation event surface + observer
+# Area: tab.
+# Rationale: rearc.ipc.v1 §§3-4 require an E->S event vocabulary (tab.created /
+#   tab.updated / tab.closed / navigation.committed / navigation.failed) before
+#   any transport exists. S3 ships the typed C++ surface and the per-session
+#   WebContentsObserver that produces it; the wire envelope (message_id,
+#   correlation, serialization, in-process typed side channel) arrives with the
+#   transport slice. Day-one scaffolding: events go to a registered
+#   TabEventSink; with no sink they drop with a VLOG — the same pattern as
+#   app/005's readiness sink and tab/006's native-window provider seam.
+# Additive only. Files:
+#   - ipc_tab_events.{h,cc} — TabEvent struct (sparse has_* change fields per
+#     §3 tab.updated; navigation fields per §4), TabEventKindName() returning
+#     the wire-name literals ("tab.created" etc. — the slice-plan §6 strings
+#     gate keys on them), TabEventSink registration, generation-stamped
+#     EmitTabEvent (unknown/destroyed sessions drop EXCEPT kTabClosed, which
+#     races session teardown and carries the caller's last-known generation),
+#     EmitTabCreatedEvent / EmitInitialSnapshotEvent (§3: tab.created first,
+#     then a fully-populated tab.updated baseline).
+#   - tab_observer.{h,cc} — one TabObserver per session, attached via
+#     AttachTabObserver only after tab.created (§3 ordering). navigation.* is
+#     filtered to IsInPrimaryMainFrame(); committed vs failed splits on
+#     HasCommitted(); ERR_ABORTED still emits navigation.failed (it is a
+#     cancellation, not a silent drop). navigation_id maps the session-stable
+#     bridge ID from NavigationHandle::GetNavigationId() — never a raw
+#     pointer, the handle is never retained (§4). A renderer crash emits
+#     is_crashed=true and is NOT a close (§3). WebContentsDestroyed emits
+#     tab.closed (final event) and self-detaches via a POSTED task — no
+#     destruction inside a content callback.
+# No call sites are wired in this slice: AttachTabObserver /
+# EmitTabCreatedEvent are integration seams invoked by the (later) IPC layer
+# wiring, because TabRegistry::CreateSession lives in tab/007's frozen file.
+# Hunk placement: the BUILD.gn sources block sits between
+# "file_select_helper_mac.mm" and "fullscreen_mac.mm" — its -U3 context
+# overlaps tab/007's after-context only on lines neither patch changes
+# (series-mechanics: context-only overlap is permitted).
+# Gate: build-p8 green (attempt 2; attempt 1 fixed three compile errors:
+# trivial NoDestructor<TabEventSink*>, non-const NavigationController
+# accessors). nm: EmitTabEvent / SetTabEventSink / TabEventKindName /
+# AttachTabObserver / DetachTabObserver / EmitTabCreatedEvent /
+# EmitInitialSnapshotEvent all present in libchrome_dll.dylib (non-external).
+# strings: all five event-name literals present exactly once.
+# Smoke (engine/docs/SMOKE-TEST.md): G1 PASS, G2 PASS, G4 PASS, G5 PASS
+# (one transient fail in a back-to-back run, 4/4 on isolated reruns).
+# G3 DEFECT (gate command, NOT this slice): `head -c4 s.png | LC_ALL=C
+# grep -q PNG` returns 1 on this machine's BSD grep — the 0x89 byte makes
+# grep treat the 4-byte input as binary and -q suppresses the match even
+# under LC_ALL=C (reproduced with a synthetic file, build-independent).
+# Gate intent verified green: a valid 800x600 PNG is produced
+# (\x89PNG\r\n\x1a\n magic via xxd; `grep -qa PNG` PASS, consistent across
+# reruns). Reported to orchestrator for a SMOKE-TEST.md command fix
+# (BSD grep needs -a).
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index a6dde903cd..6e64609977 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1535,6 +1535,13 @@ source_set("core") {
+       "chrome_browser_application_mac.mm",
+       "chrome_browser_main_mac.mm",
+       "file_select_helper_mac.mm",
++      # P-TAB-001 slice S3 (patch tab/008): typed tab/navigation event
++      # surface + per-session WebContentsObserver. Same additive-seam
++      # pattern as tab/006 and tab/007 (series-mechanics invariant).
++      "rearc_bridge/ipc_tab_events.cc",
++      "rearc_bridge/ipc_tab_events.h",
++      "rearc_bridge/tab_observer.cc",
++      "rearc_bridge/tab_observer.h",
+       "fullscreen_mac.mm",
+       "global_keyboard_shortcuts_mac.mm",
+       "icon_loader_mac.mm",
+diff --git a/chrome/browser/rearc_bridge/ipc_tab_events.cc b/chrome/browser/rearc_bridge/ipc_tab_events.cc
+new file mode 100644
+index 0000000000..3d9cb75a62
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/ipc_tab_events.cc
+@@ -0,0 +1,129 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/ipc_tab_events.h"
++
++#include <pthread.h>
++
++#include "base/check.h"
++#include "base/logging.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/web_contents.h"
++#include "url/gurl.h"
++
++namespace rearc {
++
++namespace {
++
++// String state is safe here: SetTabEventSink is main-thread-only, same as all
++// emitters.
++TabEventSink*& GetTabEventSinkSlot() {
++  // A plain static: the slot is trivially initialized and never torn down.
++  static TabEventSink* sink = nullptr;
++  return sink;
++}
++
++}  // namespace
++
++const char* TabEventKindName(TabEventKind kind) {
++  switch (kind) {
++    case TabEventKind::kTabCreated:
++      return "tab.created";
++    case TabEventKind::kTabUpdated:
++      return "tab.updated";
++    case TabEventKind::kTabClosed:
++      return "tab.closed";
++    case TabEventKind::kNavigationCommitted:
++      return "navigation.committed";
++    case TabEventKind::kNavigationFailed:
++      return "navigation.failed";
++  }
++}
++
++void SetTabEventSink(TabEventSink* sink) {
++  CHECK(pthread_main_np());
++  GetTabEventSinkSlot() = sink;
++}
++
++void EmitTabEvent(TabEvent event) {
++  CHECK(pthread_main_np());
++  TabRegistry& registry = TabRegistry::Get();
++  TabSession* session = registry.FindSession(event.tab_id);
++  if (session) {
++    event.content_generation = session->content_generation();
++  } else if (event.kind != TabEventKind::kTabClosed) {
++    // Unknown or already-destroyed session: only tab.closed may legally race
++    // session teardown (the observer emits it from WebContentsDestroyed with
++    // its last-known generation already set by the caller).
++    VLOG(1) << "rearc: dropping event " << TabEventKindName(event.kind)
++            << " for unknown tab_id " << event.tab_id;
++    return;
++  }
++  TabEventSink* sink = GetTabEventSinkSlot();
++  if (!sink) {
++    VLOG(1) << "rearc: no TabEventSink registered; dropping event "
++            << TabEventKindName(event.kind) << " for tab_id " << event.tab_id;
++    return;
++  }
++  sink->OnTabEvent(event);
++}
++
++void EmitTabCreatedEvent(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (!session) {
++    VLOG(1) << "rearc: EmitTabCreatedEvent for unknown tab_id " << tab_id;
++    return;
++  }
++  TabEvent event;
++  event.kind = TabEventKind::kTabCreated;
++  event.tab_id = tab_id;
++  event.space_id = session->space_id();
++  // profile_id stays 0 day-one (see ipc_tab_events.h); stamping lands with
++  // the profile-registry integration.
++  content::WebContents* contents = session->web_contents();
++  if (contents) {
++    event.url = contents->GetLastCommittedURL().spec();
++  }
++  EmitTabEvent(std::move(event));
++}
++
++void EmitInitialSnapshotEvent(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (!session) {
++    VLOG(1) << "rearc: EmitInitialSnapshotEvent for unknown tab_id " << tab_id;
++    return;
++  }
++  content::WebContents* contents = session->web_contents();
++  if (!contents) {
++    return;
++  }
++  // Fully-populated tab.updated: every change field present. §3 requires this
++  // snapshot to follow tab.created so the shell's per-tab state starts from a
++  // complete baseline rather than a stream of diffs against nothing.
++  TabEvent event;
++  event.kind = TabEventKind::kTabUpdated;
++  event.tab_id = tab_id;
++  event.has_url = true;
++  event.url = contents->GetLastCommittedURL().spec();
++  event.has_title = true;
++  event.title = contents->GetTitle();
++  event.has_is_loading = true;
++  event.is_loading = contents->IsLoading();
++  event.has_load_progress = true;
++  event.load_progress = contents->GetLoadProgress();
++  event.has_is_crashed = true;
++  event.is_crashed = contents->IsCrashed();
++  content::NavigationController& controller = contents->GetController();
++  event.has_can_go_back = true;
++  event.can_go_back = controller.CanGoBack();
++  event.has_can_go_forward = true;
++  event.can_go_forward = controller.CanGoForward();
++  EmitTabEvent(std::move(event));
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/ipc_tab_events.h b/chrome/browser/rearc_bridge/ipc_tab_events.h
+new file mode 100644
+index 0000000000..fe5acf6f5d
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/ipc_tab_events.h
+@@ -0,0 +1,130 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_IPC_TAB_EVENTS_H_
++#define CHROME_BROWSER_REARC_BRIDGE_IPC_TAB_EVENTS_H_
++
++#include <cstdint>
++#include <string>
++
++namespace rearc {
++
++// Typed tab/navigation event surface (P-TAB-001 slice S3), implementing the
++// E→S event vocabulary of rearc.ipc.v1 §§3-4: tab.created / tab.updated /
++// tab.closed / navigation.committed / navigation.failed.
++//
++// Day-one scaffolding: events are typed C++ structs delivered to a registered
++// TabEventSink. The wire envelope (message_id, correlation, serialization,
++// the in-process typed side channel) arrives with the transport slice; until
++// a sink is registered, events are dropped with a VLOG — the same
++// scaffolding pattern as app/005's readiness sink and tab/006's native-window
++// provider seam. The wire names are emitted as string literals so the
++// slice-plan §6 strings gate keys on them.
++//
++// All calls are main thread (Chromium BrowserThread::UI) only.
++
++enum class TabEventKind {
++  kTabCreated,
++  kTabUpdated,
++  kTabClosed,
++  kNavigationCommitted,
++  kNavigationFailed,
++};
++
++// Wire names per rearc.ipc.v1: "tab.created", "tab.updated", "tab.closed",
++// "navigation.committed", "navigation.failed".
++const char* TabEventKindName(TabEventKind kind);
++
++enum class TabClosedReason { kShell, kPage, kEngine };
++
++// rearc.ipc.v1 §4 transition enum: "typed" | "link" | "reload" |
++// "generated" | "other". Qualifiers are preserved separately in
++// TabEvent::transition_flags.
++enum class NavigationTransition { kTyped, kLink, kReload, kGenerated, kOther };
++
++struct TabEvent {
++  TabEventKind kind;
++  uint64_t tab_id = 0;
++  // Staleness key: TabSession::content_generation at emission. Consumers
++  // reject completions from a stale generation (§3 generation rules; S7's
++  // discard rebinds the generation).
++  uint64_t content_generation = 0;
++
++  // tab.created (§3):
++  uint64_t space_id = 0;
++  // 0 day-one: stamped when the profile-registry integration lands. 0 is an
++  // invalid ID on the wire (§1) — events carrying it must never reach the
++  // shell; the transport slice must not ship before stamping real ids.
++  uint64_t profile_id = 0;
++
++  // Shared: tab.created, tab.updated (url change), navigation.*.
++  std::string url;
++
++  // tab.updated sparse `changes` (§3). Only fields with their has_ flag set
++  // are part of the event.
++  bool has_url = false;
++  bool has_title = false;
++  std::u16string title;
++  bool has_is_loading = false;
++  bool is_loading = false;
++  bool has_load_progress = false;
++  double load_progress = 0.0;
++  bool has_is_crashed = false;
++  bool is_crashed = false;
++  bool has_can_go_back = false;
++  bool can_go_back = false;
++  bool has_can_go_forward = false;
++  bool can_go_forward = false;
++
++  // tab.closed (§3):
++  TabClosedReason closed_reason = TabClosedReason::kEngine;
++
++  // navigation.committed / navigation.failed (§4):
++  // Session-stable bridge navigation ID. Mapped from
++  // NavigationHandle::GetNavigationId() (unique per browser-process session,
++  // never a raw pointer; the handle itself is never retained or exposed past
++  // DidFinishNavigation — §4).
++  uint64_t navigation_id = 0;
++  bool is_main_frame = true;  // Always true in v1: emission is filtered to
++                              // IsInPrimaryMainFrame() && HasCommitted().
++  bool is_same_document = false;
++  bool is_error_page = false;
++  NavigationTransition transition = NavigationTransition::kOther;
++  uint32_t transition_flags = 0;  // PageTransition qualifier bits.
++  int32_t error_code = 0;         // net::Error (navigation.failed).
++  std::string error_text;
++};
++
++// Sink for the typed event stream. Main thread only; the sink must outlive
++// its registration.
++class TabEventSink {
++ public:
++  virtual ~TabEventSink() = default;
++  virtual void OnTabEvent(const TabEvent& event) = 0;
++};
++
++// Registers (or clears, with nullptr) the event sink.
++void SetTabEventSink(TabEventSink* sink);
++
++// Generic emission path. Stamps the session's current content generation;
++// events for unknown/destroyed sessions are dropped with a VLOG — EXCEPT
++// kTabClosed, which by definition races session teardown and must carry the
++// caller's last-known generation.
++void EmitTabEvent(TabEvent event);
++
++// Emits tab.created for an existing session (pulls space_id/url from the
++// registry). Wired by the integration seam after TabRegistry::CreateSession
++// returns — the registry itself is tab/007's frozen file and cannot call
++// this. Per §3, no other event for the tab may precede tab.created, so the
++// seam also precedes AttachTabObserver.
++void EmitTabCreatedEvent(uint64_t tab_id);
++
++// Emits the full initial presentation snapshot (a fully-populated
++// tab.updated) that §3 requires after tab.created; also the shell's
++// pull-at-attach refresh.
++void EmitInitialSnapshotEvent(uint64_t tab_id);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_IPC_TAB_EVENTS_H_
+diff --git a/chrome/browser/rearc_bridge/tab_observer.cc b/chrome/browser/rearc_bridge/tab_observer.cc
+new file mode 100644
+index 0000000000..43a49ecbb8
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/tab_observer.cc
+@@ -0,0 +1,196 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/tab_observer.h"
++
++#include <map>
++#include <memory>
++#include <utility>
++
++#include <pthread.h>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/task/sequenced_task_runner.h"
++#include "chrome/browser/rearc_bridge/ipc_tab_events.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/web_contents.h"
++#include "net/base/net_errors.h"
++#include "ui/base/page_transition_types.h"
++#include "url/gurl.h"
++
++namespace rearc {
++
++namespace {
++
++// Owning observer registry, keyed by tab_id. Main thread only (guarded by the
++// entry-point CHECKs). Observers are never destroyed inside a content
++// callback: WebContentsDestroyed posts the detach.
++using ObserverMap = std::map<uint64_t, std::unique_ptr<TabObserver>>;
++
++ObserverMap& GetObserverMap() {
++  static base::NoDestructor<ObserverMap> observers;
++  return *observers;
++}
++
++NavigationTransition MapTransition(ui::PageTransition transition) {
++  switch (transition & ui::PAGE_TRANSITION_CORE_MASK) {
++    case ui::PAGE_TRANSITION_TYPED:
++      return NavigationTransition::kTyped;
++    case ui::PAGE_TRANSITION_LINK:
++      return NavigationTransition::kLink;
++    case ui::PAGE_TRANSITION_RELOAD:
++      return NavigationTransition::kReload;
++    case ui::PAGE_TRANSITION_GENERATED:
++      return NavigationTransition::kGenerated;
++    default:
++      return NavigationTransition::kOther;
++  }
++}
++
++}  // namespace
++
++TabObserver::TabObserver(content::WebContents* web_contents, uint64_t tab_id)
++    : content::WebContentsObserver(web_contents), tab_id_(tab_id) {
++  CHECK(pthread_main_np());
++  if (TabSession* session = TabRegistry::Get().FindSession(tab_id_)) {
++    last_known_generation_ = session->content_generation();
++  }
++}
++
++TabObserver::~TabObserver() = default;
++
++void TabObserver::DidFinishNavigation(
++    content::NavigationHandle* navigation_handle) {
++  // rearc.ipc.v1 §4: only primary main-frame navigations produce events.
++  if (!navigation_handle->IsInPrimaryMainFrame()) {
++    return;
++  }
++  if (TabSession* session = TabRegistry::Get().FindSession(tab_id_)) {
++    last_known_generation_ = session->content_generation();
++  }
++
++  TabEvent event;
++  event.tab_id = tab_id_;
++  // §4: session-stable bridge ID mapped from the handle's session-unique id.
++  // The handle itself is never retained or exposed.
++  event.navigation_id =
++      static_cast<uint64_t>(navigation_handle->GetNavigationId());
++  event.is_main_frame = true;
++
++  if (navigation_handle->HasCommitted()) {
++    event.kind = TabEventKind::kNavigationCommitted;
++    event.url = navigation_handle->GetURL().spec();
++    event.is_same_document = navigation_handle->IsSameDocument();
++    event.is_error_page = navigation_handle->IsErrorPage();
++    const ui::PageTransition transition =
++        navigation_handle->GetPageTransition();
++    event.transition = MapTransition(transition);
++    event.transition_flags =
++        static_cast<uint32_t>(transition & ~ui::PAGE_TRANSITION_CORE_MASK);
++  } else {
++    // §4: a navigation that did not commit is a failure — including
++    // net::ERR_ABORTED, which is a cancellation and must still be delivered.
++    event.kind = TabEventKind::kNavigationFailed;
++    const net::Error error = navigation_handle->GetNetErrorCode();
++    event.error_code = static_cast<int32_t>(error);
++    event.error_text = net::ErrorToString(error);
++  }
++  EmitTabEvent(std::move(event));
++}
++
++void TabObserver::DidStartLoading() {
++  TabEvent event;
++  event.kind = TabEventKind::kTabUpdated;
++  event.tab_id = tab_id_;
++  event.has_is_loading = true;
++  event.is_loading = true;
++  EmitTabEvent(std::move(event));
++}
++
++void TabObserver::DidStopLoading() {
++  TabEvent event;
++  event.kind = TabEventKind::kTabUpdated;
++  event.tab_id = tab_id_;
++  event.has_is_loading = true;
++  event.is_loading = false;
++  EmitTabEvent(std::move(event));
++}
++
++void TabObserver::LoadProgressChanged(double progress) {
++  TabEvent event;
++  event.kind = TabEventKind::kTabUpdated;
++  event.tab_id = tab_id_;
++  event.has_load_progress = true;
++  event.load_progress = progress;
++  EmitTabEvent(std::move(event));
++}
++
++void TabObserver::TitleWasSet(content::NavigationEntry* entry) {
++  TabEvent event;
++  event.kind = TabEventKind::kTabUpdated;
++  event.tab_id = tab_id_;
++  event.has_title = true;
++  if (web_contents()) {
++    event.title = web_contents()->GetTitle();
++  }
++  EmitTabEvent(std::move(event));
++}
++
++void TabObserver::PrimaryMainFrameRenderProcessGone(
++    base::TerminationStatus status) {
++  // rearc.ipc.v1 §3: a renderer crash is NOT a tab close — it surfaces as
++  // is_crashed=true; the tab stays open for shell-driven recovery.
++  TabEvent event;
++  event.kind = TabEventKind::kTabUpdated;
++  event.tab_id = tab_id_;
++  event.has_is_crashed = true;
++  event.is_crashed = web_contents() ? web_contents()->IsCrashed() : true;
++  EmitTabEvent(std::move(event));
++}
++
++void TabObserver::WebContentsDestroyed() {
++  // §3: tab.closed is the final event for a tab. The session may already be
++  // tearing down (DestroySession erases before the deferred WebContents
++  // destruction runs), so carry the last-known generation and let
++  // EmitTabEvent's kTabClosed bypass deliver it either way. Day-one reason is
++  // kEngine; S6's close controller distinguishes shell/page initiators.
++  TabEvent event;
++  event.kind = TabEventKind::kTabClosed;
++  event.tab_id = tab_id_;
++  event.content_generation = last_known_generation_;
++  event.closed_reason = TabClosedReason::kEngine;
++  EmitTabEvent(std::move(event));
++
++  // Never destroy the observer inside a content callback — post the detach.
++  const uint64_t tab_id = tab_id_;
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(&DetachTabObserver, tab_id));
++}
++
++void AttachTabObserver(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (!session || !session->web_contents()) {
++    VLOG(1) << "rearc: AttachTabObserver for unknown tab_id " << tab_id;
++    return;
++  }
++  ObserverMap& observers = GetObserverMap();
++  if (observers.contains(tab_id)) {
++    return;
++  }
++  observers.emplace(tab_id, std::make_unique<TabObserver>(
++                                session->web_contents(), tab_id));
++}
++
++void DetachTabObserver(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  GetObserverMap().erase(tab_id);
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/tab_observer.h b/chrome/browser/rearc_bridge/tab_observer.h
+new file mode 100644
+index 0000000000..3c3d1ce604
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/tab_observer.h
+@@ -0,0 +1,76 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_TAB_OBSERVER_H_
++#define CHROME_BROWSER_REARC_BRIDGE_TAB_OBSERVER_H_
++
++#include <cstdint>
++
++#include "base/memory/weak_ptr.h"
++#include "content/public/browser/web_contents_observer.h"
++
++namespace content {
++class NavigationEntry;
++class NavigationHandle;
++class WebContents;
++}  // namespace content
++
++namespace rearc {
++
++// Per-session WebContentsObserver translating content-layer callbacks into
++// the rearc.ipc.v1 event vocabulary (P-TAB-001 slice S3). One observer per
++// TabSession, attached via AttachTabObserver after tab.created has been
++// emitted (§3: no event for a tab may precede tab.created).
++//
++// Emission rules (rearc.ipc.v1 §§3-4):
++//  * tab.updated carries only fields whose has_ flag is set (sparse changes).
++//  * navigation.* is emitted only for IsInPrimaryMainFrame() handles;
++//    committed vs failed splits on HasCommitted(). ERR_ABORTED still emits
++//    navigation.failed (it is a cancellation, not a silent drop).
++//  * tab.closed is emitted from WebContentsDestroyed — after the host views
++//    have been emptied by the S4 lease invalidation — and is always the
++//    final event for a tab. It races session teardown, so the observer
++//    carries the last-known content generation itself.
++//  * The observer self-detaches (posted task) after WebContentsDestroyed so
++//    destruction never happens inside a content callback.
++//
++// All calls are main thread (Chromium BrowserThread::UI) only.
++class TabObserver : public content::WebContentsObserver {
++ public:
++  TabObserver(content::WebContents* web_contents, uint64_t tab_id);
++  ~TabObserver() override;
++
++  TabObserver(const TabObserver&) = delete;
++  TabObserver& operator=(const TabObserver&) = delete;
++
++  // content::WebContentsObserver:
++  void DidFinishNavigation(
++      content::NavigationHandle* navigation_handle) override;
++  void DidStartLoading() override;
++  void DidStopLoading() override;
++  void LoadProgressChanged(double progress) override;
++  void TitleWasSet(content::NavigationEntry* entry) override;
++  void PrimaryMainFrameRenderProcessGone(
++      base::TerminationStatus status) override;
++  void WebContentsDestroyed() override;
++
++ private:
++  const uint64_t tab_id_;
++  // Last-known content generation, sampled at attach and after every emitted
++  // event, so tab.closed can be stamped even after the session is gone.
++  uint64_t last_known_generation_ = 0;
++
++  base::WeakPtrFactory<TabObserver> weak_factory_{this};
++};
++
++// Attaches a TabObserver to the session's WebContents. No-op (VLOG) for
++// unknown tab_ids. Call only after EmitTabCreatedEvent for the tab.
++void AttachTabObserver(uint64_t tab_id);
++
++// Detaches and destroys the session's observer, if any. Idempotent.
++void DetachTabObserver(uint64_t tab_id);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_TAB_OBSERVER_H_

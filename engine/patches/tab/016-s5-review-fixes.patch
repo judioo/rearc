@@ -1,0 +1,87 @@
+# Patch-ID: P-TAB-001 (slice S5 follow-up) — security/favicon review fixes
+# Area: tab.
+# Rationale: an independent review of tab/010-013 found that (1) the security
+#   adapter read GetVisibleEntry() (possibly pending) but recomputed only on
+#   commit, so it showed a stale "secure" during a pending navigation and a
+#   stuck "unknown" after a non-committing one; (2) it masked a Safe Browsing
+#   "dangerous" verdict behind the connection-info-uninitialized "unknown";
+#   (3) the favicon adapter could publish the previous page's late icon on an
+#   error page (ContentFaviconDriver skips FetchFavicon, and therefore its
+#   cancellation, for error pages).
+# Edits only security_adapter.cc and favicon_adapter.cc (tab/010, tab/012
+#   files). No upstream files touched.
+# Gate: build-p19 green attempt 1; G1-G5 PASS smoke-tab016.log, G3 grep -qa.
+# Last rebase: 2026-11-02 @ 156.0.8078.74.
+diff --git a/chrome/browser/rearc_bridge/favicon_adapter.cc b/chrome/browser/rearc_bridge/favicon_adapter.cc
+index 531f1adfd0..748b9e4dbd 100644
+--- a/chrome/browser/rearc_bridge/favicon_adapter.cc
++++ b/chrome/browser/rearc_bridge/favicon_adapter.cc
+@@ -24,6 +24,7 @@
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_observer.h"
+ #include "content/public/browser/web_contents_user_data.h"
++#include "content/public/common/page_type.h"
+ #include "third_party/skia/include/core/SkBitmap.h"
+ #include "ui/gfx/codec/png_codec.h"
+ #include "ui/gfx/image/image.h"
+@@ -56,8 +57,14 @@ class FaviconAdapter : public content::WebContentsObserver,
+                         bool icon_url_changed,
+                         const gfx::Image& image) override {
+     if (icon_type == NON_TOUCH_16_DIP && driver == driver_) {
+-      // Unchanged URLs can carry freshly downloaded pixels. The upstream
+-      // driver filters old-page completions before notifying observers.
++      // The driver never starts a fetch for an error page and so never
++      // cancels the previous page's in-flight lookups; any update arriving
++      // while an error page is committed belongs to the old page.
++      auto* entry = web_contents()->GetController().GetLastCommittedEntry();
++      if (entry && entry->GetPageType() == content::PAGE_TYPE_ERROR) {
++        return;
++      }
++      // Unchanged URLs can carry freshly downloaded pixels.
+       Publish(icon_url, image);
+     }
+   }
+diff --git a/chrome/browser/rearc_bridge/security_adapter.cc b/chrome/browser/rearc_bridge/security_adapter.cc
+index 11c1d686b7..3d9bbdf9f2 100644
+--- a/chrome/browser/rearc_bridge/security_adapter.cc
++++ b/chrome/browser/rearc_bridge/security_adapter.cc
+@@ -31,7 +31,20 @@ TabSecurityState ReadSecurityState(content::WebContents* contents) {
+     return TabSecurityState::kUnknown;
+   }
+   const auto state = chrome_security_state::GetVisibleSecurityState(contents);
+-  if (!state || !state->connection_info_initialized) {
++  if (!state) {
++    return TabSecurityState::kUnknown;
++  }
++  // Mirror security_state::GetSecurityLevel's ordering: verdicts that do not
++  // depend on connection info (Safe Browsing, the HTTPS-First interstitial)
++  // win before the "unknown until valid" rule, so danger is never masked.
++  if (state->malicious_content_status !=
++      security_state::MALICIOUS_CONTENT_STATUS_NONE) {
++    return TabSecurityState::kDangerous;
++  }
++  if (state->is_https_only_mode_upgraded && state->is_error_page) {
++    return TabSecurityState::kInsecure;
++  }
++  if (!state->connection_info_initialized) {
+     return TabSecurityState::kUnknown;
+   }
+   // No URL-scheme shortcuts. This incorporates Chrome's certificate/mixed
+@@ -75,8 +88,16 @@ class SecurityAdapter : public content::WebContentsObserver,
+ 
+   void DidChangeVisibleSecurityState() override { Publish(); }
+   void PrimaryPageChanged(content::Page& page) override { Publish(); }
++  // GetVisibleEntry() can be the pending entry, so recompute when a primary
++  // main-frame navigation starts and when it finishes, committed or not
++  // (stop/204/download/cancelled beforeunload revert to the committed entry).
++  void DidStartNavigation(content::NavigationHandle* handle) override {
++    if (handle->IsInPrimaryMainFrame()) {
++      Publish();
++    }
++  }
+   void DidFinishNavigation(content::NavigationHandle* handle) override {
+-    if (handle->IsInPrimaryMainFrame() && handle->HasCommitted()) {
++    if (handle->IsInPrimaryMainFrame()) {
+       Publish();
+     }
+   }

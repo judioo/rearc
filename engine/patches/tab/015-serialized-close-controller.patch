@@ -1,0 +1,524 @@
+# Patch-ID: P-TAB-001 (slice S6, part 2) — serialized close + safe teardown
+# Area: tab.
+# Rationale: S2 records close states but never drives beforeunload/unload or
+#   cleans up S3/S4/S5. Supply one pending close per tab, deterministic veto
+#   replies, ClosePage/CloseContents sequencing, and deferred forced teardown.
+# Last-Rebased: 2026-11-02 (Chromium 156.0.8078.74).
+# Audit: verified DispatchBeforeUnload(bool), ClosePage(), CloseContents and
+#   BeforeUnloadFired signatures at the pin. RenderFrameHostManager's
+#   BeforeUnloadCompleted calls ClosePage itself when proceed_to_fire_unload is
+#   true: return false there and post our explicit ClosePage exactly once.
+#   S5's RunBeforeUnloadDialog synchronously returns false/stay; the veto posts
+#   a cancelled completion, with no waiting dialog or orphaned close callback.
+# Policy: concurrent ordinary/forced requests return busy, not duplicate replies.
+#   Accepted close callbacks complete once, cancelled after veto or closed AFTER
+#   tab.closed. Page CloseContents is a page-initiated tab close, distinct from
+#   shell window.closed (which only hides/detaches tabs). Registry engine/force
+#   teardown supersedes a pending request, preserving its callback/initiator.
+#   Built-in content beforeunload/unload timeouts apply (BeforeUnloadTimeout
+#   simulates proceed=true); a 30-second total deadline forces cleanup if no
+#   completion arrives. Requested confirmations still veto immediately via S5.
+# Lifetime: ID/generation-only posted tasks; no raw content/view/profile pointer
+#   crosses queues. Finalizer runs after callbacks unwind, cancels S3 observer,
+#   S5 favicon/media/security subscriptions and dialogs, invalidates leases with
+#   reason tab_closed, clears delegate, destroys contents, emits one tab.closed
+#   with shell/page/engine reason, then replies. No S3 observer duplicate event.
+# Minimal frozen-file exceptions: planned delegate close/veto bodies forward;
+#   registry RequestClose/DestroySession route into the controller and a private
+#   friend-only removal seam reports actual destruction. Merely adding a cleanup
+#   call to the old synchronous removal would delete an active observer callback.
+#   attachment_lease.cc gains one closed-state rejection, preventing an invalidation
+#   sink from reattaching a native child during close. No changes to S3/S5, app
+#   lifecycle/frozen bridge BUILD.gn, or upstream C++ files. mac :core GN block.
+#   Deferred destruction still requires callers to retain profiles and drain UI
+#   tasks before profile teardown; startup/shutdown transport wiring is unchanged.
+# Gate: build-p18 green attempt 1; G1-G5 PASS smoke-tab015.log, G3 grep -qa.
+#   nm close-controller symbols and linked close-policy strings verified.
+#   Full integrity: sequential newest-first reverse/forward temporary-index replay.
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index e9b1f41561..852ccd249a 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1462,6 +1462,14 @@ source_set("core") {
+     ]
+   }
+ 
++  if (is_mac) {
++    # P-TAB-001 S6 (tab/015): serialized beforeunload/unload and forced cleanup.
++    sources += [
++      "rearc_bridge/close_controller.cc",
++      "rearc_bridge/close_controller.h",
++    ]
++  }
++
+   if (is_win) {
+     sources += [
+       "chrome_browser_main_win.cc",
+diff --git a/chrome/browser/rearc_bridge/attachment_lease.cc b/chrome/browser/rearc_bridge/attachment_lease.cc
+index 411d1c2854..db500e5e3e 100644
+--- a/chrome/browser/rearc_bridge/attachment_lease.cc
++++ b/chrome/browser/rearc_bridge/attachment_lease.cc
+@@ -104,7 +104,8 @@ AttachResult AttachmentLeaseRegistry::AttachView(uint64_t tab_id,
+   CHECK(pthread_main_np());
+   AttachResult result;
+   TabSession* session = TabRegistry::Get().FindSession(tab_id);
+-  if (!session || !session->web_contents()) {
++  if (!session || !session->web_contents() ||
++      session->close_state() == TabSession::CloseState::kClosed) {
+     result.error = AttachError::kTabNotFound;
+     return result;
+   }
+diff --git a/chrome/browser/rearc_bridge/close_controller.cc b/chrome/browser/rearc_bridge/close_controller.cc
+new file mode 100644
+index 0000000000..d4453d8f54
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/close_controller.cc
+@@ -0,0 +1,258 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/close_controller.h"
++
++#include <pthread.h>
++
++#include <map>
++#include <memory>
++#include <utility>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/time/time.h"
++#include "base/timer/timer.h"
++#include "chrome/browser/rearc_bridge/attachment_lease.h"
++#include "chrome/browser/rearc_bridge/favicon_adapter.h"
++#include "chrome/browser/rearc_bridge/ipc_tab_events.h"
++#include "chrome/browser/rearc_bridge/media_adapter.h"
++#include "chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h"
++#include "chrome/browser/rearc_bridge/security_adapter.h"
++#include "chrome/browser/rearc_bridge/tab_observer.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "content/public/browser/javascript_dialog_manager.h"
++#include "content/public/browser/web_contents.h"
++
++namespace rearc {
++
++// Friend of TabRegistry: only the posted finalizer may remove a session.
++void FinalizeTabClose(uint64_t tab_id, uint64_t generation);
++
++namespace {
++
++enum class Phase { kBeforeUnload, kUnload, kCancelled, kFinalizing };
++
++struct PendingClose {
++  uint64_t generation = 0;
++  Phase phase = Phase::kBeforeUnload;
++  TabClosedReason reason = TabClosedReason::kShell;
++  bool teardown_started = false;
++  CloseCallback callback;
++  base::OneShotTimer deadline;
++};
++
++using PendingMap = std::map<uint64_t, std::unique_ptr<PendingClose>>;
++PendingMap& PendingCloses() {
++  static base::NoDestructor<PendingMap> pending;
++  return *pending;
++}
++
++PendingClose* FindPending(uint64_t tab_id, uint64_t generation) {
++  auto it = PendingCloses().find(tab_id);
++  return it != PendingCloses().end() && it->second->generation == generation
++             ? it->second.get()
++             : nullptr;
++}
++
++TabSession* MatchContents(uint64_t tab_id, content::WebContents* contents) {
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  return session && session->web_contents() == contents ? session : nullptr;
++}
++
++PendingClose& AddPending(TabSession& session,
++                         TabClosedReason reason,
++                         CloseCallback callback = {}) {
++  auto pending = std::make_unique<PendingClose>();
++  pending->generation = session.content_generation();
++  pending->reason = reason;
++  pending->callback = std::move(callback);
++  auto [it, inserted] =
++      PendingCloses().emplace(session.tab_id(), std::move(pending));
++  CHECK(inserted);
++  return *it->second;
++}
++
++void ScheduleDestruction(TabSession& session, PendingClose& pending) {
++  if (pending.phase == Phase::kFinalizing) {
++    return;
++  }
++  pending.phase = Phase::kFinalizing;
++  pending.deadline.Stop();
++  session.SetCloseState(TabSession::CloseState::kClosed);
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&FinalizeTabClose, session.tab_id(), pending.generation));
++}
++
++void CloseDeadlineExpired(uint64_t tab_id, uint64_t generation) {
++  PendingClose* pending = FindPending(tab_id, generation);
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (pending && session && session->content_generation() == generation) {
++    VLOG(1) << "rearc: close deadline expired; force-closing unresponsive tab "
++            << tab_id;
++    ScheduleDestruction(*session, *pending);
++  }
++}
++
++void CompleteCancellation(uint64_t tab_id, uint64_t generation) {
++  PendingClose* pending = FindPending(tab_id, generation);
++  if (!pending || pending->phase != Phase::kCancelled) {
++    return;  // Force/shutdown won the race; its closed reply is authoritative.
++  }
++  CloseCallback callback = std::move(pending->callback);
++  PendingCloses().erase(tab_id);
++  VLOG(1) << "rearc: tab.close.reply cancelled tab_id=" << tab_id;
++  if (callback) {
++    std::move(callback).Run(CloseOutcome::kCancelled);
++  }
++}
++
++void RunClosePage(uint64_t tab_id, uint64_t generation) {
++  PendingClose* pending = FindPending(tab_id, generation);
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (pending && pending->phase == Phase::kUnload && session &&
++      session->content_generation() == generation) {
++    session->web_contents()->ClosePage();
++  }
++}
++
++}  // namespace
++
++CloseRequestResult RequestTabClose(uint64_t tab_id,
++                                   bool force,
++                                   CloseCallback callback) {
++  CHECK(pthread_main_np());
++  if (PendingCloses().contains(tab_id)) {
++    return CloseRequestResult::kBusy;
++  }
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (!session || session->close_state() != TabSession::CloseState::kOpen) {
++    return CloseRequestResult::kTabNotFound;
++  }
++  PendingClose& pending =
++      AddPending(*session, TabClosedReason::kShell, std::move(callback));
++  if (force) {
++    ScheduleDestruction(*session, pending);
++  } else {
++    session->SetCloseState(TabSession::CloseState::kCloseRequested);
++    pending.deadline.Start(
++        FROM_HERE, base::Seconds(30),
++        base::BindOnce(&CloseDeadlineExpired, tab_id, pending.generation));
++    // false selects TAB_CLOSE rather than DISCARD. S5's dialog manager
++    // completes a requested confirmation false/stay, which reaches our veto.
++    session->web_contents()->DispatchBeforeUnload(/*auto_cancel=*/false);
++  }
++  return CloseRequestResult::kStarted;
++}
++
++void ForceCloseTab(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (!session) {
++    return;
++  }
++  PendingClose* pending = FindPending(tab_id, session->content_generation());
++  if (!pending) {
++    pending = &AddPending(*session, TabClosedReason::kEngine);
++  }
++  ScheduleDestruction(*session, *pending);
++}
++
++void TabBeforeUnloadFired(uint64_t tab_id,
++                          content::WebContents* contents,
++                          bool proceed,
++                          bool* proceed_to_fire_unload) {
++  CHECK(pthread_main_np());
++  // We own the explicit, posted ClosePage. Returning true here would cause
++  // RenderFrameHostManager::BeforeUnloadCompleted to fire it a second time.
++  *proceed_to_fire_unload = false;
++  TabSession* session = MatchContents(tab_id, contents);
++  PendingClose* pending =
++      session ? FindPending(tab_id, session->content_generation()) : nullptr;
++  if (!pending || pending->phase != Phase::kBeforeUnload) {
++    return;
++  }
++  if (!proceed) {
++    pending->phase = Phase::kCancelled;
++    pending->deadline.Stop();
++    session->SetCloseState(TabSession::CloseState::kOpen);
++    // Do not reenter a new DispatchBeforeUnload from this content callback.
++    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(&CompleteCancellation, tab_id, pending->generation));
++    return;
++  }
++  pending->phase = Phase::kUnload;
++  session->SetCloseState(TabSession::CloseState::kUnloadPending);
++  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE, base::BindOnce(&RunClosePage, tab_id, pending->generation));
++}
++
++void TabCloseContents(uint64_t tab_id, content::WebContents* contents) {
++  CHECK(pthread_main_np());
++  TabSession* session = MatchContents(tab_id, contents);
++  if (!session) {
++    return;
++  }
++  PendingClose* pending = FindPending(tab_id, session->content_generation());
++  if (!pending) {
++    // Renderer window.close has already passed content's eligibility checks
++    // and unload path. This is a tab close, distinct from shell window.closed
++    // (which only detaches/hides tabs).
++    pending = &AddPending(*session, TabClosedReason::kPage);
++  }
++  if (pending->phase != Phase::kCancelled) {
++    ScheduleDestruction(*session, *pending);
++  }
++}
++
++void FinalizeTabClose(uint64_t tab_id, uint64_t generation) {
++  CHECK(pthread_main_np());
++  PendingClose* pending = FindPending(tab_id, generation);
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (!pending || pending->phase != Phase::kFinalizing ||
++      pending->teardown_started || !session ||
++      session->content_generation() != generation) {
++    return;
++  }
++  pending->teardown_started = true;
++  // This task runs after delegate/observer callbacks unwind. Detach the S3
++  // observer so destruction cannot produce a duplicate tab.closed, and stop
++  // S5 subscriptions/receivers before removing native children/content.
++  DetachTabObserver(tab_id);
++  DetachFaviconAdapter(tab_id);
++  DetachMediaAdapter(tab_id);
++  DetachSecurityAdapter(tab_id);
++  GetReArcJavaScriptDialogManager(session->web_contents())
++      ->CancelDialogs(session->web_contents(), /*reset_state=*/true);
++  AttachmentLeaseRegistry::Get().InvalidateLeasesForTab(
++      tab_id, LeaseInvalidatedReason::kTabClosed);
++  session->web_contents()->SetDelegate(nullptr);
++  TabRegistry::Get().DestroySessionNow(tab_id);
++}
++
++void DidDestroyTab(uint64_t tab_id, uint64_t content_generation) {
++  CHECK(pthread_main_np());
++  PendingClose* pending = FindPending(tab_id, content_generation);
++  CHECK(pending && pending->teardown_started);
++  const TabClosedReason reason = pending->reason;
++  CloseCallback callback = std::move(pending->callback);
++  PendingCloses().erase(tab_id);
++  TabEvent event;
++  event.kind = TabEventKind::kTabClosed;
++  event.tab_id = tab_id;
++  event.content_generation = content_generation;
++  event.closed_reason = reason;
++  EmitTabEvent(std::move(event));
++  VLOG(1) << "rearc: tab.close.reply closed tab_id=" << tab_id;
++  if (callback) {
++    std::move(callback).Run(CloseOutcome::kClosed);
++  }
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/close_controller.h b/chrome/browser/rearc_bridge/close_controller.h
+new file mode 100644
+index 0000000000..223c17083f
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/close_controller.h
+@@ -0,0 +1,47 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_CLOSE_CONTROLLER_H_
++#define CHROME_BROWSER_REARC_BRIDGE_CLOSE_CONTROLLER_H_
++
++#include <cstdint>
++
++#include "base/functional/callback.h"
++
++namespace content {
++class WebContents;
++}
++
++namespace rearc {
++
++enum class CloseRequestResult { kStarted, kBusy, kTabNotFound };
++enum class CloseOutcome { kClosed, kCancelled };
++using CloseCallback = base::OnceCallback<void(CloseOutcome)>;
++
++// UI thread only. Exactly one pending request per tab, including forced
++// requests. On kStarted, callback runs once: closed AFTER tab.closed, or
++// cancelled after a beforeunload veto. Errors are returned synchronously and
++// do not invoke callback. Transport supplies correlation; no wire ABI here.
++// Unresponsive policy: content's built-in beforeunload/unload timeouts apply;
++// a 30-second total deadline forces cleanup if CloseContents never arrives.
++CloseRequestResult RequestTabClose(uint64_t tab_id,
++                                   bool force,
++                                   CloseCallback callback = {});
++
++// Registry/engine teardown supersedes any pending close, retaining its reply.
++// Even this path posts cleanup so delegate/observer callbacks unwind first.
++void ForceCloseTab(uint64_t tab_id);
++
++void TabBeforeUnloadFired(uint64_t tab_id,
++                          content::WebContents* contents,
++                          bool proceed,
++                          bool* proceed_to_fire_unload);
++void TabCloseContents(uint64_t tab_id, content::WebContents* contents);
++
++// Registry-only completion, after the unique_ptr has actually been destroyed.
++void DidDestroyTab(uint64_t tab_id, uint64_t content_generation);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_CLOSE_CONTROLLER_H_
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index dacd791212..256a33b510 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -8,6 +8,7 @@
+ 
+ #include "base/logging.h"
+ #include "base/memory/weak_ptr.h"
++#include "chrome/browser/rearc_bridge/close_controller.h"
+ #include "chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h"
+ #include "chrome/browser/rearc_bridge/tab_adoption.h"
+ #include "content/public/browser/navigation_controller.h"
+@@ -94,26 +95,13 @@ bool ReArcTabDelegate::IsContentsActive(content::WebContents* contents) {
+ }
+ 
+ void ReArcTabDelegate::CloseContents(content::WebContents* source) {
+-  // The shell owns tab lifetime; page-initiated close (window.close,
+-  // ClosePage) must not destroy the session. P-TAB-001: "Window.close only
+-  // detaches/hides tabs" — detachment lands with S6's close_controller. No
+-  // upstream callback exists here, so nothing hangs.
+-  VLOG(1) << "ReArc bridge: tab " << tab_id_
+-          << " CloseContents ignored (shell owns tab lifetime; S6 close "
+-             "controller pending).";
++  TabCloseContents(tab_id_, source);
+ }
+ 
+ void ReArcTabDelegate::BeforeUnloadFired(content::WebContents* tab,
+                                          bool proceed,
+                                          bool* proceed_to_fire_unload) {
+-  // Conservative cancel day-one (R7): veto the close by refusing to fire
+-  // unload — the tab survives every close attempt until S6's close
+-  // controller implements the real DispatchBeforeUnload → honor veto →
+-  // ClosePage → await CloseContents pipeline. content's default would set
+-  // *proceed_to_fire_unload = true (allow the close).
+-  *proceed_to_fire_unload = false;
+-  VLOG(1) << "ReArc bridge: tab " << tab_id_ << " BeforeUnloadFired(proceed="
+-          << proceed << ") vetoed (S6 close controller pending).";
++  TabBeforeUnloadFired(tab_id_, tab, proceed, proceed_to_fire_unload);
+ }
+ 
+ void ReArcTabDelegate::NavigationStateChanged(
+diff --git a/chrome/browser/rearc_bridge/tab_registry.cc b/chrome/browser/rearc_bridge/tab_registry.cc
+index ee4cbc2ddf..49340185d2 100644
+--- a/chrome/browser/rearc_bridge/tab_registry.cc
++++ b/chrome/browser/rearc_bridge/tab_registry.cc
+@@ -14,6 +14,7 @@
+ #include "base/logging.h"
+ #include "base/no_destructor.h"
+ #include "base/task/sequenced_task_runner.h"
++#include "chrome/browser/rearc_bridge/close_controller.h"
+ #include "content/public/browser/web_contents.h"
+ 
+ namespace rearc {
+@@ -66,24 +67,15 @@ TabSession* TabRegistry::FindSession(uint64_t tab_id) const {
+ 
+ bool TabRegistry::RequestClose(uint64_t tab_id) {
+   CHECK(pthread_main_np());
+-  TabSession* session = FindSession(tab_id);
+-  if (!session || session->close_state() == TabSession::CloseState::kClosed) {
+-    VLOG(1) << "ReArc bridge: close requested for unknown/closed tab "
+-            << tab_id << ".";
+-    return false;
+-  }
+-  if (session->close_state() == TabSession::CloseState::kOpen) {
+-    session->SetCloseState(TabSession::CloseState::kCloseRequested);
+-  }
+-  // The real pipeline (DispatchBeforeUnload → honor veto → ClosePage → await
+-  // CloseContents) is S6's close_controller; day-one this only records the
+-  // request in the close-state machine.
+-  VLOG(1) << "ReArc bridge: tab " << tab_id
+-          << " close requested (S6 close pipeline pending).";
+-  return true;
++  return RequestTabClose(tab_id, /*force=*/false) ==
++         CloseRequestResult::kStarted;
+ }
+ 
+ void TabRegistry::DestroySession(uint64_t tab_id) {
++  ForceCloseTab(tab_id);
++}
++
++void TabRegistry::DestroySessionNow(uint64_t tab_id) {
+   CHECK(pthread_main_np());
+   auto it = sessions_.find(tab_id);
+   if (it == sessions_.end()) {
+@@ -98,10 +90,15 @@ void TabRegistry::DestroySession(uint64_t tab_id) {
+   }
+   // Deferred destruction: delegate/observer callbacks must unwind before the
+   // WebContents dies (P-TAB-001's destruction-from-callback prohibition).
++  const uint64_t generation = session->content_generation();
+   base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+-      FROM_HERE,
+-      base::BindOnce([](std::unique_ptr<TabSession> doomed_session) {},
+-                     std::move(session)));
++      FROM_HERE, base::BindOnce(
++                     [](uint64_t id, uint64_t generation,
++                        std::unique_ptr<TabSession> doomed_session) {
++                       doomed_session.reset();
++                       DidDestroyTab(id, generation);
++                     },
++                     tab_id, generation, std::move(session)));
+ }
+ 
+ void TabRegistry::DestroyAllSessions() {
+diff --git a/chrome/browser/rearc_bridge/tab_registry.h b/chrome/browser/rearc_bridge/tab_registry.h
+index e46446d962..581a61036d 100644
+--- a/chrome/browser/rearc_bridge/tab_registry.h
++++ b/chrome/browser/rearc_bridge/tab_registry.h
+@@ -75,14 +75,13 @@ class TabRegistry {
+   // Bridge-internal lookup; nullptr for unknown ids.
+   TabSession* FindSession(uint64_t tab_id) const;
+ 
+-  // Advances the session's close-state skeleton to kCloseRequested (the real
+-  // beforeunload/unload pipeline is S6). Idempotent for already-closing
+-  // sessions; false for unknown or fully closed tabs.
++  // Starts the S6 nonforced close pipeline; false for unknown or busy tabs.
++  // Transport uses RequestTabClose directly for typed errors/correlated
++  // replies.
+   bool RequestClose(uint64_t tab_id);
+ 
+-  // Idempotent. Removes the session from the registry immediately but posts
+-  // its destruction so delegate/observer callbacks unwind first (P-TAB-001's
+-  // destruction-from-callback prohibition).
++  // Idempotent forced teardown. Marks closed and posts cleanup/removal so
++  // delegate/observer callbacks unwind before observers or contents die.
+   void DestroySession(uint64_t tab_id);
+ 
+   // Teardown-ordering primitive: clears pending commands and destroys every
+@@ -94,6 +93,9 @@ class TabRegistry {
+ 
+  private:
+   friend class base::NoDestructor<TabRegistry>;
++  friend void FinalizeTabClose(uint64_t tab_id, uint64_t generation);
++
++  void DestroySessionNow(uint64_t tab_id);
+ 
+   TabRegistry() = default;
+   ~TabRegistry() = default;

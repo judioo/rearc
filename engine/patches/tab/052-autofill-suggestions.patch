@@ -1,0 +1,788 @@
+From fdea5a4f6dfd433cd81f10c5dac105ed36932003 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 14:33:06 +0400
+Subject: [PATCH] P-TAB-001 wave 18f: render autofill suggestions in the host
+
+For registry tabs AutofillPopupView::Create returns a host view instead of Chromium's Views popup, so AutofillPopupControllerImpl keeps deciding when suggestions show and hide and keeps filling, previews, keyboard handling and its early-accept guard, while the host draws. Address, card, IBAN, autocomplete, datalist and password suggestions (PasswordAutofillManager uses the same ChromeAutofillClient path) reach the host with the field bounds in tab-view coordinates and rows (value, minor text, label, icon name, kind). The host accepts, previews/selects, dismisses or asks for the settings page; "Manage..." rows (ChromeAutofillClient::ShowAutofillSettings, ChromePasswordManagerClient::NavigateToManagePasswordsPage) ask the host to open chrome://settings/contactInfo, /payments, /autofill or chrome://password-manager/passwords instead of needing a Browser. Without a callback no suggestions UI is shown. ABI 1.34 / bridge 0.36.0 (autofill_suggestions); builds p83-p84, native address/card (loopback HTTPS)/password suggestions, bounds, keyboard selection, busy early accept, fills, dismiss, both manage paths and replacement pass.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/BUILD.gn                       |   2 +
+ .../chrome_password_manager_client.cc         |   7 +
+ .../rearc_bridge/rearc_autofill_popup.cc      | 507 ++++++++++++++++++
+ .../rearc_bridge/rearc_autofill_popup.h       |  37 ++
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  59 +-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_password_prompt.h      |   3 +
+ .../ui/autofill/chrome_autofill_client.cc     |  11 +
+ .../views/autofill/popup/popup_view_views.cc  |  11 +
+ 10 files changed, 638 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_autofill_popup.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_autofill_popup.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 391707d0d9..912098e21c 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1501,6 +1501,8 @@ source_set("core") {
+       "rearc_bridge/rearc_extension_prompts.h",
+       "rearc_bridge/rearc_extension_actions.cc",
+       "rearc_bridge/rearc_extension_actions.h",
++      "rearc_bridge/rearc_autofill_popup.cc",
++      "rearc_bridge/rearc_autofill_popup.h",
+       "rearc_bridge/discard_adapter.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+       "rearc_bridge/rearc_file_chooser.cc",
+diff --git a/chrome/browser/password_manager/chrome_password_manager_client.cc b/chrome/browser/password_manager/chrome_password_manager_client.cc
+index 41e30a4ca2..86e607ec00 100644
+--- a/chrome/browser/password_manager/chrome_password_manager_client.cc
++++ b/chrome/browser/password_manager/chrome_password_manager_client.cc
+@@ -1421,6 +1421,13 @@ void ChromePasswordManagerClient::NavigateToManagePasswordsPage(
+   password_manager_launcher::ShowPasswordSettings(web_contents(), referrer,
+                                                   /*manage_passkeys=*/false);
+ #else
++#if BUILDFLAG(IS_MAC)
++  // ReArc wave 18f: the embedded host opens chrome://password-manager.
++  if (rearc::IsBrowserlessTabContents(web_contents())) {
++    rearc::RequestHostPasswordSettings(web_contents());
++    return;
++  }
++#endif
+   auto* tab = tabs::TabInterface::MaybeGetFromContents(web_contents());
+   BrowserWindowInterface* browser =
+       tab ? tab->GetBrowserWindowInterface() : nullptr;
+diff --git a/chrome/browser/rearc_bridge/rearc_autofill_popup.cc b/chrome/browser/rearc_bridge/rearc_autofill_popup.cc
+new file mode 100644
+index 0000000000..bbe92093ea
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_autofill_popup.cc
+@@ -0,0 +1,507 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_autofill_popup.h"
++
++#include <pthread.h>
++
++#include <map>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/time/time.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/ui/autofill/autofill_popup_controller.h"
++#include "chrome/browser/ui/autofill/autofill_popup_view.h"
++#include "components/autofill/core/browser/filling/filling_product.h"
++#include "components/autofill/core/browser/metrics/autofill_metrics.h"
++#include "components/autofill/core/browser/suggestions/suggestion.h"
++#include "content/public/browser/web_contents.h"
++#include "third_party/blink/public/common/input/web_input_event.h"
++#include "ui/events/keycodes/keyboard_codes.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/rect_f.h"
++
++namespace rearc {
++namespace {
++
++using autofill::FillingProduct;
++using autofill::Suggestion;
++using autofill::SuggestionType;
++
++ReArcAutofillCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0, next_id = 1;
++
++class HostView;
++std::map<uint64_t, base::WeakPtr<HostView>>& Pending() {
++  static base::NoDestructor<std::map<uint64_t, base::WeakPtr<HostView>>> map;
++  return *map;
++}
++
++const char* IconName(Suggestion::Icon icon) {
++  switch (icon) {
++    case Suggestion::Icon::kNoIcon:
++      return "";
++    case Suggestion::Icon::kHome:
++      return "home";
++    case Suggestion::Icon::kWork:
++      return "work";
++    case Suggestion::Icon::kAccount:
++      return "account";
++    case Suggestion::Icon::kEmail:
++      return "email";
++    case Suggestion::Icon::kGlobe:
++      return "globe";
++    case Suggestion::Icon::kKey:
++      return "key";
++    case Suggestion::Icon::kLocation:
++      return "location";
++    case Suggestion::Icon::kSettings:
++      return "settings";
++    case Suggestion::Icon::kUndo:
++      return "undo";
++    case Suggestion::Icon::kDelete:
++      return "delete";
++    case Suggestion::Icon::kEdit:
++      return "edit";
++    case Suggestion::Icon::kGooglePasswordManager:
++      return "password_manager";
++    case Suggestion::Icon::kCardGeneric:
++    case Suggestion::Icon::kCardGenericVector:
++      return "card";
++    case Suggestion::Icon::kCardAmericanExpress:
++      return "card_amex";
++    case Suggestion::Icon::kCardDiners:
++      return "card_diners";
++    case Suggestion::Icon::kCardDiscover:
++      return "card_discover";
++    case Suggestion::Icon::kCardElo:
++      return "card_elo";
++    case Suggestion::Icon::kCardJCB:
++      return "card_jcb";
++    case Suggestion::Icon::kCardMasterCard:
++      return "card_mastercard";
++    case Suggestion::Icon::kCardMir:
++      return "card_mir";
++    case Suggestion::Icon::kCardTroy:
++      return "card_troy";
++    case Suggestion::Icon::kCardUnionPay:
++      return "card_unionpay";
++    case Suggestion::Icon::kCardVerve:
++      return "card_verve";
++    case Suggestion::Icon::kCardVisa:
++      return "card_visa";
++    case Suggestion::Icon::kIban:
++      return "iban";
++    default:
++      return "other";
++  }
++}
++
++// 0 fill entry, 1 manage/settings footer, 2 separator, 3 other.
++uint32_t Kind(SuggestionType type) {
++  switch (type) {
++    case SuggestionType::kAutocompleteEntry:
++    case SuggestionType::kAddressEntry:
++    case SuggestionType::kAddressEntryOnTyping:
++    case SuggestionType::kAddressFieldByFieldFilling:
++    case SuggestionType::kDatalistEntry:
++    case SuggestionType::kPasswordEntry:
++    case SuggestionType::kBackupPasswordEntry:
++    case SuggestionType::kAccountStoragePasswordEntry:
++    case SuggestionType::kFillPassword:
++    case SuggestionType::kCreditCardEntry:
++    case SuggestionType::kVirtualCreditCardEntry:
++    case SuggestionType::kIbanEntry:
++      return 0;
++    case SuggestionType::kManageAddress:
++    case SuggestionType::kManageCreditCard:
++    case SuggestionType::kManageIban:
++    case SuggestionType::kManageOffers:
++    case SuggestionType::kAllSavedPasswordsEntry:
++      return 1;
++    case SuggestionType::kSeparator:
++      return 2;
++    default:
++      return 3;
++  }
++}
++
++const char* SettingsUrl(FillingProduct product) {
++  switch (product) {
++    case FillingProduct::kAddress:
++      return "chrome://settings/contactInfo";
++    case FillingProduct::kCreditCard:
++    case FillingProduct::kIban:
++    case FillingProduct::kMerchantPromoCode:
++      return "chrome://settings/payments";
++    case FillingProduct::kPassword:
++      return "chrome://password-manager/passwords";
++    default:
++      return "chrome://settings/autofill";
++  }
++}
++
++TabSession* SessionFor(const content::WebContents* contents) {
++  for (uint64_t id : TabRegistry::Get().SessionIds()) {
++    TabSession* session = TabRegistry::Get().FindSession(id);
++    if (session && session->web_contents() == contents) {
++      return session;
++    }
++  }
++  return nullptr;
++}
++
++struct Row {
++  std::string value, minor, label, icon;
++  uint32_t kind, type;
++  bool acceptable;
++};
++struct Snapshot {
++  ReArcAutofillEvent event{};
++  std::vector<Row> rows;
++  std::string settings_url;
++};
++
++void Deliver(Snapshot snapshot) {
++  ABIPost(base::BindOnce(
++      [](uint64_t expected, Snapshot s) {
++        if (!host || expected != epoch) {
++          return;
++        }
++        std::vector<ReArcAutofillSuggestion> rows;
++        for (const auto& r : s.rows) {
++          rows.push_back({r.value.c_str(), r.minor.c_str(), r.label.c_str(),
++                          r.icon.c_str(), r.kind, r.type, r.acceptable});
++        }
++        ReArcAutofillEvent e = s.event;
++        e.suggestions = rows.empty() ? nullptr : rows.data();
++        e.suggestion_count = rows.size();
++        e.settings_url = s.settings_url.c_str();
++        host(host_context, &e);
++      },
++      epoch, std::move(snapshot)));
++}
++
++void Identify(ReArcAutofillEvent& e, content::WebContents* contents) {
++  if (TabSession* session = SessionFor(contents)) {
++    e.profile_id = session->profile_id();
++    e.tab_id = session->tab_id();
++    e.content_generation = session->content_generation();
++  }
++}
++
++class HostView : public autofill::AutofillPopupView {
++ public:
++  explicit HostView(base::WeakPtr<autofill::AutofillPopupController> controller)
++      : controller_(std::move(controller)) {}
++  ~HostView() override = default;
++
++  bool Show(autofill::AutoselectFirstSuggestion autoselect) override {
++    id_ = next_id++;
++    Pending().emplace(id_, weak_.GetWeakPtr());
++    shown_ = base::TimeTicks::Now();
++    Identify(identity_, controller_->GetWebContents());
++    if (autoselect.value()) {
++      Move(+1, /*publish=*/false);
++    }
++    Publish(0);
++    // Starts Chromium's early-accept barrier as a painted popup does.
++    controller_->OnPopupPainted();
++    return true;
++  }
++  void Hide() override {
++    Pending().erase(id_);
++    Publish(1);
++    delete this;
++  }
++  bool HandleKeyPressEvent(const input::NativeWebKeyboardEvent& event) override {
++    if (event.GetType() != blink::WebInputEvent::Type::kRawKeyDown) {
++      return false;
++    }
++    const bool other_modifiers =
++        event.GetModifiers() & (blink::WebInputEvent::kControlKey |
++                                blink::WebInputEvent::kAltKey |
++                                blink::WebInputEvent::kMetaKey);
++    switch (event.windows_key_code) {
++      case ui::VKEY_UP:
++        Move(-1, true);
++        return true;
++      case ui::VKEY_DOWN:
++        Move(+1, true);
++        return true;
++      case ui::VKEY_ESCAPE:
++        controller_->Hide(autofill::SuggestionHidingReason::kUserAborted);
++        return true;
++      case ui::VKEY_RETURN:
++        if (selected_ < 0) {
++          return false;
++        }
++        Accept(selected_,
++               autofill::AutofillMetrics::SuggestionAcceptedMethod::kKeyboard);
++        return true;
++      case ui::VKEY_TAB:
++        // As PopupViewViews: accept, but let the Tab move focus.
++        if (selected_ >= 0 && !other_modifiers) {
++          Accept(selected_,
++                 autofill::AutofillMetrics::SuggestionAcceptedMethod::kKeyboard);
++        }
++        return false;
++      default:
++        return false;
++    }
++  }
++  void OnSuggestionsChanged(bool) override {
++    if (selected_ >= controller_->GetLineCount()) {
++      selected_ = -1;
++    }
++    Publish(0);
++  }
++  bool OverlapsWithPictureInPictureWindow() const override { return false; }
++  void AxAnnounce(const std::u16string&) override {}
++  std::optional<int32_t> GetAxUniqueId() override { return std::nullopt; }
++  base::WeakPtr<autofill::AutofillPopupView> CreateSubPopupView(
++      base::WeakPtr<autofill::AutofillPopupController>) override {
++    return nullptr;
++  }
++  std::optional<size_t> GetIndexOfSubPopupAnchorSuggestion() const override {
++    return std::nullopt;
++  }
++  bool HasFocus() const override { return false; }
++  base::WeakPtr<autofill::AutofillPopupView> GetWeakPtr() override {
++    return weak_.GetWeakPtr();
++  }
++
++  // Host calls. `this` may be deleted by the controller during any of them.
++  ReArcStatus HostAccept(int index) {
++    if (!Acceptable(index)) {
++      return REARC_INVALID_ARGUMENT;
++    }
++    if (base::TimeTicks::Now() - shown_ <
++        autofill::AutofillSuggestionController::
++                kIgnoreEarlyClicksOnSuggestionsDuration +
++            base::Milliseconds(50)) {
++      return REARC_BUSY;
++    }
++    Accept(index, autofill::AutofillMetrics::SuggestionAcceptedMethod::kMouse);
++    return REARC_OK;
++  }
++  ReArcStatus HostSelect(int index) {
++    if (index < 0) {
++      selected_ = -1;
++      controller_->UnselectSuggestion();
++      return REARC_OK;
++    }
++    if (!Acceptable(index)) {
++      return REARC_INVALID_ARGUMENT;
++    }
++    selected_ = index;
++    controller_->SelectSuggestion(index);
++    return REARC_OK;
++  }
++  void HostDismiss() {
++    controller_->Hide(autofill::SuggestionHidingReason::kUserAborted);
++  }
++  void HostManage() {
++    Snapshot s;
++    s.event.phase = 3;
++    s.event.request_id = id_;
++    s.event.product = static_cast<uint32_t>(controller_->GetMainFillingProduct());
++    s.event.selected = -1;
++    s.settings_url = SettingsUrl(controller_->GetMainFillingProduct());
++    Identify(s.event, controller_->GetWebContents());
++    controller_->Hide(autofill::SuggestionHidingReason::kUserAborted);
++    Deliver(std::move(s));
++  }
++
++ private:
++  bool Acceptable(int index) const {
++    return index >= 0 && index < controller_->GetLineCount() &&
++           controller_->GetSuggestionAt(index).IsAcceptable() &&
++           controller_->GetSuggestionAt(index).type != SuggestionType::kSeparator;
++  }
++  void Move(int step, bool publish) {
++    const int count = controller_->GetLineCount();
++    int index = selected_;
++    for (int i = 0; i < count; ++i) {
++      index = index < 0 ? (step > 0 ? 0 : count - 1)
++                        : (index + step + count) % count;
++      if (Acceptable(index)) {
++        selected_ = index;
++        controller_->SelectSuggestion(index);
++        if (publish) {
++          Publish(2);
++        }
++        return;
++      }
++    }
++  }
++  void Accept(int index,
++              autofill::AutofillMetrics::SuggestionAcceptedMethod method) {
++    controller_->AcceptSuggestion(index, method, /*was_obscured=*/false);
++  }
++  void Publish(uint32_t phase) {
++    Snapshot s;
++    s.event = identity_;
++    s.event.phase = phase;
++    s.event.request_id = id_;
++    s.event.selected = selected_;
++    if (!controller_) {
++      Deliver(std::move(s));  // Controller teardown: hidden, identity only.
++      return;
++    }
++    content::WebContents* contents = controller_->GetWebContents();
++    s.event.product = static_cast<uint32_t>(controller_->GetMainFillingProduct());
++    // Chromium keeps the field in screen space; the host wants it relative
++    // to the tab's view.
++    gfx::RectF bounds = controller_->element_bounds();
++    bounds.Offset(-contents->GetContainerBounds().OffsetFromOrigin());
++    s.event.x = bounds.x();
++    s.event.y = bounds.y();
++    s.event.width = bounds.width();
++    s.event.height = bounds.height();
++    if (phase == 0) {
++      for (const Suggestion& suggestion : controller_->GetSuggestions()) {
++        Row row;
++        row.value = base::UTF16ToUTF8(suggestion.main_text.value);
++        if (!suggestion.minor_texts.empty()) {
++          row.minor = base::UTF16ToUTF8(suggestion.minor_texts[0].value);
++        }
++        if (!suggestion.labels.empty() && !suggestion.labels[0].empty()) {
++          row.label = base::UTF16ToUTF8(suggestion.labels[0][0].value);
++        }
++        row.icon = IconName(suggestion.icon);
++        row.kind = Kind(suggestion.type);
++        row.type = static_cast<uint32_t>(suggestion.type);
++        row.acceptable = suggestion.IsAcceptable() &&
++                         suggestion.type != SuggestionType::kSeparator;
++        s.rows.push_back(std::move(row));
++      }
++    }
++    Deliver(std::move(s));
++  }
++
++  base::WeakPtr<autofill::AutofillPopupController> controller_;
++  ReArcAutofillEvent identity_{};
++  uint64_t id_ = 0;
++  int selected_ = -1;
++  base::TimeTicks shown_;
++  base::WeakPtrFactory<HostView> weak_{this};
++};
++
++void Settings(content::WebContents* contents, const char* url,
++              FillingProduct product) {
++  if (!host) {
++    return;
++  }
++  Snapshot s;
++  s.event.phase = 3;
++  s.event.selected = -1;
++  s.event.product = static_cast<uint32_t>(product);
++  s.settings_url = url;
++  Identify(s.event, contents);
++  Deliver(std::move(s));
++}
++
++}  // namespace
++
++base::WeakPtr<autofill::AutofillPopupView> CreateHostAutofillPopupView(
++    base::WeakPtr<autofill::AutofillPopupController> controller) {
++  CHECK(pthread_main_np());
++  if (!host || !controller || !SessionFor(controller->GetWebContents())) {
++    return nullptr;  // Never Chromium's popup; no host, no suggestions UI.
++  }
++  return (new HostView(std::move(controller)))->GetWeakPtr();
++}
++
++void RequestHostAutofillSettings(content::WebContents* contents,
++                                 SuggestionType type) {
++  CHECK(pthread_main_np());
++  switch (type) {
++    case SuggestionType::kManageAddress:
++      Settings(contents, SettingsUrl(FillingProduct::kAddress),
++               FillingProduct::kAddress);
++      return;
++    case SuggestionType::kManageCreditCard:
++    case SuggestionType::kManageIban:
++    case SuggestionType::kManageOffers:
++      Settings(contents, SettingsUrl(FillingProduct::kCreditCard),
++               FillingProduct::kCreditCard);
++      return;
++    default:
++      Settings(contents, SettingsUrl(FillingProduct::kNone),
++               FillingProduct::kNone);
++      return;
++  }
++}
++
++void RequestHostPasswordSettings(content::WebContents* contents) {
++  CHECK(pthread_main_np());
++  Settings(contents, SettingsUrl(FillingProduct::kPassword),
++           FillingProduct::kPassword);
++}
++
++}  // namespace rearc
++
++void ReArcEngineSetAutofillCallback(ReArcAutofillCallback cb, void* ctx) {
++  CHECK(pthread_main_np());
++  std::vector<base::WeakPtr<rearc::HostView>> views;
++  for (auto& [id, view] : rearc::Pending()) {
++    views.push_back(view);
++  }
++  // Hidden events of the old registration are invalidated with it.
++  for (auto& view : views) {
++    if (view) {
++      view->HostDismiss();
++    }
++  }
++  ++rearc::epoch;
++  rearc::host = cb;
++  rearc::host_context = ctx;
++}
++
++namespace {
++rearc::HostView* FindView(uint64_t id) {
++  auto it = rearc::Pending().find(id);
++  return it == rearc::Pending().end() ? nullptr : it->second.get();
++}
++}  // namespace
++
++ReArcStatus ReArcAutofillAccept(uint64_t request_id, int32_t index) {
++  CHECK(pthread_main_np());
++  rearc::HostView* view = FindView(request_id);
++  return view ? view->HostAccept(index) : REARC_NOT_FOUND;
++}
++
++ReArcStatus ReArcAutofillSelect(uint64_t request_id, int32_t index) {
++  CHECK(pthread_main_np());
++  rearc::HostView* view = FindView(request_id);
++  return view ? view->HostSelect(index) : REARC_NOT_FOUND;
++}
++
++ReArcStatus ReArcAutofillDismiss(uint64_t request_id) {
++  CHECK(pthread_main_np());
++  rearc::HostView* view = FindView(request_id);
++  if (!view) {
++    return REARC_NOT_FOUND;
++  }
++  view->HostDismiss();
++  return REARC_OK;
++}
++
++ReArcStatus ReArcAutofillManage(uint64_t request_id) {
++  CHECK(pthread_main_np());
++  rearc::HostView* view = FindView(request_id);
++  if (!view) {
++    return REARC_NOT_FOUND;
++  }
++  view->HostManage();
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_autofill_popup.h b/chrome/browser/rearc_bridge/rearc_autofill_popup.h
+new file mode 100644
+index 0000000000..da14590510
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_autofill_popup.h
+@@ -0,0 +1,37 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_AUTOFILL_POPUP_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_AUTOFILL_POPUP_H_
++
++#include "base/memory/weak_ptr.h"
++#include "components/autofill/core/browser/suggestions/suggestion_type.h"
++
++namespace autofill {
++class AutofillPopupController;
++class AutofillPopupView;
++}  // namespace autofill
++
++namespace content {
++class WebContents;
++}  // namespace content
++
++namespace rearc {
++
++// Wave 18f (autofill_suggestions). The view of Chromium's
++// AutofillPopupControllerImpl for registry tabs: suggestions reach the host
++// as events, and the host's accept/select/dismiss calls go back through the
++// controller (Chromium's filling, previews, metrics and accept threshold).
++// Chromium's Views popup is never created; without a host callback no popup
++// is shown at all. Sub-popups are not supported.
++base::WeakPtr<autofill::AutofillPopupView> CreateHostAutofillPopupView(
++    base::WeakPtr<autofill::AutofillPopupController> controller);
++// Settings requests from a suggestion footer (ChromeAutofillClient and
++// ChromePasswordManagerClient): the host opens Chromium's settings page.
++void RequestHostAutofillSettings(content::WebContents* contents,
++                                 autofill::SuggestionType type);
++void RequestHostPasswordSettings(content::WebContents* contents);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_AUTOFILL_POPUP_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 95ac64f0f3..c9d51a70b6 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 33, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 34, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -878,6 +878,63 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcTabRunExtensionAction(
+     uint64_t tab_id, const char* extension_id, uint32_t* result,
+     uint64_t* popup_tab_id);
+ 
++// Autofill suggestions (autofill_suggestions, ABI 1.34). Address, card,
++// IBAN, autocomplete, datalist and password suggestions of registry tabs are
++// rendered by the host; Chromium's popup is never shown (no callback: no
++// suggestions UI). Chromium still decides when to show/hide (focus loss,
++// navigation, typing) and does filling, previews and its 500 ms early-accept
++// guard. Keep the host popup non-activating: Chromium hides the suggestions
++// when the tab's view loses focus. Arrow keys/Enter/Tab/Escape in the field
++// are handled by the engine (phase 2 reports keyboard selection).
++// phase: 0 shown or updated (same request_id while open), 1 hidden (identity
++// and request_id only), 2 selection changed, 3 open settings_url (from
++// ReArcAutofillManage or a "Manage..." row; request_id may be 0). Password
++// rows carry the username and Chromium's masked label, never the password.
++// product: Chromium
++// FillingProduct (1 address, 2 credit card, 4 IBAN, 5 autocomplete,
++// 6 password, 12 datalist). x/y/width/height: the field in the tab view's
++// DIP coordinates (top-left origin). selected: row or -1.
++// Suggestion kind: 0 fill entry, 1 manage footer, 2 separator, 3 other
++// (type is Chromium's SuggestionType, advisory). icon: "", "account",
++// "email", "home", "work", "location", "globe", "key", "settings", "undo",
++// "delete", "edit", "password_manager", "card", "card_<network>" (amex,
++// diners, discover, elo, jcb, mastercard, mir, troy, unionpay, verve, visa),
++// "iban" or "other". Strings are page/profile data, borrowed.
++typedef struct ReArcAutofillSuggestion {
++  const char* value;
++  const char* minor;
++  const char* label;
++  const char* icon;
++  uint32_t kind, type;
++  bool acceptable;
++} ReArcAutofillSuggestion;
++typedef struct ReArcAutofillEvent {
++  uint64_t profile_id, tab_id, content_generation, request_id;
++  uint32_t phase, product;
++  double x, y, width, height;
++  int32_t selected;
++  const ReArcAutofillSuggestion* suggestions;
++  size_t suggestion_count;
++  const char* settings_url;
++} ReArcAutofillEvent;
++typedef void (*ReArcAutofillCallback)(void* context,
++                                      const ReArcAutofillEvent* event);
++// Replacement hides open suggestions (their events are not delivered).
++REARC_ENGINE_EXPORT void ReArcEngineSetAutofillCallback(
++    ReArcAutofillCallback callback, void* context);
++// Fills (or runs) an acceptable row. Within 550 ms of being shown: busy
++// (Chromium ignores early accepts); retry. Unknown/hidden: not_found.
++REARC_ENGINE_EXPORT ReArcStatus ReArcAutofillAccept(uint64_t request_id,
++                                                    int32_t index);
++// Hover/highlight: previews a fill row in the page; -1 clears the preview.
++REARC_ENGINE_EXPORT ReArcStatus ReArcAutofillSelect(uint64_t request_id,
++                                                    int32_t index);
++REARC_ENGINE_EXPORT ReArcStatus ReArcAutofillDismiss(uint64_t request_id);
++// Hides the suggestions and posts phase 3 with the settings page for the
++// product (chrome://settings/contactInfo, /payments, /autofill or
++// chrome://password-manager/passwords); the host opens it as a tab.
++REARC_ENGINE_EXPORT ReArcStatus ReArcAutofillManage(uint64_t request_id);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index bda3688fbf..d05fa6e0d3 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -547,6 +547,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "extension_tab_helpers" ||
+          std::string(feature) == "extension_install_prompts" ||
+          std::string(feature) == "extension_actions" ||
++         std::string(feature) == "autofill_suggestions" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 15ba5a58ed..447d6d5961 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.35.0";
++  return "0.36.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_password_prompt.h b/chrome/browser/rearc_bridge/rearc_password_prompt.h
+index 4307a7a3ca..4dc50d6dbc 100644
+--- a/chrome/browser/rearc_bridge/rearc_password_prompt.h
++++ b/chrome/browser/rearc_bridge/rearc_password_prompt.h
+@@ -15,5 +15,8 @@ bool OfferHostPasswordPrompt(
+     content::WebContents*,
+     std::unique_ptr<password_manager::PasswordFormManagerForUI>,
+     bool update);
++// Wave 18f (rearc_autofill_popup.cc): "Manage passwords" from a password
++// suggestion asks the host to open chrome://password-manager.
++void RequestHostPasswordSettings(content::WebContents* contents);
+ }
+ #endif
+diff --git a/chrome/browser/ui/autofill/chrome_autofill_client.cc b/chrome/browser/ui/autofill/chrome_autofill_client.cc
+index 5220b34d64..fba9fe736e 100644
+--- a/chrome/browser/ui/autofill/chrome_autofill_client.cc
++++ b/chrome/browser/ui/autofill/chrome_autofill_client.cc
+@@ -3,6 +3,10 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/ui/autofill/chrome_autofill_client.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#include "chrome/browser/rearc_bridge/rearc_autofill_popup.h"
++#endif
+ 
+ #include <utility>
+ 
+@@ -777,6 +781,13 @@ void ChromeAutofillClient::ShowAutofillSettings(
+       break;
+   }
+ #else
++#if BUILDFLAG(IS_MAC)
++  // ReArc wave 18f: the embedded host opens the settings page.
++  if (rearc::IsBrowserlessTabContents(web_contents())) {
++    rearc::RequestHostAutofillSettings(web_contents(), suggestion_type);
++    return;
++  }
++#endif
+   BrowserWindowInterface* browser =
+       GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+           web_contents());
+diff --git a/chrome/browser/ui/views/autofill/popup/popup_view_views.cc b/chrome/browser/ui/views/autofill/popup/popup_view_views.cc
+index 3febe2d2e2..c0f45fbe17 100644
+--- a/chrome/browser/ui/views/autofill/popup/popup_view_views.cc
++++ b/chrome/browser/ui/views/autofill/popup/popup_view_views.cc
+@@ -3,6 +3,10 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/ui/views/autofill/popup/popup_view_views.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#include "chrome/browser/rearc_bridge/rearc_autofill_popup.h"
++#endif
+ 
+ #include <algorithm>
+ #include <memory>
+@@ -1972,6 +1976,13 @@ base::WeakPtr<AutofillPopupView> AutofillPopupView::Create(
+     std::optional<const AutofillPopupView::SearchBarConfig> search_bar_config,
+     std::optional<const AutofillPopupView::TabbedPaneConfig> tabbed_pane_config,
+     std::optional<const AutofillPopupView::SubPopupConfig> sub_popup_config) {
++#if BUILDFLAG(IS_MAC)
++  // ReArc wave 18f: registry tabs' suggestions are rendered by the host.
++  if (controller &&
++      rearc::IsBrowserlessTabContents(controller->GetWebContents())) {
++    return rearc::CreateHostAutofillPopupView(controller);
++  }
++#endif
+   if (!controller || !CanShowRootPopup(*controller)) {
+     return nullptr;
+   }
+-- 
+2.54.0 (Apple Git-157)
+

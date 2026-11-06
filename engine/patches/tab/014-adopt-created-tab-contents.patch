@@ -1,0 +1,384 @@
+# Patch-ID: P-TAB-001 (slice S6, part 1) — adopt Chromium-created contents
+# Area: tab.
+# Rationale: AddNewContents must retain the supplied WebContents, BrowserContext,
+#   SiteInstance and Chromium opener/noopener/COOP policy instead of recreating
+#   a URL-only tab. Establish deliberate synchronous hidden staging before
+#   returning; publish opener/disposition creation metadata before observation.
+# Last-Rebased: 2026-11-02 (Chromium 156.0.8078.74).
+# Audit: verified AddNewContents's pointer return and full argument list in
+#   content/public/browser/web_contents_delegate.h; CreateParams::initially_hidden
+#   defaults false at this pin. GetBrowserContext/GetOpener/GetWeakPtr/WasHidden
+#   signatures and both opener-suppressed and ShowCreatedWindow callers verified.
+# Policy: accept NEW_FOREGROUND_TAB, NEW_BACKGROUND_TAB and NEW_POPUP only with
+#   content-supplied user_gesture. Reject NEW_WINDOW, PiP/split, profile changes,
+#   non-creation/unknown dispositions and closing sources with was_blocked=true.
+#   Accepted paths set it false; preserve Chromium-created contents unchanged
+#   apart from delegate/visibility. Popup geometry is not honored while staged;
+#   no focus/attachment/window is inferred. URL-only OpenURLFromTab creation
+#   stays unsupported. No script_opener or full popup fidelity advertisement.
+# Minimal frozen-file exceptions: tab_session.{h,cc} and tab_registry.{h,cc}
+#   lack any way to take the unique_ptr; add only Adopt and its constructor/
+#   allocator seam. Explicit initially_hidden fixes the S2 visibility assumption.
+#   ipc_tab_events.h gains only typed opener/disposition creation fields. The
+#   delegate's planned AddNewContents override forwards; its rejection comment
+#   is corrected. All other frozen implementations/bridge BUILD.gn untouched.
+#   S5 services remain dormant; real profile IDs/transport remain integration work.
+# GN: isolated mac :core block. No upstream C++ edits. Sequential full-series
+#   reverse/forward replay permits these necessary earlier additive-file edits.
+# Gate: build-p17 green attempt 2 (p16: incomplete-type default unique_ptr argument
+#   corrected by moving it out of the header). G1-G5 PASS smoke-tab014.log;
+#   G3 LC_ALL=C grep -qa PNG; nm adoption/session/registry symbols verified.
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index e1fd991a93..e9b1f41561 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1446,6 +1446,14 @@ source_set("core") {
+     deps += [ "//chrome/browser/background/extensions" ]
+   }
+ 
++  if (is_mac) {
++    # P-TAB-001 S6 (tab/014): adopt exact Chromium-created contents.
++    sources += [
++      "rearc_bridge/tab_adoption.cc",
++      "rearc_bridge/tab_adoption.h",
++    ]
++  }
++
+   if (enable_on_device_translation) {
+     deps += [
+       "//chrome/browser/on_device_translation",
+diff --git a/chrome/browser/rearc_bridge/ipc_tab_events.h b/chrome/browser/rearc_bridge/ipc_tab_events.h
+index fe5acf6f5d..95912fee6e 100644
+--- a/chrome/browser/rearc_bridge/ipc_tab_events.h
++++ b/chrome/browser/rearc_bridge/ipc_tab_events.h
+@@ -37,6 +37,7 @@ enum class TabEventKind {
+ const char* TabEventKindName(TabEventKind kind);
+ 
+ enum class TabClosedReason { kShell, kPage, kEngine };
++enum class TabDisposition { kShell, kForegroundTab, kBackgroundTab, kPopup };
+ 
+ // rearc.ipc.v1 §4 transition enum: "typed" | "link" | "reload" |
+ // "generated" | "other". Qualifiers are preserved separately in
+@@ -57,6 +58,10 @@ struct TabEvent {
+   // invalid ID on the wire (§1) — events carrying it must never reach the
+   // shell; the transport slice must not ship before stamping real ids.
+   uint64_t profile_id = 0;
++  // 0 omits the source tab; the actual script opener may be suppressed by
++  // Chromium's noopener/COOP policy and is never synthesized from this ID.
++  uint64_t opener_tab_id = 0;
++  TabDisposition disposition = TabDisposition::kShell;
+ 
+   // Shared: tab.created, tab.updated (url change), navigation.*.
+   std::string url;
+diff --git a/chrome/browser/rearc_bridge/tab_adoption.cc b/chrome/browser/rearc_bridge/tab_adoption.cc
+new file mode 100644
+index 0000000000..8173cd2fff
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/tab_adoption.cc
+@@ -0,0 +1,89 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/tab_adoption.h"
++
++#include <pthread.h>
++
++#include <utility>
++
++#include "base/check.h"
++#include "base/logging.h"
++#include "chrome/browser/rearc_bridge/ipc_tab_events.h"
++#include "chrome/browser/rearc_bridge/tab_observer.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "content/public/browser/web_contents.h"
++#include "url/gurl.h"
++
++namespace rearc {
++
++content::WebContents* AdoptNewTabContents(
++    uint64_t source_tab_id,
++    content::WebContents* source,
++    std::unique_ptr<content::WebContents> contents,
++    WindowOpenDisposition disposition,
++    bool user_gesture,
++    bool* was_blocked) {
++  CHECK(pthread_main_np());
++  if (was_blocked) {
++    *was_blocked = true;
++  }
++  TabSession* parent = TabRegistry::Get().FindSession(source_tab_id);
++  if (!parent || parent->web_contents() != source || !contents ||
++      parent->close_state() != TabSession::CloseState::kOpen ||
++      contents->IsBeingDestroyed() || !user_gesture ||
++      contents->GetBrowserContext() != source->GetBrowserContext()) {
++    VLOG(1) << "rearc: tab adoption rejected (source/context/gesture)";
++    return nullptr;
++  }
++
++  TabDisposition placement;
++  switch (disposition) {
++    case WindowOpenDisposition::NEW_FOREGROUND_TAB:
++      placement = TabDisposition::kForegroundTab;
++      break;
++    case WindowOpenDisposition::NEW_BACKGROUND_TAB:
++      placement = TabDisposition::kBackgroundTab;
++      break;
++    case WindowOpenDisposition::NEW_POPUP:
++      placement = TabDisposition::kPopup;
++      break;
++    default:
++      VLOG(1) << "rearc: tab adoption rejected disposition "
++              << static_cast<int>(disposition);
++      return nullptr;
++  }
++
++  TabSession::CreateArgs args;
++  args.browser_context = source->GetBrowserContext();
++  args.space_id = parent->space_id();
++  // Placement/order is a shell decision; do not overflow an adjacent index.
++  args.order_index = parent->order_index();
++  const bool has_opener = contents->GetOpener() != nullptr;
++  auto weak_contents = contents->GetWeakPtr();
++  const uint64_t tab_id =
++      TabRegistry::Get().AdoptSession(args, std::move(contents));
++  if (was_blocked) {
++    *was_blocked = false;
++  }
++
++  TabEvent event;
++  event.kind = TabEventKind::kTabCreated;
++  event.tab_id = tab_id;
++  event.space_id = args.space_id;
++  event.opener_tab_id = has_opener ? source_tab_id : 0;
++  event.disposition = placement;
++  event.url = weak_contents->GetVisibleURL().spec();
++  // As in S3, profile_id remains internal scaffolding until transport stamps
++  // the real profile ID. Never expose this event directly on the wire yet.
++  EmitTabEvent(std::move(event));
++  // A sink can synchronously request destruction; never attach after removal.
++  if (TabRegistry::Get().FindSession(tab_id)) {
++    AttachTabObserver(tab_id);
++    EmitInitialSnapshotEvent(tab_id);
++  }
++  return weak_contents.get();
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/tab_adoption.h b/chrome/browser/rearc_bridge/tab_adoption.h
+new file mode 100644
+index 0000000000..56c1fd1f50
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/tab_adoption.h
+@@ -0,0 +1,33 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_TAB_ADOPTION_H_
++#define CHROME_BROWSER_REARC_BRIDGE_TAB_ADOPTION_H_
++
++#include <cstdint>
++#include <memory>
++
++#include "ui/base/window_open_disposition.h"
++
++namespace content {
++class WebContents;
++}
++
++namespace rearc {
++
++// UI thread only. Adopts Chromium's exact contents, hidden before returning.
++// No focus, native window, URL recreation or script-opener capability implied.
++// Baseline policy requires a content-supplied user gesture; NEW_WINDOW, PiP,
++// split, profile changes and non-creation dispositions are rejected.
++content::WebContents* AdoptNewTabContents(
++    uint64_t source_tab_id,
++    content::WebContents* source,
++    std::unique_ptr<content::WebContents> contents,
++    WindowOpenDisposition disposition,
++    bool user_gesture,
++    bool* was_blocked);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_TAB_ADOPTION_H_
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 00e364c48e..dacd791212 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -9,6 +9,7 @@
+ #include "base/logging.h"
+ #include "base/memory/weak_ptr.h"
+ #include "chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h"
++#include "chrome/browser/rearc_bridge/tab_adoption.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
+ #include "content/public/browser/web_contents.h"
+@@ -45,15 +46,12 @@ content::WebContents* ReArcTabDelegate::OpenURLFromTab(
+     case WindowOpenDisposition::NEW_BACKGROUND_TAB:
+     case WindowOpenDisposition::NEW_FOREGROUND_TAB:
+     case WindowOpenDisposition::SINGLETON_TAB:
+-      // Predictable rejection day-one: adoption of page-created contents
+-      // (preserving opener, BrowserContext and disposition, with a valid
+-      // native parent or deliberate hidden staging established before
+-      // returning) is S6's tab_adoption. Returning nullptr tells content the
+-      // URL was not opened; nothing hangs.
++      // This path supplies no Chromium-created contents. Reject instead of
++      // fabricating a URL-only replacement with different opener semantics.
+       VLOG(1) << "ReArc bridge: tab " << tab_id_
+               << " denied OpenURLFromTab disposition "
+               << static_cast<int>(params.disposition) << " (" << params.url
+-              << ") — S6 adoption pending.";
++              << ") — URL-only new-content recreation unsupported.";
+       return nullptr;
+     default:
+       // OFF_THE_RECORD / SAVE_TO_DISK / IGNORE_ACTION / unknown: unsupported
+@@ -74,18 +72,10 @@ content::WebContents* ReArcTabDelegate::AddNewContents(
+     const blink::mojom::WindowFeatures& window_features,
+     bool user_gesture,
+     bool* was_blocked) {
+-  // Predictable rejection day-one (S6 owns adoption — a later SwiftUI update
+-  // is not synchronous reparenting). The moved-in WebContents is destroyed
+-  // with this scope: an explicit, immediate rejection, not a leak or a hang.
+-  // was_blocked is set honestly — no tab was created.
+-  if (was_blocked) {
+-    *was_blocked = true;
+-  }
+-  VLOG(1) << "ReArc bridge: tab " << tab_id_ << " rejected AddNewContents ("
+-          << target_url << ", disposition " << static_cast<int>(disposition)
+-          << ", user_gesture " << user_gesture
+-          << ") — S6 adoption pending.";
+-  return nullptr;
++  // Chromium retains navigation/opener policy. Popup bounds are deliberately
++  // not applied: accepted contents stage hidden until explicit shell placement.
++  return AdoptNewTabContents(tab_id_, source, std::move(new_contents),
++                             disposition, user_gesture, was_blocked);
+ }
+ 
+ void ReArcTabDelegate::ActivateContents(content::WebContents* contents) {
+diff --git a/chrome/browser/rearc_bridge/tab_registry.cc b/chrome/browser/rearc_bridge/tab_registry.cc
+index fc67b02cd9..ee4cbc2ddf 100644
+--- a/chrome/browser/rearc_bridge/tab_registry.cc
++++ b/chrome/browser/rearc_bridge/tab_registry.cc
+@@ -14,6 +14,7 @@
+ #include "base/logging.h"
+ #include "base/no_destructor.h"
+ #include "base/task/sequenced_task_runner.h"
++#include "content/public/browser/web_contents.h"
+ 
+ namespace rearc {
+ 
+@@ -47,6 +48,16 @@ uint64_t TabRegistry::CreateSession(const TabSession::CreateArgs& args) {
+   return tab_id;
+ }
+ 
++uint64_t TabRegistry::AdoptSession(
++    const TabSession::CreateArgs& args,
++    std::unique_ptr<content::WebContents> contents) {
++  CHECK(pthread_main_np());
++  const uint64_t tab_id = next_tab_id_++;
++  sessions_.emplace(tab_id,
++                    TabSession::Adopt(tab_id, args, std::move(contents)));
++  return tab_id;
++}
++
+ TabSession* TabRegistry::FindSession(uint64_t tab_id) const {
+   CHECK(pthread_main_np());
+   auto it = sessions_.find(tab_id);
+diff --git a/chrome/browser/rearc_bridge/tab_registry.h b/chrome/browser/rearc_bridge/tab_registry.h
+index f0d8060a0a..e46446d962 100644
+--- a/chrome/browser/rearc_bridge/tab_registry.h
++++ b/chrome/browser/rearc_bridge/tab_registry.h
+@@ -69,6 +69,8 @@ class TabRegistry {
+   // Creates a session and returns its newly allocated tab_id. Main thread
+   // only.
+   uint64_t CreateSession(const TabSession::CreateArgs& args);
++  uint64_t AdoptSession(const TabSession::CreateArgs& args,
++                        std::unique_ptr<content::WebContents> contents);
+ 
+   // Bridge-internal lookup; nullptr for unknown ids.
+   TabSession* FindSession(uint64_t tab_id) const;
+diff --git a/chrome/browser/rearc_bridge/tab_session.cc b/chrome/browser/rearc_bridge/tab_session.cc
+index 4394bdf77c..03f8522ed9 100644
+--- a/chrome/browser/rearc_bridge/tab_session.cc
++++ b/chrome/browser/rearc_bridge/tab_session.cc
+@@ -6,6 +6,8 @@
+ 
+ #include <pthread.h>
+ 
++#include <utility>
++
+ #include "base/check.h"
+ #include "base/logging.h"
+ #include "chrome/browser/rearc_bridge/tab_delegate.h"
+@@ -44,17 +46,37 @@ std::unique_ptr<TabSession> TabSession::Create(uint64_t tab_id,
+                                                const CreateArgs& args) {
+   CHECK(pthread_main_np());
+   CHECK(args.browser_context);
+-  return std::unique_ptr<TabSession>(new TabSession(tab_id, args));
++  return std::unique_ptr<TabSession>(new TabSession(tab_id, args, nullptr));
+ }
+ 
+-TabSession::TabSession(uint64_t tab_id, const CreateArgs& args)
++std::unique_ptr<TabSession> TabSession::Adopt(
++    uint64_t tab_id,
++    const CreateArgs& args,
++    std::unique_ptr<content::WebContents> contents) {
++  CHECK(pthread_main_np());
++  CHECK(contents);
++  CHECK_EQ(args.browser_context, contents->GetBrowserContext());
++  return std::unique_ptr<TabSession>(
++      new TabSession(tab_id, args, std::move(contents)));
++}
++
++TabSession::TabSession(uint64_t tab_id,
++                       const CreateArgs& args,
++                       std::unique_ptr<content::WebContents> contents)
+     : tab_id_(tab_id),
+       space_id_(args.space_id),
+       order_index_(args.order_index) {
+   delegate_ = std::make_unique<ReArcTabDelegate>(tab_id_);
+-  content::WebContents::CreateParams params(args.browser_context);
+-  web_contents_ = content::WebContents::Create(params);
++  if (contents) {
++    web_contents_ = std::move(contents);
++  } else {
++    content::WebContents::CreateParams params(args.browser_context);
++    params.initially_hidden = true;
++    web_contents_ = content::WebContents::Create(params);
++  }
+   web_contents_->SetDelegate(delegate_.get());
++  // Deliberate synchronous hidden staging, including renderer-created popups.
++  web_contents_->WasHidden();
+ 
+   // Start hidden (P-TAB-001): a fresh WebContents is hidden by default and
+   // becomes visible only through the S4 attachment lease's explicit
+diff --git a/chrome/browser/rearc_bridge/tab_session.h b/chrome/browser/rearc_bridge/tab_session.h
+index cb8b30ab21..9b8f5241b5 100644
+--- a/chrome/browser/rearc_bridge/tab_session.h
++++ b/chrome/browser/rearc_bridge/tab_session.h
+@@ -66,6 +66,11 @@ class TabSession {
+   // Main thread only. `args.browser_context` must be non-null.
+   static std::unique_ptr<TabSession> Create(uint64_t tab_id,
+                                             const CreateArgs& args);
++  // Adopt the exact Chromium-created contents; never reconstruct its opener.
++  static std::unique_ptr<TabSession> Adopt(
++      uint64_t tab_id,
++      const CreateArgs& args,
++      std::unique_ptr<content::WebContents> contents);
+   ~TabSession();
+ 
+   TabSession(const TabSession&) = delete;
+@@ -95,7 +100,9 @@ class TabSession {
+   content::WebContents* web_contents() const { return web_contents_.get(); }
+ 
+  private:
+-  TabSession(uint64_t tab_id, const CreateArgs& args);
++  TabSession(uint64_t tab_id,
++             const CreateArgs& args,
++             std::unique_ptr<content::WebContents> contents);
+ 
+   const uint64_t tab_id_;
+   uint64_t space_id_;

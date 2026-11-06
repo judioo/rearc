@@ -1,0 +1,281 @@
+From 579c39be3468214f5ed4aad6b1a0f49ff928e8d8 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 15:47:50 +0400
+Subject: [PATCH] P-TAB-001 wave 18g: route HTTP authentication through the
+ host
+
+Use a registry LoginHandler for Basic/Digest challenge requests and credential responses, preserving Chromium auth caching and password-manager bookkeeping. Cancel without a host callback; withdraw on handler/navigation teardown, callback replacement and tab/profile/engine close. Permit registry subresource challenges to reach the handler without a modal-dialog manager. ABI 1.38 / bridge 0.40.0 (http_auth); p93 and local Basic retry/Digest/cancel/replacement/pending-close fixture pass with no outside connections. TLS client certificate selection is deferred for a separate identity/private-key lifetime and isolated mutual-TLS harness.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/browser/BUILD.gn                       |  2 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   | 20 ++++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |  1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |  2 +-
+ .../browser/rearc_bridge/rearc_http_auth.cc   | 79 +++++++++++++++++++
+ chrome/browser/rearc_bridge/rearc_http_auth.h | 13 +++
+ .../rearc_bridge/rearc_services_abi.cc        |  2 +
+ .../browser/ui/login/http_auth_coordinator.cc |  9 ++-
+ .../browser/ui/views/login_handler_views.cc   |  8 ++
+ 9 files changed, 133 insertions(+), 3 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_http_auth.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_http_auth.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index a6f4888892..34a2f69277 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1506,6 +1506,8 @@ source_set("core") {
+       "rearc_bridge/rearc_password_leak_abi.cc",
+       "rearc_bridge/rearc_extension_windows.cc",
+       "rearc_bridge/rearc_autofill_save.cc",
++      "rearc_bridge/rearc_http_auth.cc",
++      "rearc_bridge/rearc_http_auth.h",
+       "rearc_bridge/rearc_autofill_save.h",
+       "rearc_bridge/rearc_extension_windows.h",
+       "rearc_bridge/discard_adapter.cc",
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 86332fbb76..de80426df9 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 37, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 38, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -984,6 +984,24 @@ typedef void (*ReArcAutofillSaveCallback)(void*, const ReArcAutofillSaveEvent*);
+ REARC_ENGINE_EXPORT void ReArcEngineSetAutofillSaveCallback(ReArcAutofillSaveCallback, void* context);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcAutofillSaveRespond(uint64_t request_id, uint32_t action);
+ 
++// HTTP Basic/Digest challenges (http_auth, ABI 1.38). phase 0 requested,
++// 1 withdrawn. All strings borrowed during callback. No credentials emitted.
++// Without a callback, cancel. Callback replacement, navigation/handler teardown,
++// tab/profile close and shutdown withdraw. Credentials are copied on Respond.
++typedef struct ReArcHttpAuthEvent {
++  uint64_t profile_id, tab_id, content_generation, request_id;
++  uint32_t phase;
++  bool is_proxy;
++  const char* challenger;
++  const char* scheme;
++  const char* realm;
++} ReArcHttpAuthEvent;
++typedef void (*ReArcHttpAuthCallback)(void*, const ReArcHttpAuthEvent*);
++REARC_ENGINE_EXPORT void ReArcEngineSetHttpAuthCallback(ReArcHttpAuthCallback, void* context);
++// cancel=true ignores username/password; otherwise valid UTF-8 <=4096 bytes
++// each, including empty strings. Repeated/stale request_id => not_found.
++REARC_ENGINE_EXPORT ReArcStatus ReArcHttpAuthRespond(uint64_t request_id, bool cancel, const char* username, const char* password);
++
+ // Password leak detection (password_leak_detection, ABI 1.35): Chromium's
+ // profile.password_manager_leak_detection pref, default on as in Chrome. When
+ // on, a successfully submitted sign-in's credential is checked against
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 1b32de024b..8ab81c5feb 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -551,6 +551,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "password_leak_detection" ||
+          std::string(feature) == "extension_windows" ||
+          std::string(feature) == "autofill_save_prompts" ||
++         std::string(feature) == "http_auth" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index d8c6d37d0a..3961af44aa 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.39.0";
++  return "0.40.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_http_auth.cc b/chrome/browser/rearc_bridge/rearc_http_auth.cc
+new file mode 100644
+index 0000000000..5322e1fec8
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_http_auth.cc
+@@ -0,0 +1,79 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_http_auth.h"
++#include <pthread.h>
++#include <cstring>
++#include <map>
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++namespace rearc {
++namespace {
++class Handler;
++ReArcHttpAuthCallback host = nullptr;
++void* context = nullptr;
++uint64_t epoch = 0,next_id = 1;
++auto& Pending() { static base::NoDestructor<std::map<uint64_t,base::WeakPtr<Handler>>> p; return *p; }
++class Handler : public LoginHandler {
++ public:
++  Handler(const net::AuthChallengeInfo& info,content::WebContents* c,content::LoginDelegate::LoginAuthRequiredCallback done)
++    : LoginHandler(info,c,std::move(done)) {}
++  ~Handler() override { Withdraw(); }
++  uint64_t tab() const { return event_.tab_id; }
++  void Reply(bool cancel,std::u16string user,std::u16string password) {
++    Pending().erase(event_.request_id);event_.request_id=0;
++    if (cancel) CancelAuth(false); else SetAuth(user,password);
++  }
++  void Cancel() { Withdraw(); CancelAuth(false); }
++ private:
++  bool BuildViewImpl(const std::u16string&,const std::u16string&,LoginModelData*) override {
++    if (!host || Pending().size() >= 64) return false;
++    for (auto id : TabRegistry::Get().SessionIds()) {
++      auto* s = TabRegistry::Get().FindSession(id);
++      if (s->web_contents() != web_contents() || s->close_state() != TabSession::CloseState::kOpen) continue;
++      event_ = {s->profile_id(),id,s->content_generation(),next_id++,0,auth_info().is_proxy,nullptr,nullptr,nullptr};
++      challenger_ = auth_info().challenger.Serialize();scheme_=auth_info().scheme;realm_=auth_info().realm;
++      Pending().emplace(event_.request_id,weak_.GetWeakPtr());Publish(0);return true;
++    }
++    return false;
++  }
++  void CloseDialog() override { Withdraw(); }
++  void Withdraw() {
++    if (!event_.request_id) return;
++    Publish(1);Pending().erase(event_.request_id);event_.request_id=0;
++  }
++  void Publish(uint32_t phase) {
++    auto e=event_;e.phase=phase;
++    ABIPost(base::BindOnce([](uint64_t expected,ReArcHttpAuthEvent e,std::string challenger,std::string scheme,std::string realm){
++      if(!host||expected!=epoch||(!e.phase&&!Pending().contains(e.request_id)))return;
++      e.challenger=challenger.c_str();e.scheme=scheme.c_str();e.realm=realm.c_str();host(context,&e);
++    },epoch,e,challenger_,scheme_,realm_));
++  }
++  ReArcHttpAuthEvent event_{};
++  std::string challenger_,scheme_,realm_;
++  base::WeakPtrFactory<Handler> weak_{this};
++};
++}
++std::unique_ptr<LoginHandler> CreateHostLoginHandler(const net::AuthChallengeInfo& info,content::WebContents* c,content::LoginDelegate::LoginAuthRequiredCallback done) {
++  return std::make_unique<Handler>(info,c,std::move(done));
++}
++void ABICancelHttpAuth(uint64_t tab) {
++  auto pending=Pending();for(auto& [id,h]:pending)if(h&&h->tab()==tab)h->Cancel();
++}
++}
++void ReArcEngineSetHttpAuthCallback(ReArcHttpAuthCallback cb,void* ctx) {
++  CHECK(pthread_main_np());auto pending=rearc::Pending();for(auto&[id,h]:pending)if(h)h->Cancel();
++  ++rearc::epoch;rearc::host=cb;rearc::context=ctx;
++}
++ReArcStatus ReArcHttpAuthRespond(uint64_t id,bool cancel,const char* username,const char* password) {
++  CHECK(pthread_main_np());
++  if (!cancel && (!username || !password || strnlen(username,4097)>4096 || strnlen(password,4097)>4096 || !base::IsStringUTF8(username) || !base::IsStringUTF8(password)))return REARC_INVALID_ARGUMENT;
++  auto it=rearc::Pending().find(id);if(it==rearc::Pending().end()||!it->second)return REARC_NOT_FOUND;
++  it->second->Reply(cancel,cancel?u"":base::UTF8ToUTF16(username),cancel?u"":base::UTF8ToUTF16(password));return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_http_auth.h b/chrome/browser/rearc_bridge/rearc_http_auth.h
+new file mode 100644
+index 0000000000..118990cd7e
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_http_auth.h
+@@ -0,0 +1,13 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_HTTP_AUTH_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_HTTP_AUTH_H_
++#include <cstdint>
++#include <memory>
++#include "chrome/browser/ui/login/login_handler.h"
++namespace rearc {
++std::unique_ptr<LoginHandler> CreateHostLoginHandler(const net::AuthChallengeInfo&, content::WebContents*, content::LoginDelegate::LoginAuthRequiredCallback);
++void ABICancelHttpAuth(uint64_t tab_id);
++}
++#endif
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index f4bde41269..45f37c9ed9 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -33,6 +33,7 @@
+ #include "chrome/browser/rearc_bridge/ipc_service_events.h"
+ #include "chrome/browser/rearc_bridge/media_adapter.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_http_auth.h"
+ #include "chrome/browser/rearc_bridge/rearc_autofill_save.h"
+ #include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
+ #include "chrome/browser/rearc_bridge/rearc_pip.h"
+@@ -1101,6 +1102,7 @@ void ABIAttachServices(uint64_t id) {
+ void ABIDetachServices(uint64_t id) {
+   CHECK(pthread_main_np());
+   ABICancelPasswords(id);
++  ABICancelHttpAuth(id);
+   ABICancelAutofillSave(id);
+   ABICancelExtensionPrompts(id, 0);
+   ABICancelExtensionTabs(id, 0);
+diff --git a/chrome/browser/ui/login/http_auth_coordinator.cc b/chrome/browser/ui/login/http_auth_coordinator.cc
+index ca9dc0e2c6..f999c980ef 100644
+--- a/chrome/browser/ui/login/http_auth_coordinator.cc
++++ b/chrome/browser/ui/login/http_auth_coordinator.cc
+@@ -3,6 +3,9 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/ui/login/http_auth_coordinator.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#endif
+ 
+ #include "base/task/sequenced_task_runner.h"
+ #include "chrome/browser/enterprise/net/enterprise_proxy_error_service_factory.h"
+@@ -233,7 +236,11 @@ void HttpAuthCoordinator::Flow::ShowDialog() {
+   web_modal::WebContentsModalDialogManager* manager =
+       web_modal::WebContentsModalDialogManager::FromWebContents(
+           web_contents_.get());
+-  if (!manager) {
++  if (!manager
++#if BUILDFLAG(IS_MAC)
++      && !rearc::IsBrowserlessTabContents(web_contents_.get())
++#endif
++      ) {
+     std::move(callback_).Run(std::nullopt);
+     return;
+   }
+diff --git a/chrome/browser/ui/views/login_handler_views.cc b/chrome/browser/ui/views/login_handler_views.cc
+index 14a99f40f3..c166e5cd1a 100644
+--- a/chrome/browser/ui/views/login_handler_views.cc
++++ b/chrome/browser/ui/views/login_handler_views.cc
+@@ -9,6 +9,10 @@
+ #include "chrome/browser/ui/blocked_content/popunder_preventer.h"
+ #include "chrome/browser/ui/dialogs/browser_dialogs.h"
+ #include "chrome/browser/ui/login/login_handler.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#include "chrome/browser/rearc_bridge/rearc_http_auth.h"
++#endif
+ #include "chrome/browser/ui/views/login_view.h"
+ #include "components/constrained_window/constrained_window_views.h"
+ #include "components/password_manager/core/browser/password_manager.h"
+@@ -231,6 +235,10 @@ std::unique_ptr<LoginHandler> LoginHandler::Create(
+     const net::AuthChallengeInfo& auth_info,
+     content::WebContents* web_contents,
+     content::LoginDelegate::LoginAuthRequiredCallback auth_required_callback) {
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsBrowserlessTabContents(web_contents))
++    return rearc::CreateHostLoginHandler(auth_info,web_contents,std::move(auth_required_callback));
++#endif
+   return std::make_unique<LoginHandlerViews>(auth_info, web_contents,
+                                              std::move(auth_required_callback));
+ }
+-- 
+2.54.0 (Apple Git-157)
+

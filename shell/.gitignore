@@ -5,3 +5,8 @@ dist/
 *.xcodeproj/
 signing.local.env
 .build-release/
+
+# Local run logs
+/selftest-*.log
+/selftest-*.txt
+/swift-test.log

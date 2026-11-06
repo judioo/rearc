@@ -1,0 +1,195 @@
+# Patch-ID: P-TAB-001 (slice S5, adapter 3) — visible security state
+# Area: tab.
+# Rationale: IPC-CONTRACT section 3 requires Chromium-derived security state,
+#   with unknown until initialized and no HTTPS-scheme claim of secure.
+# Last-Rebased: 2026-11-02 (Chromium 156.0.8078.74).
+# Dependency: tab/010's typed ServiceEvent surface. No new helper admitted.
+# Audit: chrome_security_state::{GetVisibleSecurityState,GetSecurityLevel}
+#   read the visible entry, Profile prefs, Safe Browsing and optional helpers.
+#   QWAC/safety-tip/HTTPS-Only helpers are null-checked upstream; no Browser,
+#   BrowserWindowInterface, TabFeatures or TabInterface is instantiated here.
+# Mapping: NONE->none, SECURE->secure, WARNING->insecure,
+#   DANGEROUS->dangerous, sentinel/unrecognized->unknown. No visible entry,
+#   initial entry, or uninitialized connection info -> unknown. This guard
+#   deliberately keeps even early verdicts unknown until connection validity.
+# Lifetime: WebContentsUserData observer, detached in WebContentsDestroyed;
+#   primary-page/committed primary-frame/visible-state changes recompute and
+#   coalesce values; captured content generation rejects stale emissions.
+# Dormant AttachSecurityAdapter seam after tab.created; isolated mac :core
+#   source registration. No frozen earlier-slice file changes.
+# Gate: build-p13 green attempt 1. G1-G5 PASS (G3: grep -qa).
+# nm AttachSecurityAdapter/DetachSecurityAdapter symbols verified.
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 64b865e64d..a35021ee3f 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1417,6 +1417,14 @@ source_set("core") {
+     deps += [ "//chrome/browser/ui/webui/compose" ]
+   }
+ 
++  if (is_mac) {
++    # P-TAB-001 S5 (tab/012): Chromium visible-security-state adapter.
++    sources += [
++      "rearc_bridge/security_adapter.cc",
++      "rearc_bridge/security_adapter.h",
++    ]
++  }
++
+   if (chrome_root_store_cert_management_ui) {
+     deps += [ "//chrome/browser/ui/webui/certificate_manager" ]
+   }
+diff --git a/chrome/browser/rearc_bridge/security_adapter.cc b/chrome/browser/rearc_bridge/security_adapter.cc
+new file mode 100644
+index 0000000000..11c1d686b7
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/security_adapter.cc
+@@ -0,0 +1,124 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/security_adapter.h"
++
++#include <pthread.h>
++
++#include <optional>
++#include <utility>
++
++#include "base/check.h"
++#include "chrome/browser/rearc_bridge/ipc_service_events.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "chrome/browser/ssl/chrome_security_state_util.h"
++#include "components/security_state/core/security_state.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_entry.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++
++namespace rearc {
++namespace {
++
++TabSecurityState ReadSecurityState(content::WebContents* contents) {
++  auto* entry = contents->GetController().GetVisibleEntry();
++  if (!entry || entry->IsInitialEntry()) {
++    return TabSecurityState::kUnknown;
++  }
++  const auto state = chrome_security_state::GetVisibleSecurityState(contents);
++  if (!state || !state->connection_info_initialized) {
++    return TabSecurityState::kUnknown;
++  }
++  // No URL-scheme shortcuts. This incorporates Chrome's certificate/mixed
++  // content, Safe Browsing, safety tip and HTTPS-Only state when available.
++  switch (chrome_security_state::GetSecurityLevel(contents)) {
++    case security_state::NONE:
++      return TabSecurityState::kNone;
++    case security_state::SECURE:
++      return TabSecurityState::kSecure;
++    case security_state::WARNING:
++      return TabSecurityState::kInsecure;
++    case security_state::DANGEROUS:
++      return TabSecurityState::kDangerous;
++    case security_state::SECURITY_LEVEL_COUNT:
++      return TabSecurityState::kUnknown;
++  }
++  return TabSecurityState::kUnknown;
++}
++
++class SecurityAdapter : public content::WebContentsObserver,
++                        public content::WebContentsUserData<SecurityAdapter> {
++ public:
++  ~SecurityAdapter() override = default;
++
++  void Publish() {
++    if (!web_contents() || web_contents()->IsBeingDestroyed()) {
++      return;
++    }
++    const auto state = ReadSecurityState(web_contents());
++    if (last_state_ == state) {
++      return;
++    }
++    last_state_ = state;
++    ServiceEvent event;
++    event.kind = ServiceEventKind::kSecurityStateChanged;
++    event.tab_id = tab_id_;
++    event.content_generation = generation_;
++    event.security_state = state;
++    EmitServiceEvent(std::move(event));
++  }
++
++  void DidChangeVisibleSecurityState() override { Publish(); }
++  void PrimaryPageChanged(content::Page& page) override { Publish(); }
++  void DidFinishNavigation(content::NavigationHandle* handle) override {
++    if (handle->IsInPrimaryMainFrame() && handle->HasCommitted()) {
++      Publish();
++    }
++  }
++  void WebContentsDestroyed() override { Observe(nullptr); }
++
++ private:
++  friend class content::WebContentsUserData<SecurityAdapter>;
++  SecurityAdapter(content::WebContents* contents,
++                  uint64_t tab_id,
++                  uint64_t generation)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<SecurityAdapter>(*contents),
++        tab_id_(tab_id),
++        generation_(generation) {}
++
++  const uint64_t tab_id_;
++  const uint64_t generation_;
++  std::optional<TabSecurityState> last_state_;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++
++WEB_CONTENTS_USER_DATA_KEY_IMPL(SecurityAdapter);
++
++}  // namespace
++
++void AttachSecurityAdapter(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  auto* session = TabRegistry::Get().FindSession(tab_id);
++  if (!session || !session->web_contents() ||
++      SecurityAdapter::FromWebContents(session->web_contents())) {
++    return;
++  }
++  SecurityAdapter::CreateForWebContents(session->web_contents(), tab_id,
++                                        session->content_generation());
++  SecurityAdapter::FromWebContents(session->web_contents())->Publish();
++}
++
++void DetachSecurityAdapter(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  if (auto* session = TabRegistry::Get().FindSession(tab_id)) {
++    session->web_contents()->RemoveUserData(SecurityAdapter::UserDataKey());
++  }
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/security_adapter.h b/chrome/browser/rearc_bridge/security_adapter.h
+new file mode 100644
+index 0000000000..dc590fc5dd
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/security_adapter.h
+@@ -0,0 +1,19 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_SECURITY_ADAPTER_H_
++#define CHROME_BROWSER_REARC_BRIDGE_SECURITY_ADAPTER_H_
++
++#include <cstdint>
++
++namespace rearc {
++
++// UI thread only, dormant until called after tab.created. Uses Chrome's
++// visible-security-state machinery; uninitialized state is always unknown.
++void AttachSecurityAdapter(uint64_t tab_id);
++void DetachSecurityAdapter(uint64_t tab_id);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_SECURITY_ADAPTER_H_

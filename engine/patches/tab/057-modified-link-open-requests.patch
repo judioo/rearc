@@ -1,0 +1,317 @@
+From 9739603b0f3fee4985c18d7407f3f3c4de05d865 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 16:29:12 +0400
+Subject: [PATCH] P-TAB-001 wave 18g: route modified link opens to host tab
+ creation
+
+Route gestured HTTP(S) OpenURLFromTab foreground/background/window/split dispositions through a separate host callback over the existing bounded creation queue. Preserve original Chromium navigation parameters, initiator, referrer policy and navigation callback. Host supplies a distinct blank tab in the source profile and reports selection; source/profile close, replacement and timeout withdraw. Retire queued initial blank navigation before loading retained params, including extension creation. ABI 1.39 / bridge 0.41.0 (link_open_requests); p96 and synthesized native Command, Command-Shift, middle, Shift and Option-Command click cases pass, including HTTP Referer/noreferrer verification, profile/target rejection and lifecycle cancellation, with no outside connection. Existing ABI layouts remain unchanged; explicit rel=opener/non-HTTP URL-only opens remain unsupported.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  26 ++++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_extension_windows.cc   | 105 ++++++++++++++++--
+ .../rearc_bridge/rearc_extension_windows.h    |   3 +-
+ chrome/browser/rearc_bridge/tab_delegate.cc   |   6 +-
+ 6 files changed, 130 insertions(+), 13 deletions(-)
+
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index de80426df9..264deacf67 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 38, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 39, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -1002,6 +1002,30 @@ REARC_ENGINE_EXPORT void ReArcEngineSetHttpAuthCallback(ReArcHttpAuthCallback, v
+ // each, including empty strings. Repeated/stale request_id => not_found.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcHttpAuthRespond(uint64_t request_id, bool cancel, const char* username, const char* password);
+ 
++// Modifier/context-menu link opens (link_open_requests, ABI 1.39).
++// Separate event layout; ABI 1.36 extension requests are unchanged. HTTP(S)
++// OpenURLFromTab only: 1 foreground, 2 background, 4 window, 5 split view.
++// phase 0 requested, 1 withdrawn. opener_tab_id is bridge source/grouping
++// identity, not a script window.opener grant. Referrer is Chromium-sanitized;
++// referrer_policy is network::mojom::ReferrerPolicy at this pin, display only.
++// Strings borrowed during callback. Engine retains the full navigation params.
++typedef struct ReArcLinkOpenEvent {
++  uint64_t profile_id, opener_tab_id, content_generation, request_id;
++  uint32_t phase, disposition, referrer_policy;
++  bool user_gesture;
++  const char* url;
++  const char* referrer;
++} ReArcLinkOpenEvent;
++typedef void (*ReArcLinkOpenCallback)(void*, const ReArcLinkOpenEvent*);
++REARC_ENGINE_EXPORT void ReArcEngineSetLinkOpenCallback(ReArcLinkOpenCallback, void* context);
++// Host creates about:blank in this profile/current space, reports its logical
++// window/active state with ReArcTabSetExtensionWindow, then replies. It must
++// return a distinct blank tab; active required for dispositions 1/4/5. 0 cancels.
++// Response performs the original Chromium navigation (including referrer).
++// No callback => refused. Pending requests cancel on source/profile close,
++// registration replacement or 30 s timeout. Explicit rel=opener is unsupported.
++REARC_ENGINE_EXPORT ReArcStatus ReArcLinkOpenRespond(uint64_t request_id, uint64_t tab_id);
++
+ // Password leak detection (password_leak_detection, ABI 1.35): Chromium's
+ // profile.password_manager_leak_detection pref, default on as in Chrome. When
+ // on, a successfully submitted sign-in's credential is checked against
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 8ab81c5feb..5002a2881d 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -552,6 +552,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "extension_windows" ||
+          std::string(feature) == "autofill_save_prompts" ||
+          std::string(feature) == "http_auth" ||
++         std::string(feature) == "link_open_requests" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 3961af44aa..f82189264a 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.40.0";
++  return "0.41.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_windows.cc b/chrome/browser/rearc_bridge/rearc_extension_windows.cc
+index f888201128..c1f89966a8 100644
+--- a/chrome/browser/rearc_bridge/rearc_extension_windows.cc
++++ b/chrome/browser/rearc_bridge/rearc_extension_windows.cc
+@@ -4,6 +4,7 @@
+ #include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
+ #include <pthread.h>
+ #include <map>
++#include <optional>
+ #include <set>
+ #include "base/check.h"
+ #include "base/functional/bind.h"
+@@ -18,6 +19,9 @@
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/page_navigator.h"
++#include "content/public/common/referrer.h"
+ #include "content/public/browser/site_instance.h"
+ #include "url/origin.h"
+ #include "extensions/browser/extension_function.h"
+@@ -32,10 +36,20 @@ int focused_window = 0;
+ ReArcExtensionTabRequestCallback host = nullptr;
+ void* context = nullptr;
+ uint64_t epoch = 0, next_id = 1;
++ReArcLinkOpenCallback link_host = nullptr;
++void* link_context = nullptr;
++uint64_t link_epoch = 0;
++struct LinkNavigation {
++  explicit LinkNavigation(const content::OpenURLParams& p) : params(p) {}
++  content::OpenURLParams params;
++  uint64_t generation = 0;
++  base::OnceCallback<void(content::NavigationHandle&)> navigation_callback;
++};
+ struct Request {
+   ReArcExtensionTabRequest event{};
+   std::string url, extension;
+   base::OnceCallback<void(content::WebContents*)> done;
++  std::unique_ptr<LinkNavigation> link;
+ };
+ auto& Requests() { static base::NoDestructor<std::map<uint64_t, Request>> r; return *r; }
+ bool Open(TabSession* s) {
+@@ -48,17 +62,30 @@ bool Visible(ExtensionFunction* f, TabSession* s) {
+   return Open(s) && States().contains(s->tab_id()) &&
+     p->IsSameOrParent(candidate) && (p == candidate || f->include_incognito_information());
+ }
+-void Publish(uint64_t id, ReArcExtensionTabRequest e, std::string url, std::string extension) {
++void Publish(uint64_t id, const Request& r) {
++  if (r.link) {
++    const auto referrer = content::Referrer::SanitizeForRequest(r.link->params.url, r.link->params.referrer);
++    uint32_t disposition = r.link->params.disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB ? 2 :
++        r.link->params.disposition == WindowOpenDisposition::NEW_WINDOW ? 4 :
++        r.link->params.disposition == WindowOpenDisposition::NEW_SPLIT_VIEW ? 5 : 1;
++    ReArcLinkOpenEvent event{r.event.profile_id,r.event.opener_tab_id,r.link->generation,id,
++        r.event.phase,disposition,static_cast<uint32_t>(referrer.policy),r.link->params.user_gesture,nullptr,nullptr};
++    ABIPost(base::BindOnce([](uint64_t expected,ReArcLinkOpenEvent e,std::string url,std::string referrer) {
++      if (!link_host || expected != link_epoch || (!e.phase && !Requests().contains(e.request_id))) return;
++      e.url = url.c_str(); e.referrer = referrer.c_str(); link_host(link_context,&e);
++    },link_epoch,event,r.url,referrer.url.spec()));
++    return;
++  }
+   ABIPost(base::BindOnce([](uint64_t expected, uint64_t id, ReArcExtensionTabRequest e, std::string u, std::string x) {
+     if (!host || expected != epoch || (!e.phase && !Requests().contains(id))) return;
+     e.url = u.c_str(); e.extension_id = x.c_str(); host(context, &e);
+-  }, epoch, id, e, std::move(url), std::move(extension)));
++  }, epoch, id, r.event, r.url, r.extension));
+ }
+ void Cancel(uint64_t id) {
+   auto it = Requests().find(id); if (it == Requests().end()) return;
+   auto r = std::move(it->second); Requests().erase(it);
+-  r.event.phase = 1; Publish(id, r.event, r.url, r.extension);
+-  std::move(r.done).Run(nullptr);
++  r.event.phase = 1; Publish(id, r);
++  if (r.done) std::move(r.done).Run(nullptr);
+ }
+ }
+ TabSession* ExtensionSession(content::WebContents* c) {
+@@ -147,8 +174,27 @@ void RequestExtensionTab(Profile* p, const std::string& extension, const GURL& u
+   uint64_t id = next_id++;
+   Request r; r.event = {id,profile,tab,opener,window,kind,0,active,nullptr,nullptr};
+   r.url = url.spec(); r.extension = extension; r.done = std::move(done);
+-  auto event = r.event; Requests().emplace(id,std::move(r));
+-  Publish(id,event,url.spec(),extension);
++  Requests().emplace(id,std::move(r));
++  Publish(id,Requests().at(id));
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(FROM_HERE,base::BindOnce(&Cancel,id),base::Seconds(30));
++}
++void RequestLinkOpen(uint64_t source_id, content::WebContents* source,
++    const content::OpenURLParams& params,
++    base::OnceCallback<void(content::NavigationHandle&)> callback) {
++  TabSession* s;
++  if (!link_host || ABICheckTab(source_id,&s) != REARC_OK || s->web_contents() != source ||
++      Requests().size() >= 64 || !params.url.SchemeIsHTTPOrHTTPS() || params.has_rel_opener ||
++      (!params.user_gesture && !params.started_from_context_menu)) return;
++  uint64_t id = next_id++;
++  Request r;
++  r.event = {id,s->profile_id(),0,source_id,0,4,0,
++      params.disposition != WindowOpenDisposition::NEW_BACKGROUND_TAB,nullptr,nullptr};
++  r.url = params.url.spec();
++  r.link = std::make_unique<LinkNavigation>(params);
++  r.link->generation = s->content_generation();
++  r.link->navigation_callback = std::move(callback);
++  Requests().emplace(id,std::move(r));
++  Publish(id,Requests().at(id));
+   base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(FROM_HERE,base::BindOnce(&Cancel,id),base::Seconds(30));
+ }
+ void ABICancelExtensionTabs(uint64_t tab, uint64_t profile) {
+@@ -186,20 +232,46 @@ ReArcStatus ReArcTabGetExtensionState(uint64_t id, ReArcExtensionTabState* out)
+ }
+ void ReArcEngineSetExtensionTabRequestCallback(ReArcExtensionTabRequestCallback cb, void* ctx) {
+   CHECK(pthread_main_np());
+-  std::vector<uint64_t> ids; for (auto& [id,r] : rearc::Requests()) ids.push_back(id);
++  std::vector<uint64_t> ids; for (auto& [id,r] : rearc::Requests()) if (!r.link) ids.push_back(id);
+   for (auto id : ids) rearc::Cancel(id);
+   ++rearc::epoch; rearc::host = cb; rearc::context = ctx;
+ }
+-ReArcStatus ReArcExtensionTabRequestRespond(uint64_t id, uint64_t tab) {
+-  CHECK(pthread_main_np()); auto it = rearc::Requests().find(id); if (it == rearc::Requests().end()) return REARC_NOT_FOUND;
++namespace {
++ReArcStatus RespondCreation(uint64_t id, uint64_t tab, bool link) {
++  CHECK(pthread_main_np()); auto it = rearc::Requests().find(id); if (it == rearc::Requests().end() || static_cast<bool>(it->second.link) != link) return REARC_NOT_FOUND;
+   if (tab) {
+     rearc::TabSession* s; if (auto status = rearc::ABICheckTab(tab,&s)) return status;
+     auto state = rearc::States().find(tab);
+     if (!rearc::ExtensionSession(s->web_contents()) || state == rearc::States().end()) return REARC_INVALID_STATE;
+     const auto& e = it->second.event;
++    if (link && (tab == e.opener_tab_id ||
++        (!s->web_contents()->GetLastCommittedURL().is_empty() && !s->web_contents()->GetLastCommittedURL().IsAboutBlank()) ||
++        (!s->web_contents()->GetVisibleURL().is_empty() && !s->web_contents()->GetVisibleURL().IsAboutBlank()))) return REARC_INVALID_STATE;
+     if (s->profile_id() != e.profile_id) return REARC_INVALID_ARGUMENT;
+     if ((e.tab_id && e.tab_id != tab) || (e.window_id > 0 && e.window_id != state->second.window) || (e.active && !state->second.active)) return REARC_INVALID_STATE;
+   }
++  if (tab && (link || it->second.event.kind != 3)) {
++    // The host's about:blank creation may still have a queued initial load.
++    // Retire it before starting the retained navigation, or it can win later.
++    if (auto status = ReArcTabStop(tab)) return status;
++  }
++  if (link) {
++    auto r = std::move(it->second);
++    rearc::Requests().erase(it);
++    if (!tab) return REARC_OK;
++    rearc::TabSession* source;
++    if (rearc::ABICheckTab(r.event.opener_tab_id,&source) != REARC_OK ||
++        source->content_generation() != r.link->generation) return REARC_INVALID_STATE;
++    auto* target = rearc::TabRegistry::Get().FindSession(tab);
++    content::NavigationController::LoadURLParams params(r.link->params);
++    // OpenURLParams identifies the source frame; the new target uses its own
++    // primary frame. Keep the initiator, referrer policy, body and headers.
++    params.frame_tree_node_id = content::FrameTreeNodeId();
++    params.should_replace_current_entry = false;
++    auto handle = target->web_contents()->GetController().LoadURLWithParams(params);
++    if (handle && r.link->navigation_callback) std::move(r.link->navigation_callback).Run(*handle);
++    return handle ? REARC_OK : REARC_INVALID_STATE;
++  }
+   auto done = std::move(it->second.done);
+   if (tab && it->second.event.kind != 3) {
+     auto* s = rearc::TabRegistry::Get().FindSession(tab);
+@@ -215,3 +287,18 @@ ReArcStatus ReArcExtensionTabRequestRespond(uint64_t id, uint64_t tab) {
+     std::move(done).Run(rearc::Open(s) ? s->web_contents() : nullptr);
+   }, std::move(done), tab)); return REARC_OK;
+ }
++
++}  // namespace
++ReArcStatus ReArcExtensionTabRequestRespond(uint64_t id, uint64_t tab) {
++  return RespondCreation(id,tab,false);
++}
++void ReArcEngineSetLinkOpenCallback(ReArcLinkOpenCallback cb,void* ctx) {
++  CHECK(pthread_main_np());
++  std::vector<uint64_t> ids;
++  for (const auto& [id,r] : rearc::Requests()) if (r.link) ids.push_back(id);
++  for (auto id : ids) rearc::Cancel(id);
++  ++rearc::link_epoch; rearc::link_host = cb; rearc::link_context = ctx;
++}
++ReArcStatus ReArcLinkOpenRespond(uint64_t id,uint64_t tab) {
++  return RespondCreation(id,tab,true);
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_windows.h b/chrome/browser/rearc_bridge/rearc_extension_windows.h
+index b4dddabacc..e74441625e 100644
+--- a/chrome/browser/rearc_bridge/rearc_extension_windows.h
++++ b/chrome/browser/rearc_bridge/rearc_extension_windows.h
+@@ -11,7 +11,7 @@
+ class Profile;
+ class GURL;
+ namespace extensions { class URLPatternSet; }
+-namespace content { class WebContents; }
++namespace content { class WebContents; class NavigationHandle; struct OpenURLParams; }
+ class ExtensionFunction;
+ namespace rearc {
+ class TabSession;
+@@ -21,6 +21,7 @@ content::WebContents* ActiveExtensionContents(Profile*);
+ base::ListValue QueryExtensionTabs(ExtensionFunction*, const extensions::api::tabs::Query::Params::QueryInfo&, const extensions::URLPatternSet&);
+ base::ListValue QueryExtensionWindows(ExtensionFunction*, int window_id, bool populate);
+ void RequestExtensionTab(Profile*, const std::string& extension_id, const GURL&, bool active, uint64_t opener, int window_id, uint32_t kind, uint64_t tab_id, base::OnceCallback<void(content::WebContents*)>);
++void RequestLinkOpen(uint64_t source_tab_id, content::WebContents*, const content::OpenURLParams&, base::OnceCallback<void(content::NavigationHandle&)>);
+ void ABICancelExtensionTabs(uint64_t tab_id, uint64_t profile_id);
+ }
+ #endif
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 8dfa38726f..fa1c9dac07 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -8,6 +8,7 @@
+ #include "chrome/browser/rearc_bridge/rearc_fullscreen.h"
+ #include "chrome/browser/rearc_bridge/rearc_pip.h"
+ #include "chrome/browser/rearc_bridge/rearc_extension_actions.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
+ 
+ #include <utility>
+ 
+@@ -56,10 +57,13 @@ content::WebContents* ReArcTabDelegate::OpenURLFromTab(
+       }
+       return source;
+     }
+-    case WindowOpenDisposition::NEW_POPUP:
+     case WindowOpenDisposition::NEW_WINDOW:
++    case WindowOpenDisposition::NEW_SPLIT_VIEW:
+     case WindowOpenDisposition::NEW_BACKGROUND_TAB:
+     case WindowOpenDisposition::NEW_FOREGROUND_TAB:
++      RequestLinkOpen(tab_id_,source,params,std::move(navigation_handle_callback));
++      return nullptr;  // Host creation/navigation is asynchronous.
++    case WindowOpenDisposition::NEW_POPUP:
+     case WindowOpenDisposition::SINGLETON_TAB:
+       // This path supplies no Chromium-created contents. Reject instead of
+       // fabricating a URL-only replacement with different opener semantics.
+-- 
+2.54.0 (Apple Git-157)
+

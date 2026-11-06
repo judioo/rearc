@@ -1,0 +1,781 @@
+From 758ca5e9a361d4a1ceeef82c95c33994b575e613 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 14:08:21 +0400
+Subject: [PATCH] P-TAB-001 wave 18f: route extension install and uninstall
+ prompts to the host
+
+In embedded mode Chromium's extension install, re-enable and permission confirmations (ShowExtensionInstallDialogImpl: Web Store, CRX, chrome://extensions) and its uninstall confirmation (ExtensionUninstallDialog::Create) become host requests answered with accept or cancel; no Views dialog is created. ExtensionInstallUIDesktop reports install success and failure to the host instead of opening a Browser window, installed bubble or infobar. Extension tabs.create and runtime.openOptionsPage no longer create a Browser window (they fail as with no window). Requests cancel on tab close, profile release and callback replacement; without a callback install prompts abort and uninstall confirmations cancel. ABI 1.32 / bridge 0.34.0 (extension_install_prompts); builds p79-p80, native webstorePrivate cancel/replace/accept through a loopback gallery override, a locally signed CRX dropped on chrome://extensions installing with notification, confirmed uninstall cancel/accept and no Chromium window pass.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/BUILD.gn                       |   2 +
+ .../runtime/chrome_runtime_api_delegate.cc    |  10 +
+ chrome/browser/extensions/open_tab_helper.cc  |  10 +
+ .../browser/rearc_bridge/rearc_abi_internal.h |   2 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  40 +-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_extension_prompts.cc   | 394 ++++++++++++++++++
+ .../rearc_bridge/rearc_extension_prompts.h    |  49 +++
+ .../rearc_bridge/rearc_profile_registry.cc    |   1 +
+ .../rearc_bridge/rearc_services_abi.cc        |   1 +
+ .../extension_install_ui_desktop.cc           |  19 +
+ .../extension_uninstall_dialog_impl.cc        |  12 +
+ .../extension_install_dialog_view.cc          |  12 +
+ 14 files changed, 553 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_extension_prompts.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_extension_prompts.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 67699a148e..ea737787af 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1497,6 +1497,8 @@ source_set("core") {
+       "rearc_bridge/rearc_drop_policy.mm",
+       "rearc_bridge/rearc_pip.cc",
+       "rearc_bridge/rearc_pip.h",
++      "rearc_bridge/rearc_extension_prompts.cc",
++      "rearc_bridge/rearc_extension_prompts.h",
+       "rearc_bridge/discard_adapter.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+       "rearc_bridge/rearc_file_chooser.cc",
+diff --git a/chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.cc b/chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.cc
+index fb00714a3e..56661c0f0b 100644
+--- a/chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.cc
++++ b/chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.cc
+@@ -3,6 +3,9 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/engine_mode.h"
++#endif
+ 
+ #include <memory>
+ #include <string>
+@@ -415,6 +418,13 @@ void ChromeRuntimeAPIDelegate::OpenOptionsPage(
+   const bool create_new_browser = !browser;
+ 
+   if (create_new_browser) {
++#if BUILDFLAG(IS_MAC)
++    // ReArc wave 18f: no Chromium Browser window in the embedded engine.
++    if (rearc::IsEngineEmbeddedMode()) {
++      std::move(callback).Run(false);
++      return;
++    }
++#endif
+     if (GetBrowserWindowCreationStatusForProfile(*profile) !=
+         BrowserWindowInterface::CreationStatus::kOk) {
+       // No active browser and can't create a new one. Bail.
+diff --git a/chrome/browser/extensions/open_tab_helper.cc b/chrome/browser/extensions/open_tab_helper.cc
+index 9ee4de85f5..4ab26ba08d 100644
+--- a/chrome/browser/extensions/open_tab_helper.cc
++++ b/chrome/browser/extensions/open_tab_helper.cc
+@@ -3,6 +3,9 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/open_tab_helper.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/engine_mode.h"
++#endif
+ 
+ #include "base/strings/string_number_conversions.h"
+ #include "base/types/expected_macros.h"
+@@ -48,6 +51,13 @@ namespace {
+ // creation / initialization is an async process.
+ BrowserWindowInterface* CreateAndShowBrowser(Profile* profile,
+                                              bool user_gesture) {
++#if BUILDFLAG(IS_MAC)
++  // ReArc wave 18f: extension APIs never open a Chromium Browser window in
++  // the embedded engine; callers report kNoCurrentWindowError.
++  if (rearc::IsEngineEmbeddedMode()) {
++    return nullptr;
++  }
++#endif
+   if (GetBrowserWindowCreationStatusForProfile(*profile) !=
+       BrowserWindowInterface::CreationStatus::kOk) {
+     return nullptr;
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 1f9507dd35..8142ab4dc8 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -26,6 +26,8 @@ void ABIAttachFind(uint64_t tab_id);
+ void ABIDetachFind(uint64_t tab_id);
+ ReArcStatus ABIValidateNavigationURL(const GURL&);
+ void ABICancelPasswords(uint64_t tab_id);
++// Wave 18f: extension prompts of a tab (tab_id) or a profile (profile_id).
++void ABICancelExtensionPrompts(uint64_t tab_id, uint64_t profile_id);
+ void ABICancelContextMenu(uint64_t tab_id);
+ void ABICancelPermissions(uint64_t tab_id);
+ void ABICancelFileChooser(uint64_t tab_id);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 4e78785b78..30c456d878 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 31, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 32, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -782,6 +782,44 @@ REARC_ENGINE_EXPORT void ReArcEngineSetPasswordPromptCallback(
+ REARC_ENGINE_EXPORT ReArcStatus ReArcPasswordPromptRespond(
+     uint64_t request_id, uint32_t action);
+ 
++// Extension prompts (extension_install_prompts, ABI 1.32). Chromium's
++// extension install, re-enable and permission confirmations (Web Store,
++// CRX, chrome://extensions) and its uninstall confirmation are host requests;
++// Chromium's dialogs, its post-install Browser window/bubble and its error
++// infobar are never shown. Without a callback install prompts abort and
++// uninstall confirmations cancel. Register before tabs.
++// phase: 0 request, 1 cancelled (tab close, profile release, replacement or
++// Chromium withdrew it), 2 installed, 3 install failed (2/3 are notifications
++// with request_id 0). kind: Chromium InstallPromptData::PromptType (0 install,
++// 3 re-enable, 4 permissions, 5 external, 8 remote, 9 repair, 13/14 request,
++// 15 parent approval) or 100 uninstall. tab_id 0: not parented to a registry
++// tab (window-parented chrome://extensions dialogs, background installs).
++// title/labels/permissions are Chromium's localized strings; icon_png is a
++// borrowed PNG (may be null). error: phase 3 only.
++typedef struct ReArcExtensionPromptEvent {
++  uint64_t profile_id, tab_id, content_generation, request_id;
++  uint32_t phase, kind;
++  const char* extension_id;
++  const char* name;
++  const char* title;
++  const char* accept_label;
++  const char* cancel_label;
++  const char* const* permissions;
++  size_t permission_count;
++  const char* triggering_extension;
++  const char* error;
++  const uint8_t* icon_png;
++  size_t icon_png_size;
++} ReArcExtensionPromptEvent;
++typedef void (*ReArcExtensionPromptCallback)(void*,
++                                             const ReArcExtensionPromptEvent*);
++REARC_ENGINE_EXPORT void ReArcEngineSetExtensionPromptCallback(
++    ReArcExtensionPromptCallback callback, void* context);
++// action: 0 accept (install/enable/grant, or remove for kind 100), 1 cancel.
++// Single use; stale/cancelled IDs -> not_found.
++REARC_ENGINE_EXPORT ReArcStatus ReArcExtensionPromptRespond(
++    uint64_t request_id, uint32_t action);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 9348cf209a..d8a3cabf1b 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -545,6 +545,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "page_drops" ||
+          std::string(feature) == "picture_in_picture" ||
+          std::string(feature) == "extension_tab_helpers" ||
++         std::string(feature) == "extension_install_prompts" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index af8ee2d838..8450358278 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.33.0";
++  return "0.34.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_prompts.cc b/chrome/browser/rearc_bridge/rearc_extension_prompts.cc
+new file mode 100644
+index 0000000000..67775ebcc6
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_extension_prompts.cc
+@@ -0,0 +1,394 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_extension_prompts.h"
++
++#include <pthread.h>
++
++#include <map>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/extensions/extension_install_prompt_show_params.h"  // nogncheck
++#include "chrome/browser/extensions/extension_uninstall_dialog.h"  // nogncheck
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/grit/generated_resources.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "extensions/browser/install_prompt_data.h"
++#include "extensions/browser/ui_util.h"
++#include "extensions/common/extension.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "ui/base/l10n/l10n_util.h"
++#include "ui/strings/grit/ui_strings.h"
++#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/image/image.h"
++#include "ui/gfx/image/image_skia.h"
++
++namespace rearc {
++namespace {
++
++constexpr uint32_t kUninstallKind = 100;
++
++ReArcExtensionPromptCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0, next_id = 1;
++
++// Owned copy of an event; pointers are filled in at delivery.
++struct Snapshot {
++  ReArcExtensionPromptEvent event{};
++  std::string extension_id, name, title, accept_label, cancel_label,
++      triggering_extension, error;
++  std::vector<std::string> permissions;
++  std::vector<uint8_t> icon;
++};
++
++std::vector<uint8_t> EncodeIcon(const SkBitmap& bitmap) {
++  if (bitmap.drawsNothing()) {
++    return {};
++  }
++  return gfx::PNGCodec::EncodeBGRASkBitmap(bitmap, false)
++      .value_or(std::vector<uint8_t>());
++}
++
++void Publish(Snapshot snapshot, bool requires_pending);
++
++class Request;
++std::map<uint64_t, std::unique_ptr<Request>>& Pending() {
++  static base::NoDestructor<std::map<uint64_t, std::unique_ptr<Request>>> map;
++  return *map;
++}
++
++class HostUninstallDialog;
++
++// One pending host request. Install prompts own Chromium's DoneCallback and
++// prompt data; uninstall requests point back at their dialog.
++class Request : public content::WebContentsObserver {
++ public:
++  explicit Request(content::WebContents* contents)
++      : content::WebContentsObserver(contents) {}
++  void WebContentsDestroyed() override;
++
++  Snapshot snapshot;
++  ExtensionInstallPrompt::DoneCallback done;
++  std::unique_ptr<extensions::InstallPromptData> prompt;
++  std::unique_ptr<ExtensionInstallPromptShowParams> params;
++  base::WeakPtr<extensions::ExtensionUninstallDialog> uninstall;
++};
++
++std::unique_ptr<Request> Take(uint64_t id) {
++  auto it = Pending().find(id);
++  if (it == Pending().end()) {
++    return nullptr;
++  }
++  auto request = std::move(it->second);
++  Pending().erase(it);
++  return request;
++}
++
++void CloseUninstallLater(base::WeakPtr<extensions::ExtensionUninstallDialog> d,
++                         extensions::ExtensionUninstallDialog::CloseAction a) {
++  // The delegate usually destroys the dialog from OnDialogClosed; never do
++  // that inside the dialog's own Show/Close or a registry iteration.
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++      FROM_HERE,
++      base::BindOnce(&extensions::ExtensionUninstallDialog::OnDialogClosed,
++                     std::move(d), a));
++}
++
++// Cancellation: phase 1 event, then Chromium's abort/cancel result.
++void Cancel(uint64_t id) {
++  auto request = Take(id);
++  if (!request) {
++    return;
++  }
++  Snapshot snapshot = request->snapshot;
++  snapshot.event.phase = 1;
++  Publish(std::move(snapshot), false);
++  if (request->done) {
++    if (request->prompt) {
++      request->prompt->OnDialogCanceled();
++    }
++    std::move(request->done)
++        .Run(ExtensionInstallPrompt::DoneCallbackPayload(
++            ExtensionInstallPrompt::Result::ABORTED));
++  } else if (request->uninstall) {
++    CloseUninstallLater(
++        request->uninstall,
++        extensions::ExtensionUninstallDialog::CLOSE_ACTION_CANCELED);
++  }
++}
++
++void Request::WebContentsDestroyed() {
++  // `this` is destroyed by Cancel.
++  Cancel(snapshot.event.request_id);
++}
++
++void Publish(Snapshot snapshot, bool requires_pending) {
++  ABIPost(base::BindOnce(
++      [](uint64_t expected, bool requires_pending, Snapshot s) {
++        if (!host || expected != epoch ||
++            (requires_pending && !Pending().contains(s.event.request_id))) {
++          return;
++        }
++        std::vector<const char*> permissions;
++        for (const auto& p : s.permissions) {
++          permissions.push_back(p.c_str());
++        }
++        ReArcExtensionPromptEvent e = s.event;
++        e.extension_id = s.extension_id.c_str();
++        e.name = s.name.c_str();
++        e.title = s.title.c_str();
++        e.accept_label = s.accept_label.c_str();
++        e.cancel_label = s.cancel_label.c_str();
++        e.permissions = permissions.empty() ? nullptr : permissions.data();
++        e.permission_count = permissions.size();
++        e.triggering_extension = s.triggering_extension.c_str();
++        e.error = s.error.c_str();
++        e.icon_png = s.icon.empty() ? nullptr : s.icon.data();
++        e.icon_png_size = s.icon.size();
++        host(host_context, &e);
++      },
++      epoch, requires_pending, std::move(snapshot)));
++}
++
++// Fills profile/tab identity. A prompt parented to a registry tab carries its
++// tab; window-parented and background prompts carry tab 0.
++void Identify(Snapshot& s, Profile* profile, content::WebContents* contents) {
++  s.event.profile_id = profile ? BridgeProfileId(profile) : 0;
++  if (!s.event.profile_id && profile) {
++    s.event.profile_id = BridgeProfileId(profile->GetOriginalProfile());
++  }
++  if (!contents) {
++    return;
++  }
++  for (uint64_t id : TabRegistry::Get().SessionIds()) {
++    TabSession* session = TabRegistry::Get().FindSession(id);
++    if (session && session->web_contents() == contents) {
++      s.event.tab_id = session->tab_id();
++      s.event.content_generation = session->content_generation();
++      s.event.profile_id = session->profile_id();
++      return;
++    }
++  }
++}
++
++uint64_t Enqueue(std::unique_ptr<Request> request) {
++  const uint64_t id = next_id++;
++  request->snapshot.event.request_id = id;
++  request->snapshot.event.phase = 0;
++  Snapshot snapshot = request->snapshot;
++  Pending().emplace(id, std::move(request));
++  Publish(std::move(snapshot), true);
++  return id;
++}
++
++class HostUninstallDialog : public extensions::ExtensionUninstallDialog {
++ public:
++  HostUninstallDialog(Profile* profile,
++                      gfx::NativeWindow parent,
++                      Delegate* delegate)
++      : extensions::ExtensionUninstallDialog(profile, parent, delegate),
++        profile_(profile) {}
++  ~HostUninstallDialog() override {
++    // Destroyed by its owner without a reply: withdraw the request.
++    if (id_ && Take(id_)) {
++      Snapshot snapshot;
++      snapshot.event = event_;
++      snapshot.event.phase = 1;
++      Publish(std::move(snapshot), false);
++    }
++  }
++
++ private:
++  void Show() override {
++    if (!host) {
++      CloseUninstallLater(AsWeakPtr(), CLOSE_ACTION_CANCELED);
++      return;
++    }
++    auto request = std::make_unique<Request>(nullptr);
++    Snapshot& s = request->snapshot;
++    s.event.kind = kUninstallKind;
++    Identify(s, profile_, nullptr);
++    s.extension_id = extension()->id();
++    s.name = extension()->name();
++    s.title = base::UTF16ToUTF8(l10n_util::GetStringFUTF16(
++        IDS_EXTENSION_PROMPT_UNINSTALL_TITLE,
++        extensions::ui_util::GetFixupExtensionNameForUIDisplay(
++            extension()->name())));
++    s.accept_label = base::UTF16ToUTF8(
++        l10n_util::GetStringUTF16(IDS_EXTENSION_PROMPT_UNINSTALL_BUTTON));
++    s.cancel_label =
++        base::UTF16ToUTF8(l10n_util::GetStringUTF16(IDS_APP_CANCEL));
++    if (triggering_extension()) {
++      s.triggering_extension = triggering_extension()->name();
++    }
++    if (const SkBitmap* bitmap = icon().bitmap()) {
++      s.icon = EncodeIcon(*bitmap);
++    }
++    request->uninstall = AsWeakPtr();
++    event_ = s.event;
++    id_ = Enqueue(std::move(request));
++  }
++  void Close() override {
++    if (id_) {
++      Cancel(std::exchange(id_, 0));
++    }
++  }
++
++  raw_ptr<Profile> profile_;
++  uint64_t id_ = 0;
++  ReArcExtensionPromptEvent event_{};
++};
++
++}  // namespace
++
++void ShowHostExtensionInstallPrompt(
++    std::unique_ptr<ExtensionInstallPromptShowParams> show_params,
++    ExtensionInstallPrompt::DoneCallback done_callback,
++    std::unique_ptr<extensions::InstallPromptData> prompt) {
++  CHECK(pthread_main_np());
++  if (!host || show_params->WasParentDestroyed()) {
++    // Conservative: never Chromium UI, never an implicit accept.
++    prompt->OnDialogCanceled();
++    std::move(done_callback)
++        .Run(ExtensionInstallPrompt::DoneCallbackPayload(
++            ExtensionInstallPrompt::Result::ABORTED));
++    return;
++  }
++  content::WebContents* contents = show_params->GetParentWebContents();
++  auto request = std::make_unique<Request>(contents);
++  Snapshot& s = request->snapshot;
++  s.event.kind = static_cast<uint32_t>(prompt->type());
++  Identify(s, show_params->profile(), contents);
++  if (const extensions::Extension* extension = prompt->extension()) {
++    s.extension_id = extension->id();
++    s.name = extension->name();
++  }
++  s.title = base::UTF16ToUTF8(prompt->GetDialogTitle());
++  s.accept_label = base::UTF16ToUTF8(prompt->GetAcceptButtonLabel());
++  s.cancel_label = base::UTF16ToUTF8(prompt->GetAbortButtonLabel());
++  for (size_t i = 0; i < prompt->GetPermissionCount(); ++i) {
++    s.permissions.push_back(base::UTF16ToUTF8(prompt->GetPermission(i)));
++  }
++  if (!prompt->icon().IsEmpty()) {
++    s.icon = EncodeIcon(*prompt->icon().ToSkBitmap());
++  }
++  request->done = std::move(done_callback);
++  request->prompt = std::move(prompt);
++  request->params = std::move(show_params);
++  Enqueue(std::move(request));
++}
++
++std::unique_ptr<extensions::ExtensionUninstallDialog>
++CreateHostExtensionUninstallDialog(
++    Profile* profile,
++    gfx::NativeWindow parent,
++    extensions::ExtensionUninstallDialog::Delegate* delegate) {
++  return std::make_unique<HostUninstallDialog>(profile, parent, delegate);
++}
++
++void NotifyHostExtensionInstalled(Profile* profile,
++                                  const extensions::Extension& extension,
++                                  const SkBitmap* icon) {
++  CHECK(pthread_main_np());
++  Snapshot s;
++  s.event.phase = 2;
++  s.event.kind = static_cast<uint32_t>(
++      extensions::InstallPromptData::INSTALL_PROMPT);
++  Identify(s, profile, nullptr);
++  s.extension_id = extension.id();
++  s.name = extension.name();
++  if (icon) {
++    s.icon = EncodeIcon(*icon);
++  }
++  Publish(std::move(s), false);
++}
++
++void NotifyHostExtensionInstallFailed(Profile* profile,
++                                      const std::string& extension_id,
++                                      const std::u16string& error) {
++  CHECK(pthread_main_np());
++  Snapshot s;
++  s.event.phase = 3;
++  s.event.kind = static_cast<uint32_t>(
++      extensions::InstallPromptData::INSTALL_PROMPT);
++  Identify(s, profile, nullptr);
++  s.extension_id = extension_id;
++  s.error = base::UTF16ToUTF8(error);
++  Publish(std::move(s), false);
++}
++
++void ABICancelExtensionPrompts(uint64_t tab_id, uint64_t profile_id) {
++  CHECK(pthread_main_np());
++  std::vector<uint64_t> ids;
++  for (const auto& [id, request] : Pending()) {
++    const auto& e = request->snapshot.event;
++    if ((tab_id && e.tab_id == tab_id) ||
++        (profile_id && e.profile_id == profile_id)) {
++      ids.push_back(id);
++    }
++  }
++  for (uint64_t id : ids) {
++    Cancel(id);
++  }
++}
++
++}  // namespace rearc
++
++void ReArcEngineSetExtensionPromptCallback(ReArcExtensionPromptCallback cb,
++                                           void* ctx) {
++  CHECK(pthread_main_np());
++  std::vector<uint64_t> ids;
++  for (const auto& [id, request] : rearc::Pending()) {
++    ids.push_back(id);
++  }
++  for (uint64_t id : ids) {
++    rearc::Cancel(id);
++  }
++  ++rearc::epoch;
++  rearc::host = cb;
++  rearc::host_context = ctx;
++}
++
++ReArcStatus ReArcExtensionPromptRespond(uint64_t id, uint32_t action) {
++  CHECK(pthread_main_np());
++  if (action > 1) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  auto request = rearc::Take(id);
++  if (!request) {
++    return REARC_NOT_FOUND;
++  }
++  const bool accept = action == 0;
++  if (request->done) {
++    ExtensionInstallPrompt::Result result =
++        !accept ? ExtensionInstallPrompt::Result::USER_CANCELED
++        : request->prompt->ShouldWithheldPermissionsOnDialogAccept()
++            ? ExtensionInstallPrompt::Result::ACCEPTED_WITH_WITHHELD_PERMISSIONS
++            : ExtensionInstallPrompt::Result::ACCEPTED;
++    if (accept) {
++      request->prompt->OnDialogAccepted();
++    } else {
++      request->prompt->OnDialogCanceled();
++    }
++    std::move(request->done)
++        .Run(ExtensionInstallPrompt::DoneCallbackPayload(result));
++  } else if (request->uninstall) {
++    rearc::CloseUninstallLater(
++        request->uninstall,
++        accept ? extensions::ExtensionUninstallDialog::CLOSE_ACTION_UNINSTALL
++               : extensions::ExtensionUninstallDialog::CLOSE_ACTION_CANCELED);
++  }
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_prompts.h b/chrome/browser/rearc_bridge/rearc_extension_prompts.h
+new file mode 100644
+index 0000000000..6281ccf9bc
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_extension_prompts.h
+@@ -0,0 +1,49 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_PROMPTS_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_PROMPTS_H_
++
++#include <memory>
++#include <string>
++
++#include "chrome/browser/extensions/extension_install_prompt.h"  // nogncheck
++#include "chrome/browser/extensions/extension_uninstall_dialog.h"  // nogncheck
++#include "ui/gfx/native_ui_types.h"
++
++class ExtensionInstallPromptShowParams;
++class Profile;
++class SkBitmap;
++
++namespace extensions {
++class Extension;
++class InstallPromptData;
++}  // namespace extensions
++
++namespace rearc {
++
++// Wave 18f (extension_install_prompts). In embedded mode Chromium's install,
++// re-enable and permission confirmations and the uninstall confirmation are
++// host requests; Chromium's Views dialogs are never shown. Without a host
++// callback install prompts abort and uninstall confirmations cancel.
++void ShowHostExtensionInstallPrompt(
++    std::unique_ptr<ExtensionInstallPromptShowParams> show_params,
++    ExtensionInstallPrompt::DoneCallback done_callback,
++    std::unique_ptr<extensions::InstallPromptData> prompt);
++std::unique_ptr<extensions::ExtensionUninstallDialog>
++CreateHostExtensionUninstallDialog(
++    Profile* profile,
++    gfx::NativeWindow parent,
++    extensions::ExtensionUninstallDialog::Delegate* delegate);
++// Post-install UI (ExtensionInstallUIDesktop) as host notifications, instead
++// of opening a Chromium Browser window and its installed bubble.
++void NotifyHostExtensionInstalled(Profile* profile,
++                                  const extensions::Extension& extension,
++                                  const SkBitmap* icon);
++void NotifyHostExtensionInstallFailed(Profile* profile,
++                                      const std::string& extension_id,
++                                      const std::u16string& error);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_PROMPTS_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.cc b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+index a98073e76c..653fb08647 100644
+--- a/chrome/browser/rearc_bridge/rearc_profile_registry.cc
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+@@ -52,6 +52,7 @@ void UnregisterBridgeProfile(Profile* profile) {
+   // Before the profile (and its DownloadManager) can be destroyed.
+   ABICancelHistory(BridgeProfileId(profile));
+   ABICancelSearch(BridgeProfileId(profile));
++  ABICancelExtensionPrompts(0, BridgeProfileId(profile));
+   ABIDetachDownloads(BridgeProfileId(profile));
+   if (BridgeProfileId(profile) == default_id) {
+     default_id = 0;
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 962860f24d..0914501936 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -1099,6 +1099,7 @@ void ABIAttachServices(uint64_t id) {
+ void ABIDetachServices(uint64_t id) {
+   CHECK(pthread_main_np());
+   ABICancelPasswords(id);
++  ABICancelExtensionPrompts(id, 0);
+   ABICancelContextMenu(id);
+   ABICancelPermissions(id);
+   ABICancelFileChooser(id);
+diff --git a/chrome/browser/ui/extensions/extension_install_ui_desktop.cc b/chrome/browser/ui/extensions/extension_install_ui_desktop.cc
+index c9e2a59c3e..1b8e60ba87 100644
+--- a/chrome/browser/ui/extensions/extension_install_ui_desktop.cc
++++ b/chrome/browser/ui/extensions/extension_install_ui_desktop.cc
+@@ -3,6 +3,10 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/ui/extensions/extension_install_ui_desktop.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/engine_mode.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_prompts.h"
++#endif
+ 
+ #include <string>
+ #include <utility>
+@@ -129,6 +133,14 @@ void ExtensionInstallUIDesktop::OnInstallSuccess(
+     DUMP_WILL_BE_NOTREACHED();
+     return;
+   }
++#if BUILDFLAG(IS_MAC)
++  // ReArc wave 18f: no Chromium Browser window or installed bubble; the
++  // embedded host is told instead.
++  if (rearc::IsEngineEmbeddedMode()) {
++    rearc::NotifyHostExtensionInstalled(profile(), *extension, icon);
++    return;
++  }
++#endif
+ 
+   // Extensions aren't enabled by default in incognito so we confirm
+   // the install in a normal window.
+@@ -185,6 +197,13 @@ void ExtensionInstallUIDesktop::OnInstallFailure(
+   if (IsUiDisabled() || skip_post_install_ui()) {
+     return;
+   }
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    rearc::NotifyHostExtensionInstallFailed(profile(), std::string(),
++                                            error.message());
++    return;
++  }
++#endif
+ 
+   BrowserWindowInterface* const browser =
+       ProfileBrowserCollection::GetForProfile(profile())
+diff --git a/chrome/browser/ui/extensions/extension_uninstall_dialog_impl.cc b/chrome/browser/ui/extensions/extension_uninstall_dialog_impl.cc
+index 9bc1098150..cda2d8cadf 100644
+--- a/chrome/browser/ui/extensions/extension_uninstall_dialog_impl.cc
++++ b/chrome/browser/ui/extensions/extension_uninstall_dialog_impl.cc
+@@ -7,6 +7,11 @@
+ 
+ #include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
++#include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/engine_mode.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_prompts.h"
++#endif
+ #include "chrome/browser/extensions/extension_uninstall_dialog.h"
+ #include "chrome/browser/ui/extensions/extension_dialog_utils.h"
+ #include "chrome/grit/generated_resources.h"
+@@ -163,6 +168,13 @@ std::unique_ptr<extensions::ExtensionUninstallDialog>
+ extensions::ExtensionUninstallDialog::Create(Profile* profile,
+                                              gfx::NativeWindow parent,
+                                              Delegate* delegate) {
++#if BUILDFLAG(IS_MAC)
++  // ReArc wave 18f: the embedded host presents uninstall confirmations.
++  if (rearc::IsEngineEmbeddedMode()) {
++    return rearc::CreateHostExtensionUninstallDialog(profile, parent,
++                                                     delegate);
++  }
++#endif
+   return std::make_unique<ExtensionUninstallDialogImpl>(profile, parent,
+                                                         delegate);
+ }
+diff --git a/chrome/browser/ui/views/extensions/extension_install_dialog_view.cc b/chrome/browser/ui/views/extensions/extension_install_dialog_view.cc
+index 83ce5b59c1..16be49084f 100644
+--- a/chrome/browser/ui/views/extensions/extension_install_dialog_view.cc
++++ b/chrome/browser/ui/views/extensions/extension_install_dialog_view.cc
+@@ -3,6 +3,10 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/ui/views/extensions/extension_install_dialog_view.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/engine_mode.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_prompts.h"
++#endif
+ 
+ #include <memory>
+ #include <string>
+@@ -87,6 +91,14 @@ void ShowExtensionInstallDialogImpl(
+     ExtensionInstallPrompt::DoneCallback done_callback,
+     std::unique_ptr<InstallPromptData> prompt) {
+   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++#if BUILDFLAG(IS_MAC)
++  // ReArc wave 18f: the embedded host presents install confirmations.
++  if (rearc::IsEngineEmbeddedMode()) {
++    rearc::ShowHostExtensionInstallPrompt(
++        std::move(show_params), std::move(done_callback), std::move(prompt));
++    return;
++  }
++#endif
+ 
+   // If the dialog has to be parented to WebContents, force activate the
+   // contents. See crbug.com/40059470.
+-- 
+2.54.0 (Apple Git-157)
+

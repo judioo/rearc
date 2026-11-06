@@ -1,0 +1,161 @@
+From f511949e6b2f0910634df6b10e1f938018674496 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 21:32:58 +0400
+Subject: [PATCH] P-TAB-001 release: export the whole ReArc C ABI from the
+ non-component framework
+
+A non-component (release) Chromium Framework exports only the symbols listed in chrome/app/framework.exports (ld -exported_symbol_list); everything else becomes hidden. Waves after tab/018 added ABI functions to rearc_engine_abi.h without listing most of them, so the first optimized build (out/ReArc-release-arm64, engine/docs/RELEASE.md) exported 52 of the 110 functions the header declares. Component dev builds export everything from libchrome_dll.dylib, which hid the gap. The release shell could not link against it. This adds the 58 missing functions (find, downloads, autofill, passwords, permissions, dialogs, history, search, extensions, fullscreen, discard, print, link-open, HTTP auth, file chooser, context menu, drops, picture-in-picture callbacks and their responders) to framework.exports, and to framework.order ahead of _ChromeMain so verify_chrome_framework_order still passes. No behavior change; nm -gU of the release framework now lists all 110 header functions, the same set as the dev libchrome_dll.dylib.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/app/framework.exports | 62 ++++++++++++++++++++++++++++++++++++
+ chrome/app/framework.order   | 62 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 124 insertions(+)
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index e4c16e73fb..e2f2b2cd63 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -75,3 +75,65 @@ _ReArcTabSetZoomFactor
+ _ReArcTabGetDocumentIdentity
+ _ReArcTabEvaluateScript2
+ _ReArcTabEvaluateScript
++
++# ReArc ABI functions added after tab/018, through ABI 1.41 (tab/060). A
++# non-component framework exports only what is listed here; keep this file and
++# framework.order in step with rearc_engine_abi.h.
++_ReArcDownloadGetWarning
++_ReArcDownloadResolveDanger
++_ReArcHistoryQuery
++_ReArcHistoryDeleteURL
++_ReArcHistoryDeleteRange
++_ReArcSearchGetDefaultProvider
++_ReArcSearchSetDefaultProvider
++_ReArcSearchClassifyInput
++_ReArcAutocompleteStart
++_ReArcAutocompleteStop
++_ReArcTabDiscard
++_ReArcTabGetDiscardState
++_ReArcEngineSetFullscreenCallback
++_ReArcTabExitFullscreen
++_ReArcTabGetFullscreenState
++_ReArcEngineSetPrintCallback
++_ReArcTabPrintToPDF
++_ReArcEngineSetDropPolicy
++_ReArcEngineSetPictureInPictureCallback
++_ReArcEngineSetFindCallback
++_ReArcTabFindStart
++_ReArcTabFindNext
++_ReArcTabFindStop
++_ReArcEngineSetDownloadCallback
++_ReArcDownloadSetPolicy
++_ReArcDownloadAction
++_ReArcEngineSetJavaScriptDialogCallback
++_ReArcJavaScriptDialogRespond
++_ReArcEngineSetFileChooserCallback
++_ReArcFileChooserRespond
++_ReArcEngineSetPermissionCallback
++_ReArcPermissionRespond
++_ReArcEngineSetContextMenuCallback
++_ReArcContextMenuCommand
++_ReArcEngineSetPasswordPromptCallback
++_ReArcPasswordPromptRespond
++_ReArcEngineSetExtensionPromptCallback
++_ReArcExtensionPromptRespond
++_ReArcTabGetExtensionActions
++_ReArcEngineSetExtensionActionCallback
++_ReArcTabRunExtensionAction
++_ReArcEngineSetAutofillCallback
++_ReArcAutofillAccept
++_ReArcAutofillSelect
++_ReArcAutofillDismiss
++_ReArcAutofillManage
++_ReArcTabSetExtensionWindow
++_ReArcTabGetExtensionState
++_ReArcEngineSetExtensionTabRequestCallback
++_ReArcExtensionTabRequestRespond
++_ReArcEngineSetAutofillSaveCallback
++_ReArcAutofillSaveRespond
++_ReArcEngineSetHttpAuthCallback
++_ReArcHttpAuthRespond
++_ReArcEngineSetLinkOpenCallback
++_ReArcLinkOpenRespond
++_ReArcProfileGetPasswordLeakDetection
++_ReArcProfileSetPasswordLeakDetection
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index a08aa712ee..85e3707996 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -87,5 +87,67 @@ _ReArcTabGetDocumentIdentity
+ _ReArcTabEvaluateScript2
+ _ReArcTabEvaluateScript
+ 
++# ReArc ABI functions added after tab/018, through ABI 1.41 (tab/060). A
++# non-component framework exports only what is listed here; keep this file and
++# framework.order in step with rearc_engine_abi.h.
++_ReArcDownloadGetWarning
++_ReArcDownloadResolveDanger
++_ReArcHistoryQuery
++_ReArcHistoryDeleteURL
++_ReArcHistoryDeleteRange
++_ReArcSearchGetDefaultProvider
++_ReArcSearchSetDefaultProvider
++_ReArcSearchClassifyInput
++_ReArcAutocompleteStart
++_ReArcAutocompleteStop
++_ReArcTabDiscard
++_ReArcTabGetDiscardState
++_ReArcEngineSetFullscreenCallback
++_ReArcTabExitFullscreen
++_ReArcTabGetFullscreenState
++_ReArcEngineSetPrintCallback
++_ReArcTabPrintToPDF
++_ReArcEngineSetDropPolicy
++_ReArcEngineSetPictureInPictureCallback
++_ReArcEngineSetFindCallback
++_ReArcTabFindStart
++_ReArcTabFindNext
++_ReArcTabFindStop
++_ReArcEngineSetDownloadCallback
++_ReArcDownloadSetPolicy
++_ReArcDownloadAction
++_ReArcEngineSetJavaScriptDialogCallback
++_ReArcJavaScriptDialogRespond
++_ReArcEngineSetFileChooserCallback
++_ReArcFileChooserRespond
++_ReArcEngineSetPermissionCallback
++_ReArcPermissionRespond
++_ReArcEngineSetContextMenuCallback
++_ReArcContextMenuCommand
++_ReArcEngineSetPasswordPromptCallback
++_ReArcPasswordPromptRespond
++_ReArcEngineSetExtensionPromptCallback
++_ReArcExtensionPromptRespond
++_ReArcTabGetExtensionActions
++_ReArcEngineSetExtensionActionCallback
++_ReArcTabRunExtensionAction
++_ReArcEngineSetAutofillCallback
++_ReArcAutofillAccept
++_ReArcAutofillSelect
++_ReArcAutofillDismiss
++_ReArcAutofillManage
++_ReArcTabSetExtensionWindow
++_ReArcTabGetExtensionState
++_ReArcEngineSetExtensionTabRequestCallback
++_ReArcExtensionTabRequestRespond
++_ReArcEngineSetAutofillSaveCallback
++_ReArcAutofillSaveRespond
++_ReArcEngineSetHttpAuthCallback
++_ReArcHttpAuthRespond
++_ReArcEngineSetLinkOpenCallback
++_ReArcLinkOpenRespond
++_ReArcProfileGetPasswordLeakDetection
++_ReArcProfileSetPasswordLeakDetection
++
+ # _ChromeMain must be listed last.  That's the whole point of this file.
+ _ChromeMain
+-- 
+2.54.0 (Apple Git-157)
+

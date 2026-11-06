@@ -1,0 +1,16 @@
+// Test-only loopback CDP focus emulation for a locked macOS test session.
+// Never linked into the engine. Mirrors the wave-18 WebUI/helpers host cleanup.
+#include <functional>
+namespace test_cdp {
+static std::string profile;
+static NSURLSession* session;
+static NSURLSessionWebSocketTask* socket_;
+static int next_id=1;
+static std::function<void()> pending;
+static NSArray* port_lines(){return [[NSString stringWithContentsOfFile:[NSString stringWithUTF8String:(profile+"/DevToolsActivePort").c_str()] encoding:NSUTF8StringEncoding error:nil] componentsSeparatedByString:@"\n"];}
+static void initialize(int argc,const char** argv){for(int i=1;i<argc;++i)if(std::string(argv[i]).starts_with("--user-data-dir="))profile=argv[i]+16;session=[NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];}
+static void receive(){[socket_ receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage* message,NSError* error){assert(!error&&message);NSDictionary* reply=[NSJSONSerialization JSONObjectWithData:[message.string dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];dispatch_async(dispatch_get_main_queue(),^{if(!reply[@"id"]){receive();return;}assert(!reply[@"error"]);auto callback=std::move(pending);pending=nullptr;callback();});}];}
+static void command(NSString* method,NSDictionary* params,std::function<void()> callback){pending=std::move(callback);NSData* payload=[NSJSONSerialization dataWithJSONObject:@{@"id":@(next_id++),@"method":method,@"params":params} options:0 error:nil];[socket_ sendMessage:[[NSURLSessionWebSocketMessage alloc]initWithString:[[NSString alloc]initWithData:payload encoding:NSUTF8StringEncoding]] completionHandler:^(NSError* error){assert(!error);}];receive();}
+static void focus(std::string prefix,std::function<void()> callback){pending=std::move(callback);NSURL* url=[NSURL URLWithString:[NSString stringWithFormat:@"http://127.0.0.1:%@/json/list",port_lines()[0]]];[[session dataTaskWithURL:url completionHandler:^(NSData* data,NSURLResponse*,NSError* error){assert(!error&&data);NSArray* targets=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];dispatch_async(dispatch_get_main_queue(),^{NSString* ws=nil;for(NSDictionary* t in targets)if([t[@"url"] hasPrefix:[NSString stringWithUTF8String:prefix.c_str()]])ws=t[@"webSocketDebuggerUrl"];assert(ws);if(socket_)[socket_ cancelWithCloseCode:NSURLSessionWebSocketCloseCodeNormalClosure reason:nil];socket_=[session webSocketTaskWithURL:[NSURL URLWithString:ws]];[socket_ resume];NSData* payload=[NSJSONSerialization dataWithJSONObject:@{@"id":@(next_id++),@"method":@"Emulation.setFocusEmulationEnabled",@"params":@{@"enabled":@YES}} options:0 error:nil];[socket_ sendMessage:[[NSURLSessionWebSocketMessage alloc]initWithString:[[NSString alloc]initWithData:payload encoding:NSUTF8StringEncoding]] completionHandler:^(NSError* error){assert(!error);}];receive();});}] resume];}
+static void close_browser(){NSArray* lines=port_lines();socket_=[session webSocketTaskWithURL:[NSURL URLWithString:[NSString stringWithFormat:@"ws://127.0.0.1:%@%@",lines[0],lines[1]]]];[socket_ resume];[socket_ sendMessage:[[NSURLSessionWebSocketMessage alloc]initWithString:@"{\"id\":1,\"method\":\"Browser.close\"}"] completionHandler:^(NSError* error){assert(!error);}];}
+}

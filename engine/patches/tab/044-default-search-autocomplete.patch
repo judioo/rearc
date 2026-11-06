@@ -1,0 +1,650 @@
+From 669d2bfe616d5ee1b49f0f9640d878bd277f97b5 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 11:23:14 +0400
+Subject: [PATCH] P-TAB-001 wave 18e: default search provider and cancellable
+ autocomplete
+
+Read and set the profile's TemplateURLService default engine, classify command-bar input as URL or search, and run Chromium AutocompleteController queries with local providers plus gated remote suggest. One query per profile; the next query, Stop or profile release delivers exactly one cancelled terminal result. OTR IDs never read their original's history/bookmarks/shortcuts and never send suggest requests; setting the engine through OTR is rejected. ABI 1.26 / bridge 0.28.0; build p70, native provider get/set, classification, history and remote-suggest results, supersede/stop/close cancellation and OTR isolation pass.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/BUILD.gn                       |   1 +
+ .../browser/rearc_bridge/rearc_abi_internal.h |   1 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  70 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_profile_registry.cc    |   1 +
+ .../browser/rearc_bridge/rearc_search_abi.cc  | 470 ++++++++++++++++++
+ 7 files changed, 544 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_search_abi.cc
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 6aa6446be3..71bd6732d5 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1488,6 +1488,7 @@ source_set("core") {
+       "rearc_bridge/browserless_tab_helpers.h",
+       "rearc_bridge/rearc_downloads_abi.cc",
+       "rearc_bridge/rearc_history_abi.cc",
++      "rearc_bridge/rearc_search_abi.cc",
+       "rearc_bridge/discard_adapter.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+       "rearc_bridge/rearc_file_chooser.cc",
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 1cf82524f4..1f9507dd35 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -34,6 +34,7 @@ void ABICancelJavaScriptDialogs(uint64_t tab_id);
+ void ABIAttachDownloads(Profile* profile, uint64_t profile_id);
+ void ABIDetachDownloads(uint64_t profile_id);
+ void ABICancelHistory(uint64_t profile_id);
++void ABICancelSearch(uint64_t profile_id);
+ bool ABIHasVisibilityIntent(uint64_t tab_id);
+ bool ABIDiscardServicesBusy(uint64_t tab_id);
+ }  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index d288c081f0..d3766174c2 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 25, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 26, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -178,6 +178,74 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcHistoryDeleteRange(
+     uint64_t profile_id, int64_t begin_us, int64_t end_us,
+     ReArcCompletion completion, void* context);
+ 
++// Default search and autocomplete (search_autocomplete, ABI 1.26) over the
++// profile's TemplateURLService and Chromium's AutocompleteController. Calls
++// wait for the keyword service to load; callbacks are deferred, exactly once.
++// Text is non-empty UTF-8 <=4096 bytes. URLs use "%s" for the search terms,
++// with Chromium's other template parameters already resolved. OTR IDs read
++// their original's search engines but never its history/bookmarks/shortcuts
++// and never send remote suggest requests; SetDefaultProvider rejects OTR.
++typedef struct ReArcSearchProvider {
++  const char* name;
++  const char* keyword;
++  const char* search_url;
++  const char* suggest_url;  // Empty when the engine has none.
++  bool is_managed, is_prepopulated;
++} ReArcSearchProvider;
++typedef void (*ReArcSearchProviderCallback)(void* context, ReArcStatus status,
++                                            uint64_t profile_id,
++                                            const ReArcSearchProvider* provider);
++REARC_ENGINE_EXPORT ReArcStatus ReArcSearchGetDefaultProvider(
++    uint64_t profile_id, ReArcSearchProviderCallback completion, void* context);
++// name/keyword non-empty (keyword without whitespace); http(s) templates with
++// %s; suggest_url null/empty for none. is_* fields are ignored. Reuses an
++// identical engine or adds a user engine, then makes it default. Policy-managed
++// default search: invalid_state.
++REARC_ENGINE_EXPORT ReArcStatus ReArcSearchSetDefaultProvider(
++    uint64_t profile_id, const ReArcSearchProvider* provider,
++    ReArcCompletion completion, void* context);
++// kind: 0 none, 1 url (navigate), 2 search. match_type is Chromium's
++// AutocompleteMatchType. Uses synchronous providers only, no network.
++typedef struct ReArcInputClassification {
++  uint32_t kind, match_type;
++  const char* destination_url;
++} ReArcInputClassification;
++typedef void (*ReArcClassifyCallback)(void* context, ReArcStatus status,
++                                      uint64_t profile_id,
++                                      const ReArcInputClassification* result);
++REARC_ENGINE_EXPORT ReArcStatus ReArcSearchClassifyInput(
++    uint64_t profile_id, const char* text, ReArcClassifyCallback completion,
++    void* context);
++// One active query per profile. Start supersedes (and Stop ends) the previous
++// query: it receives one terminal result with status cancelled. A query gets
++// zero or more done=false updates, then exactly one done=true result (OK or
++// cancelled; profile release cancels). Ignore results for older query IDs.
++// options: 1 prevent inline autocompletion. Matches are Chromium's ranked
++// result (kind as above); strings/arrays are borrowed for the callback.
++typedef struct ReArcAutocompleteMatch {
++  uint32_t kind, match_type;
++  int32_t relevance;
++  bool allowed_to_be_default, deletable;
++  const char* contents;
++  const char* description;
++  const char* destination_url;
++  const char* fill_into_edit;
++  const char* inline_autocompletion;
++} ReArcAutocompleteMatch;
++typedef struct ReArcAutocompleteResult {
++  ReArcStatus status;
++  uint64_t profile_id, query_id;
++  bool done;
++  const ReArcAutocompleteMatch* matches;
++  size_t count;
++} ReArcAutocompleteResult;
++typedef void (*ReArcAutocompleteCallback)(
++    void* context, const ReArcAutocompleteResult* result);
++REARC_ENGINE_EXPORT ReArcStatus ReArcAutocompleteStart(
++    uint64_t profile_id, const char* text, uint32_t options,
++    ReArcAutocompleteCallback completion, void* context, uint64_t* query_id);
++REARC_ENGINE_EXPORT ReArcStatus ReArcAutocompleteStop(uint64_t profile_id);
++
+ // ABI 1.15 (history_recording, password_autofill): every tab carries Chromium's
+ // HistoryTabHelper (non-OTR profiles), autofill client and
+ // ChromePasswordManagerClient. Visits reach HistoryService/chrome://history;
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index a70607724c..7aeea0cc7c 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -529,6 +529,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "webui_daily_pages" ||
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "history_query" ||
++         std::string(feature) == "search_autocomplete" ||
+          std::string(feature) == "password_autofill" ||
+          std::string(feature) == "find_in_page" ||
+          std::string(feature) == "downloads" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 8c649057d2..60f6bb9530 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.27.0";
++  return "0.28.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.cc b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+index e13740e2bb..a98073e76c 100644
+--- a/chrome/browser/rearc_bridge/rearc_profile_registry.cc
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+@@ -51,6 +51,7 @@ void UnregisterBridgeProfile(Profile* profile) {
+   CHECK(pthread_main_np());
+   // Before the profile (and its DownloadManager) can be destroyed.
+   ABICancelHistory(BridgeProfileId(profile));
++  ABICancelSearch(BridgeProfileId(profile));
+   ABIDetachDownloads(BridgeProfileId(profile));
+   if (BridgeProfileId(profile) == default_id) {
+     default_id = 0;
+diff --git a/chrome/browser/rearc_bridge/rearc_search_abi.cc b/chrome/browser/rearc_bridge/rearc_search_abi.cc
+new file mode 100644
+index 0000000000..16f908bef1
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_search_abi.cc
+@@ -0,0 +1,470 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <pthread.h>
++#include <map>
++#include <memory>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/callback_list.h"
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/autocomplete/chrome_autocomplete_provider_client.h"
++#include "chrome/browser/autocomplete/chrome_autocomplete_scheme_classifier.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++#include "chrome/browser/search_engines/template_url_service_factory.h"
++#include "components/omnibox/browser/autocomplete_classifier.h"
++#include "components/omnibox/browser/autocomplete_controller.h"
++#include "components/omnibox/browser/autocomplete_input.h"
++#include "components/omnibox/browser/autocomplete_match.h"
++#include "components/omnibox/browser/autocomplete_result.h"
++#include "components/omnibox/browser/shortcuts_backend.h"
++#include "components/search_engines/template_url.h"
++#include "components/search_engines/template_url_service.h"
++#include "third_party/metrics_proto/omnibox_event.pb.h"
++#include "url/gurl.h"
++
++namespace rearc {
++namespace {
++using Type = AutocompleteProvider::Type;
++using Done = base::OnceCallback<void(ReArcStatus)>;
++constexpr metrics::OmniboxEventProto::PageClassification kPage =
++    metrics::OmniboxEventProto::OTHER;
++// Local providers only, plus SearchProvider whose remote suggest request is
++// gated by Chromium (no OTR, suggest pref). No zero-suggest/document/ML/tabs.
++constexpr int kRegularProviders =
++    static_cast<int>(Type::kBookmark) | static_cast<int>(Type::kBuiltin) |
++    static_cast<int>(Type::kHistoryQuick) | static_cast<int>(Type::kHistoryUrl) |
++    static_cast<int>(Type::kSearch) | static_cast<int>(Type::kShortcuts) |
++    static_cast<int>(Type::kKeyword) | static_cast<int>(Type::kCalculator) |
++    static_cast<int>(Type::kHistoryFuzzy);
++// OTR: HistoryURLProvider supplies only what-you-typed with no history.
++constexpr int kPrivateProviders =
++    static_cast<int>(Type::kBuiltin) | static_cast<int>(Type::kHistoryUrl) |
++    static_cast<int>(Type::kSearch) | static_cast<int>(Type::kKeyword) |
++    static_cast<int>(Type::kCalculator);
++// Chromium resolves these to the original profile for OTR. As with
++// history_query, an OTR ID never reads its original's history/bookmarks.
++class PrivateClient : public ChromeAutocompleteProviderClient {
++ public:
++  using ChromeAutocompleteProviderClient::ChromeAutocompleteProviderClient;
++  history::HistoryService* GetHistoryService() override { return nullptr; }
++  history_clusters::HistoryClustersService* GetHistoryClustersService()
++      override {
++    return nullptr;
++  }
++  bookmarks::BookmarkModel* GetBookmarkModel() override { return nullptr; }
++  history::URLDatabase* GetInMemoryDatabase() override { return nullptr; }
++  InMemoryURLIndex* GetInMemoryURLIndex() override { return nullptr; }
++  scoped_refptr<ShortcutsBackend> GetShortcutsBackend() override {
++    return nullptr;
++  }
++  scoped_refptr<ShortcutsBackend> GetShortcutsBackendIfExists() override {
++    return nullptr;
++  }
++};
++std::unique_ptr<AutocompleteController> NewController(Profile* profile) {
++  const bool otr = profile->IsOffTheRecord();
++  std::unique_ptr<AutocompleteProviderClient> client;
++  if (otr) {
++    client = std::make_unique<PrivateClient>(profile);
++  } else {
++    client = std::make_unique<ChromeAutocompleteProviderClient>(profile);
++  }
++  return std::make_unique<AutocompleteController>(
++      std::move(client),
++      AutocompleteControllerConfig{
++          .provider_types = otr ? kPrivateProviders : kRegularProviders,
++          .disable_ml = true,
++          .show_iph_matches = false});
++}
++struct Row {
++  uint32_t kind, type;
++  int32_t relevance;
++  bool allowed_to_be_default, deletable;
++  std::string contents, description, destination, fill, inline_completion;
++};
++class State;
++auto& States() {
++  static base::NoDestructor<std::map<uint64_t, std::unique_ptr<State>>> states;
++  return *states;
++}
++size_t waiting_count = 0;
++uint64_t next_query = 1;
++uint32_t Kind(const AutocompleteMatch& match) {
++  return AutocompleteMatch::IsSearchType(match.type) ? 2 : 1;
++}
++class State : public AutocompleteController::Observer {
++ public:
++  State(uint64_t id, Profile* profile)
++      : id_(id), profile_(profile), scheme_(profile) {}
++  ~State() override {
++    // Profile release: every waiter and the active query complete cancelled.
++    Cancel();
++    auto waiting = std::move(waiting_);
++    waiting_count -= waiting.size();
++    for (auto& done : waiting) std::move(done).Run(REARC_CANCELLED);
++    if (controller_) controller_->RemoveObserver(this);
++    if (classifier_) classifier_->Shutdown();
++  }
++  Profile* profile() const { return profile_; }
++  TemplateURLService* service() const {
++    return TemplateURLServiceFactory::GetForProfile(profile_);
++  }
++  // Runs done(OK) now when keywords are loaded, else once loaded (deferred).
++  ReArcStatus WhenLoaded(Done done) {
++    TemplateURLService* urls = service();
++    if (!urls) return REARC_UNSUPPORTED;
++    if (urls->loaded()) {
++      std::move(done).Run(REARC_OK);
++      return REARC_OK;
++    }
++    if (waiting_count >= 64) return REARC_BUSY;
++    ++waiting_count;
++    waiting_.push_back(std::move(done));
++    if (!loaded_subscription_) {
++      loaded_subscription_ = urls->RegisterOnLoadedCallback(base::BindOnce(
++          [](uint64_t id) {
++            auto it = States().find(id);
++            if (it == States().end()) return;
++            State& s = *it->second;
++            s.loaded_subscription_ = {};
++            auto waiting = std::move(s.waiting_);
++            waiting_count -= waiting.size();
++            for (auto& done : waiting) std::move(done).Run(REARC_OK);
++          },
++          id_));
++      urls->Load();
++    }
++    return REARC_OK;
++  }
++  AutocompleteClassifier& classifier() {
++    if (!classifier_) {
++      classifier_ = std::make_unique<AutocompleteClassifier>(
++          NewController(profile_),
++          std::make_unique<ChromeAutocompleteSchemeClassifier>(profile_));
++    }
++    return *classifier_;
++  }
++  ReArcStatus Start(std::u16string text, uint32_t options,
++                    ReArcAutocompleteCallback callback, void* context,
++                    uint64_t* query_id) {
++    Cancel();
++    query_ = next_query++;
++    callback_ = callback;
++    context_ = context;
++    text_ = std::move(text);
++    options_ = options;
++    const uint64_t query = query_;
++    ReArcStatus status = WhenLoaded(base::BindOnce(
++        [](uint64_t id, uint64_t query, ReArcStatus status) {
++          auto it = States().find(id);
++          if (it == States().end() || it->second->query_ != query) return;
++          if (status) {
++            it->second->Finish(status, {});
++          } else {
++            it->second->Run();
++          }
++        },
++        id_, query));
++    if (status) {
++      // Synchronous rejection: no result is ever delivered for this ID.
++      query_ = 0;
++      callback_ = nullptr;
++      context_ = nullptr;
++      return status;
++    }
++    *query_id = query;
++    return REARC_OK;
++  }
++  // Ends the active query with exactly one cancelled terminal result.
++  void Cancel() {
++    if (!query_) return;
++    running_ = false;
++    if (controller_) controller_->Stop(AutocompleteStopReason::kClobbered);
++    Finish(REARC_CANCELLED, {});
++  }
++
++  // AutocompleteController::Observer:
++  void OnResultChanged(AutocompleteController* controller, bool) override {
++    if (!running_ || controller != controller_.get()) return;
++    std::vector<Row> rows;
++    for (const AutocompleteMatch& match : controller->result()) {
++      rows.push_back({Kind(match), static_cast<uint32_t>(match.type),
++                      match.relevance, match.allowed_to_be_default_match,
++                      match.deletable, base::UTF16ToUTF8(match.contents),
++                      base::UTF16ToUTF8(match.description),
++                      match.destination_url.spec(),
++                      base::UTF16ToUTF8(match.fill_into_edit),
++                      base::UTF16ToUTF8(match.inline_autocompletion)});
++    }
++    if (controller->done()) {
++      running_ = false;
++      Finish(REARC_OK, std::move(rows));
++    } else {
++      Post(false, REARC_OK, std::move(rows));
++    }
++  }
++
++ private:
++  void Run() {
++    if (!controller_) {
++      controller_ = NewController(profile_);
++      controller_->AddObserver(this);
++    }
++    AutocompleteInput input(text_, kPage, scheme_);
++    input.set_prevent_inline_autocomplete(options_ & 1);
++    running_ = true;
++    controller_->Start(input);
++  }
++  void Finish(ReArcStatus status, std::vector<Row> rows) {
++    Post(true, status, std::move(rows));
++    query_ = 0;
++    callback_ = nullptr;
++    context_ = nullptr;
++  }
++  void Post(bool done, ReArcStatus status, std::vector<Row> rows) {
++    ABIPost(base::BindOnce(
++        [](uint64_t id, uint64_t query, bool done, ReArcStatus status,
++           ReArcAutocompleteCallback callback, void* context,
++           std::vector<Row> rows) {
++          // Intermediate results of a superseded/finished query are dropped;
++          // the terminal (done or cancelled) result is always delivered.
++          auto it = States().find(id);
++          if (!done && (it == States().end() || it->second->query_ != query))
++            return;
++          std::vector<ReArcAutocompleteMatch> matches;
++          for (const Row& row : rows) {
++            matches.push_back({row.kind, row.type, row.relevance,
++                               row.allowed_to_be_default, row.deletable,
++                               row.contents.c_str(), row.description.c_str(),
++                               row.destination.c_str(), row.fill.c_str(),
++                               row.inline_completion.c_str()});
++          }
++          ReArcAutocompleteResult result{status, id, query, done,
++                                         matches.empty() ? nullptr : matches.data(),
++                                         matches.size()};
++          callback(context, &result);
++        },
++        id_, query_, done, status, callback_, context_.get(), std::move(rows)));
++  }
++
++  const uint64_t id_;
++  raw_ptr<Profile> profile_;
++  ChromeAutocompleteSchemeClassifier scheme_;
++  base::CallbackListSubscription loaded_subscription_;
++  std::vector<Done> waiting_;
++  std::unique_ptr<AutocompleteController> controller_;
++  std::unique_ptr<AutocompleteClassifier> classifier_;
++  uint64_t query_ = 0;
++  bool running_ = false;
++  ReArcAutocompleteCallback callback_ = nullptr;
++  raw_ptr<void> context_ = nullptr;
++  std::u16string text_;
++  uint32_t options_ = 0;
++};
++ReArcStatus Lookup(uint64_t profile_id, State** state) {
++  CHECK(pthread_main_np());
++  if (!ReArcEngineDefaultProfile()) return REARC_ENGINE_NOT_READY;
++  Profile* profile = FindBridgeProfile(profile_id);
++  if (!profile) return REARC_PROFILE_NOT_FOUND;
++  auto& slot = States()[profile_id];
++  if (!slot) slot = std::make_unique<State>(profile_id, profile);
++  *state = slot.get();
++  return REARC_OK;
++}
++bool ValidText(const char* text, bool allow_empty) {
++  if (!text) return false;
++  std::string value(text);
++  return (allow_empty || !value.empty()) && value.size() <= 4096 &&
++         base::IsStringUTF8(value);
++}
++// A ready-to-use URL: Chromium parameters resolved, search terms as "%s".
++std::string Resolve(const TemplateURLRef& ref, const SearchTermsData& data) {
++  constexpr char kToken[] = "rearcsearchterms7f3a";
++  std::string url = ref.ReplaceSearchTerms(
++      TemplateURLRef::SearchTermsArgs(u"rearcsearchterms7f3a"), data);
++  base::ReplaceSubstringsAfterOffset(&url, 0, kToken, "%s");
++  return url;
++}
++bool ValidTemplate(const char* value, bool allow_empty) {
++  if (!value) return allow_empty;
++  std::string url(value);
++  if (url.empty()) return allow_empty;
++  GURL parsed(url);
++  return url.size() <= 4096 && base::IsStringUTF8(url) && parsed.is_valid() &&
++         parsed.SchemeIsHTTPOrHTTPS() && url.find("%s") != std::string::npos;
++}
++}  // namespace
++void ABICancelSearch(uint64_t profile_id) {
++  CHECK(pthread_main_np());
++  // Destruction posts cancellation for waiters/queries, then drops services.
++  auto node = States().extract(profile_id);
++}
++}  // namespace rearc
++
++ReArcStatus ReArcSearchGetDefaultProvider(uint64_t profile_id,
++                                          ReArcSearchProviderCallback completion,
++                                          void* context) {
++  rearc::State* state;
++  if (auto status = rearc::Lookup(profile_id, &state)) return status;
++  if (!completion) return REARC_INVALID_ARGUMENT;
++  return state->WhenLoaded(base::BindOnce(
++      [](uint64_t id, ReArcSearchProviderCallback completion, void* context,
++         ReArcStatus status) {
++        std::string name, keyword, search, suggest;
++        bool managed = false, prepopulated = false;
++        if (!status) {
++          auto it = rearc::States().find(id);
++          TemplateURLService* urls = it->second->service();
++          const TemplateURL* url = urls->GetDefaultSearchProvider();
++          if (!url) {
++            status = REARC_NOT_FOUND;
++          } else {
++            name = base::UTF16ToUTF8(url->short_name());
++            keyword = base::UTF16ToUTF8(url->keyword());
++            search = rearc::Resolve(url->url_ref(), urls->search_terms_data());
++            if (!url->suggestions_url().empty()) {
++              suggest = rearc::Resolve(url->suggestions_url_ref(),
++                                       urls->search_terms_data());
++            }
++            managed = urls->is_default_search_managed();
++            prepopulated = url->prepopulate_id() > 0;
++          }
++        }
++        rearc::ABIPost(base::BindOnce(
++            [](uint64_t id, ReArcSearchProviderCallback completion,
++               void* context, ReArcStatus status, std::string name,
++               std::string keyword, std::string search, std::string suggest,
++               bool managed, bool prepopulated) {
++              ReArcSearchProvider provider{name.c_str(), keyword.c_str(),
++                                           search.c_str(), suggest.c_str(),
++                                           managed, prepopulated};
++              completion(context, status, id, status ? nullptr : &provider);
++            },
++            id, completion, context, status, std::move(name),
++            std::move(keyword), std::move(search), std::move(suggest), managed,
++            prepopulated));
++      },
++      profile_id, completion, context));
++}
++
++ReArcStatus ReArcSearchSetDefaultProvider(uint64_t profile_id,
++                                          const ReArcSearchProvider* provider,
++                                          ReArcCompletion completion,
++                                          void* context) {
++  rearc::State* state;
++  if (auto status = rearc::Lookup(profile_id, &state)) return status;
++  // OTR shares (redirects to) its original's keywords; never mutate them.
++  if (state->profile()->IsOffTheRecord()) return REARC_UNSUPPORTED;
++  if (!completion || !provider || !provider->name || !provider->keyword ||
++      !rearc::ValidText(provider->name, false) ||
++      !rearc::ValidText(provider->keyword, false) ||
++      std::string(provider->keyword).find_first_of(" \t\r\n") !=
++          std::string::npos ||
++      !rearc::ValidTemplate(provider->search_url, false) ||
++      !rearc::ValidTemplate(provider->suggest_url, true)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  TemplateURLData data;
++  data.SetShortName(base::UTF8ToUTF16(provider->name));
++  data.SetKeyword(base::UTF8ToUTF16(provider->keyword));
++  data.SetURL(TemplateURLRef::DisplayURLToURLRef(
++      base::UTF8ToUTF16(provider->search_url)));
++  if (provider->suggest_url && *provider->suggest_url) {
++    data.suggestions_url = TemplateURLRef::DisplayURLToURLRef(
++        base::UTF8ToUTF16(provider->suggest_url));
++  }
++  data.safe_for_autoreplace = false;
++  return state->WhenLoaded(base::BindOnce(
++      [](uint64_t id, TemplateURLData data, ReArcCompletion completion,
++         void* context, ReArcStatus status) {
++        if (!status) {
++          TemplateURLService* urls = rearc::States().at(id)->service();
++          if (urls->is_default_search_managed()) {
++            status = REARC_INVALID_STATE;
++          } else {
++            // Reuse an identical engine; otherwise add a user engine.
++            TemplateURL* url = urls->GetTemplateURLForKeyword(data.keyword());
++            if (!url || url->url() != data.url() ||
++                url->suggestions_url() != data.suggestions_url ||
++                url->type() != TemplateURL::NORMAL) {
++              url = urls->Add(std::make_unique<TemplateURL>(data));
++            }
++            if (!url || !urls->CanMakeDefault(url)) {
++              status = REARC_INVALID_STATE;
++            } else {
++              urls->SetUserSelectedDefaultSearchProvider(url);
++            }
++          }
++        }
++        rearc::ABIPost(base::BindOnce(completion, context, status, false));
++      },
++      profile_id, std::move(data), completion, context));
++}
++
++ReArcStatus ReArcSearchClassifyInput(uint64_t profile_id, const char* text,
++                                     ReArcClassifyCallback completion,
++                                     void* context) {
++  rearc::State* state;
++  if (auto status = rearc::Lookup(profile_id, &state)) return status;
++  if (!completion || !rearc::ValidText(text, false)) return REARC_INVALID_ARGUMENT;
++  return state->WhenLoaded(base::BindOnce(
++      [](uint64_t id, std::u16string text, ReArcClassifyCallback completion,
++         void* context, ReArcStatus status) {
++        uint32_t kind = 0, type = 0;
++        std::string destination;
++        if (!status) {
++          AutocompleteMatch match;
++          rearc::States().at(id)->classifier().Classify(
++              text, false, true, rearc::kPage, &match, nullptr);
++          if (match.destination_url.is_valid()) {
++            kind = rearc::Kind(match);
++            type = static_cast<uint32_t>(match.type);
++            destination = match.destination_url.spec();
++          }
++        }
++        rearc::ABIPost(base::BindOnce(
++            [](uint64_t id, ReArcClassifyCallback completion, void* context,
++               ReArcStatus status, uint32_t kind, uint32_t type,
++               std::string destination) {
++              ReArcInputClassification result{kind, type, destination.c_str()};
++              completion(context, status, id, status ? nullptr : &result);
++            },
++            id, completion, context, status, kind, type,
++            std::move(destination)));
++      },
++      profile_id, base::UTF8ToUTF16(text), completion, context));
++}
++
++ReArcStatus ReArcAutocompleteStart(uint64_t profile_id, const char* text,
++                                   uint32_t options,
++                                   ReArcAutocompleteCallback completion,
++                                   void* context, uint64_t* query_id) {
++  CHECK(pthread_main_np());
++  if (query_id) *query_id = 0;
++  rearc::State* state;
++  if (auto status = rearc::Lookup(profile_id, &state)) return status;
++  if (!completion || !query_id || options & ~1u ||
++      !rearc::ValidText(text, false)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  return state->Start(base::UTF8ToUTF16(text), options, completion, context,
++                      query_id);
++}
++
++ReArcStatus ReArcAutocompleteStop(uint64_t profile_id) {
++  rearc::State* state;
++  if (auto status = rearc::Lookup(profile_id, &state)) return status;
++  state->Cancel();
++  return REARC_OK;
++}
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,11 @@
+# Only the overlay is versioned: the pin, patches, docs, scripts and test hosts.
+/*
+!/.gitignore
+!/CHROMIUM_PIN
+!/patches/
+!/docs/
+!/scripts/
+!/tests/
+__pycache__/
+*.pyc
+*.log

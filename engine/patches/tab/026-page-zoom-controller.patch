@@ -1,0 +1,228 @@
+From 86b4181b825ad4e389ca47bd8c594f92f18fbbb2 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Mon, 2 Nov 2026 18:29:21 +0400
+Subject: [PATCH] P-TAB-001 wave 14: expose Chromium page zoom and change
+ events
+
+Use the upstream ZoomController in default HostZoomMap mode, suppress the Chrome bubble, and add factor get/set plus typed zoom callbacks. Preserve per-host sharing, profile isolation and ZoomLevelPrefs persistence. Add page_zoom in ABI 1.8 without changing old callback layouts.
+
+Last rebased: 2026-11-02 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/app/framework.exports                  |  3 +
+ chrome/app/framework.order                    |  3 +
+ chrome/browser/BUILD.gn                       |  1 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   | 17 +++++-
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |  2 +-
+ .../rearc_bridge/rearc_services_abi.cc        | 58 ++++++++++++++++++-
+ 6 files changed, 80 insertions(+), 4 deletions(-)
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 492cf6bfca..d9ea6af22e 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -64,6 +64,9 @@ _ReArcTabSetScripts
+ _ReArcTabRefreshStyles
+ _ReArcTabSetLinkPeek
+ _ReArcTabCaptureSnapshot
++_ReArcEngineSetZoomCallback
++_ReArcTabGetZoomFactor
++_ReArcTabSetZoomFactor
+ _ReArcTabGetDocumentIdentity
+ _ReArcTabEvaluateScript2
+ _ReArcTabEvaluateScript
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index bace7b453c..d46f09acf6 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -75,6 +75,9 @@ _ReArcTabSetScripts
+ _ReArcTabRefreshStyles
+ _ReArcTabSetLinkPeek
+ _ReArcTabCaptureSnapshot
++_ReArcEngineSetZoomCallback
++_ReArcTabGetZoomFactor
++_ReArcTabSetZoomFactor
+ _ReArcTabGetDocumentIdentity
+ _ReArcTabEvaluateScript2
+ _ReArcTabEvaluateScript
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index bd19bd9b4f..5b1312adfa 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1216,6 +1216,7 @@ source_set("core") {
+     "//components/search",
+     "//components/search_engines/search_engine_choice:switches",
+     "//components/security_state/content",
++    "//components/zoom",
+     "//components/segmentation_platform/embedder/home_modules:constants",
+     "//components/send_tab_to_self:features",
+     "//components/sessions",
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 73990db521..e0eac5f0f7 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 7, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 8, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -324,6 +324,21 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcTabEvaluateScript2(
+     uint64_t tab_id, const char* source, uint32_t world, const char* boost_id,
+     uint32_t timeout_ms, ReArcScriptCallback2 completion, void* context);
+ 
++// Chromium default HostZoomMap behavior: per-host, shared within the profile,
++// persisted by its ZoomLevelPrefs; OTR uses Chromium's inherited/private map.
++// Factor is finite, in Chromium's browser range [0.25,5]. Not CSS/pinch zoom.
++typedef struct ReArcZoomEvent {
++  ReArcDocumentIdentity document;
++  double factor;
++} ReArcZoomEvent;
++typedef void (*ReArcZoomCallback)(void* context, const ReArcZoomEvent* event);
++REARC_ENGINE_EXPORT void ReArcEngineSetZoomCallback(ReArcZoomCallback callback,
++                                                     void* context);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetZoomFactor(uint64_t tab_id,
++                                                      double* factor);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetZoomFactor(uint64_t tab_id,
++                                                      double factor);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index a2847a5f98..4dfc721dec 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.9.0";
++  return "0.10.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 3504b78dab..29196308a0 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -35,6 +35,9 @@
+ #include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
+ #include "chrome/browser/rearc_bridge/security_adapter.h"
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "components/zoom/zoom_controller.h"
++#include "components/zoom/zoom_observer.h"
++#include "third_party/blink/public/common/page/page_zoom.h"
+ #include "content/public/browser/devtools_agent_host.h"
+ #include "content/public/browser/devtools_agent_host_client.h"
+ #include "content/public/browser/media_session.h"
+@@ -49,6 +52,8 @@
+ namespace rearc {
+ namespace {
+ 
++ReArcZoomCallback zoom_callback = nullptr;
++void* zoom_context = nullptr;
+ ReArcServiceCallback service_callback = nullptr;
+ void* service_context = nullptr;
+ 
+@@ -222,7 +227,8 @@ auto& Pages() {
+ // no browser target, file I/O or user-gesture grants. File/WebUI documents
+ // retain future registrations but cannot receive host evaluations or boosts.
+ class PageServices : public content::DevToolsAgentHostClient,
+-                     public content::WebContentsObserver {
++                     public content::WebContentsObserver,
++                     public zoom::ZoomObserver {
+  public:
+   using Reply = base::OnceCallback<void(ReArcStatus, base::DictValue)>;
+   explicit PageServices(TabSession& s)
+@@ -231,15 +237,39 @@ class PageServices : public content::DevToolsAgentHostClient,
+         profile_id_(s.profile_id()),
+         generation_(s.content_generation()) {
+     CHECK(pthread_main_np());
++    zoom_ = zoom::ZoomController::CreateForWebContents(s.web_contents());
++    zoom_->SetShowsNotificationBubble(false);
++    zoom_->AddObserver(this);
++    PublishZoom();
+   }
+   ~PageServices() override {
+     CHECK(pthread_main_np());
++    if (zoom_) zoom_->RemoveObserver(this);
+     if (attached_) {
+       host_->DetachClient(this);
+     }
+     CancelPending(REARC_CANCELLED);
+     weak_factory_.InvalidateWeakPtrs();
+   }
++  double zoom_factor() const {
++    return blink::ZoomLevelToZoomFactor(zoom_->GetZoomLevel());
++  }
++  bool SetZoom(double factor) {
++    return zoom_ && zoom_->SetZoomLevel(blink::ZoomFactorToZoomLevel(factor));
++  }
++  void OnZoomControllerDestroyed(zoom::ZoomController* controller) override {
++    controller->RemoveObserver(this);
++    zoom_ = nullptr;
++  }
++  void OnZoomChanged(const zoom::ZoomController::ZoomChangedEventData&) override {
++    PublishZoom();
++  }
++  void PublishZoom() {
++    ReArcZoomEvent event{document(), zoom_factor()};
++    ABIPost(base::BindOnce([](base::WeakPtr<PageServices> self, ReArcZoomEvent e) {
++      if (self && self->Current() && zoom_callback) zoom_callback(zoom_context, &e);
++    }, weak_factory_.GetWeakPtr(), event));
++  }
+   bool IsTrusted() override { return false; }
+   bool MayReadLocalFiles() override { return false; }
+   bool MayWriteLocalFiles() override { return false; }
+@@ -888,6 +918,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+         std::move(png)));
+   }
+ 
++  raw_ptr<zoom::ZoomController> zoom_ = nullptr;
+   const uint64_t tab_id_, profile_id_, generation_;
+   scoped_refptr<content::DevToolsAgentHost> host_;
+   bool attached_ = false, installing_ = false, peek_installing_ = false,
+@@ -959,7 +990,7 @@ bool ABIHasServiceFeature(const char* feature) {
+   return name == "media_session" || name == "media_metadata_snapshot" || name == "favicon" ||
+          name == "security_state" || name == "user_scripts" ||
+          name == "link_peek" || name == "snapshot_viewport" ||
+-         name == "snapshot_full_page" || name == "script_evaluation" || name == "script_evaluation_identity";
++         name == "snapshot_full_page" || name == "script_evaluation" || name == "script_evaluation_identity" || name == "page_zoom";
+ }
+ }  // namespace rearc
+ 
+@@ -1223,3 +1254,26 @@ ReArcStatus ReArcTabGetDocumentIdentity(uint64_t id, ReArcDocumentIdentity* out)
+   *out = page->document();
+   return REARC_OK;
+ }
++
++void ReArcEngineSetZoomCallback(ReArcZoomCallback callback, void* context) {
++  CHECK(pthread_main_np());
++  rearc::zoom_callback = callback;
++  rearc::zoom_context = context;
++}
++ReArcStatus ReArcTabGetZoomFactor(uint64_t id, double* factor) {
++  CHECK(pthread_main_np());
++  if (!factor) return REARC_INVALID_ARGUMENT;
++  *factor = 0;
++  rearc::PageServices* page;
++  if (auto status = rearc::FindPage(id, &page)) return status;
++  *factor = page->zoom_factor();
++  return REARC_OK;
++}
++ReArcStatus ReArcTabSetZoomFactor(uint64_t id, double factor) {
++  CHECK(pthread_main_np());
++  if (!std::isfinite(factor) || factor < blink::kMinimumBrowserZoomFactor ||
++      factor > blink::kMaximumBrowserZoomFactor) return REARC_INVALID_ARGUMENT;
++  rearc::PageServices* page;
++  if (auto status = rearc::FindPage(id, &page)) return status;
++  return page->SetZoom(factor) ? REARC_OK : REARC_INVALID_STATE;
++}
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,101 @@
+From 137a0dc3dc503d1c6012faf6d7eac30bad12cff0 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Tue, 3 Nov 2026 14:54:32 +0400
+Subject: [PATCH] P-TAB-001 wave 16: record hidden-tab throttling evidence
+
+Measure immediate evaluation, chained timers and rAF under four isolated diagnostic controls, plus separate load-only samples. Preserve real visibility and Chromium background policy: timer-dependent scripts explain hidden evaluation delays, while first-load controls show no gain justifying an inferred pending-attachment exemption. Add no production scheduler switch or ABI change.
+
+Last rebased: 2026-11-03 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/browser/rearc_bridge/README.md | 77 +++++++++++++++++++++++++++
+ 1 file changed, 77 insertions(+)
+ create mode 100644 chrome/browser/rearc_bridge/README.md
+
+diff --git a/chrome/browser/rearc_bridge/README.md b/chrome/browser/rearc_bridge/README.md
+new file mode 100644
+index 0000000000..2faa6379ea
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/README.md
+@@ -0,0 +1,77 @@
++# Hidden contents and attachment policy
++
++A newly created bridge tab is hidden. Native attachment and the host's real
++presentation intent, combined with AppKit visibility/occlusion, determine
++WebContents visibility. A tab that has never been attached is not evidence of
++an imminent foreground attachment. There is no implicit scheduler exemption
++for an "attached-pending" state.
++
++Hidden means Chromium's normal background policy, not freeze, discard, mute,
++stop or process-wide parking. In particular, a script evaluation can start
++promptly while the Promise it returns waits for a throttled timer or a frame
++that a hidden document does not produce. Do not make an unattached WebContents
++visible to accelerate such a Promise.
++
++## Wave 16 measurement
++
++macOS arm64 component/debug build, Chromium 156.0.8078.74, ABI 1.13. Four fresh
++processes each alternate six hidden and six attached loopback loads, then issue
++one cold isolated evaluation, a warm literal evaluation, eight sequential 5 ms
++timers, and requestAnimationFrame. A disposable mock keychain removes OS key
++authorization from this experiment. The document reports hidden/visible as
++expected in all 48 visibility queries. No production flag is changed.
++
++Medians in milliseconds, hidden / attached (six of each per control):
++
++| Diagnostic control | Warm `42` | Eight chained timers |
++|---|---:|---:|
++| Default | 4.112 / 6.060 | 10670.734 / 54.915 |
++| Background timer throttling + intensive feature disabled | 3.845 / 4.172 | 53.506 / 54.578 |
++| Renderer backgrounding disabled | 3.686 / 4.637 | 7323.323 / 52.793 |
++| Frame-rate cap disabled | 4.312 / 6.380 | 7450.831 / 54.096 |
++
++Cold isolated evaluation includes CDP/world setup: default medians are
++45.651 / 64.089 ms, hidden maximum 198.132 ms. The default hidden timer chain
++has a 26240.084 ms maximum; its callback remains within the ABI's 30-second
++bound. A pilot's 12-second assertion was too short to measure this tail and
++was replaced with explicit timeout recording, rather than a production change.
++
++All 24 hidden requestAnimationFrame Promises hit their 350 ms evaluation
++deadline; all 24 attached cases complete (per-control medians 5.242–6.362 ms).
++Removing the frame-rate cap does not grant hidden pages animation frames.
++Removing timer throttling changes timer latency while visibility stays hidden.
++This identifies timer-dependent evaluation slowness; immediate evaluation is
++not generally held for seconds by hidden state in this experiment.
++
++Fresh documents here are younger than the intensive throttling grace periods
++at this pin (60 seconds loaded / 5 minutes loading). This is evidence for the
++ordinary wake-up/budget policy, not a reproduction of aged intensive throttling.
++
++Load-only measurements are recorded separately to avoid contaminating the next
++tab's startup interval with the preceding evaluation's long timer wait.
++Ten hidden and ten attached first loads per control (80 loads, zero 20-second
++watchdog timeouts) give:
++
++| Diagnostic control | Hidden p50 / max (ms) | Attached p50 / max (ms) |
++|---|---:|---:|
++| Default | 1277.564 / 3993.049 | 1261.942 / 3403.571 |
++| Timer throttling disabled | 1268.745 / 4021.423 | 1265.106 / 2678.631 |
++| Renderer backgrounding disabled | 1305.996 / 3753.998 | 1259.717 / 2509.024 |
++| Frame-rate cap disabled | 1288.858 / 3365.803 | 1509.423 / 5624.783 |
++
++The controls show no first-load improvement that justifies a policy change.
++Cold component/debug renderer startup remains variable, including seconds-long
++samples in both visibility states. A median from one fresh process per control
++is diagnostic evidence, not an optimized-build performance guarantee.
++
++## Host guidance
++
++Preserve the visibility/attachment contract. Attach and present an intended
++foreground tab when its real native host is available. Do not await rAF before
++attachment, and avoid timer-based polling to bootstrap hidden editor code;
++use direct evaluation for explicit snapshots and the isolated message channel
++for document/input events. An engine-wide exemption inferred from "never
++attached" would also exempt genuinely hidden background tabs. These findings
++do not justify that policy change or a global timer/frame/priority switch.
++Any future preparation capability needs explicit bounded host intent and a
++separate contract; ABI 1.13 adds no such capability.
+-- 
+2.54.0 (Apple Git-157)
+

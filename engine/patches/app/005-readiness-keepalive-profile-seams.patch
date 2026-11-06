@@ -1,0 +1,437 @@
+Patch-ID: P-APP-001 (wave-5 slice 3) — readiness signaling, ScopedKeepAlive
+and profile-registration seams (scaffolding only, no real profile work).
+Rationale: fourth milestone of engine/docs/patches/P-APP-001.md. Ships the
+bridge-side seams the remaining lifecycle work hangs off, all gated on
+rearc::GetEngineLifecycleHost() so stock behavior stays bit-identical with
+the gate off:
+- Readiness: additive rearc_readiness.{h,cc} defines EngineReadinessSink +
+  SetEngineReadinessSink() + SignalEngineReady(). A new
+  ChromeBrowserMainPartsMac::PostBrowserStart() override signals after the
+  base implementation — the spec's "async profile unblocking and
+  PostBrowserStart" tail of PreMainMessageLoopRunImpl
+  (chrome/browser/chrome_browser_main.cc:2163-2165). The sink is standalone
+  rather than an EngineLifecycleHost extension so this patch stays purely
+  additive over app/002's files; it merges into the lifecycle host C ABI
+  surface in the shell-integration wave. framework.exports/framework.order
+  are deliberately untouched (per wave-5 scope): no new exported symbols.
+- Keepalive: additive rearc_keep_alive.{h,cc} wraps ScopedKeepAlive
+  (components/keep_alive_registry) as AcquireShellKeepAlive() /
+  ReleaseShellKeepAlive() / HasShellKeepAlive(), mirroring AppController's
+  APP_CONTROLLER/DISABLED keepalive (app_controller_mac.mm:824). Scaffolding
+  only: no call sites yet; acquisition joins the readiness C ABI wave and
+  release joins ordered bridge finalization (P-APP-001 steps 3 and 6).
+- Profile registration: additive rearc_profile_registry.{h,cc} records opaque
+  Profile handles (forward-declared; the bridge's consumers must not need the
+  full browser target). A gated call in
+  ChromeBrowserMainPartsMac::PostProfileInit() registers each profile as
+  Chromium brings it up. No prefs, KeyedServices, session-restore or
+  startup-window interaction — no real profile work.
+Build wiring: the six seam sources join source_set("core")'s is_mac block in
+chrome/browser/BUILD.gn (with //components/keep_alive_registry in the deps'
+//components group) instead of app/002's rearc_bridge target. Rationale:
+every patch in the series must individually pass `git apply --check -R`
+against the fully applied tree, and a new-file patch (002) cannot
+reverse-apply once its created files carry later modifications — so app/005
+never touches app/002's files. Both BUILD.gn hunks sit >10 lines from 002's
+deps hunk. Fold the sources back into rearc_bridge at the next pin rebase,
+when the patch set is refreshed as a whole.
+Placement notes (same reverse-apply invariant): the two rearc_bridge includes
+sit outside the alphabetical include group and the PostBrowserStart override
+is declared/defined out of stage order, keeping this patch's hunks clear of
+app/003's include-hunk and app/004's DidEndMainMessageLoop-hunk -U3 context
+windows. Regroup include/stage order at the next pin rebase.
+Gate history: attempt 1 (superseded) extended app/002's rearc_engine_lifecycle
+and rearc_bridge/BUILD.gn directly and compiled green, but broke app/002's
+git apply --check -R; this restructured patch replaces it. Both attempts'
+compile logs are in engine/build-p5.log.
+Drift check @ 156.0.8078.74 (2026-11-01): none. PostBrowserStart verified
+virtual public (chrome_browser_main.h:115), not overridden by
+ChromeBrowserMainPartsPosix, invoked once from PreMainMessageLoopRunImpl
+(chrome_browser_main.cc:2165). ScopedKeepAlive /
+KeepAliveOrigin::APP_CONTROLLER / KeepAliveRestartOption::DISABLED verified
+at components/keep_alive_registry/{scoped_keep_alive,keep_alive_types}.h;
+keep_alive_registry depends only on //base and crash_key — no cycle.
+Upstream hunks: chrome/browser/BUILD.gn (sources + deps, both clear of
+app/002's hunk), chrome/browser/chrome_browser_main_mac.{h,mm} (override
+declaration/definition, gated PostProfileInit registration, two includes).
+Everything else is additive under chrome/browser/rearc_bridge/.
+Last rebased: 2026-11-01 @ 156.0.8078.74.
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 66fa97ef02..aec8479415 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1530,6 +1530,17 @@ source_set("core") {
+       "memory_details_mac.cc",
+       "platform_util_mac.mm",
+       "process_singleton_mac.mm",
++      # P-APP-001 (patch app/005): seam sources join :core, not
++      # :rearc_bridge, so app/002's additive files stay untouched and every
++      # patch in the series keeps passing `git apply --check -R` against the
++      # fully applied tree. Fold back into rearc_bridge at the next pin
++      # rebase, when the patch set is refreshed as a whole.
++      "rearc_bridge/rearc_keep_alive.cc",
++      "rearc_bridge/rearc_keep_alive.h",
++      "rearc_bridge/rearc_profile_registry.cc",
++      "rearc_bridge/rearc_profile_registry.h",
++      "rearc_bridge/rearc_readiness.cc",
++      "rearc_bridge/rearc_readiness.h",
+       "shell_integration_mac.mm",
+       "shutdown_watchdog_mac.cc",
+       "shutdown_watchdog_mac.h",
+@@ -1566,6 +1577,7 @@ source_set("core") {
+       "//components/device_signals/core/browser/mac",
+       "//components/enterprise/platform_auth:enterprise_platform_auth",
+       "//components/handoff",
++      "//components/keep_alive_registry",
+       "//components/metal_util",
+       "//components/os_crypt/browser:keychain_key_provider",
+       "//components/policy/core/common:common_constants",
+diff --git a/chrome/browser/chrome_browser_main_mac.h b/chrome/browser/chrome_browser_main_mac.h
+index 35bec6d86b..136616ca38 100644
+--- a/chrome/browser/chrome_browser_main_mac.h
++++ b/chrome/browser/chrome_browser_main_mac.h
+@@ -30,6 +30,10 @@ class ChromeBrowserMainPartsMac : public ChromeBrowserMainPartsPosix {
+   void PreCreateMainMessageLoop() override;
+   void PostCreateMainMessageLoop() override;
+   int PreCreateThreads() override;
++  // P-APP-001 (patch app/005): readiness seam override. Declared out of stage
++  // order, mirroring the definition placement in the .mm (kept clear of other
++  // ReArc hunks' context windows; see the app/005 patch header).
++  void PostBrowserStart() override;
+   void PreProfileInit() override;
+   void PostProfileInit(Profile* profile, bool is_initial_profile) override;
+ 
+diff --git a/chrome/browser/chrome_browser_main_mac.mm b/chrome/browser/chrome_browser_main_mac.mm
+index a6eca25a04..5957fd1811 100644
+--- a/chrome/browser/chrome_browser_main_mac.mm
++++ b/chrome/browser/chrome_browser_main_mac.mm
+@@ -35,6 +35,12 @@
+ #include "chrome/browser/ui/cocoa/main_menu_builder.h"
+ #include "chrome/browser/ui/cocoa/renderer_context_menu/chrome_swizzle_services_menu_updater.h"
+ #include "chrome/browser/updater/updater.h"
++// P-APP-001 (patch app/005): placed outside the alphabetical rearc_bridge
++// group above so this hunk stays clear of app/003's context window (every
++// patch in the series must reverse-apply against the fully applied tree).
++// Regroup at the next pin rebase.
++#include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++#include "chrome/browser/rearc_bridge/rearc_readiness.h"
+ #include "chrome/common/channel_info.h"
+ #include "chrome/common/chrome_paths.h"
+ #include "chrome/common/chrome_switches.h"
+@@ -180,6 +186,22 @@
+   return content::RESULT_CODE_NORMAL_EXIT;
+ }
+ 
++void ChromeBrowserMainPartsMac::PostBrowserStart() {
++  ChromeBrowserMainPartsPosix::PostBrowserStart();
++
++  // P-APP-001 (patch app/005): readiness seam. At this point browser services
++  // and profile startup have completed (the spec's "async profile unblocking
++  // and PostBrowserStart" tail of PreMainMessageLoopRunImpl), so the host may
++  // build its UI on Chromium's main thread. Scaffolding only — the readiness
++  // C ABI surface and real host UI construction arrive with the shell
++  // integration wave. Without a host, SignalEngineReady() only logs and
++  // stock behavior is unchanged. Defined out of stage order to keep this
++  // hunk's context window disjoint from the other ReArc hunks in this file.
++  if (rearc::GetEngineLifecycleHost()) {
++    rearc::SignalEngineReady();
++  }
++}
++
+ void ChromeBrowserMainPartsMac::PreProfileInit() {
+   ChromeBrowserMainPartsPosix::PreProfileInit();
+ 
+@@ -191,6 +213,15 @@
+ void ChromeBrowserMainPartsMac::PostProfileInit(Profile* profile,
+                                                 bool is_initial_profile) {
+   ChromeBrowserMainPartsPosix::PostProfileInit(profile, is_initial_profile);
++
++  // P-APP-001 (patch app/005): profile-registration seam. Scaffolding only —
++  // the bridge records the profile handle so later slices can order readiness
++  // and teardown; no real profile work (prefs, KeyedServices, session
++  // restore) happens here. Without a host nothing runs and stock behavior is
++  // unchanged.
++  if (rearc::GetEngineLifecycleHost()) {
++    rearc::RegisterBridgeProfile(profile, is_initial_profile);
++  }
+ }
+ 
+ void ChromeBrowserMainPartsMac::DidEndMainMessageLoop() {
+diff --git a/chrome/browser/rearc_bridge/rearc_keep_alive.cc b/chrome/browser/rearc_bridge/rearc_keep_alive.cc
+new file mode 100644
+index 0000000000..69c9d6dc76
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_keep_alive.cc
+@@ -0,0 +1,53 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/rearc_keep_alive.h"
++
++#include <pthread.h>
++
++#include <memory>
++
++#include "base/check.h"
++#include "base/logging.h"
++#include "components/keep_alive_registry/keep_alive_types.h"
++#include "components/keep_alive_registry/scoped_keep_alive.h"
++
++namespace rearc {
++
++namespace {
++
++// Main-thread only. Held while the shell's lifetime is active; released as
++// part of bridge finalization in a later slice (P-APP-001 step 6), before
++// the upstream quit closure runs.
++std::unique_ptr<ScopedKeepAlive> g_shell_keep_alive;
++
++}  // namespace
++
++void AcquireShellKeepAlive() {
++  CHECK(pthread_main_np());
++  if (g_shell_keep_alive) {
++    return;
++  }
++  // Mirrors AppController's keepalive (app_controller_mac.mm), which this
++  // bridge replaces under the lifecycle host: browser-process restart means
++  // application relaunch (P-APP-001 step 7), so restart is DISABLED.
++  g_shell_keep_alive = std::make_unique<ScopedKeepAlive>(
++      KeepAliveOrigin::APP_CONTROLLER, KeepAliveRestartOption::DISABLED);
++  VLOG(1) << "ReArc bridge: shell keepalive acquired.";
++}
++
++void ReleaseShellKeepAlive() {
++  CHECK(pthread_main_np());
++  if (!g_shell_keep_alive) {
++    return;
++  }
++  g_shell_keep_alive.reset();
++  VLOG(1) << "ReArc bridge: shell keepalive released.";
++}
++
++bool HasShellKeepAlive() {
++  return g_shell_keep_alive != nullptr;
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/rearc_keep_alive.h b/chrome/browser/rearc_bridge/rearc_keep_alive.h
+new file mode 100644
+index 0000000000..dc92be47b0
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_keep_alive.h
+@@ -0,0 +1,26 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_KEEP_ALIVE_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_KEEP_ALIVE_H_
++
++namespace rearc {
++
++// ScopedKeepAlive seam (P-APP-001 sequence step 3: hold a ScopedKeepAlive
++// from components/keep_alive_registry while shell lifetime is active).
++// Scaffolding only (patch app/005): no call sites exist yet — the host
++// triggers acquisition through the readiness C ABI surface in the wave that
++// wires real shell integration, and release joins bridge finalization in the
++// ordered-teardown slice (P-APP-001 step 6).
++//
++// Callers must be on the main thread with BrowserProcess already created
++// (KeepAliveRegistry hangs off the browser process); acquisition while the
++// registry is shutting down CHECKs there by design.
++void AcquireShellKeepAlive();
++void ReleaseShellKeepAlive();
++bool HasShellKeepAlive();
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_KEEP_ALIVE_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.cc b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+new file mode 100644
+index 0000000000..7e5ecf756a
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+@@ -0,0 +1,47 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++
++#include <pthread.h>
++
++#include <set>
++
++#include "base/check.h"
++#include "base/logging.h"
++
++namespace rearc {
++
++namespace {
++
++// Main-thread only; PostProfileInit and the future unregister path run on
++// BrowserThread::UI. Stores opaque handles only — see the header for why
++// Profile stays forward-declared here.
++std::set<Profile*> g_registered_profiles;
++
++}  // namespace
++
++void RegisterBridgeProfile(Profile* profile, bool is_initial_profile) {
++  CHECK(pthread_main_np());
++  CHECK(profile);
++  bool inserted = g_registered_profiles.insert(profile).second;
++  VLOG(1) << "ReArc bridge: profile registered (initial=" << is_initial_profile
++          << ", new=" << inserted
++          << ", count=" << g_registered_profiles.size() << ").";
++}
++
++void UnregisterBridgeProfile(Profile* profile) {
++  CHECK(pthread_main_np());
++  g_registered_profiles.erase(profile);
++}
++
++size_t GetRegisteredBridgeProfileCount() {
++  return g_registered_profiles.size();
++}
++
++bool IsBridgeProfileRegistered(Profile* profile) {
++  return g_registered_profiles.find(profile) != g_registered_profiles.end();
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.h b/chrome/browser/rearc_bridge/rearc_profile_registry.h
+new file mode 100644
+index 0000000000..68401554b1
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.h
+@@ -0,0 +1,34 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_PROFILE_REGISTRY_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_PROFILE_REGISTRY_H_
++
++#include <cstddef>
++
++class Profile;
++
++namespace rearc {
++
++// Profile-registration seam (P-APP-001 sequence step 4: "Register the
++// default profile with the bridge"). Scaffolding only (patch app/005): the
++// registry records which profiles Chromium has brought up so later slices can
++// hang readiness gating, per-profile shell state and teardown ordering off
++// it. No real profile work happens here — no prefs, no KeyedServices, no
++// session-restore or startup-window interaction.
++//
++// Profile stays forward-declared on purpose: this header is consumed from
++// chrome_browser_main_mac.mm without dragging the full Profile definition
++// into the bridge's dependency surface. Handles are opaque; the registry
++// never dereferences them.
++void RegisterBridgeProfile(Profile* profile, bool is_initial_profile);
++void UnregisterBridgeProfile(Profile* profile);
++
++// Observability for later slices and tests.
++size_t GetRegisteredBridgeProfileCount();
++bool IsBridgeProfileRegistered(Profile* profile);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_PROFILE_REGISTRY_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_readiness.cc b/chrome/browser/rearc_bridge/rearc_readiness.cc
+new file mode 100644
+index 0000000000..afecaa1a07
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_readiness.cc
+@@ -0,0 +1,36 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/rearc_readiness.h"
++
++#include <pthread.h>
++
++#include "base/check.h"
++#include "base/logging.h"
++
++namespace rearc {
++
++namespace {
++
++// Main-thread only; registered before startup completes and read from the
++// PostBrowserStart seam on the same thread.
++EngineReadinessSink* g_engine_readiness_sink = nullptr;
++
++}  // namespace
++
++void SetEngineReadinessSink(EngineReadinessSink* sink) {
++  CHECK(pthread_main_np());
++  g_engine_readiness_sink = sink;
++}
++
++void SignalEngineReady() {
++  CHECK(pthread_main_np());
++  if (g_engine_readiness_sink) {
++    g_engine_readiness_sink->OnEngineReady();
++    return;
++  }
++  VLOG(1) << "ReArc bridge: engine ready; no readiness sink registered.";
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/rearc_readiness.h b/chrome/browser/rearc_bridge/rearc_readiness.h
+new file mode 100644
+index 0000000000..500aecdbf2
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_readiness.h
+@@ -0,0 +1,45 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_READINESS_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_READINESS_H_
++
++namespace rearc {
++
++// Readiness seam (P-APP-001 sequence step 4: "Post ready/UI construction
++// after startup on Chromium UI"). Scaffolding only (patch app/005).
++//
++// This is a standalone sink interface rather than an extension of
++// EngineLifecycleHost so patch app/005 stays purely additive over app/002's
++// files: every patch in the series must individually pass
++// `git apply --check -R` against the fully applied tree, which forbids
++// editing an earlier patch's created files. The sink merges into the
++// lifecycle host C ABI surface in the wave that wires real shell integration
++// (framework.exports is deliberately untouched by app/005); until then no
++// sink can be registered from outside the engine and SignalEngineReady()
++// only logs.
++//
++// All calls happen on the main thread (Chromium BrowserThread::UI).
++class EngineReadinessSink {
++ public:
++  virtual ~EngineReadinessSink() = default;
++
++  // Called once browser services and profile startup have completed (the
++  // ChromeBrowserMainParts::PostBrowserStart point — after async profile
++  // unblocking), when the host may build its UI on Chromium's main thread.
++  virtual void OnEngineReady() = 0;
++};
++
++// Registers (or clears, with nullptr) the readiness sink. Main thread only;
++// the sink must outlive its registration.
++void SetEngineReadinessSink(EngineReadinessSink* sink);
++
++// Forwards the startup-complete transition to the registered sink. A no-op
++// when no sink is registered, so gated upstream call sites keep stock
++// behavior bit-identical. Main thread only.
++void SignalEngineReady();
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_READINESS_H_

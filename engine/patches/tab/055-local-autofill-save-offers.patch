@@ -1,0 +1,328 @@
+From ee5a2f288cfda1733b4f2f2b94619dc447d4d0b6 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 15:38:53 +0400
+Subject: [PATCH] P-TAB-001 wave 18g: route local card and address save offers
+
+Route local card/address import offers to a WebContents-owned request/response adapter. Accept, decline and ignore invoke Chromium callbacks; no full card number or CVC crosses the ABI. Preserve the submission navigation, cancel subsequent navigation and close, and ignore offers without a host callback. Account migration and cloud-save UI are not offered in registry tabs. ABI 1.37 / bridge 0.39.0 (autofill_save_prompts); p91 and native HTTPS address accept/card decline/card accept/store verification pass, with no outside connections.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/browser/BUILD.gn                       |   2 +
+ .../rearc_bridge/rearc_autofill_save.cc       | 108 ++++++++++++++++++
+ .../rearc_bridge/rearc_autofill_save.h        |  15 +++
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  19 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_services_abi.cc        |   2 +
+ .../ui/autofill/chrome_autofill_client.cc     |  14 +++
+ .../chrome_payments_autofill_client.cc        |  14 +++
+ 9 files changed, 175 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_autofill_save.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_autofill_save.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 75e227be04..a6f4888892 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1505,6 +1505,8 @@ source_set("core") {
+       "rearc_bridge/rearc_autofill_popup.h",
+       "rearc_bridge/rearc_password_leak_abi.cc",
+       "rearc_bridge/rearc_extension_windows.cc",
++      "rearc_bridge/rearc_autofill_save.cc",
++      "rearc_bridge/rearc_autofill_save.h",
+       "rearc_bridge/rearc_extension_windows.h",
+       "rearc_bridge/discard_adapter.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+diff --git a/chrome/browser/rearc_bridge/rearc_autofill_save.cc b/chrome/browser/rearc_bridge/rearc_autofill_save.cc
+new file mode 100644
+index 0000000000..10b61ff076
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_autofill_save.cc
+@@ -0,0 +1,108 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_autofill_save.h"
++#include <pthread.h>
++#include <map>
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "components/autofill/core/browser/data_model/addresses/autofill_profile.h"
++#include "components/autofill/core/browser/data_model/payments/credit_card.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "url/origin.h"
++namespace rearc {
++namespace {
++class Offer;
++ReArcAutofillSaveCallback host = nullptr;
++void* context = nullptr;
++uint64_t epoch = 0, next_id = 1;
++auto& Pending() { static base::NoDestructor<std::map<uint64_t,base::WeakPtr<Offer>>> p; return *p; }
++class Offer : public content::WebContentsObserver, public content::WebContentsUserData<Offer> {
++ public:
++  ~Offer() override { Cancel(); }
++  void Start(TabSession& s, uint32_t kind, bool update, std::string summary, base::OnceCallback<void(uint32_t)> done) {
++    Cancel(); allow_submission_ = true; done_ = std::move(done); summary_ = std::move(summary);
++    origin_ = url::Origin::Create(web_contents()->GetLastCommittedURL()).Serialize();
++    event_ = {s.profile_id(),s.tab_id(),s.content_generation(),next_id++,0,kind,update,nullptr,nullptr};
++    Pending().emplace(event_.request_id,weak_.GetWeakPtr()); Publish(0);
++  }
++  void Respond(uint32_t action) {
++    Pending().erase(event_.request_id); event_.request_id = 0;
++    auto done = std::move(done_); std::move(done).Run(action);
++  }
++  void Cancel() { if (event_.request_id) { Publish(1); Respond(2); } }
++  void DidStartNavigation(content::NavigationHandle* h) override {
++    if (!h->IsInPrimaryMainFrame() || h->IsSameDocument()) return;
++    // Form import can offer before the submission navigation starts. Keep the
++    // offer through that navigation, as Chromium's save bubble does.
++    if (allow_submission_ && h->IsFormSubmission()) { allow_submission_ = false; return; }
++    Cancel();
++  }
++  void WebContentsDestroyed() override { Cancel(); }
++ private:
++  friend class content::WebContentsUserData<Offer>;
++  explicit Offer(content::WebContents* c) : content::WebContentsObserver(c),content::WebContentsUserData<Offer>(*c) {}
++  void Publish(uint32_t phase) {
++    auto e = event_; e.phase = phase;
++    ABIPost(base::BindOnce([](uint64_t expected,ReArcAutofillSaveEvent e,std::string origin,std::string summary) {
++      if (!host || expected != epoch || (!e.phase && !Pending().contains(e.request_id))) return;
++      e.origin = origin.c_str(); e.summary = summary.c_str(); host(context,&e);
++    },epoch,e,origin_,summary_));
++  }
++  bool allow_submission_ = false;
++  ReArcAutofillSaveEvent event_{};
++  std::string origin_,summary_;
++  base::OnceCallback<void(uint32_t)> done_;
++  base::WeakPtrFactory<Offer> weak_{this};
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(Offer);
++void Start(content::WebContents* c,uint32_t kind,bool update,std::u16string summary,base::OnceCallback<void(uint32_t)> done) {
++  for (auto id : TabRegistry::Get().SessionIds()) {
++    auto* s = TabRegistry::Get().FindSession(id);
++    if (s->web_contents() == c && s->close_state() == TabSession::CloseState::kOpen && host && Pending().size() < 64) {
++      Offer::GetOrCreateForWebContents(c)->Start(*s,kind,update,base::UTF16ToUTF8(summary),std::move(done)); return;
++    }
++  }
++  ABIPost(base::BindOnce(std::move(done),2));
++}
++}
++void OfferHostCardSave(content::WebContents* c,const autofill::CreditCard& card,autofill::payments::PaymentsAutofillClient::LocalSaveCardPromptCallback done) {
++  Start(c,0,false,card.NetworkAndLastFourDigits()+u"\n"+card.ExpirationDateForDisplay()+u"\n"+card.GetRawInfo(autofill::CREDIT_CARD_NAME_FULL),
++    base::BindOnce([](autofill::payments::PaymentsAutofillClient::LocalSaveCardPromptCallback done,uint32_t action) {
++      using Decision = autofill::payments::PaymentsAutofillClient::SaveCardOfferUserDecision;
++      std::move(done).Run(action == 0 ? Decision::kAccepted : action == 1 ? Decision::kDeclined : Decision::kIgnored);
++    },std::move(done)));
++}
++void OfferHostAddressSave(content::WebContents* c,const autofill::AutofillProfile& profile,bool update,autofill::AutofillClient::AddressProfileSavePromptCallback done) {
++  std::u16string summary;
++  for (auto field : {autofill::NAME_FULL,autofill::ADDRESS_HOME_STREET_ADDRESS,autofill::ADDRESS_HOME_CITY,autofill::ADDRESS_HOME_STATE,autofill::ADDRESS_HOME_ZIP,autofill::ADDRESS_HOME_COUNTRY,autofill::EMAIL_ADDRESS,autofill::PHONE_HOME_WHOLE_NUMBER}) {
++    auto text = profile.GetInfo(field,"en-US"); if (!text.empty()) { if (!summary.empty()) summary += u"\n"; summary += text; }
++  }
++  Start(c,1,update,std::move(summary),base::BindOnce([](autofill::AutofillClient::AddressProfileSavePromptCallback done,uint32_t action) {
++    using Decision = autofill::AutofillClient::AddressPromptUserDecision;
++    std::move(done).Run(action == 0 ? Decision::kAccepted : action == 1 ? Decision::kDeclined : Decision::kIgnored,std::nullopt);
++  },std::move(done)));
++}
++void ABICancelAutofillSave(uint64_t tab) {
++  if (auto* s = TabRegistry::Get().FindSession(tab)) if (auto* o = Offer::FromWebContents(s->web_contents())) o->Cancel();
++}
++}
++void ReArcEngineSetAutofillSaveCallback(ReArcAutofillSaveCallback cb,void* ctx) {
++  CHECK(pthread_main_np()); auto pending = rearc::Pending();
++  for (auto& [id,o] : pending) if (o) o->Cancel();
++  ++rearc::epoch; rearc::host = cb; rearc::context = ctx;
++}
++ReArcStatus ReArcAutofillSaveRespond(uint64_t id,uint32_t action) {
++  CHECK(pthread_main_np()); if (action > 2) return REARC_INVALID_ARGUMENT;
++  auto it = rearc::Pending().find(id); if (it == rearc::Pending().end() || !it->second) return REARC_NOT_FOUND;
++  it->second->Respond(action); return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_autofill_save.h b/chrome/browser/rearc_bridge/rearc_autofill_save.h
+new file mode 100644
+index 0000000000..6061a0e514
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_autofill_save.h
+@@ -0,0 +1,15 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_AUTOFILL_SAVE_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_AUTOFILL_SAVE_H_
++#include <cstdint>
++#include "components/autofill/core/browser/foundations/autofill_client.h"
++#include "components/autofill/core/browser/payments/payments_autofill_client.h"
++namespace content { class WebContents; }
++namespace rearc {
++void OfferHostCardSave(content::WebContents*, const autofill::CreditCard&, autofill::payments::PaymentsAutofillClient::LocalSaveCardPromptCallback);
++void OfferHostAddressSave(content::WebContents*, const autofill::AutofillProfile&, bool update, autofill::AutofillClient::AddressProfileSavePromptCallback);
++void ABICancelAutofillSave(uint64_t tab_id);
++}
++#endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 888228ddc5..86332fbb76 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 36, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 37, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -967,6 +967,23 @@ typedef void (*ReArcExtensionTabRequestCallback)(void*, const ReArcExtensionTabR
+ REARC_ENGINE_EXPORT void ReArcEngineSetExtensionTabRequestCallback(ReArcExtensionTabRequestCallback, void* context);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcExtensionTabRequestRespond(uint64_t request_id, uint64_t tab_id);
+ 
++// Local card/address offers (autofill_save_prompts, ABI 1.37).
++// phase 0 request, 1 withdrawn; kind 0 local card, 1 address (update supplied).
++// summary is Chromium data for display: card network/last four/expiration/name,
++// or address/name/email. No full card number or CVC crosses this channel.
++// Respond action 0 accept unchanged, 1 decline, 2 ignore/dismiss. Lifecycle
++// cancellation and absent callback ignore. No account migration/cloud save UI.
++typedef struct ReArcAutofillSaveEvent {
++  uint64_t profile_id, tab_id, content_generation, request_id;
++  uint32_t phase, kind;
++  bool update;
++  const char* origin;
++  const char* summary;
++} ReArcAutofillSaveEvent;
++typedef void (*ReArcAutofillSaveCallback)(void*, const ReArcAutofillSaveEvent*);
++REARC_ENGINE_EXPORT void ReArcEngineSetAutofillSaveCallback(ReArcAutofillSaveCallback, void* context);
++REARC_ENGINE_EXPORT ReArcStatus ReArcAutofillSaveRespond(uint64_t request_id, uint32_t action);
++
+ // Password leak detection (password_leak_detection, ABI 1.35): Chromium's
+ // profile.password_manager_leak_detection pref, default on as in Chrome. When
+ // on, a successfully submitted sign-in's credential is checked against
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 5970fd851e..1b32de024b 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -550,6 +550,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "autofill_suggestions" ||
+          std::string(feature) == "password_leak_detection" ||
+          std::string(feature) == "extension_windows" ||
++         std::string(feature) == "autofill_save_prompts" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 919c21c107..d8c6d37d0a 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.38.0";
++  return "0.39.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 07ee936599..f4bde41269 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -33,6 +33,7 @@
+ #include "chrome/browser/rearc_bridge/ipc_service_events.h"
+ #include "chrome/browser/rearc_bridge/media_adapter.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_autofill_save.h"
+ #include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
+ #include "chrome/browser/rearc_bridge/rearc_pip.h"
+ #include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
+@@ -1100,6 +1101,7 @@ void ABIAttachServices(uint64_t id) {
+ void ABIDetachServices(uint64_t id) {
+   CHECK(pthread_main_np());
+   ABICancelPasswords(id);
++  ABICancelAutofillSave(id);
+   ABICancelExtensionPrompts(id, 0);
+   ABICancelExtensionTabs(id, 0);
+   ABICancelContextMenu(id);
+diff --git a/chrome/browser/ui/autofill/chrome_autofill_client.cc b/chrome/browser/ui/autofill/chrome_autofill_client.cc
+index fba9fe736e..5f0dcdd19a 100644
+--- a/chrome/browser/ui/autofill/chrome_autofill_client.cc
++++ b/chrome/browser/ui/autofill/chrome_autofill_client.cc
+@@ -5,6 +5,10 @@
+ #include "chrome/browser/ui/autofill/chrome_autofill_client.h"
+ #if BUILDFLAG(IS_MAC)
+ #include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#include "chrome/browser/rearc_bridge/rearc_autofill_save.h"
++#endif
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
+ #include "chrome/browser/rearc_bridge/rearc_autofill_popup.h"
+ #endif
+ 
+@@ -860,6 +864,16 @@ void ChromeAutofillClient::ConfirmSaveAddressProfile(
+     const AutofillProfile* original_profile,
+     SaveAddressBubbleType save_address_bubble_type,
+     AddressProfileSavePromptCallback callback) {
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsBrowserlessTabContents(web_contents())) {
++    if (save_address_bubble_type != SaveAddressBubbleType::kSave) {
++      std::move(callback).Run(AddressPromptUserDecision::kIgnored,std::nullopt);
++    } else {
++      rearc::OfferHostAddressSave(web_contents(),profile,original_profile != nullptr,std::move(callback));
++    }
++    return;
++  }
++#endif
+ #if BUILDFLAG(IS_ANDROID)
+   save_update_address_profile_flow_manager_->OfferSave(
+       profile, original_profile,
+diff --git a/chrome/browser/ui/autofill/payments/chrome_payments_autofill_client.cc b/chrome/browser/ui/autofill/payments/chrome_payments_autofill_client.cc
+index a084d6b53a..9e7531d555 100644
+--- a/chrome/browser/ui/autofill/payments/chrome_payments_autofill_client.cc
++++ b/chrome/browser/ui/autofill/payments/chrome_payments_autofill_client.cc
+@@ -3,6 +3,10 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/ui/autofill/payments/chrome_payments_autofill_client.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#include "chrome/browser/rearc_bridge/rearc_autofill_save.h"
++#endif
+ 
+ #include <memory>
+ #include <optional>
+@@ -300,6 +304,11 @@ void ChromePaymentsAutofillClient::ShowSaveCreditCardLocally(
+     const CreditCard& card,
+     SaveCreditCardOptions options,
+     LocalSaveCardPromptCallback callback) {
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsBrowserlessTabContents(web_contents())) {
++    rearc::OfferHostCardSave(web_contents(),card,std::move(callback)); return;
++  }
++#endif
+ #if BUILDFLAG(IS_ANDROID)
+   DCHECK(options.show_prompt);
+   AutofillSaveCardUiInfo ui_info =
+@@ -333,6 +342,11 @@ void ChromePaymentsAutofillClient::ShowSaveCreditCardToCloud(
+     const LegalMessageLines& legal_message_lines,
+     SaveCreditCardOptions options,
+     UploadSaveCardPromptCallback callback) {
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsBrowserlessTabContents(web_contents())) {
++    std::move(callback).Run(SaveCardOfferUserDecision::kIgnored,{}); return;
++  }
++#endif
+ #if BUILDFLAG(IS_ANDROID)
+   DCHECK(options.show_prompt);
+   Profile* profile =
+-- 
+2.54.0 (Apple Git-157)
+

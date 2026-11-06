@@ -1,0 +1,489 @@
+From 5d6a80867c82851158a1ad82952d816e06dcd6a5 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 09:40:00 +0400
+Subject: [PATCH] P-TAB-001 wave 18c: route file choosers and download save
+ paths to the host
+
+Expose open, multiple, upload folder, open directory and save modes with accept types. Complete Chromium FileSelectListener with host paths or cancellation. Enumerate folders off-thread without symlink traversal; bound paths and file counts. Route download confirmations through the same save panel when registered. ABI 1.19 / bridge 0.21.0. Build p56 and native files host pass.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/browser/BUILD.gn                       |   2 +
+ .../chrome_download_manager_delegate.cc       |  17 +-
+ .../browser/rearc_bridge/rearc_abi_internal.h |   1 +
+ .../rearc_bridge/rearc_downloads_abi.cc       |   6 +-
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  32 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_file_chooser.cc        | 196 ++++++++++++++++++
+ .../browser/rearc_bridge/rearc_file_chooser.h |  18 ++
+ .../rearc_bridge/rearc_services_abi.cc        |   1 +
+ chrome/browser/rearc_bridge/tab_delegate.cc   |   7 +
+ chrome/browser/rearc_bridge/tab_delegate.h    |   3 +
+ 12 files changed, 275 insertions(+), 11 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_file_chooser.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_file_chooser.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 5d7b2273d8..22f47995a2 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1488,6 +1488,8 @@ source_set("core") {
+       "rearc_bridge/browserless_tab_helpers.h",
+       "rearc_bridge/rearc_downloads_abi.cc",
+       "rearc_bridge/rearc_find_abi.cc",
++      "rearc_bridge/rearc_file_chooser.cc",
++      "rearc_bridge/rearc_file_chooser.h",
+     ]
+   }
+ 
+diff --git a/chrome/browser/download/chrome_download_manager_delegate.cc b/chrome/browser/download/chrome_download_manager_delegate.cc
+index d1c4f87792..e02fd70ae8 100644
+--- a/chrome/browser/download/chrome_download_manager_delegate.cc
++++ b/chrome/browser/download/chrome_download_manager_delegate.cc
+@@ -54,6 +54,7 @@
+ #include "chrome/browser/profiles/profile.h"
+ #if BUILDFLAG(IS_MAC)
+ #include "chrome/browser/rearc_bridge/engine_mode.h"
++#include "chrome/browser/rearc_bridge/rearc_file_chooser.h"
+ #endif
+ #include "chrome/browser/tab_group_sync/tab_group_sync_tab_state.h"
+ #include "chrome/browser/ui/chrome_pages.h"
+@@ -1722,9 +1723,21 @@ void ChromeDownloadManagerDelegate::RequestConfirmation(
+ 
+ #else   // BUILDFLAG(IS_ANDROID)
+ #if BUILDFLAG(IS_MAC)
+-  // ReArc embedding has no file picker surface yet: save at the suggested
+-  // path when only a preference or save-as asked, otherwise cancel.
++  // ReArc uses the host save panel when registered; no Chromium picker.
+   if (rearc::IsEngineEmbeddedMode()) {
++    if (rearc::HasHostFileChooser()) {
++      auto* contents = content::DownloadItemUtils::GetWebContents(download);
++      if (!contents) {
++        std::move(callback).Run(DownloadConfirmationResult::CANCELED, ui::SelectedFileInfo());
++        return;
++      }
++      rearc::RunHostSaveChooser(contents, suggested_path, base::BindOnce(
++          [](DownloadTargetDeterminerDelegate::ConfirmationCallback reply, const base::FilePath& path) {
++            std::move(reply).Run(path.empty() ? DownloadConfirmationResult::CANCELED : DownloadConfirmationResult::CONFIRMED,
++                                ui::SelectedFileInfo(path));
++          }, std::move(callback)));
++      return;
++    }
+     if (reason == DownloadConfirmationReason::PREFERENCE ||
+         reason == DownloadConfirmationReason::SAVE_AS) {
+       std::move(callback).Run(
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 59a5cdefb0..84147b8fa1 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -24,6 +24,7 @@ bool ABIHasServiceFeature(const char* feature);
+ // Wave 18b find in page (rearc_find_abi.cc), driven by the services hooks.
+ void ABIAttachFind(uint64_t tab_id);
+ void ABIDetachFind(uint64_t tab_id);
++void ABICancelFileChooser(uint64_t tab_id);
+ void ABICancelJavaScriptDialogs(uint64_t tab_id);
+ // Wave 18b downloads (rearc_downloads_abi.cc), per registered bridge profile.
+ void ABIAttachDownloads(Profile* profile, uint64_t profile_id);
+diff --git a/chrome/browser/rearc_bridge/rearc_downloads_abi.cc b/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+index 4a4435ecc0..9f1ed6af9a 100644
+--- a/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+@@ -21,6 +21,7 @@
+ #include "chrome/browser/download/download_prefs.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_file_chooser.h"
+ #include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
+ #include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
+@@ -229,8 +230,7 @@ ReArcStatus ReArcDownloadSetPolicy(uint64_t profile_id,
+       return REARC_INVALID_ARGUMENT;
+     }
+   }
+-  // Chromium's file picker is the later file-chooser concern.
+-  if (prompt == 1) {
++  if (prompt == 1 && !rearc::HasHostFileChooser()) {
+     return REARC_UNSUPPORTED;
+   }
+   DownloadPrefs* prefs = DownloadPrefs::FromBrowserContext(profile);
+@@ -242,7 +242,7 @@ ReArcStatus ReArcDownloadSetPolicy(uint64_t profile_id,
+     // cancel rather than prompting in embedded mode.
+     prefs->SetDownloadPath(path);
+   }
+-  profile->GetPrefs()->SetBoolean(prefs::kPromptForDownload, false);
++  profile->GetPrefs()->SetBoolean(prefs::kPromptForDownload, prompt == 1);
+   return REARC_OK;
+ }
+ ReArcStatus ReArcDownloadAction(uint64_t profile_id,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 74ff3a5925..9912306cfa 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 18, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 19, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -427,10 +427,9 @@ REARC_ENGINE_EXPORT void ReArcEngineSetDownloadCallback(
+     ReArcDownloadCallback callback, void* context);
+ // directory: absolute UTF-8 path without '..' (null keeps Chromium's current
+ // default); persisted in the profile's Chromium download prefs. prompt: 0 save
+-// without asking (the only mode in 1.17); 1 Chromium's location picker is
+-// unsupported until the file chooser ABI. Embedded mode never shows Chromium's
+-// picker or opens a Chrome window: confirmations Chromium would ask for are
+-// accepted at the suggested path (preference/save-as) or cancelled.
++// without asking; 1 asks through the registered host file chooser (1.19),
++// unsupported without one. With no host chooser, preference/save-as uses the
++// suggested path and other confirmations cancel. No Chromium picker/window.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadSetPolicy(uint64_t profile_id,
+                                                        const char* directory,
+                                                        uint32_t prompt);
+@@ -462,6 +461,29 @@ REARC_ENGINE_EXPORT void ReArcEngineSetJavaScriptDialogCallback(
+ REARC_ENGINE_EXPORT ReArcStatus ReArcJavaScriptDialogRespond(
+     uint64_t request_id, bool accept, const char* text);
+ 
++// File chooser (file_chooser, ABI 1.19). phase 0 request, 1 cancelled.
++// mode: 0 open, 1 open_multiple, 2 upload_folder, 3 open_directory, 4 save.
++// accept_types are the page's MIME types/extensions, advisory filters.
++// Folder replies contain one root; engine enumerates regular descendants
++// off-thread without traversing symlinks (10k files / 8 MiB path bound).
++typedef struct ReArcFileChooserEvent {
++  uint64_t profile_id, tab_id, content_generation, request_id;
++  uint32_t phase, mode;
++  const char* origin;
++  const char* title;
++  const char* default_path;
++  const char* const* accept_types;
++  size_t accept_type_count;
++} ReArcFileChooserEvent;
++typedef void (*ReArcFileChooserCallback)(void*, const ReArcFileChooserEvent*);
++REARC_ENGINE_EXPORT void ReArcEngineSetFileChooserCallback(
++    ReArcFileChooserCallback callback, void* context);
++// cancel requires count=0. Otherwise absolute UTF-8 paths without '..',
++// <=4096 bytes/path, <=4096 paths; one except open_multiple. Invalid replies
++// leave the request pending. Filesystem failure asynchronously cancels it.
++REARC_ENGINE_EXPORT ReArcStatus ReArcFileChooserRespond(
++    uint64_t request_id, bool cancel, const char* const* paths, size_t count);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index b15301487d..f3ad7d744c 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -527,6 +527,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "find_in_page" ||
+          std::string(feature) == "downloads" ||
+          std::string(feature) == "javascript_dialogs" ||
++         std::string(feature) == "file_chooser" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index beb8bc11bd..503e84c177 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.20.0";
++  return "0.21.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_file_chooser.cc b/chrome/browser/rearc_bridge/rearc_file_chooser.cc
+new file mode 100644
+index 0000000000..4f515c9dc9
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_file_chooser.cc
+@@ -0,0 +1,196 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_file_chooser.h"
++#include <pthread.h>
++#include <sys/stat.h>
++#include <map>
++#include <string>
++#include <vector>
++#include "base/check.h"
++#include "base/files/file_enumerator.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/thread_pool.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "content/public/browser/file_select_listener.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++namespace rearc {
++namespace {
++using Mode = blink::mojom::FileChooserParams::Mode;
++class Chooser;
++ReArcFileChooserCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0, next_id = 1;
++auto& Pending() {
++ static base::NoDestructor<std::map<uint64_t, base::WeakPtr<Chooser>>> map;
++ return *map;
++}
++struct Selection { bool ok = false; std::vector<base::FilePath> files; base::FilePath root; };
++Selection ReadSelection(Mode mode, std::vector<base::FilePath> paths) {
++ Selection result;
++ if (mode == Mode::kUploadFolder) {
++  result.root = paths[0];
++  if (!base::DirectoryExists(result.root) || base::IsLink(result.root)) return result;
++  base::FileEnumerator e(result.root, true, base::FileEnumerator::FILES | base::FileEnumerator::SHOW_SYM_LINKS,
++      base::FilePath::StringType(), base::FileEnumerator::FolderSearchPolicy::ALL,
++      base::FileEnumerator::ErrorPolicy::STOP_ENUMERATION);
++  size_t bytes = 0;
++  for (auto path = e.Next(); !path.empty(); path = e.Next()) {
++   if (!S_ISREG(e.GetInfo().stat().st_mode)) continue;
++   bytes += path.value().size();
++   if (result.files.size() == 10000 || bytes > 8*1024*1024) return result;
++   result.files.push_back(path);
++  }
++  result.ok = e.GetError() == base::File::FILE_OK;
++  return result;
++ }
++ for (const auto& path : paths) {
++  if (mode == Mode::kSave) {
++   if (!base::DirectoryExists(path.DirName()) || base::DirectoryExists(path)) return result;
++  } else if (mode == Mode::kOpenDirectory) {
++   if (!base::DirectoryExists(path)) return result;
++  } else {
++   base::File::Info info;
++   if (!base::GetFileInfo(path, &info) || info.is_directory) return result;
++  }
++ }
++ result.ok = true; result.files = std::move(paths); return result;
++}
++class Chooser : public content::WebContentsObserver, public content::WebContentsUserData<Chooser> {
++ public:
++ ~Chooser() override { Cancel(); }
++ void Start(content::RenderFrameHost* frame, scoped_refptr<content::FileSelectListener> listener,
++            const blink::mojom::FileChooserParams& params) {
++  Cancel();
++  TabSession* s = nullptr;
++  for (auto id : TabRegistry::Get().SessionIds()) {
++   auto* candidate = TabRegistry::Get().FindSession(id);
++   if (candidate->web_contents() == web_contents()) { s = candidate; break; }
++  }
++  if (!host || !s || params.use_media_capture) { listener->FileSelectionCanceled(); return; }
++  listener_ = std::move(listener); mode_ = params.mode; id_ = next_id++;
++  event_ = {s->profile_id(), s->tab_id(), s->content_generation(), id_, 0,
++            static_cast<uint32_t>(mode_), nullptr, nullptr, nullptr, nullptr, 0};
++  origin_ = frame->GetLastCommittedOrigin().Serialize(); frame_ = frame->GetGlobalId();
++  title_ = base::UTF16ToUTF8(params.title); path_ = params.default_file_name.AsUTF8Unsafe();
++  types_.clear(); for (const auto& type : params.accept_types) types_.push_back(base::UTF16ToUTF8(type));
++  Pending().emplace(id_, weak_.GetWeakPtr()); Publish(0);
++ }
++ bool responding() const { return responding_; }
++ Mode mode() const { return mode_; }
++ void Respond(std::vector<base::FilePath> paths) {
++  responding_ = true;
++  base::ThreadPool::PostTaskAndReplyWithResult(FROM_HERE,
++    {base::MayBlock(), base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
++    base::BindOnce(&ReadSelection, mode_, std::move(paths)),
++    base::BindOnce(&Chooser::Selected, weak_.GetWeakPtr(), id_));
++ }
++ void Selected(uint64_t id, Selection selection) {
++  if (id != id_) return;
++  if (!selection.ok) { Cancel(); return; }
++  auto listener = std::move(listener_); Pending().erase(id_); id_ = 0; responding_ = false;
++  std::vector<blink::mojom::FileChooserFileInfoPtr> files;
++  for (const auto& path : selection.files) files.push_back(blink::mojom::FileChooserFileInfo::NewNativeFile(
++    blink::mojom::NativeFileInfo::New(path, u"", std::vector<std::u16string>())));
++  listener->FileSelected(std::move(files), selection.root, mode_);
++ }
++ void Cancel() {
++  if (!id_) return;
++  Publish(1); Pending().erase(id_); id_ = 0; responding_ = false;
++  auto listener = std::move(listener_); listener->FileSelectionCanceled();
++ }
++ void DidStartNavigation(content::NavigationHandle* h) override {
++  if (h->IsInPrimaryMainFrame() && !h->IsSameDocument()) Cancel();
++ }
++ void RenderFrameDeleted(content::RenderFrameHost* f) override { if (id_ && f->GetGlobalId() == frame_) Cancel(); }
++ void WebContentsDestroyed() override { Cancel(); }
++ private:
++ friend class content::WebContentsUserData<Chooser>;
++ explicit Chooser(content::WebContents* c) : content::WebContentsObserver(c), content::WebContentsUserData<Chooser>(*c) {}
++ void Publish(uint32_t phase) {
++  auto event = event_; event.phase = phase;
++  ABIPost(base::BindOnce([](uint64_t expected, ReArcFileChooserEvent e, std::string origin,
++      std::string title, std::string path, std::vector<std::string> types) {
++   if (!host || expected != epoch || (!e.phase && !Pending().contains(e.request_id))) return;
++   std::vector<const char*> pointers; for (const auto& type : types) pointers.push_back(type.c_str());
++   e.origin = origin.c_str(); e.title = title.c_str(); e.default_path = path.c_str();
++   e.accept_types = pointers.data(); e.accept_type_count = pointers.size(); host(host_context, &e);
++  }, epoch, event, origin_, title_, path_, types_));
++ }
++ uint64_t id_ = 0;
++ bool responding_ = false;
++ Mode mode_ = Mode::kOpen;
++ ReArcFileChooserEvent event_{};
++ std::string origin_, title_, path_;
++ std::vector<std::string> types_;
++ content::GlobalRenderFrameHostId frame_;
++ scoped_refptr<content::FileSelectListener> listener_;
++ base::WeakPtrFactory<Chooser> weak_{this};
++ WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(Chooser);
++class SaveListener : public content::FileSelectListener {
++ public:
++ explicit SaveListener(base::OnceCallback<void(const base::FilePath&)> cb) : cb_(std::move(cb)) {}
++ void FileSelected(std::vector<blink::mojom::FileChooserFileInfoPtr> files,
++     const base::FilePath&, Mode) override {
++   std::move(cb_).Run(files.empty() ? base::FilePath() : files[0]->get_native_file()->file_path);
++ }
++ void FileSelectionCanceled() override { std::move(cb_).Run(base::FilePath()); }
++ private:
++ ~SaveListener() override = default;
++ base::OnceCallback<void(const base::FilePath&)> cb_;
++};
++}  // namespace
++bool HasHostFileChooser() { return host != nullptr; }
++void RunHostSaveChooser(content::WebContents* contents, const base::FilePath& path,
++    base::OnceCallback<void(const base::FilePath&)> cb) {
++ blink::mojom::FileChooserParams params;
++ params.mode = Mode::kSave; params.default_file_name = path;
++ RunHostFileChooser(contents->GetPrimaryMainFrame(), base::MakeRefCounted<SaveListener>(std::move(cb)), params);
++}
++void RunHostFileChooser(content::RenderFrameHost* frame, scoped_refptr<content::FileSelectListener> listener,
++                        const blink::mojom::FileChooserParams& params) {
++ CHECK(pthread_main_np());
++ auto* c = content::WebContents::FromRenderFrameHost(frame);
++ Chooser::GetOrCreateForWebContents(c)->Start(frame, std::move(listener), params);
++}
++void ABICancelFileChooser(uint64_t tab) {
++ if (auto* s = TabRegistry::Get().FindSession(tab)) {
++  if (auto* c = Chooser::FromWebContents(s->web_contents())) c->Cancel();
++ }
++}
++}  // namespace rearc
++void ReArcEngineSetFileChooserCallback(ReArcFileChooserCallback cb, void* ctx) {
++ CHECK(pthread_main_np());
++ auto pending = rearc::Pending(); for (auto& [id, c] : pending) if (c) c->Cancel();
++ ++rearc::epoch; rearc::host = cb; rearc::host_context = ctx;
++}
++ReArcStatus ReArcFileChooserRespond(uint64_t id, bool cancel, const char* const* paths, size_t count) {
++ CHECK(pthread_main_np());
++ auto it = rearc::Pending().find(id);
++ if (it == rearc::Pending().end() || !it->second) return REARC_NOT_FOUND;
++ auto* c = it->second.get();
++ if (c->responding()) return REARC_NOT_FOUND;
++ if ((cancel && count) || (!cancel && (!paths || !count || count > 4096 ||
++     (c->mode() != rearc::Mode::kOpenMultiple && count != 1)))) return REARC_INVALID_ARGUMENT;
++ std::vector<base::FilePath> selected;
++ for (size_t i = 0; i < count; ++i) {
++  if (!paths[i]) return REARC_INVALID_ARGUMENT;
++  std::string value(paths[i]); base::FilePath path(value);
++  if (value.size() > 4096 || !base::IsStringUTF8(value) || !path.IsAbsolute() || path.ReferencesParent()) return REARC_INVALID_ARGUMENT;
++  selected.push_back(path);
++ }
++ if (cancel) c->Cancel(); else c->Respond(std::move(selected));
++ return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_file_chooser.h b/chrome/browser/rearc_bridge/rearc_file_chooser.h
+new file mode 100644
+index 0000000000..ed6697d6b0
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_file_chooser.h
+@@ -0,0 +1,18 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_FILE_CHOOSER_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_FILE_CHOOSER_H_
++#include "base/memory/scoped_refptr.h"
++#include "base/files/file_path.h"
++#include "base/functional/callback.h"
++#include "third_party/blink/public/mojom/choosers/file_chooser.mojom.h"
++namespace content { class RenderFrameHost; class FileSelectListener; class WebContents; }
++namespace rearc {
++bool HasHostFileChooser();
++void RunHostSaveChooser(content::WebContents*, const base::FilePath&,
++    base::OnceCallback<void(const base::FilePath&)>);
++void RunHostFileChooser(content::RenderFrameHost*, scoped_refptr<content::FileSelectListener>,
++                        const blink::mojom::FileChooserParams&);
++}
++#endif
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index f806a6a341..809c440587 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -1079,6 +1079,7 @@ void ABIAttachServices(uint64_t id) {
+ }
+ void ABIDetachServices(uint64_t id) {
+   CHECK(pthread_main_np());
++  ABICancelFileChooser(id);
+   ABICancelJavaScriptDialogs(id);
+   ABIDetachFind(id);
+   Pages().erase(id);
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 28fbd555b6..4d41bca27a 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/rearc_bridge/tab_delegate.h"
++#include "chrome/browser/rearc_bridge/rearc_file_chooser.h"
+ 
+ #include <utility>
+ 
+@@ -13,6 +14,7 @@
+ #include "chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h"
+ #include "chrome/browser/rearc_bridge/tab_adoption.h"
+ #include "components/find_in_page/find_tab_helper.h"
++#include "content/public/browser/file_select_listener.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
+ #include "content/public/browser/web_contents.h"
+@@ -131,6 +133,11 @@ ReArcTabDelegate::GetJavaScriptDialogManager(content::WebContents* source) {
+   return GetReArcJavaScriptDialogManager(source);
+ }
+ 
++void ReArcTabDelegate::RunFileChooser(content::RenderFrameHost* frame,
++    scoped_refptr<content::FileSelectListener> listener,
++    const blink::mojom::FileChooserParams& params) {
++  RunHostFileChooser(frame, std::move(listener), params);
++}
+ void ReArcTabDelegate::FindReply(content::WebContents* web_contents,
+                                  int request_id,
+                                  int number_of_matches,
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.h b/chrome/browser/rearc_bridge/tab_delegate.h
+index 7e96abe959..5df0be2a5e 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.h
++++ b/chrome/browser/rearc_bridge/tab_delegate.h
+@@ -64,6 +64,9 @@ class ReArcTabDelegate : public content::WebContentsDelegate {
+   bool TakeFocus(content::WebContents* source, bool reverse) override;
+   content::JavaScriptDialogManager* GetJavaScriptDialogManager(
+       content::WebContents* source) override;
++  void RunFileChooser(content::RenderFrameHost* frame,
++      scoped_refptr<content::FileSelectListener> listener,
++      const blink::mojom::FileChooserParams& params) override;
+   // Wave 18b: Browser::FindReply's routing to Chromium's FindTabHelper.
+   void FindReply(content::WebContents* web_contents,
+                  int request_id,
+-- 
+2.54.0 (Apple Git-157)
+

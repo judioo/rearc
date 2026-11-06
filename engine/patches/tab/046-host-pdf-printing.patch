@@ -1,0 +1,464 @@
+From 3cf2236a0c0d861af346e59c3c1bb8027fe9f8ec Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 11:45:18 +0400
+Subject: [PATCH] P-TAB-001 wave 18e: print registry tabs through host-rendered
+ PDF
+
+Attach Chromium's printing helpers to browser-less tabs and generate PDFs of the primary document with PrintViewManager/PdfPrintJob for the host to print with NSPrintOperation or save as PDF. Registry tabs never open Chromium's WebUI print preview or system print dialog: scripted, requested and system-dialog print paths complete the page's request (beforeprint/afterprint) and post a host print request instead. One job per tab; navigation, discard and close cancel. ABI 1.28 / bridge 0.30.0; build p75, native PDF bytes/pages, landscape page range, invalid range, busy, window.print request/afterprint and navigation/close cancellation pass.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/BUILD.gn                       |   2 +
+ chrome/browser/printing/print_view_manager.cc |  22 ++
+ .../printing/print_view_manager_base.cc       |  10 +
+ .../rearc_bridge/browserless_tab_helpers.cc   |   4 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  38 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ chrome/browser/rearc_bridge/rearc_print.cc    | 216 ++++++++++++++++++
+ chrome/browser/rearc_bridge/rearc_print.h     |  17 ++
+ 9 files changed, 310 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_print.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_print.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index dd90f87ccc..b894d07dec 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1491,6 +1491,8 @@ source_set("core") {
+       "rearc_bridge/rearc_search_abi.cc",
+       "rearc_bridge/rearc_fullscreen.cc",
+       "rearc_bridge/rearc_fullscreen.h",
++      "rearc_bridge/rearc_print.cc",
++      "rearc_bridge/rearc_print.h",
+       "rearc_bridge/discard_adapter.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+       "rearc_bridge/rearc_file_chooser.cc",
+diff --git a/chrome/browser/printing/print_view_manager.cc b/chrome/browser/printing/print_view_manager.cc
+index 25f1aa604a..005f573599 100644
+--- a/chrome/browser/printing/print_view_manager.cc
++++ b/chrome/browser/printing/print_view_manager.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/printing/print_view_manager.h"
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#include "chrome/browser/rearc_bridge/rearc_print.h"
+ 
+ #include <map>
+ #include <memory>
+@@ -564,6 +566,14 @@ void PrintViewManager::OnScriptedPrintPreviewCallback(
+     return;
+   }
+ 
++  // ReArc registry tabs have no Browser to host the preview dialog. The host
++  // prints from a generated PDF; window.print() completes immediately.
++  if (rearc::IsBrowserlessTabContents(web_contents())) {
++    rearc::RequestHostPrint(web_contents(), /*source=*/0);
++    PrintPreviewDone();
++    return;
++  }
++
+   // Running a dialog causes an exit to webpage-initiated fullscreen.
+   // https://crbug.com/41322524
+   if (web_contents()->IsFullscreen()) {
+@@ -627,6 +637,18 @@ void PrintViewManager::OnRequestPrintPreviewCallback(
+     return;
+   }
+ 
++  if (rearc::IsBrowserlessTabContents(web_contents())) {
++    // As for scripted previews: notify the host, then close the request so
++    // the renderer dispatches afterprint and can print again.
++    if (print_preview_state_ == NOT_PREVIEWING) {
++      SetPrintPreviewRenderFrameHost(render_frame_host);
++      print_preview_state_ = USER_INITIATED_PREVIEW;
++    }
++    rearc::RequestHostPrint(web_contents(), /*source=*/1);
++    PrintPreviewDone();
++    return;
++  }
++
+   if (params->webnode_only) {
+     PrintPreviewForWebNode(render_frame_host);
+   }
+diff --git a/chrome/browser/printing/print_view_manager_base.cc b/chrome/browser/printing/print_view_manager_base.cc
+index b673362fe8..076a175345 100644
+--- a/chrome/browser/printing/print_view_manager_base.cc
++++ b/chrome/browser/printing/print_view_manager_base.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/printing/print_view_manager_base.h"
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#include "chrome/browser/rearc_bridge/rearc_print.h"
+ 
+ #include <memory>
+ #include <string_view>
+@@ -629,6 +631,14 @@ void PrintViewManagerBase::ScriptedPrint(mojom::ScriptedPrintParamsPtr params,
+     return;
+   }
+ 
++  // ReArc registry tabs never show Chromium's system print dialog (print
++  // preview disabled): the host prints from a generated PDF instead.
++  if (rearc::IsBrowserlessTabContents(web_contents())) {
++    rearc::RequestHostPrint(web_contents(), /*source=*/0);
++    std::move(callback).Run(nullptr);
++    return;
++  }
++
+ #if BUILDFLAG(ENABLE_OOP_PRINTING)
+   if (ShouldPrintJobOop() && !query_with_ui_client_id().has_value()) {
+     // Renderer process has requested settings outside of the expected setup.
+diff --git a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+index e4a989c322..48a21d3163 100644
+--- a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
++++ b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+@@ -11,6 +11,7 @@
+ #include "base/check.h"
+ #include "chrome/browser/history/history_tab_helper.h"
+ #include "chrome/browser/password_manager/chrome_password_manager_client.h"
++#include "chrome/browser/printing/printing_init.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_key.h"
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
+@@ -83,6 +84,9 @@ void AttachBrowserlessTabHelpers(content::WebContents* contents) {
+   }
+   find_in_page::FindTabHelper::CreateForWebContents(contents);
+   permissions::PermissionRequestManager::CreateForWebContents(contents);
++  // Wave 18e: PDF generation for host printing. PrintViewManager's preview
++  // and system-dialog paths are routed to the host for registry tabs.
++  printing::InitializePrintingForWebContents(contents);
+ }
+ 
+ bool IsBrowserlessTabContents(const content::WebContents* contents) {
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 29fb241fb0..b0e383045a 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 27, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 28, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -311,6 +311,42 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcTabExitFullscreen(uint64_t tab_id);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetFullscreenState(uint64_t tab_id,
+                                                            bool* fullscreen);
+ 
++// Printing (printing, ABI 1.28). Registry tabs never show Chromium's print
++// preview or system print dialog. window.print() (source 0) and other page
++// print requests (source 1) complete immediately for the page (beforeprint/
++// afterprint fire) and post a request event; the host prints a PDF from
++// ReArcTabPrintToPDF with NSPrintOperation, or saves it ("Save as PDF").
++// Without a callback page requests are completed silently. Chromium's
++// renderer throttling of repeated script prints applies.
++typedef struct ReArcPrintRequestEvent {
++  uint64_t profile_id, tab_id, content_generation;
++  uint32_t source;
++} ReArcPrintRequestEvent;
++typedef void (*ReArcPrintCallback)(void* context,
++                                   const ReArcPrintRequestEvent* event);
++REARC_ENGINE_EXPORT void ReArcEngineSetPrintCallback(
++    ReArcPrintCallback callback, void* context);
++// Null options: Chromium defaults (Letter portrait, ~0.4in margins, scale 1,
++// no background/header/footer). Sizes in inches; 0 paper size/scale and a
++// negative margin select the default. scale 0.1..2. page_ranges: null/empty
++// for all, else e.g. "1-3,5" (ASCII, <=4096 bytes). header_footer prints
++// Chromium's date/title/URL/page-number template.
++typedef struct ReArcPrintOptions {
++  bool landscape, print_background, header_footer, prefer_css_page_size;
++  double scale, paper_width_in, paper_height_in;
++  double margin_top_in, margin_bottom_in, margin_left_in, margin_right_in;
++  const char* page_ranges;
++} ReArcPrintOptions;
++// Callback owns +1 PDF bytes; free with ReArcBufferFree (also when stale).
++// Error: null/0. 256 MiB bound (too_large). Invalid/out-of-range page ranges:
++// invalid_argument. Navigation, discard and close cancel. One job per tab.
++typedef void (*ReArcPdfCallback)(void* context, ReArcStatus status,
++                                 uint64_t tab_id, uint64_t content_generation,
++                                 uint8_t* data, size_t size);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabPrintToPDF(
++    uint64_t tab_id, const ReArcPrintOptions* options,
++    ReArcPdfCallback completion, void* context);
++
+ 
+ // Register a +0 NSWindow* before attachment; engine retains until Closed/Run
+ // returns. Duplicate/zero IDs rejected. Closing a window keeps its tabs alive.
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index a715f9b4c8..b27caf1d7e 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -541,6 +541,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "password_prompts" ||
+          std::string(feature) == "tab_discard" ||
+          std::string(feature) == "html_fullscreen" ||
++         std::string(feature) == "printing" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 41fa0507a7..e40eb0fdb3 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.29.0";
++  return "0.30.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_print.cc b/chrome/browser/rearc_bridge/rearc_print.cc
+new file mode 100644
+index 0000000000..7f0ac819a2
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_print.cc
+@@ -0,0 +1,216 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_print.h"
++
++#include <pthread.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <optional>
++#include <string>
++#include <variant>
++
++#include "base/check.h"
++#include "base/containers/span.h"
++#include "base/functional/bind.h"
++#include "base/memory/ref_counted_memory.h"
++#include "base/memory/weak_ptr.h"
++#include "base/strings/string_util.h"
++#include "chrome/browser/printing/print_view_manager.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "components/printing/browser/print_to_pdf/pdf_print_result.h"
++#include "components/printing/browser/print_to_pdf/pdf_print_utils.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++
++namespace rearc {
++namespace {
++ReArcPrintCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0;
++constexpr size_t kMaxPdfBytes = 256u * 1024 * 1024;
++TabSession* SessionFor(content::WebContents* contents) {
++  for (uint64_t id : TabRegistry::Get().SessionIds()) {
++    auto* session = TabRegistry::Get().FindSession(id);
++    if (session && session->web_contents() == contents) return session;
++  }
++  return nullptr;
++}
++// One PDF job per tab. Navigation, discard and close cancel observation;
++// a late PdfPrintJob reply for a cancelled job is ignored.
++class PdfJob : public content::WebContentsObserver,
++               public content::WebContentsUserData<PdfJob> {
++ public:
++  ~PdfJob() override { Finish(REARC_CANCELLED, nullptr); }
++  bool busy() const { return callback_; }
++  void Start(TabSession& session, printing::mojom::PrintPagesParamsPtr params,
++             std::string ranges, ReArcPdfCallback callback, void* context) {
++    tab_id_ = session.tab_id();
++    generation_ = session.content_generation();
++    callback_ = callback;
++    context_ = context;
++    ++token_;
++    frame_ = web_contents()->GetPrimaryMainFrame()->GetGlobalId();
++    printing::PrintViewManager::FromWebContents(web_contents())
++        ->PrintToPdf(web_contents()->GetPrimaryMainFrame(), ranges,
++                     std::move(params),
++                     base::BindOnce(&PdfJob::Done, weak_.GetWeakPtr(), token_));
++  }
++  void Finish(ReArcStatus status, scoped_refptr<base::RefCountedMemory> data) {
++    if (!callback_) return;
++    auto callback = callback_;
++    void* context = context_;
++    callback_ = nullptr;
++    context_ = nullptr;
++    ++token_;
++    ABIPost(base::BindOnce(
++        [](ReArcPdfCallback callback, void* context, ReArcStatus status,
++           uint64_t tab, uint64_t generation,
++           scoped_refptr<base::RefCountedMemory> data) {
++          uint8_t* bytes = nullptr;
++          size_t size = 0;
++          if (!status && data) {
++            size = data->size();
++            bytes = static_cast<uint8_t*>(malloc(size));
++            if (!bytes) {
++              status = REARC_INTERNAL;
++              size = 0;
++            } else {
++              memcpy(bytes, data->data(), size);
++            }
++          }
++          callback(context, status, tab, generation, bytes, size);
++        },
++        callback, context, status, tab_id_, generation_, std::move(data)));
++  }
++  void DidStartNavigation(content::NavigationHandle* handle) override {
++    if (handle->IsInPrimaryMainFrame() && !handle->IsSameDocument()) {
++      Finish(REARC_CANCELLED, nullptr);
++    }
++  }
++  void AboutToBeDiscarded(content::WebContents*) override {
++    Finish(REARC_CANCELLED, nullptr);
++  }
++  void WebContentsDestroyed() override { Finish(REARC_CANCELLED, nullptr); }
++
++ private:
++  friend class content::WebContentsUserData<PdfJob>;
++  explicit PdfJob(content::WebContents* contents)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<PdfJob>(*contents) {}
++  void Done(uint64_t token, print_to_pdf::PdfPrintResult result,
++            scoped_refptr<base::RefCountedMemory> data) {
++    if (token != token_) return;
++    using Result = print_to_pdf::PdfPrintResult;
++    ReArcStatus status = REARC_OK;
++    switch (result) {
++      case Result::kPrintSuccess:
++        if (!data || !data->size()) status = REARC_INTERNAL;
++        else if (data->size() > kMaxPdfBytes) status = REARC_TOO_LARGE;
++        break;
++      case Result::kPageRangeSyntaxError:
++      case Result::kPageRangeInvalidRange:
++      case Result::kPageCountExceeded:
++        status = REARC_INVALID_ARGUMENT;
++        break;
++      case Result::kPrintingInProgress:
++        status = REARC_BUSY;
++        break;
++      default:
++        // PdfPrintJob fails from RenderFrameDeleted: that is teardown.
++        status = REARC_INTERNAL;
++        if (web_contents()->IsBeingDestroyed() ||
++            !content::RenderFrameHost::FromID(frame_) ||
++            !content::RenderFrameHost::FromID(frame_)->IsRenderFrameLive()) {
++          status = REARC_CANCELLED;
++        }
++        break;
++    }
++    Finish(status, status ? nullptr : std::move(data));
++  }
++  uint64_t tab_id_ = 0, generation_ = 0, token_ = 0;
++  content::GlobalRenderFrameHostId frame_;
++  ReArcPdfCallback callback_ = nullptr;
++  raw_ptr<void> context_ = nullptr;
++  base::WeakPtrFactory<PdfJob> weak_{this};
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(PdfJob);
++std::optional<double> Positive(double value) {
++  return value > 0 ? std::optional<double>(value) : std::nullopt;
++}
++std::optional<double> Margin(double value) {
++  return value >= 0 ? std::optional<double>(value) : std::nullopt;
++}
++}  // namespace
++
++void RequestHostPrint(content::WebContents* contents, uint32_t source) {
++  CHECK(pthread_main_np());
++  TabSession* session = SessionFor(contents);
++  if (!host || !session) return;
++  ReArcPrintRequestEvent event{session->profile_id(), session->tab_id(),
++                               session->content_generation(), source};
++  ABIPost(base::BindOnce(
++      [](uint64_t expected, ReArcPrintRequestEvent event) {
++        if (host && expected == epoch) host(host_context, &event);
++      },
++      epoch, event));
++}
++}  // namespace rearc
++
++void ReArcEngineSetPrintCallback(ReArcPrintCallback callback, void* context) {
++  CHECK(pthread_main_np());
++  ++rearc::epoch;
++  rearc::host = callback;
++  rearc::host_context = context;
++}
++
++ReArcStatus ReArcTabPrintToPDF(uint64_t tab_id,
++                               const ReArcPrintOptions* options,
++                               ReArcPdfCallback completion, void* context) {
++  rearc::TabSession* session;
++  if (auto status = rearc::ABICheckTab(tab_id, &session)) return status;
++  if (!completion) return REARC_INVALID_ARGUMENT;
++  content::WebContents* contents = session->web_contents();
++  if (!printing::PrintViewManager::FromWebContents(contents)) {
++    return REARC_UNSUPPORTED;
++  }
++  ReArcPrintOptions o{};
++  o.margin_top_in = o.margin_bottom_in = o.margin_left_in = o.margin_right_in =
++      -1;
++  if (options) o = *options;
++  std::string ranges = o.page_ranges ? o.page_ranges : "";
++  if (ranges.size() > 4096 || !base::IsStringASCII(ranges) ||
++      (o.scale && (o.scale < 0.1 || o.scale > 2)) || o.paper_width_in < 0 ||
++      o.paper_height_in < 0 || o.paper_width_in > 200 ||
++      o.paper_height_in > 200) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  if (contents->WasDiscarded() || contents->IsCrashed() ||
++      !contents->GetPrimaryMainFrame()->IsRenderFrameLive()) {
++    return REARC_INVALID_STATE;
++  }
++  auto* job = rearc::PdfJob::GetOrCreateForWebContents(contents);
++  if (job->busy()) return REARC_BUSY;
++  auto params = print_to_pdf::GetPrintPagesParams(
++      contents->GetPrimaryMainFrame()->GetLastCommittedURL(), o.landscape,
++      o.header_footer, o.print_background, rearc::Positive(o.scale),
++      rearc::Positive(o.paper_width_in), rearc::Positive(o.paper_height_in),
++      rearc::Margin(o.margin_top_in), rearc::Margin(o.margin_bottom_in),
++      rearc::Margin(o.margin_left_in), rearc::Margin(o.margin_right_in),
++      std::nullopt, std::nullopt, o.prefer_css_page_size, std::nullopt,
++      std::nullopt);
++  if (std::holds_alternative<std::string>(params)) {
++    return REARC_INVALID_ARGUMENT;  // Margins exceed the paper, etc.
++  }
++  job->Start(*session,
++             std::move(std::get<printing::mojom::PrintPagesParamsPtr>(params)),
++             std::move(ranges), completion, context);
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_print.h b/chrome/browser/rearc_bridge/rearc_print.h
+new file mode 100644
+index 0000000000..17af893724
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_print.h
+@@ -0,0 +1,17 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_PRINT_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_PRINT_H_
++#include <cstdint>
++namespace content {
++class WebContents;
++}
++namespace rearc {
++// Called by PrintViewManager(Base) instead of showing Chromium's print preview
++// or system print dialog for a registry tab (printing, ABI 1.28). source:
++// 0 window.print(), 1 other page print request. The caller completes the
++// renderer's request; this only notifies the host, deferred.
++void RequestHostPrint(content::WebContents* contents, uint32_t source);
++}  // namespace rearc
++#endif
+-- 
+2.54.0 (Apple Git-157)
+

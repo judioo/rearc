@@ -1,0 +1,384 @@
+From 5a857e2ca603fbe973accb86b370d12efac1486a Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 11:54:01 +0400
+Subject: [PATCH] P-TAB-001 wave 18e: allow host-policed drops into web pages
+
+Replace the embedded view delegate's unconditional drop abort with a host drop policy. The host selects which parts of a drag (files, text, URLs, promised image data) reach pages; drags with no accepted part are refused before any page event and mixed drags are filtered at drop. Exact host-registered pasteboard UTIs are rejected in WebContentsViewCocoa itself, so the shell's private sidebar drags never reach web content. Without a policy drops stay aborted, as before. ABI 1.29 / bridge 0.31.0; build p76, native legacy abort, text/URL/file/image drops, private-type invisibility and accept-mask filtering through the real NSDraggingDestination pass.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/BUILD.gn                       |  2 +
+ .../browser/rearc_bridge/rearc_drop_policy.h  | 16 ++++
+ .../browser/rearc_bridge/rearc_drop_policy.mm | 81 +++++++++++++++++++
+ .../browser/rearc_bridge/rearc_engine_abi.h   | 23 +++++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |  1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |  2 +-
+ chrome/browser/rearc_bridge/tab_delegate.cc   | 13 +++
+ chrome/browser/rearc_bridge/tab_delegate.h    |  5 ++
+ .../web_contents_view_delegate_mac.mm         | 12 ++-
+ .../web_contents_view_cocoa.h                 |  5 ++
+ .../web_contents_view_cocoa.mm                | 29 ++++++-
+ 11 files changed, 181 insertions(+), 8 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_drop_policy.h
+ create mode 100644 chrome/browser/rearc_bridge/rearc_drop_policy.mm
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index b894d07dec..1485e0fddc 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1493,6 +1493,8 @@ source_set("core") {
+       "rearc_bridge/rearc_fullscreen.h",
+       "rearc_bridge/rearc_print.cc",
+       "rearc_bridge/rearc_print.h",
++      "rearc_bridge/rearc_drop_policy.h",
++      "rearc_bridge/rearc_drop_policy.mm",
+       "rearc_bridge/discard_adapter.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+       "rearc_bridge/rearc_file_chooser.cc",
+diff --git a/chrome/browser/rearc_bridge/rearc_drop_policy.h b/chrome/browser/rearc_bridge/rearc_drop_policy.h
+new file mode 100644
+index 0000000000..6d7a873125
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_drop_policy.h
+@@ -0,0 +1,16 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_DROP_POLICY_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_DROP_POLICY_H_
++namespace content {
++struct DropData;
++}
++namespace rearc {
++// page_drops (ABI 1.29). False until the host sets a policy: drops are then
++// aborted at drop time, as before.
++bool HasHostDropPolicy();
++// Strips kinds the host did not accept. False when nothing droppable remains.
++bool FilterHostDropData(content::DropData* data);
++}  // namespace rearc
++#endif
+diff --git a/chrome/browser/rearc_bridge/rearc_drop_policy.mm b/chrome/browser/rearc_bridge/rearc_drop_policy.mm
+new file mode 100644
+index 0000000000..22c68f1949
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_drop_policy.mm
+@@ -0,0 +1,81 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_drop_policy.h"
++
++#import <AppKit/AppKit.h>
++#include <pthread.h>
++
++#include <string>
++
++#include "base/check.h"
++#include "base/strings/string_util.h"
++#include "base/strings/sys_string_conversions.h"
++#include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
++#import "content/app_shim_remote_cocoa/web_contents_view_cocoa.h"
++#include "content/public/common/drop_data.h"
++
++namespace rearc {
++namespace {
++bool configured = false;
++uint32_t accepted = 0;
++}  // namespace
++bool HasHostDropPolicy() {
++  return configured;
++}
++bool FilterHostDropData(content::DropData* data) {
++  CHECK(configured);
++  if (!(accepted & REARC_DROP_FILES)) {
++    data->filenames.clear();
++    data->file_mime_types.clear();
++    data->file_system_files.clear();
++    data->filesystem_id.clear();
++  }
++  if (!(accepted & REARC_DROP_TEXT)) {
++    data->text.reset();
++    data->html.reset();
++    data->html_base_url = GURL();
++    data->custom_data.clear();
++  }
++  if (!(accepted & REARC_DROP_URLS)) {
++    data->url_infos.clear();
++    data->download_metadata.reset();
++  }
++  if (!(accepted & REARC_DROP_IMAGES)) {
++    data->file_contents.clear();
++    data->file_contents_image_accessible = false;
++    data->file_contents_source_url = GURL();
++    data->file_contents_filename_extension.clear();
++    data->file_contents_content_disposition.clear();
++  }
++  return !data->filenames.empty() || !data->file_system_files.empty() ||
++         data->text || data->html || !data->custom_data.empty() ||
++         !data->url_infos.empty() || !data->file_contents.empty();
++}
++}  // namespace rearc
++
++ReArcStatus ReArcEngineSetDropPolicy(uint32_t accept,
++                                     const char* const* blocked_types,
++                                     size_t count) {
++  CHECK(pthread_main_np());
++  constexpr uint32_t kAll = REARC_DROP_FILES | REARC_DROP_TEXT |
++                            REARC_DROP_URLS | REARC_DROP_IMAGES;
++  if (accept & ~kAll || count > 32 || (count && !blocked_types)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  NSMutableSet<NSString*>* types = [NSMutableSet set];
++  for (size_t i = 0; i < count; ++i) {
++    const char* type = blocked_types[i];
++    if (!type) return REARC_INVALID_ARGUMENT;
++    std::string value(type);
++    if (value.empty() || value.size() > 256 || !base::IsStringASCII(value) ||
++        value.find_first_of(" \t\r\n") != std::string::npos) {
++      return REARC_INVALID_ARGUMENT;
++    }
++    [types addObject:base::SysUTF8ToNSString(value)];
++  }
++  [WebContentsViewCocoa setRejectedDragTypes:types];
++  rearc::configured = true;
++  rearc::accepted = accept;
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index b0e383045a..74e6604574 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 28, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 29, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -347,6 +347,27 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcTabPrintToPDF(
+     uint64_t tab_id, const ReArcPrintOptions* options,
+     ReArcPdfCallback completion, void* context);
+ 
++// Drops into pages (page_drops, ABI 1.29). Until a policy is set, drops are
++// aborted at drop time as in ABI <=1.28 (pages can still see dragenter/over).
++// accept selects the parts of a drag that reach pages: files (Finder file
++// URLs; Chromium grants the renderer read access to exactly those files),
++// text (plain/HTML/RTF and web custom data), URLs, and image data (promised or
++// raw image bytes, exposed as a File). A drag with no accepted part is refused
++// before the page sees any event; partial drags are filtered. Unhandled drops
++// follow Chromium (e.g. a dropped link or file may navigate the frame).
++// blocked_types: exact pasteboard UTIs, <=32, ASCII 1..256 bytes. Any drag
++// carrying one is never offered to any page (no events, no operation), so
++// the shell's private drags (e.g. sidebar tab drags) never reach web content.
++// Each call replaces the whole policy; accept 0 refuses every drop.
++enum {
++  REARC_DROP_FILES = 1,
++  REARC_DROP_TEXT = 2,
++  REARC_DROP_URLS = 4,
++  REARC_DROP_IMAGES = 8
++};
++REARC_ENGINE_EXPORT ReArcStatus ReArcEngineSetDropPolicy(
++    uint32_t accept, const char* const* blocked_types, size_t count);
++
+ 
+ // Register a +0 NSWindow* before attachment; engine retains until Closed/Run
+ // returns. Duplicate/zero IDs rejected. Closing a window keeps its tabs alive.
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index b27caf1d7e..4b773e120d 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -542,6 +542,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "tab_discard" ||
+          std::string(feature) == "html_fullscreen" ||
+          std::string(feature) == "printing" ||
++         std::string(feature) == "page_drops" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index e40eb0fdb3..f11343aeff 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.30.0";
++  return "0.31.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index a22c46f100..06cdabdb97 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/rearc_bridge/tab_delegate.h"
+ #include "chrome/browser/rearc_bridge/rearc_file_chooser.h"
++#include "chrome/browser/rearc_bridge/rearc_drop_policy.h"
+ #include "chrome/browser/rearc_bridge/rearc_fullscreen.h"
+ 
+ #include <utility>
+@@ -19,6 +20,7 @@
+ #include "chrome/browser/rearc_bridge/tab_adoption.h"
+ #include "components/find_in_page/find_tab_helper.h"
+ #include "content/public/browser/file_select_listener.h"
++#include "content/public/common/drop_data.h"
+ #include "content/public/browser/keyboard_event_processing_result.h"
+ #include "third_party/blink/public/mojom/frame/fullscreen.mojom.h"
+ #include "content/public/browser/navigation_controller.h"
+@@ -203,6 +205,17 @@ content::KeyboardEventProcessingResult ReArcTabDelegate::PreHandleKeyboardEvent(
+              : content::KeyboardEventProcessingResult::NOT_HANDLED;
+ }
+ 
++bool ReArcTabDelegate::CanDragEnter(
++    content::WebContents* source,
++    const content::DropData& data,
++    blink::DragOperationsMask operations_allowed) {
++  if (!HasHostDropPolicy()) {
++    return true;  // ABI <=1.28 behavior: events, then an aborted drop.
++  }
++  content::DropData filtered = data;
++  return FilterHostDropData(&filtered);
++}
++
+ void ReArcTabDelegate::WebContentsCreated(
+     content::WebContents* source_contents,
+     const content::GlobalRenderFrameHostId& opener_id,
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.h b/chrome/browser/rearc_bridge/tab_delegate.h
+index 2caed991f8..65c3b49284 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.h
++++ b/chrome/browser/rearc_bridge/tab_delegate.h
+@@ -90,6 +90,11 @@ class ReArcTabDelegate : public content::WebContentsDelegate {
+   content::KeyboardEventProcessingResult PreHandleKeyboardEvent(
+       content::WebContents* source,
+       const input::NativeWebKeyboardEvent& event) override;
++  // Wave 18e: a drag with nothing the host's drop policy accepts never
++  // reaches the page (page_drops).
++  bool CanDragEnter(content::WebContents* source,
++                    const content::DropData& data,
++                    blink::DragOperationsMask operations_allowed) override;
+   // Wave 18b: attach browser-less helpers before the new contents navigates.
+   void WebContentsCreated(content::WebContents* source_contents,
+                           const content::GlobalRenderFrameHostId& opener_id,
+diff --git a/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.mm b/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.mm
+index 991917f981..25717b708b 100644
+--- a/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.mm
++++ b/chrome/browser/rearc_bridge/web_contents_view_delegate_mac.mm
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/rearc_bridge/web_contents_view_delegate_mac.h"
+ #include "chrome/browser/rearc_bridge/rearc_context_menu.h"
++#include "chrome/browser/rearc_bridge/rearc_drop_policy.h"
+ 
+ #include <pthread.h>
+ 
+@@ -84,8 +85,15 @@ void ShowContextMenu(content::RenderFrameHost& render_frame_host,
+ 
+   void OnPerformingDrop(const content::DropData& drop_data,
+                         DropCompletionCallback callback) override {
+-    VLOG(1) << "ReArc bridge: drop aborted (no shell drop policy yet).";
+-    std::move(callback).Run(std::nullopt);
++    // Wave 18e (page_drops): without a host policy drops stay aborted.
++    // With one, the page receives only the kinds the host accepts.
++    content::DropData filtered = drop_data;
++    if (!HasHostDropPolicy() || !FilterHostDropData(&filtered)) {
++      VLOG(1) << "ReArc bridge: drop aborted by host drop policy.";
++      std::move(callback).Run(std::nullopt);
++      return;
++    }
++    std::move(callback).Run(std::move(filtered));
+   }
+ 
+  private:
+diff --git a/content/app_shim_remote_cocoa/web_contents_view_cocoa.h b/content/app_shim_remote_cocoa/web_contents_view_cocoa.h
+index bf3460983f..70a6784269 100644
+--- a/content/app_shim_remote_cocoa/web_contents_view_cocoa.h
++++ b/content/app_shim_remote_cocoa/web_contents_view_cocoa.h
+@@ -40,6 +40,11 @@ CONTENT_EXPORT
+ // in-PWA-process instances, to limit the workaround's effect to just PWAs.
+ - (void)enableDroppedScreenShotCopier;
+ 
++// ReArc embedder (page_drops): drags whose pasteboard carries any of these
++// UTIs are never offered to web content, in any view. Main thread only; nil
++// or empty clears. The shell's private (e.g. sidebar item) drags use this.
+++ (void)setRejectedDragTypes:(NSSet<NSString*>*)types;
++
+ // Private interface.
+ // TODO(ccameron): Document these functions.
+ - (instancetype)initWithViewsHostableView:(ui::ViewsHostableView*)v;
+diff --git a/content/app_shim_remote_cocoa/web_contents_view_cocoa.mm b/content/app_shim_remote_cocoa/web_contents_view_cocoa.mm
+index 60bb2a260c..e2a8393436 100644
+--- a/content/app_shim_remote_cocoa/web_contents_view_cocoa.mm
++++ b/content/app_shim_remote_cocoa/web_contents_view_cocoa.mm
+@@ -112,6 +112,22 @@ bool IsPathScreenShot(const base::FilePath& path) const {
+ ////////////////////////////////////////////////////////////////////////////////
+ // WebContentsViewCocoa
+ 
++// ReArc page_drops: UTIs whose drags never reach web content.
++namespace {
++NSSet<NSString*>* __strong g_rejected_drag_types;
++bool IsRejectedDrag(id<NSDraggingInfo> sender) {
++  if (!g_rejected_drag_types.count) {
++    return false;
++  }
++  for (NSString* type in sender.draggingPasteboard.types) {
++    if ([g_rejected_drag_types containsObject:type]) {
++      return true;
++    }
++  }
++  return false;
++}
++}  // namespace
++
+ @implementation WebContentsViewCocoa {
+   // Instances of this class are owned by both `_host` and AppKit. The `_host`
+   // must call `-setHost:nil` in its destructor.
+@@ -366,8 +382,13 @@ - (void)draggingSession:(NSDraggingSession*)session
+ 
+ // NSDraggingDestination methods
+ 
+++ (void)setRejectedDragTypes:(NSSet<NSString*>*)types {
++  g_rejected_drag_types = [types copy];
++}
++
+ - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+-  if (!_host)
++  // Rejected drags never reach the drag destination, so no page event fires.
++  if (!_host || IsRejectedDrag(sender))
+     return NSDragOperationNone;
+ 
+   // Fill out a DropData from pasteboard.
+@@ -389,13 +410,13 @@ - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+ }
+ 
+ - (void)draggingExited:(id<NSDraggingInfo>)sender {
+-  if (!_host)
++  if (!_host || IsRejectedDrag(sender))
+     return;
+   _host->DraggingExited();
+ }
+ 
+ - (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender {
+-  if (!_host)
++  if (!_host || IsRejectedDrag(sender))
+     return NSDragOperationNone;
+   auto draggingInfo = DraggingInfo::New();
+   [self populateDraggingInfo:draggingInfo.get() fromNSDraggingInfo:sender];
+@@ -405,7 +426,7 @@ - (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender {
+ }
+ 
+ - (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+-  if (!_host)
++  if (!_host || IsRejectedDrag(sender))
+     return NO;
+   auto draggingInfo = DraggingInfo::New();
+   [self populateDraggingInfo:draggingInfo.get() fromNSDraggingInfo:sender];
+-- 
+2.54.0 (Apple Git-157)
+

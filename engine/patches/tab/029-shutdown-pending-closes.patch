@@ -1,0 +1,130 @@
+From 6201151b27f759f3e502614bc49894f8b0884382 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Tue, 3 Nov 2026 14:16:06 +0400
+Subject: [PATCH] P-APP-001 wave 16: join pending tab closes during shutdown
+
+Join existing close-controller requests without dropping their original replies. Normal shutdown honors veto and force promotes pending cleanup; retain live-content protection across deferred destruction. Keep ProfileClose lifecycle serialization and all old C layouts, advertising shutdown_pending_closes in ABI 1.12.
+
+Last rebased: 2026-11-03 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ .../browser/rearc_bridge/close_controller.cc  | 19 +++++++++++++++++++
+ .../browser/rearc_bridge/close_controller.h   |  5 +++++
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  2 +-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  | 10 ++++------
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |  2 +-
+ 5 files changed, 30 insertions(+), 8 deletions(-)
+
+diff --git a/chrome/browser/rearc_bridge/close_controller.cc b/chrome/browser/rearc_bridge/close_controller.cc
+index 0b7467ce12..7a2c3e6209 100644
+--- a/chrome/browser/rearc_bridge/close_controller.cc
++++ b/chrome/browser/rearc_bridge/close_controller.cc
+@@ -153,6 +153,25 @@ CloseRequestResult RequestTabClose(uint64_t tab_id,
+   return CloseRequestResult::kStarted;
+ }
+ 
++CloseRequestResult RequestTabCloseForShutdown(uint64_t tab_id,
++                                              bool force,
++                                              CloseCallback callback) {
++  CHECK(pthread_main_np());
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  PendingClose* pending =
++      session ? FindPending(tab_id, session->content_generation()) : nullptr;
++  if (!pending) {
++    return RequestTabClose(tab_id, force, std::move(callback));
++  }
++  pending->callback = base::BindOnce(
++      [](CloseCallback original, CloseCallback shutdown, CloseOutcome outcome) {
++        if (original) std::move(original).Run(outcome);
++        std::move(shutdown).Run(outcome);
++      }, std::move(pending->callback), std::move(callback));
++  if (force) ScheduleDestruction(*session, *pending);
++  return CloseRequestResult::kStarted;
++}
++
+ void ForceCloseTab(uint64_t tab_id) {
+   CHECK(pthread_main_np());
+   TabSession* session = TabRegistry::Get().FindSession(tab_id);
+diff --git a/chrome/browser/rearc_bridge/close_controller.h b/chrome/browser/rearc_bridge/close_controller.h
+index 223c17083f..078d9675b3 100644
+--- a/chrome/browser/rearc_bridge/close_controller.h
++++ b/chrome/browser/rearc_bridge/close_controller.h
+@@ -29,6 +29,11 @@ CloseRequestResult RequestTabClose(uint64_t tab_id,
+                                    bool force,
+                                    CloseCallback callback = {});
+ 
++// Shutdown joins an existing close, retaining its reply; force promotes it.
++CloseRequestResult RequestTabCloseForShutdown(uint64_t tab_id,
++                                              bool force,
++                                              CloseCallback callback);
++
+ // Registry/engine teardown supersedes any pending close, retaining its reply.
+ // Even this path posts cleanup so delegate/observer callbacks unwind first.
+ void ForceCloseTab(uint64_t tab_id);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 574831bab0..e57494119f 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 11, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 12, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 216d82e331..4704726fa8 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -273,7 +273,7 @@ void ContinueShutdown() {
+       if (!TabRegistry::Get().FindSession(id)) {
+         continue;
+       }
+-      auto result = RequestTabClose(
++      auto result = RequestTabCloseForShutdown(
+           id, shutdown_force, base::BindOnce([](CloseOutcome outcome) {
+             auto& a = Get();
+             if (outcome == CloseOutcome::kCancelled) {
+@@ -443,6 +443,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+   }
+   return std::string(feature) == "native_view" ||
+          std::string(feature) == "os_permission_shutdown" ||
++         std::string(feature) == "shutdown_pending_closes" ||
+          std::string(feature) == "navigation" ||
+          std::string(feature) == "navigation_extended" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+@@ -569,13 +570,10 @@ ReArcStatus ReArcEngineShutdown(bool force,
+   a.shutdown_tabs.clear();
+   // Id allocation is monotonic, but the registry owns the authoritative set.
+   for (uint64_t id : rearc::TabRegistry::Get().SessionIds()) {
+-    auto* s = rearc::TabRegistry::Get().FindSession(id);
+-    if (s->close_state() != rearc::TabSession::CloseState::kOpen) {
+-      return REARC_BUSY;
+-    }
+     a.shutdown_tabs.push_back(id);
+   }
+-  if (a.live_tabs != a.shutdown_tabs.size()) return REARC_BUSY;
++  // Contents removed from the registry can still be in posted destruction.
++  // live_tabs keeps their profiles alive through their terminal replies.
+   a.stopping = true;
+   auto opens = std::move(a.profile_opens);
+   a.profile_opens.clear();
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index bcb7e13b1d..6bf0b99bf9 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.13.0";
++  return "0.14.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+-- 
+2.54.0 (Apple Git-157)
+

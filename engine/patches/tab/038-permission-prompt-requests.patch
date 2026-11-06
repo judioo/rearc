@@ -1,0 +1,502 @@
+From 7fe0314f32543ddf5acbfd231a6e7cee726afb04 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 09:53:08 +0400
+Subject: [PATCH] P-TAB-001 wave 18c: surface Chromium permission requests
+ without browser UI
+
+Attach PermissionRequestManager and provide a host PermissionPrompt through ChromePermissionsClient. Route camera/microphone delegates through MediaCaptureDevicesDispatcher; keep screen capture unsupported. Carry an explicit persistence choice through PermissionPromptDecision, including duplicate requests, so PermissionContextBase can resolve without storing. Suppress embedded follow-up infobars/surveys. ABI 1.20 / bridge 0.22.0; builds p57-p59 and native permission host cover notifications, clipboard, MIDI, grouped camera/microphone, geolocation, persistence and cancellation. Wave 16 shutdown traits unchanged.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/browser/BUILD.gn                       |   2 +
+ .../permissions/chrome_permissions_client.cc  |  15 +++
+ .../rearc_bridge/browserless_tab_helpers.cc   |   2 +
+ .../browser/rearc_bridge/rearc_abi_internal.h |   1 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  23 +++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_permission_prompt.cc   | 108 ++++++++++++++++++
+ .../rearc_bridge/rearc_permission_prompt.h    |  11 ++
+ .../rearc_bridge/rearc_services_abi.cc        |   1 +
+ chrome/browser/rearc_bridge/tab_delegate.cc   |  20 ++++
+ chrome/browser/rearc_bridge/tab_delegate.h    |   4 +
+ .../permissions/permission_context_base.cc    |   3 +-
+ .../permissions/permission_prompt_decision.h  |   2 +
+ components/permissions/permission_request.cc  |   6 +-
+ components/permissions/permission_request.h   |   3 +
+ .../permissions/permission_request_manager.cc |  12 +-
+ 17 files changed, 207 insertions(+), 9 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_permission_prompt.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_permission_prompt.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 22f47995a2..ba535580f4 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1490,6 +1490,8 @@ source_set("core") {
+       "rearc_bridge/rearc_find_abi.cc",
+       "rearc_bridge/rearc_file_chooser.cc",
+       "rearc_bridge/rearc_file_chooser.h",
++      "rearc_bridge/rearc_permission_prompt.cc",
++      "rearc_bridge/rearc_permission_prompt.h",
+     ]
+   }
+ 
+diff --git a/chrome/browser/permissions/chrome_permissions_client.cc b/chrome/browser/permissions/chrome_permissions_client.cc
+index 18110dccfe..3972974c24 100644
+--- a/chrome/browser/permissions/chrome_permissions_client.cc
++++ b/chrome/browser/permissions/chrome_permissions_client.cc
+@@ -3,6 +3,10 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/permissions/chrome_permissions_client.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#include "chrome/browser/rearc_bridge/rearc_permission_prompt.h"
++#endif
+ 
+ #include <algorithm>
+ #include <optional>
+@@ -234,6 +238,9 @@ bool ShouldShowInfobarOnPromptResolved(
+     std::optional<permissions::PermissionsClient::QuietUiReason>
+         quiet_ui_reason,
+     permissions::PermissionAction action) {
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsBrowserlessTabContents(web_contents)) return false;
++#endif
+   if (!quiet_ui_reason ||
+       (action != permissions::PermissionAction::GRANTED &&
+        action != permissions::PermissionAction::GRANTED_ONCE) ||
+@@ -465,6 +472,9 @@ void ChromePermissionsClient::TriggerPromptHatsSurveyIfEnabled(
+     ContentSetting initial_permission_status,
+     base::OnceCallback<void()> hats_shown_callback,
+     PromptOptions prompt_options) {
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsBrowserlessTabContents(web_contents)) return;
++#endif
+   Profile* profile =
+       Profile::FromBrowserContext(web_contents->GetBrowserContext());
+   std::optional<GURL> recorded_gurl =
+@@ -1060,6 +1070,11 @@ std::unique_ptr<permissions::PermissionPrompt>
+ ChromePermissionsClient::CreatePrompt(
+     content::WebContents* web_contents,
+     permissions::PermissionPrompt::Delegate* delegate) {
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsBrowserlessTabContents(web_contents)) {
++    return rearc::CreateHostPermissionPrompt(web_contents, delegate);
++  }
++#endif
+   return CreatePermissionPrompt(web_contents, delegate);
+ }
+ 
+diff --git a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+index fff314b57f..e4a989c322 100644
+--- a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
++++ b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+@@ -20,6 +20,7 @@
+ #include "components/download/content/public/download_navigation_observer.h"
+ #include "components/find_in_page/find_tab_helper.h"
+ #include "components/zoom/zoom_controller.h"
++#include "components/permissions/permission_request_manager.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_user_data.h"
+ 
+@@ -81,6 +82,7 @@ void AttachBrowserlessTabHelpers(content::WebContents* contents) {
+     HistoryTabHelper::GetOrCreateForWebContents(contents);
+   }
+   find_in_page::FindTabHelper::CreateForWebContents(contents);
++  permissions::PermissionRequestManager::CreateForWebContents(contents);
+ }
+ 
+ bool IsBrowserlessTabContents(const content::WebContents* contents) {
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 84147b8fa1..256f318e80 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -24,6 +24,7 @@ bool ABIHasServiceFeature(const char* feature);
+ // Wave 18b find in page (rearc_find_abi.cc), driven by the services hooks.
+ void ABIAttachFind(uint64_t tab_id);
+ void ABIDetachFind(uint64_t tab_id);
++void ABICancelPermissions(uint64_t tab_id);
+ void ABICancelFileChooser(uint64_t tab_id);
+ void ABICancelJavaScriptDialogs(uint64_t tab_id);
+ // Wave 18b downloads (rearc_downloads_abi.cc), per registered bridge profile.
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 9912306cfa..76b343658f 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 19, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 20, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -484,6 +484,27 @@ REARC_ENGINE_EXPORT void ReArcEngineSetFileChooserCallback(
+ REARC_ENGINE_EXPORT ReArcStatus ReArcFileChooserRespond(
+     uint64_t request_id, bool cancel, const char* const* paths, size_t count);
+ 
++// Permissions (permission_prompts, ABI 1.20). Chromium request manager owns
++// origin/security/gesture/policy checks, grouping and cancellation. phase 0
++// request, 1 cancelled. types are Chromium PermissionKeyForRequestType names;
++// a combined camera/microphone prompt has both. One response covers the group.
++typedef struct ReArcPermissionEvent {
++  uint64_t profile_id, tab_id, content_generation, request_id;
++  uint32_t phase;
++  const char* origin;
++  const char* embedding_origin;
++  const char* const* types;
++  size_t type_count;
++} ReArcPermissionEvent;
++typedef void (*ReArcPermissionCallback)(void*, const ReArcPermissionEvent*);
++REARC_ENGINE_EXPORT void ReArcEngineSetPermissionCallback(
++    ReArcPermissionCallback callback, void* context);
++// decision: 0 allow, 1 deny, 2 dismiss. persist=false affects this request
++// only; persist=true lets Chromium record its normal HostContentSettingsMap
++// decision. Dismiss never persists. OS/TCC permission remains independent.
++REARC_ENGINE_EXPORT ReArcStatus ReArcPermissionRespond(
++    uint64_t request_id, uint32_t decision, bool persist);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index f3ad7d744c..81b919b987 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -528,6 +528,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "downloads" ||
+          std::string(feature) == "javascript_dialogs" ||
+          std::string(feature) == "file_chooser" ||
++         std::string(feature) == "permission_prompts" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 503e84c177..f7302447a2 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.21.0";
++  return "0.22.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_permission_prompt.cc b/chrome/browser/rearc_bridge/rearc_permission_prompt.cc
+new file mode 100644
+index 0000000000..6243f7365e
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_permission_prompt.cc
+@@ -0,0 +1,108 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_permission_prompt.h"
++#include <pthread.h>
++#include <map>
++#include <string>
++#include <vector>
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "components/permissions/permission_request.h"
++#include "components/permissions/permission_request_manager.h"
++#include "components/permissions/permission_uma_constants.h"
++#include "components/permissions/request_type.h"
++namespace rearc {
++namespace {
++class Prompt;
++ReArcPermissionCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0, next_id = 1;
++auto& Pending() { static base::NoDestructor<std::map<uint64_t, base::WeakPtr<Prompt>>> map; return *map; }
++class Prompt : public permissions::PermissionPrompt {
++ public:
++ Prompt(TabSession& s, Delegate* delegate) : delegate_(delegate->GetWeakPtr()), id_(next_id++) {
++  event_ = {s.profile_id(), s.tab_id(), s.content_generation(), id_, 0, nullptr, nullptr, nullptr, 0};
++  origin_ = delegate->GetRequestingOrigin().spec(); embedding_ = delegate->GetEmbeddingOrigin().spec();
++  for (const auto& request : delegate->Requests()) {
++   types_.emplace_back(permissions::PermissionKeyForRequestType(request->request_type()));
++  }
++  Pending().emplace(id_, weak_.GetWeakPtr());
++  if (host) Publish(0);
++  else ABIPost(base::BindOnce([](base::WeakPtr<Prompt> p) { if (p) p->Respond(2, false); }, weak_.GetWeakPtr()));
++ }
++ ~Prompt() override { if (!resolved_) Publish(1); Pending().erase(id_); }
++ bool UpdateAnchor() override { return true; }
++ TabSwitchingBehavior GetTabSwitchingBehavior() override { return kKeepPromptAlive; }
++ permissions::PermissionPromptDisposition GetPromptDisposition() const override {
++  return permissions::PermissionPromptDisposition::CUSTOM_MODAL_DIALOG;
++ }
++ bool IsAskPrompt() const override { return true; }
++ std::optional<gfx::Rect> GetViewBoundsInScreen() const override { return std::nullopt; }
++ std::vector<permissions::ElementAnchoredBubbleVariant> GetPromptVariants() const override { return {}; }
++ std::optional<permissions::feature_params::PermissionElementPromptPosition> GetPromptPosition() const override { return std::nullopt; }
++ void Respond(uint32_t decision, bool persist) {
++  auto delegate = delegate_;
++  resolved_ = true; Pending().erase(id_);
++  if (!delegate) return;
++  PromptOptions options = std::monostate();
++  for (const auto& request : delegate->Requests()) {
++   request->set_persist_decision(persist);
++   if (request->GetContentSettingsType() == ContentSettingsType::GEOLOCATION_WITH_OPTIONS) {
++    options = GeolocationPromptOptions{delegate->GetInitialGeolocationAccuracySelection()};
++   }
++  }
++  // These can destroy this prompt synchronously. Do not access members after.
++  if (decision == 0) delegate->Accept(options);
++  else if (decision == 1) delegate->Deny(options);
++  else delegate->Dismiss(options);
++ }
++ uint64_t tab() const { return event_.tab_id; }
++ void Cancel() { Publish(1); Respond(2, false); }
++ private:
++ void Publish(uint32_t phase) {
++  auto event = event_; event.phase = phase;
++  ABIPost(base::BindOnce([](uint64_t expected, ReArcPermissionEvent e, std::string origin,
++     std::string embedding, std::vector<std::string> types) {
++   if (!host || expected != epoch || (!e.phase && !Pending().contains(e.request_id))) return;
++   std::vector<const char*> pointers; for (const auto& type : types) pointers.push_back(type.c_str());
++   e.origin = origin.c_str(); e.embedding_origin = embedding.c_str();
++   e.types = pointers.data(); e.type_count = pointers.size(); host(host_context, &e);
++  }, epoch, event, origin_, embedding_, types_));
++ }
++ base::WeakPtr<Delegate> delegate_;
++ const uint64_t id_;
++ bool resolved_ = false;
++ ReArcPermissionEvent event_{};
++ std::string origin_, embedding_;
++ std::vector<std::string> types_;
++ base::WeakPtrFactory<Prompt> weak_{this};
++};
++}  // namespace
++std::unique_ptr<permissions::PermissionPrompt> CreateHostPermissionPrompt(
++    content::WebContents* contents, permissions::PermissionPrompt::Delegate* delegate) {
++ for (auto id : TabRegistry::Get().SessionIds()) {
++  auto* s = TabRegistry::Get().FindSession(id);
++  if (s->web_contents() == contents) return std::make_unique<Prompt>(*s, delegate);
++ }
++ return nullptr;
++}
++void ABICancelPermissions(uint64_t tab) {
++ auto pending = Pending(); for (auto& [id, prompt] : pending) if (prompt && prompt->tab() == tab) prompt->Cancel();
++}
++}  // namespace rearc
++void ReArcEngineSetPermissionCallback(ReArcPermissionCallback cb, void* ctx) {
++ CHECK(pthread_main_np());
++ auto pending = rearc::Pending(); for (auto& [id, p] : pending) if (p) p->Cancel();
++ ++rearc::epoch; rearc::host = cb; rearc::host_context = ctx;
++}
++ReArcStatus ReArcPermissionRespond(uint64_t id, uint32_t decision, bool persist) {
++ CHECK(pthread_main_np());
++ if (decision > 2) return REARC_INVALID_ARGUMENT;
++ auto it = rearc::Pending().find(id); if (it == rearc::Pending().end() || !it->second) return REARC_NOT_FOUND;
++ it->second->Respond(decision, persist); return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_permission_prompt.h b/chrome/browser/rearc_bridge/rearc_permission_prompt.h
+new file mode 100644
+index 0000000000..3c3e4bf429
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_permission_prompt.h
+@@ -0,0 +1,11 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_PERMISSION_PROMPT_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_PERMISSION_PROMPT_H_
++#include "components/permissions/permission_prompt.h"
++namespace rearc {
++std::unique_ptr<permissions::PermissionPrompt> CreateHostPermissionPrompt(
++    content::WebContents*, permissions::PermissionPrompt::Delegate*);
++}
++#endif
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 809c440587..413404081f 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -1079,6 +1079,7 @@ void ABIAttachServices(uint64_t id) {
+ }
+ void ABIDetachServices(uint64_t id) {
+   CHECK(pthread_main_np());
++  ABICancelPermissions(id);
+   ABICancelFileChooser(id);
+   ABICancelJavaScriptDialogs(id);
+   ABIDetachFind(id);
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 4d41bca27a..247e5953cd 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -8,6 +8,9 @@
+ #include <utility>
+ 
+ #include "base/logging.h"
++#include "chrome/browser/media/webrtc/media_capture_devices_dispatcher.h"
++#include "content/public/browser/media_stream_request.h"
++#include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
+ #include "base/memory/weak_ptr.h"
+ #include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
+ #include "chrome/browser/rearc_bridge/close_controller.h"
+@@ -133,6 +136,23 @@ ReArcTabDelegate::GetJavaScriptDialogManager(content::WebContents* source) {
+   return GetReArcJavaScriptDialogManager(source);
+ }
+ 
++void ReArcTabDelegate::RequestMediaAccessPermission(content::WebContents* contents,
++    const content::MediaStreamRequest& request, content::MediaResponseCallback callback) {
++  using Type = blink::mojom::MediaStreamType;
++  if ((request.audio_type != Type::NO_SERVICE && request.audio_type != Type::DEVICE_AUDIO_CAPTURE) ||
++      (request.video_type != Type::NO_SERVICE && request.video_type != Type::DEVICE_VIDEO_CAPTURE)) {
++    content::WebContentsDelegate::RequestMediaAccessPermission(contents, request, std::move(callback));
++    return;
++  }
++  MediaCaptureDevicesDispatcher::GetInstance()->ProcessMediaAccessRequest(
++      contents, request, std::move(callback), nullptr);
++}
++bool ReArcTabDelegate::CheckMediaAccessPermission(content::RenderFrameHost* frame,
++    const url::Origin& origin, blink::mojom::MediaStreamType type) {
++  using Type = blink::mojom::MediaStreamType;
++  return (type == Type::DEVICE_AUDIO_CAPTURE || type == Type::DEVICE_VIDEO_CAPTURE) &&
++      MediaCaptureDevicesDispatcher::GetInstance()->CheckMediaAccessPermission(frame, origin, type);
++}
+ void ReArcTabDelegate::RunFileChooser(content::RenderFrameHost* frame,
+     scoped_refptr<content::FileSelectListener> listener,
+     const blink::mojom::FileChooserParams& params) {
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.h b/chrome/browser/rearc_bridge/tab_delegate.h
+index 5df0be2a5e..fbf243410f 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.h
++++ b/chrome/browser/rearc_bridge/tab_delegate.h
+@@ -64,6 +64,10 @@ class ReArcTabDelegate : public content::WebContentsDelegate {
+   bool TakeFocus(content::WebContents* source, bool reverse) override;
+   content::JavaScriptDialogManager* GetJavaScriptDialogManager(
+       content::WebContents* source) override;
++  void RequestMediaAccessPermission(content::WebContents*,
++      const content::MediaStreamRequest&, content::MediaResponseCallback) override;
++  bool CheckMediaAccessPermission(content::RenderFrameHost*, const url::Origin&,
++      blink::mojom::MediaStreamType) override;
+   void RunFileChooser(content::RenderFrameHost* frame,
+       scoped_refptr<content::FileSelectListener> listener,
+       const blink::mojom::FileChooserParams& params) override;
+diff --git a/components/permissions/permission_context_base.cc b/components/permissions/permission_context_base.cc
+index e74cc6937b..ab021e3d22 100644
+--- a/components/permissions/permission_context_base.cc
++++ b/components/permissions/permission_context_base.cc
+@@ -676,7 +676,8 @@ void PermissionContextBase::PermissionDecided(
+         content::WebContents::FromRenderFrameHost(rfh));
+   }
+ 
+-  bool persist = decision.overall_decision != PermissionDecision::kNone;
++  bool persist = decision.persist &&
++                 decision.overall_decision != PermissionDecision::kNone;
+ 
+   auto request = pending_requests_.find(request_data.id.ToString());
+   CHECK(request != pending_requests_.end());
+diff --git a/components/permissions/permission_prompt_decision.h b/components/permissions/permission_prompt_decision.h
+index 235e896177..af0e5f86d9 100644
+--- a/components/permissions/permission_prompt_decision.h
++++ b/components/permissions/permission_prompt_decision.h
+@@ -27,6 +27,8 @@ struct PermissionPromptDecision {
+   PermissionDecision overall_decision;
+   PromptOptions prompt_options = std::monostate();
+   bool is_final;
++  // Embedders may resolve a request without storing a site setting.
++  bool persist = true;
+ };
+ 
+ }  // namespace permissions
+diff --git a/components/permissions/permission_request.cc b/components/permissions/permission_request.cc
+index 4e358a94a2..bede9f4d48 100644
+--- a/components/permissions/permission_request.cc
++++ b/components/permissions/permission_request.cc
+@@ -515,7 +515,8 @@ void PermissionRequest::PermissionGranted(const PromptOptions& prompt_options,
+                                             ? PermissionDecision::kAllowThisTime
+                                             : PermissionDecision::kAllow,
+                                     .prompt_options = prompt_options,
+-                                    .is_final = true},
++                                    .is_final = true,
++                                    .persist = persist_decision_},
+            /*request_data=*/*data_);
+ }
+ 
+@@ -524,7 +525,8 @@ void PermissionRequest::PermissionDenied() {
+       .Run(PermissionPromptDecision{.overall_decision =
+                                         PermissionDecision::kDeny,
+                                     .prompt_options = std::monostate(),
+-                                    .is_final = true},
++                                    .is_final = true,
++                                    .persist = persist_decision_},
+            /*request_data=*/*data_);
+ }
+ 
+diff --git a/components/permissions/permission_request.h b/components/permissions/permission_request.h
+index 528d64f665..b4ede67501 100644
+--- a/components/permissions/permission_request.h
++++ b/components/permissions/permission_request.h
+@@ -193,6 +193,8 @@ class PermissionRequest {
+ 
+   // Called when the user has denied the requested permission.
+   void PermissionDenied();
++  void set_persist_decision(bool persist) { persist_decision_ = persist; }
++  bool persist_decision() const { return persist_decision_; }
+ 
+   // Called when the user has cancelled the permission request. This
+   // corresponds to a denial, but is segregated in case the context needs to
+@@ -254,6 +256,7 @@ class PermissionRequest {
+   std::unique_ptr<PermissionRequestData> data_;
+ 
+   // Called once a decision is made about the permission.
++  bool persist_decision_ = true;
+   PermissionDecidedCallback permission_decided_callback_;
+ 
+   // Called when the request is finished to perform bookkeeping tasks.
+diff --git a/components/permissions/permission_request_manager.cc b/components/permissions/permission_request_manager.cc
+index f331f4df78..8dbb8038bc 100644
+--- a/components/permissions/permission_request_manager.cc
++++ b/components/permissions/permission_request_manager.cc
+@@ -1595,14 +1595,16 @@ void PermissionRequestManager::PermissionGrantedIncludingDuplicates(
+   CHECK(RequestExistsExactlyOnce(request, pending_permission_requests_,
+                                  requests_))
+       << "Only requests in [pending_permission_]requests_ can have duplicates";
++  const bool persist = request->persist_decision();
+   request->PermissionGranted(prompt_options, is_one_time);
+   VisitDuplicateRequests(
+       base::BindRepeating(
+-          [](const PromptOptions& prompt_options, bool is_one_time,
++          [](const PromptOptions& prompt_options, bool is_one_time, bool persist,
+              const std::unique_ptr<PermissionRequest>& request) {
++            request->set_persist_decision(persist);
+             request->PermissionGranted(prompt_options, is_one_time);
+           },
+-          prompt_options, is_one_time),
++          prompt_options, is_one_time, persist),
+       request);
+ }
+ 
+@@ -1611,12 +1613,14 @@ void PermissionRequestManager::PermissionDeniedIncludingDuplicates(
+   CHECK(RequestExistsExactlyOnce(request, pending_permission_requests_,
+                                  requests_))
+       << "Only requests in [pending_permission_]requests_ can have duplicates";
++  const bool persist = request->persist_decision();
+   request->PermissionDenied();
+   VisitDuplicateRequests(
+       base::BindRepeating(
+-          [](const std::unique_ptr<PermissionRequest>& request) {
++          [](bool persist, const std::unique_ptr<PermissionRequest>& request) {
++            request->set_persist_decision(persist);
+             request->PermissionDenied();
+-          }),
++          }, persist),
+       request);
+ }
+ 
+-- 
+2.54.0 (Apple Git-157)
+

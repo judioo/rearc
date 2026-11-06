@@ -1,0 +1,127 @@
+From 367324a5103d39a682b91653b257f7347189f654 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Tue, 3 Nov 2026 14:07:31 +0400
+Subject: [PATCH] P-APP-001 wave 16: stop waiting for read-only macOS
+ permission probes
+
+Named-profile shutdown samples reveal a running SKIP_ON_SHUTDOWN TCC media-status refresh holding ThreadPool shutdown while the OSCrypt read already continues. Let production process-lifetime status callbacks continue on shutdown, retaining SKIP semantics for borrowed test wrappers. Preserve encryption, authorization and all data-write shutdown tasks; advertise os_permission_shutdown in ABI 1.11.
+
+Last rebased: 2026-11-03 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ .../system/system_media_capture_permissions_mac.h     |  7 +++++++
+ .../system/system_media_capture_permissions_mac.mm    | 11 +++++++++++
+ .../system/system_permission_settings_mac.cc          |  2 +-
+ chrome/browser/rearc_bridge/rearc_engine_abi.h        |  2 +-
+ chrome/browser/rearc_bridge/rearc_engine_abi.mm       |  1 +
+ chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm |  2 +-
+ 6 files changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/chrome/browser/permissions/system/system_media_capture_permissions_mac.h b/chrome/browser/permissions/system/system_media_capture_permissions_mac.h
+index c8f9686231..c204173c67 100644
+--- a/chrome/browser/permissions/system/system_media_capture_permissions_mac.h
++++ b/chrome/browser/permissions/system/system_media_capture_permissions_mac.h
+@@ -8,12 +8,19 @@
+ #include <optional>
+ 
+ #include "base/functional/callback_forward.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/task/task_traits.h"
+ #include "chrome/browser/permissions/system/system_permission_common.h"
+ 
+ namespace system_permission_settings {
+ 
+ class MediaAuthorizationWrapper;
+ 
++// Production status reads own no profile state and may outlive browser shutdown.
++// Borrowed authorization wrappers in tests must still finish before shutdown.
++scoped_refptr<base::SequencedTaskRunner> CreateSystemMediaPermissionTaskRunner(
++    const base::TaskTraits& traits);
++
+ // Returns the system permission to capture audio or video.
+ SystemPermission CheckSystemAudioCapturePermission();
+ SystemPermission CheckSystemVideoCapturePermission();
+diff --git a/chrome/browser/permissions/system/system_media_capture_permissions_mac.mm b/chrome/browser/permissions/system/system_media_capture_permissions_mac.mm
+index 71bfc30a77..ff00989ef8 100644
+--- a/chrome/browser/permissions/system/system_media_capture_permissions_mac.mm
++++ b/chrome/browser/permissions/system/system_media_capture_permissions_mac.mm
+@@ -16,6 +16,7 @@
+ #include "base/no_destructor.h"
+ #import "base/task/sequenced_task_runner.h"
+ #include "base/task/sequenced_task_runner.h"
++#include "base/task/thread_pool.h"
+ #include "chrome/browser/permissions/system/media_authorization_wrapper_mac.h"
+ #include "chrome/browser/permissions/system/system_permission_common.h"
+ #include "media/base/media_switches.h"
+@@ -121,6 +122,16 @@ bool IsScreenCaptureAllowed() {
+ 
+ }  // namespace
+ 
++scoped_refptr<base::SequencedTaskRunner> CreateSystemMediaPermissionTaskRunner(
++    const base::TaskTraits& traits) {
++  // TCC preflight can wait on the OS; it performs no user-data writes.
++  return base::ThreadPool::CreateSequencedTaskRunner(
++      {base::MayBlock(), traits.priority(),
++       g_media_authorization_wrapper_for_tests
++           ? base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN
++           : base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN});
++}
++
+ SystemPermission CheckSystemAudioCapturePermission() {
+   return CheckSystemMediaCapturePermission(AVMediaTypeAudio);
+ }
+diff --git a/chrome/browser/permissions/system/system_permission_settings_mac.cc b/chrome/browser/permissions/system/system_permission_settings_mac.cc
+index da6bd14576..4bcc8edb9a 100644
+--- a/chrome/browser/permissions/system/system_permission_settings_mac.cc
++++ b/chrome/browser/permissions/system/system_permission_settings_mac.cc
+@@ -33,7 +33,7 @@ class PlatformHandleImpl : public PlatformHandle {
+  public:
+   PlatformHandleImpl()
+       : media_cache_(
+-            base::BindOnce(&base::ThreadPool::CreateSequencedTaskRunner),
++            base::BindOnce(&CreateSystemMediaPermissionTaskRunner),
+             base::BindRepeating(&CheckSystemVideoCapturePermission),
+             base::BindRepeating(&CheckSystemAudioCapturePermission)) {}
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index ead057979c..574831bab0 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 10, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 11, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 4c8bd58e03..216d82e331 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -442,6 +442,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+     return false;
+   }
+   return std::string(feature) == "native_view" ||
++         std::string(feature) == "os_permission_shutdown" ||
+          std::string(feature) == "navigation" ||
+          std::string(feature) == "navigation_extended" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 332cd949ee..bcb7e13b1d 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.12.0";
++  return "0.13.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+-- 
+2.54.0 (Apple Git-157)
+

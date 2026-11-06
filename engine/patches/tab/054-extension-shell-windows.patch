@@ -1,0 +1,706 @@
+From b236dccd15f8a92ea3e2348bbb06ffc35fd456bf Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 15:32:51 +0400
+Subject: [PATCH] P-TAB-001 wave 18g: route extension tabs and logical shell
+ windows
+
+Expose host-reported extension window membership, active tab and focus, and bounded host creation/activation requests. Route registry tabs through tabs query/get/update/remove and read-only windows APIs with Chromium permission scrubbing; options and single-URL normal windows use the host instead of stock Browser creation. Removal joins the veto-aware tab close pipeline. ABI 1.36 / bridge 0.38.0 (extension_windows); build p89 and local MV3 routing fixture pass with no outside connections. Geometry, multi-URL windows, tab groups/move and windows mutations remain unsupported.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/browser/BUILD.gn                       |   2 +
+ .../runtime/chrome_runtime_api_delegate.cc    |   7 +-
+ .../browser/extensions/api/tabs/tabs_api.cc   | 149 ++++++++++++
+ .../browser/extensions/extension_tab_util.cc  |   4 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  34 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_extension_windows.cc   | 217 ++++++++++++++++++
+ .../rearc_bridge/rearc_extension_windows.h    |  26 +++
+ .../rearc_bridge/rearc_profile_registry.cc    |   2 +
+ .../rearc_bridge/rearc_services_abi.cc        |   2 +
+ 11 files changed, 443 insertions(+), 3 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_extension_windows.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_extension_windows.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 4bfb5de9dd..75e227be04 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1504,6 +1504,8 @@ source_set("core") {
+       "rearc_bridge/rearc_autofill_popup.cc",
+       "rearc_bridge/rearc_autofill_popup.h",
+       "rearc_bridge/rearc_password_leak_abi.cc",
++      "rearc_bridge/rearc_extension_windows.cc",
++      "rearc_bridge/rearc_extension_windows.h",
+       "rearc_bridge/discard_adapter.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+       "rearc_bridge/rearc_file_chooser.cc",
+diff --git a/chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.cc b/chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.cc
+index 56661c0f0b..02db5d4db6 100644
+--- a/chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.cc
++++ b/chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/extensions/api/runtime/chrome_runtime_api_delegate.h"
+ #if BUILDFLAG(IS_MAC)
+ #include "chrome/browser/rearc_bridge/engine_mode.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
+ #endif
+ 
+ #include <memory>
+@@ -421,7 +422,11 @@ void ChromeRuntimeAPIDelegate::OpenOptionsPage(
+ #if BUILDFLAG(IS_MAC)
+     // ReArc wave 18f: no Chromium Browser window in the embedded engine.
+     if (rearc::IsEngineEmbeddedMode()) {
+-      std::move(callback).Run(false);
++      rearc::RequestExtensionTab(profile, extension->id(),
++          extensions::OptionsPageInfo::GetOptionsPage(extension), true, 0, 0, 2, 0,
++          base::BindOnce([](base::OnceCallback<void(bool)> done, content::WebContents* c) {
++            std::move(done).Run(c != nullptr);
++          }, std::move(callback)));
+       return;
+     }
+ #endif
+diff --git a/chrome/browser/extensions/api/tabs/tabs_api.cc b/chrome/browser/extensions/api/tabs/tabs_api.cc
+index 2a631eb9fc..4721918e09 100644
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -3,6 +3,13 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/api/tabs/tabs_api.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/engine_mode.h"
++#include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
++#include "chrome/browser/rearc_bridge/close_controller.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#endif
+ 
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
+@@ -887,6 +894,17 @@ ExtensionFunction::ResponseAction WindowsGetFunction::Run() {
+   std::optional<windows::Get::Params> params =
+       windows::Get::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    tabs_internal::ApiParameterExtractor<windows::Get::Params> extractor(params);
++    auto values = rearc::QueryExtensionWindows(this, params->window_id, extractor.populate_tabs());
++    auto filter = extractor.type_filters();
++    if (filter && !(filter & WindowController::GetFilterFromWindowTypes({windows::WindowType::kNormal}))) values.clear();
++    if (values.empty()) return RespondNow(Error("No matching shell window."));
++    return RespondNow(WithArguments(std::move(values[0])));
++  }
++#endif
++
+ 
+   tabs_internal::ApiParameterExtractor<windows::Get::Params> extractor(params);
+   WindowController* window_controller = nullptr;
+@@ -909,6 +927,17 @@ ExtensionFunction::ResponseAction WindowsGetCurrentFunction::Run() {
+   std::optional<windows::GetCurrent::Params> params =
+       windows::GetCurrent::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    tabs_internal::ApiParameterExtractor<windows::GetCurrent::Params> extractor(params);
++    auto values = rearc::QueryExtensionWindows(this, -2, extractor.populate_tabs());
++    auto filter = extractor.type_filters();
++    if (filter && !(filter & WindowController::GetFilterFromWindowTypes({windows::WindowType::kNormal}))) values.clear();
++    if (values.empty()) return RespondNow(Error("No matching shell window."));
++    return RespondNow(WithArguments(std::move(values[0])));
++  }
++#endif
++
+ 
+   tabs_internal::ApiParameterExtractor<windows::GetCurrent::Params> extractor(
+       params);
+@@ -932,6 +961,17 @@ ExtensionFunction::ResponseAction WindowsGetLastFocusedFunction::Run() {
+   std::optional<windows::GetLastFocused::Params> params =
+       windows::GetLastFocused::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    tabs_internal::ApiParameterExtractor<windows::GetLastFocused::Params> extractor(params);
++    auto values = rearc::QueryExtensionWindows(this, -2, extractor.populate_tabs());
++    auto filter = extractor.type_filters();
++    if (filter && !(filter & WindowController::GetFilterFromWindowTypes({windows::WindowType::kNormal}))) values.clear();
++    if (values.empty()) return RespondNow(Error("No matching shell window."));
++    return RespondNow(WithArguments(std::move(values[0])));
++  }
++#endif
++
+ 
+   tabs_internal::ApiParameterExtractor<windows::GetLastFocused::Params>
+       extractor(params);
+@@ -964,6 +1004,16 @@ ExtensionFunction::ResponseAction WindowsGetAllFunction::Run() {
+   std::optional<windows::GetAll::Params> params =
+       windows::GetAll::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    tabs_internal::ApiParameterExtractor<windows::GetAll::Params> extractor(params);
++    auto values = rearc::QueryExtensionWindows(this, -1, extractor.populate_tabs());
++    auto filter = extractor.type_filters();
++    if (filter && !(filter & WindowController::GetFilterFromWindowTypes({windows::WindowType::kNormal}))) values.clear();
++    return RespondNow(WithArguments(std::move(values)));
++  }
++#endif
++
+ 
+   tabs_internal::ApiParameterExtractor<windows::GetAll::Params> extractor(
+       params);
+@@ -996,6 +1046,34 @@ ExtensionFunction::ResponseAction WindowsCreateFunction::Run() {
+   DCHECK(extension() || source_context_type() == mojom::ContextType::kWebUi ||
+          source_context_type() == mojom::ContextType::kUntrustedWebUi);
+   create_data_ = std::move(params->create_data);
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    auto* profile = Profile::FromBrowserContext(browser_context());
++    if (create_data_ && (create_data_->tab_id || create_data_->left || create_data_->top ||
++        create_data_->width || create_data_->height || create_data_->state != windows::WindowState::kNone ||
++        (create_data_->type != windows::CreateType::kNone && create_data_->type != windows::CreateType::kNormal) ||
++        (create_data_->incognito && *create_data_->incognito != profile->IsOffTheRecord())))
++      return RespondNow(Error("Unsupported shell window creation properties."));
++    std::string url_string = "about:blank";
++    if (create_data_ && create_data_->url) {
++      if (create_data_->url->as_string) url_string = *create_data_->url->as_string;
++      else if (create_data_->url->as_strings && create_data_->url->as_strings->size() == 1)
++        url_string = create_data_->url->as_strings->front();
++      else return RespondNow(Error("Shell windows.create accepts one URL."));
++    }
++    auto url = ExtensionTabUtil::PrepareURLForNavigation(url_string, extension(), browser_context());
++    if (!url.has_value()) return RespondNow(Error(url.error()));
++    rearc::RequestExtensionTab(profile, extension() ? extension()->id() : "", *url, true, 0, 0, 1, 0,
++      base::BindOnce([](scoped_refptr<WindowsCreateFunction> self, content::WebContents* c) {
++        if (!c) { self->Respond(self->Error("Shell window creation cancelled."));; return; }
++        ReArcExtensionTabState state{};
++        ReArcTabGetExtensionState(rearc::ExtensionSession(c)->tab_id(), &state);
++        auto values = rearc::QueryExtensionWindows(self.get(), state.window_id, true);
++        self->Respond(values.empty() ? self->Error("Shell window unavailable.") : self->WithArguments(std::move(values[0])));;
++      }, base::WrapRefCounted(this)));
++    return RespondLater();
++  }
++#endif
+ 
+   // Look for optional url.
+   if (create_data_ && create_data_->url) {
+@@ -1550,6 +1628,9 @@ void WindowsCreateFunction::OnBocaWindowCreatedAsynchronously(
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
+ ExtensionFunction::ResponseAction WindowsUpdateFunction::Run() {
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) return RespondNow(Error("Shell window mutation is unsupported."));
++#endif
+   std::optional<windows::Update::Params> params =
+       windows::Update::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
+@@ -1708,6 +1789,9 @@ void WindowsUpdateFunction::UpdateWindowState(
+ }
+ 
+ ExtensionFunction::ResponseAction WindowsRemoveFunction::Run() {
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) return RespondNow(Error("Shell window mutation is unsupported."));
++#endif
+   std::optional<windows::Remove::Params> params =
+       windows::Remove::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
+@@ -1862,6 +1946,10 @@ ExtensionFunction::ResponseAction TabsQueryFunction::Run() {
+     }
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode())
++    return RespondNow(WithArguments(rearc::QueryExtensionTabs(this, query_info_, url_patterns)));
++#endif
+   int window_id = extension_misc::kUnknownWindowId;
+   if (query_info_.window_id) {
+     window_id = *query_info_.window_id;
+@@ -2187,6 +2275,24 @@ ExtensionFunction::ResponseAction TabsCreateFunction::Run() {
+     }
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    if (pinned_.value_or(false) || index_ || split_with_tab_id_)
++      return RespondNow(Error("Unsupported shell tab creation properties."));
++    auto* opener_session = rearc::ExtensionSession(opener);
++    int window_id = create_properties.window_id.value_or(0);
++    if (window_id == -2) window_id = 0;
++    if (window_id < 0 || (window_id && rearc::QueryExtensionWindows(this, window_id, false).empty()))
++      return RespondNow(Error("No matching shell window."));
++    rearc::RequestExtensionTab(Profile::FromBrowserContext(browser_context()), extension()->id(), validated_url_,
++      active_.value_or(true), opener_session ? opener_session->tab_id() : 0, window_id, 0, 0,
++      base::BindOnce([](scoped_refptr<TabsCreateFunction> self, content::WebContents* c) {
++        self->Respond(c ? self->ArgumentList(tabs::Get::Results::Create(tabs_internal::CreateTabObjectHelper(
++          c, self->extension(), self->source_context_type(), nullptr, -1))) : self->Error(ExtensionTabUtil::kNoCurrentWindowError));;
++      }, base::WrapRefCounted(this)));
++    return RespondLater();
++  }
++#endif
+   // Try to find a suitable browser.
+   // TODO(https://crbug.com/468223125): This is a wild set of tangle
+   // conditions, most of which are inconsistent.
+@@ -2660,6 +2766,23 @@ ExtensionFunction::ResponseAction TabsUpdateFunction::Run() {
+     return RespondNow(Error(tabs_constants::kNotAllowedForDevToolsError));
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  if (auto* session = rearc::ExtensionSession(contents)) {
++    const auto& u = params->update_properties;
++    if (u.pinned || u.highlighted || u.muted || u.opener_tab_id || u.auto_discardable)
++      return RespondNow(Error("Unsupported shell tab update properties."));
++    if (u.url && !UpdateURL(contents, *u.url, tab_id, &error)) return RespondNow(Error(std::move(error)));
++    if (u.active.value_or(u.selected.value_or(false))) {
++      rearc::RequestExtensionTab(Profile::FromBrowserContext(contents->GetBrowserContext()), extension()->id(), GURL(),
++        true, 0, 0, 3, session->tab_id(),
++        base::BindOnce([](scoped_refptr<TabsUpdateFunction> self, content::WebContents* c) {
++          self->Respond(c ? self->GetResult(c) : self->Error("Shell activation cancelled."));;
++        }, base::WrapRefCounted(this)));
++      return RespondLater();
++    }
++    return RespondNow(GetResult(contents));
++  }
++#endif
+   // tabs_internal::GetTabById may return a null window for prerender tabs.
+   if (!window || !ExtensionTabUtil::BrowserSupportsTabs(
+                      window->GetBrowserWindowInterface())) {
+@@ -2784,6 +2907,13 @@ ExtensionFunction::ResponseAction TabsUpdateFunction::Run() {
+ bool TabsUpdateFunction::ComputeDefaultTabId(int& tab_id,
+                                              content::WebContents*& contents,
+                                              std::string& error) {
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    contents = rearc::ActiveExtensionContents(Profile::FromBrowserContext(browser_context()));
++    if (!contents) { error = ExtensionTabUtil::kNoCurrentWindowError; return false; }
++    tab_id = ExtensionTabUtil::GetTabId(contents); return true;
++  }
++#endif
+   const auto* window_controller =
+       ChromeExtensionFunctionDetails(this).GetCurrentWindowController();
+   if (!window_controller) {
+@@ -3260,6 +3390,25 @@ ExtensionFunction::ResponseAction TabsRemoveFunction::Run() {
+   std::optional<tabs::Remove::Params> params =
+       tabs::Remove::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    std::vector<int> ids;
++    if (params->tab_ids.as_integers) ids = *params->tab_ids.as_integers;
++    else if (params->tab_ids.as_integer) ids.push_back(*params->tab_ids.as_integer);
++    if (ids.size() != 1) return RespondNow(Error("Shell tabs.remove accepts one tab at a time."));
++    content::WebContents* c = nullptr;
++    if (!ExtensionTabUtil::GetTabById(ids[0], browser_context(), include_incognito_information(), &c))
++      return RespondNow(Error("No matching shell tab."));
++    auto* s = rearc::ExtensionSession(c);
++    if (!s) return RespondNow(Error("No matching shell tab."));
++    auto result = rearc::RequestTabClose(s->tab_id(), false,
++      base::BindOnce([](scoped_refptr<TabsRemoveFunction> self, rearc::CloseOutcome outcome) {
++        self->Respond(outcome == rearc::CloseOutcome::kClosed ? self->NoArguments() : self->Error("Tab close cancelled."));;
++      }, base::WrapRefCounted(this)));
++    if (result != rearc::CloseRequestResult::kStarted) return RespondNow(Error("Tab close busy."));
++    return RespondLater();
++  }
++#endif
+ 
+   std::string error;
+   if (params->tab_ids.as_integers) {
+diff --git a/chrome/browser/extensions/extension_tab_util.cc b/chrome/browser/extensions/extension_tab_util.cc
+index 17dece6560..70acbfb55c 100644
+--- a/chrome/browser/extensions/extension_tab_util.cc
++++ b/chrome/browser/extensions/extension_tab_util.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/extensions/extension_tab_util.h"
+ #if BUILDFLAG(IS_MAC)
+ #include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
+ #endif
+ 
+ #include <stddef.h>
+@@ -468,6 +469,9 @@ api::tabs::Tab ExtensionTabUtil::CreateTabObject(
+     }
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  rearc::DecorateExtensionTab(contents, tab_object);
++#endif
+   ScrubTabForExtension(extension, contents, &tab_object, scrub_tab_behavior);
+   return tab_object;
+ }
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index bbe87ba92c..888228ddc5 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 35, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 36, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -935,6 +935,38 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcAutofillDismiss(uint64_t request_id);
+ // chrome://password-manager/passwords); the host opens it as a tab.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcAutofillManage(uint64_t request_id);
+ 
++// Extension window routing (extension_windows, ABI 1.36). UI thread only.
++// Host reports logical window membership, selection and focus independently of
++// native view visibility (split views can present several tabs). window_id is a
++// positive signed 32-bit shell ID; 0 removes membership. One active tab/window,
++// one focused window; windows may not contain different profiles.
++typedef struct ReArcExtensionTabState {
++  int32_t tab_id; // Chromium extension ID, distinct from the bridge tab_id.
++  int32_t window_id;
++  bool active;
++  bool focused;
++} ReArcExtensionTabState;
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetExtensionWindow(uint64_t tab_id, int32_t window_id, bool active, bool focused);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetExtensionState(uint64_t tab_id, ReArcExtensionTabState* state);
++// kind: 0 tabs.create, 1 windows.create, 2 options page, 3 activate existing.
++// phase: 0 request, 1 withdrawn. Borrowed strings during callback only.
++// opener_tab_id and tab_id are bridge IDs. window_id=0 means current space.
++// Reply with an open, mapped tab in the requested profile, or 0 to cancel.
++// Creation uses ReArcTabCreate with about:blank; on reply the engine loads
++// the validated extension URL (including its own options page). Activation must
++// be reported before reply. No callback => API error, no Chromium window.
++typedef struct ReArcExtensionTabRequest {
++  uint64_t request_id, profile_id, tab_id, opener_tab_id;
++  int32_t window_id;
++  uint32_t kind, phase;
++  bool active;
++  const char* url;
++  const char* extension_id;
++} ReArcExtensionTabRequest;
++typedef void (*ReArcExtensionTabRequestCallback)(void*, const ReArcExtensionTabRequest*);
++REARC_ENGINE_EXPORT void ReArcEngineSetExtensionTabRequestCallback(ReArcExtensionTabRequestCallback, void* context);
++REARC_ENGINE_EXPORT ReArcStatus ReArcExtensionTabRequestRespond(uint64_t request_id, uint64_t tab_id);
++
+ // Password leak detection (password_leak_detection, ABI 1.35): Chromium's
+ // profile.password_manager_leak_detection pref, default on as in Chrome. When
+ // on, a successfully submitted sign-in's credential is checked against
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 5da4bfed28..5970fd851e 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -549,6 +549,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "extension_actions" ||
+          std::string(feature) == "autofill_suggestions" ||
+          std::string(feature) == "password_leak_detection" ||
++         std::string(feature) == "extension_windows" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index a1e8326cd9..919c21c107 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.37.0";
++  return "0.38.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_windows.cc b/chrome/browser/rearc_bridge/rearc_extension_windows.cc
+new file mode 100644
+index 0000000000..f888201128
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_extension_windows.cc
+@@ -0,0 +1,217 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
++#include <pthread.h>
++#include <map>
++#include <set>
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "base/strings/pattern.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/time/time.h"
++#include "chrome/browser/extensions/extension_tab_util.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/site_instance.h"
++#include "url/origin.h"
++#include "extensions/browser/extension_function.h"
++#include "extensions/browser/view_type_utils.h"
++#include "extensions/common/mojom/view_type.mojom.h"
++#include "extensions/common/url_pattern_set.h"
++namespace rearc {
++namespace {
++struct State { int window; bool active; };
++auto& States() { static base::NoDestructor<std::map<uint64_t, State>> s; return *s; }
++int focused_window = 0;
++ReArcExtensionTabRequestCallback host = nullptr;
++void* context = nullptr;
++uint64_t epoch = 0, next_id = 1;
++struct Request {
++  ReArcExtensionTabRequest event{};
++  std::string url, extension;
++  base::OnceCallback<void(content::WebContents*)> done;
++};
++auto& Requests() { static base::NoDestructor<std::map<uint64_t, Request>> r; return *r; }
++bool Open(TabSession* s) {
++  return s && s->close_state() == TabSession::CloseState::kOpen &&
++    extensions::GetViewType(s->web_contents()) == extensions::mojom::ViewType::kTabContents;
++}
++bool Visible(ExtensionFunction* f, TabSession* s) {
++  auto* p = Profile::FromBrowserContext(f->browser_context());
++  auto* candidate = Profile::FromBrowserContext(s->web_contents()->GetBrowserContext());
++  return Open(s) && States().contains(s->tab_id()) &&
++    p->IsSameOrParent(candidate) && (p == candidate || f->include_incognito_information());
++}
++void Publish(uint64_t id, ReArcExtensionTabRequest e, std::string url, std::string extension) {
++  ABIPost(base::BindOnce([](uint64_t expected, uint64_t id, ReArcExtensionTabRequest e, std::string u, std::string x) {
++    if (!host || expected != epoch || (!e.phase && !Requests().contains(id))) return;
++    e.url = u.c_str(); e.extension_id = x.c_str(); host(context, &e);
++  }, epoch, id, e, std::move(url), std::move(extension)));
++}
++void Cancel(uint64_t id) {
++  auto it = Requests().find(id); if (it == Requests().end()) return;
++  auto r = std::move(it->second); Requests().erase(it);
++  r.event.phase = 1; Publish(id, r.event, r.url, r.extension);
++  std::move(r.done).Run(nullptr);
++}
++}
++TabSession* ExtensionSession(content::WebContents* c) {
++  for (auto id : TabRegistry::Get().SessionIds()) {
++    auto* s = TabRegistry::Get().FindSession(id);
++    if (Open(s) && s->web_contents() == c) return s;
++  }
++  return nullptr;
++}
++void DecorateExtensionTab(content::WebContents* c, extensions::api::tabs::Tab& tab) {
++  auto* s = ExtensionSession(c); if (!s) return;
++  auto it = States().find(s->tab_id()); if (it == States().end()) return;
++  tab.window_id = it->second.window;
++  tab.active = it->second.active; tab.selected = tab.active; tab.highlighted = tab.active;
++  tab.index = 0;
++  for (auto id : TabRegistry::Get().SessionIds()) {
++    auto* other = TabRegistry::Get().FindSession(id);
++    auto state = States().find(id);
++    if (Open(other) && state != States().end() && state->second.window == tab.window_id &&
++        std::pair(other->order_index(), id) < std::pair(s->order_index(), s->tab_id())) ++tab.index;
++  }
++}
++content::WebContents* ActiveExtensionContents(Profile* p) {
++  content::WebContents* fallback = nullptr;
++  for (auto [id, state] : States()) {
++    auto* s = TabRegistry::Get().FindSession(id);
++    if (Open(s) && s->web_contents()->GetBrowserContext() == p && state.active) {
++      fallback = s->web_contents(); if (state.window == focused_window) return fallback;
++    }
++  }
++  return fallback;
++}
++base::ListValue QueryExtensionTabs(ExtensionFunction* f, const extensions::api::tabs::Query::Params::QueryInfo& q, const extensions::URLPatternSet& patterns) {
++  base::ListValue result;
++  auto* current = ActiveExtensionContents(Profile::FromBrowserContext(f->browser_context()));
++  int current_window = 0;
++  if (auto* s = ExtensionSession(current)) current_window = States().at(s->tab_id()).window;
++  auto matches = [](const std::optional<bool>& wanted, bool value) { return !wanted || *wanted == value; };
++  for (auto id : TabRegistry::Get().SessionIds()) {
++    auto* s = TabRegistry::Get().FindSession(id); if (!Visible(f,s)) continue;
++    auto* c = s->web_contents();
++    auto tab = extensions::ExtensionTabUtil::CreateTabObject(c,
++      extensions::ExtensionTabUtil::GetScrubTabBehavior(f->extension(), f->source_context_type(), c), f->extension(), nullptr, -1);
++    if ((q.window_id && (*q.window_id == -2 ? tab.window_id != current_window : *q.window_id >= 0 && *q.window_id != tab.window_id)) ||
++        (q.index && *q.index != tab.index) || !matches(q.active,tab.active) || !matches(q.highlighted,tab.highlighted) ||
++        !matches(q.current_window,tab.window_id == current_window) || !matches(q.last_focused_window,tab.window_id == focused_window) ||
++        !matches(q.pinned,false) || !matches(q.audible,tab.audible.value_or(false)) || !matches(q.muted,c->IsAudioMuted()) ||
++        !matches(q.discarded,c->WasDiscarded()) || !matches(q.frozen,false) || !matches(q.auto_discardable,true) ||
++        (q.group_id && *q.group_id != -1) || (q.split_view_id && *q.split_view_id != -1) ||
++        (q.window_type != extensions::api::tabs::WindowType::kNone && q.window_type != extensions::api::tabs::WindowType::kNormal) ||
++        (q.status != extensions::api::tabs::TabStatus::kNone && q.status != tab.status)) continue;
++    if (q.title && !q.title->empty() && (!tab.title || !base::MatchPattern(*tab.title,*q.title))) continue;
++    if (!patterns.is_empty() && !(tab.url && patterns.MatchesURL(GURL(*tab.url))) &&
++        !(tab.pending_url && patterns.MatchesURL(GURL(*tab.pending_url)))) continue;
++    result.Append(tab.ToValue());
++  }
++  return result;
++}
++base::ListValue QueryExtensionWindows(ExtensionFunction* f, int window, bool populate) {
++  base::ListValue result; std::set<int> seen;
++  if (window == -2) {
++    auto* c = ActiveExtensionContents(Profile::FromBrowserContext(f->browser_context()));
++    auto* s = ExtensionSession(c); window = s ? States().at(s->tab_id()).window : 0;
++  }
++  for (auto id : TabRegistry::Get().SessionIds()) {
++    auto* s = TabRegistry::Get().FindSession(id); if (!Visible(f,s)) continue;
++    int w = States().at(id).window;
++    if ((window >= 0 && window != w) || !seen.insert(w).second) continue;
++    base::DictValue value;
++    value.Set("id",w); value.Set("focused",w == focused_window); value.Set("type","normal");
++    value.Set("state","normal"); value.Set("incognito",s->web_contents()->GetBrowserContext()->IsOffTheRecord());
++    value.Set("alwaysOnTop",false);
++    if (populate) {
++      extensions::api::tabs::Query::Params::QueryInfo q; q.window_id = w;
++      value.Set("tabs",QueryExtensionTabs(f,q,extensions::URLPatternSet()));
++    }
++    result.Append(std::move(value));
++  }
++  return result;
++}
++void RequestExtensionTab(Profile* p, const std::string& extension, const GURL& url, bool active, uint64_t opener, int window, uint32_t kind, uint64_t tab, base::OnceCallback<void(content::WebContents*)> done) {
++  uint64_t profile = BridgeProfileId(p);
++  if (!host || !profile || Requests().size() >= 64 || (!url.is_empty() && ABIValidateNavigationURL(url) != REARC_OK && !(url.SchemeIs("chrome-extension") && url.host() == extension))) {
++    ABIPost(base::BindOnce(std::move(done),nullptr)); return;
++  }
++  uint64_t id = next_id++;
++  Request r; r.event = {id,profile,tab,opener,window,kind,0,active,nullptr,nullptr};
++  r.url = url.spec(); r.extension = extension; r.done = std::move(done);
++  auto event = r.event; Requests().emplace(id,std::move(r));
++  Publish(id,event,url.spec(),extension);
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(FROM_HERE,base::BindOnce(&Cancel,id),base::Seconds(30));
++}
++void ABICancelExtensionTabs(uint64_t tab, uint64_t profile) {
++  std::vector<uint64_t> ids;
++  for (auto& [id,r] : Requests()) if ((tab && (r.event.tab_id == tab || r.event.opener_tab_id == tab)) || (profile && r.event.profile_id == profile)) ids.push_back(id);
++  for (auto id : ids) Cancel(id);
++  if (tab) States().erase(tab);
++}
++}
++ReArcStatus ReArcTabSetExtensionWindow(uint64_t id, int32_t window, bool active, bool focused) {
++  CHECK(pthread_main_np());
++  rearc::TabSession* s; if (auto status = rearc::ABICheckTab(id,&s)) return status;
++  if (!rearc::ExtensionSession(s->web_contents())) return REARC_UNSUPPORTED;
++  if (window < 0 || (!window && (active || focused))) return REARC_INVALID_ARGUMENT;
++  for (auto [other,state] : rearc::States()) {
++    auto* candidate = rearc::TabRegistry::Get().FindSession(other);
++    if (window && candidate && state.window == window && candidate->profile_id() != s->profile_id()) return REARC_INVALID_ARGUMENT;
++  }
++  if (!window) { rearc::States().erase(id); return REARC_OK; }
++  if (active) for (auto& [other,state] : rearc::States()) if (state.window == window) state.active = false;
++  rearc::States()[id] = {window,active};
++  if (focused) rearc::focused_window = window;
++  else if (rearc::focused_window == window) rearc::focused_window = 0;
++  return REARC_OK;
++}
++ReArcStatus ReArcTabGetExtensionState(uint64_t id, ReArcExtensionTabState* out) {
++  CHECK(pthread_main_np()); if (out) *out = {};
++  rearc::TabSession* s; if (auto status = rearc::ABICheckTab(id,&s)) return status;
++  if (!out) return REARC_INVALID_ARGUMENT;
++  if (!rearc::ExtensionSession(s->web_contents())) return REARC_UNSUPPORTED;
++  out->tab_id = extensions::ExtensionTabUtil::GetTabId(s->web_contents());
++  auto it = rearc::States().find(id);
++  if (it != rearc::States().end()) { out->window_id = it->second.window; out->active = it->second.active; out->focused = it->second.window == rearc::focused_window; }
++  return REARC_OK;
++}
++void ReArcEngineSetExtensionTabRequestCallback(ReArcExtensionTabRequestCallback cb, void* ctx) {
++  CHECK(pthread_main_np());
++  std::vector<uint64_t> ids; for (auto& [id,r] : rearc::Requests()) ids.push_back(id);
++  for (auto id : ids) rearc::Cancel(id);
++  ++rearc::epoch; rearc::host = cb; rearc::context = ctx;
++}
++ReArcStatus ReArcExtensionTabRequestRespond(uint64_t id, uint64_t tab) {
++  CHECK(pthread_main_np()); auto it = rearc::Requests().find(id); if (it == rearc::Requests().end()) return REARC_NOT_FOUND;
++  if (tab) {
++    rearc::TabSession* s; if (auto status = rearc::ABICheckTab(tab,&s)) return status;
++    auto state = rearc::States().find(tab);
++    if (!rearc::ExtensionSession(s->web_contents()) || state == rearc::States().end()) return REARC_INVALID_STATE;
++    const auto& e = it->second.event;
++    if (s->profile_id() != e.profile_id) return REARC_INVALID_ARGUMENT;
++    if ((e.tab_id && e.tab_id != tab) || (e.window_id > 0 && e.window_id != state->second.window) || (e.active && !state->second.active)) return REARC_INVALID_STATE;
++  }
++  auto done = std::move(it->second.done);
++  if (tab && it->second.event.kind != 3) {
++    auto* s = rearc::TabRegistry::Get().FindSession(tab);
++    content::NavigationController::LoadURLParams params(GURL(it->second.url));
++    params.is_renderer_initiated = true;
++    params.initiator_origin = url::Origin::Create(GURL("chrome-extension://" + it->second.extension));
++    params.source_site_instance = content::SiteInstance::CreateForURL(s->web_contents()->GetBrowserContext(),params.initiator_origin->GetURL());
++    s->web_contents()->GetController().LoadURLWithParams(params);
++  }
++  rearc::Requests().erase(it);
++  rearc::ABIPost(base::BindOnce([](base::OnceCallback<void(content::WebContents*)> done, uint64_t tab) {
++    auto* s = rearc::TabRegistry::Get().FindSession(tab);
++    std::move(done).Run(rearc::Open(s) ? s->web_contents() : nullptr);
++  }, std::move(done), tab)); return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_windows.h b/chrome/browser/rearc_bridge/rearc_extension_windows.h
+new file mode 100644
+index 0000000000..b4dddabacc
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_extension_windows.h
+@@ -0,0 +1,26 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_WINDOWS_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_WINDOWS_H_
++#include <cstdint>
++#include <string>
++#include "base/functional/callback.h"
++#include "base/values.h"
++#include "chrome/common/extensions/api/tabs.h"
++class Profile;
++class GURL;
++namespace extensions { class URLPatternSet; }
++namespace content { class WebContents; }
++class ExtensionFunction;
++namespace rearc {
++class TabSession;
++TabSession* ExtensionSession(content::WebContents*);
++void DecorateExtensionTab(content::WebContents*, extensions::api::tabs::Tab&);
++content::WebContents* ActiveExtensionContents(Profile*);
++base::ListValue QueryExtensionTabs(ExtensionFunction*, const extensions::api::tabs::Query::Params::QueryInfo&, const extensions::URLPatternSet&);
++base::ListValue QueryExtensionWindows(ExtensionFunction*, int window_id, bool populate);
++void RequestExtensionTab(Profile*, const std::string& extension_id, const GURL&, bool active, uint64_t opener, int window_id, uint32_t kind, uint64_t tab_id, base::OnceCallback<void(content::WebContents*)>);
++void ABICancelExtensionTabs(uint64_t tab_id, uint64_t profile_id);
++}
++#endif
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.cc b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+index 5865002b04..db956547e1 100644
+--- a/chrome/browser/rearc_bridge/rearc_profile_registry.cc
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+@@ -14,6 +14,7 @@
+ #include "base/supports_user_data.h"
+ #include "chrome/browser/profiles/profile_destroyer.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
+ #include "chrome/browser/rearc_bridge/rearc_extension_actions.h"
+ #include "base/no_destructor.h"
+ #include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+@@ -55,6 +56,7 @@ void UnregisterBridgeProfile(Profile* profile) {
+   ABICancelHistory(BridgeProfileId(profile));
+   ABICancelSearch(BridgeProfileId(profile));
+   ABICancelExtensionPrompts(0, BridgeProfileId(profile));
++  ABICancelExtensionTabs(0, BridgeProfileId(profile));
+   DetachExtensionActions(profile);
+   ABIDetachDownloads(BridgeProfileId(profile));
+   if (BridgeProfileId(profile) == default_id) {
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 0914501936..07ee936599 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -33,6 +33,7 @@
+ #include "chrome/browser/rearc_bridge/ipc_service_events.h"
+ #include "chrome/browser/rearc_bridge/media_adapter.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
+ #include "chrome/browser/rearc_bridge/rearc_pip.h"
+ #include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
+ #include "chrome/browser/rearc_bridge/security_adapter.h"
+@@ -1100,6 +1101,7 @@ void ABIDetachServices(uint64_t id) {
+   CHECK(pthread_main_np());
+   ABICancelPasswords(id);
+   ABICancelExtensionPrompts(id, 0);
++  ABICancelExtensionTabs(id, 0);
+   ABICancelContextMenu(id);
+   ABICancelPermissions(id);
+   ABICancelFileChooser(id);
+-- 
+2.54.0 (Apple Git-157)
+

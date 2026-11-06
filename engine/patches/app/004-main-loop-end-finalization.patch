@@ -1,0 +1,44 @@
+Patch-ID: P-APP-001 (wave-5 slice 2) — DidEndMainMessageLoop bridge
+finalization.
+Rationale: third milestone of engine/docs/patches/P-APP-001.md, patch-map row
+"DidEndMainMessageLoop(): replace its call to AppController.sharedController
+with bridge finalization. A teardown-only call to sharedController would
+recreate/replace the delegate." When an engine lifecycle host is registered,
+AppController was never created (patch app/003 gate), so
+ChromeBrowserMainPartsMac::DidEndMainMessageLoop() now finalizes through
+rearc::FinalizeReArcAppDelegate() and never touches
+AppController.sharedController. Without a host the stock
+-[AppController didEndMainMessageLoop] call runs bit-identically.
+FinalizeReArcAppDelegate() itself remains the 002 scaffolding no-op (records
+the transition via VLOG); ordered tab/keepalive teardown arrives with P-TAB-001
+and the remaining P-APP-001 slices.
+Gate: rearc::GetEngineLifecycleHost() != nullptr. No new includes: patch
+app/003 already imported rearc_app_delegate_mac.h (declares
+FinalizeReArcAppDelegate) and rearc_engine_lifecycle.h into this file.
+Drift check @ 156.0.8078.74 (2026-11-01): none. The upstream
+DidEndMainMessageLoop AppController call moved from
+chrome_browser_main_mac.mm:185 (pre-003 pin recording) to :203 after this
+patch; rebase notes should target the gated form.
+Upstream hunks: chrome/browser/chrome_browser_main_mac.mm only (the gated
+finalization block).
+Last rebased: 2026-11-01 @ 156.0.8078.74.
+
+diff --git a/chrome/browser/chrome_browser_main_mac.mm b/chrome/browser/chrome_browser_main_mac.mm
+index e93ab07125..a6eca25a04 100644
+--- a/chrome/browser/chrome_browser_main_mac.mm
++++ b/chrome/browser/chrome_browser_main_mac.mm
+@@ -194,5 +194,14 @@
+ }
+ 
+ void ChromeBrowserMainPartsMac::DidEndMainMessageLoop() {
++  // P-APP-001 (patch app/004): with an engine lifecycle host registered,
++  // AppController was never created (app/003); requesting sharedController
++  // here would instantiate it during teardown and violate the delegate
++  // identity invariants. Finalize through the bridge instead. Without a
++  // host, the stock AppController path runs unchanged.
++  if (rearc::GetEngineLifecycleHost()) {
++    rearc::FinalizeReArcAppDelegate();
++    return;
++  }
+   [AppController.sharedController didEndMainMessageLoop];
+ }

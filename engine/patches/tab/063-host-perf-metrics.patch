@@ -1,0 +1,1385 @@
+From 09332ffebeb20f9a6899b0251881270b1228be85 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Thu, 5 Nov 2026 02:43:18 +0400
+Subject: [PATCH] P-TAB-001 perf-0: page timing, presentation feedback,
+ histograms and processes for the host
+
+perf-0 measures ReArc against its budgets (docs/PERFORMANCE-PLAN.md). The
+host needs the engine's own clocks for page loads and content presentation,
+so ABI 1.44 (perf_metrics, bridge 0.46.0) adds four measurement-only
+channels; with no callback set nothing is attached and behavior is
+unchanged. ReArcEngineSetPageTimingCallback attaches page_load_metrics
+(MetricsWebContentsObserver with Chromium's UmaPageLoadMetricsObserver, so
+PageLoad.PaintTiming.* match Chrome) to tabs created afterwards and reports
+response start, first paint, FCP, DCL, load and each LCP candidate.
+ReArcEngineSetViewPresentationCallback reports a lease's hidden-to-visible
+transition with Chromium's Browser.Tabs.TotalSwitchDuration3 measurement
+(WebContents::SetTabSwitchStartTime before VISIBLE) and, after a
+ResizeView, the first renderer frame activated at the new pixel size and the
+browser compositor's next presented frame. ReArcMetricsGetHistogram returns
+a UMA histogram after merging child deltas; ReArcEngineGetProcesses lists
+the browser, renderers (profile, extension, hosted tabs) and child
+processes with phys_footprint, resident size and CPU time. Times are
+microseconds on mach_absolute_time's clock. rearc_perf.{h,cc} adds
+os_signpost intervals under net.rearc.engine (abi: hot entry points and
+every event/completion dispatch; profile: ProfileOpen; view:
+TabSwitchPresentation, ResizeToPresentation; tab: page milestones).
+framework.exports and framework.order list the four new functions.
+Existing ABI layouts remain unchanged.
+
+Last rebased: 2026-11-05 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/app/framework.exports                  |   4 +
+ chrome/app/framework.order                    |   4 +
+ chrome/browser/BUILD.gn                       |   3 +
+ .../browser/rearc_bridge/attachment_lease.cc  |   5 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  90 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |  17 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../browser/rearc_bridge/rearc_history_abi.cc |   2 +
+ chrome/browser/rearc_bridge/rearc_perf.cc     | 199 +++++
+ chrome/browser/rearc_bridge/rearc_perf.h      |  81 +++
+ .../rearc_bridge/rearc_perf_metrics.cc        | 680 ++++++++++++++++++
+ .../browser/rearc_bridge/rearc_search_abi.cc  |   2 +
+ 12 files changed, 1087 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_perf.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_perf.h
+ create mode 100644 chrome/browser/rearc_bridge/rearc_perf_metrics.cc
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index f3b9bc5668..acc7df312f 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -38,6 +38,10 @@ _ReArcVideoOverlayAction
+ _ReArcVideoOverlaySeek
+ _ReArcVideoOverlaySetBounds
+ _ReArcVideoOverlayReadPixel
++_ReArcEngineSetPageTimingCallback
++_ReArcEngineSetViewPresentationCallback
++_ReArcMetricsGetHistogram
++_ReArcEngineGetProcesses
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 7d6bec39bf..1b0191ee41 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -45,6 +45,10 @@ _ReArcVideoOverlayAction
+ _ReArcVideoOverlaySeek
+ _ReArcVideoOverlaySetBounds
+ _ReArcVideoOverlayReadPixel
++_ReArcEngineSetPageTimingCallback
++_ReArcEngineSetViewPresentationCallback
++_ReArcMetricsGetHistogram
++_ReArcEngineGetProcesses
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 04e690932c..6beb031e43 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1493,6 +1493,9 @@ source_set("core") {
+       "rearc_bridge/rearc_fullscreen.h",
+       "rearc_bridge/rearc_key_equivalents.cc",
+       "rearc_bridge/rearc_key_equivalents.h",
++      "rearc_bridge/rearc_perf.cc",
++      "rearc_bridge/rearc_perf.h",
++      "rearc_bridge/rearc_perf_metrics.cc",
+       "rearc_bridge/rearc_print.cc",
+       "rearc_bridge/rearc_print.h",
+       "rearc_bridge/rearc_drop_policy.h",
+diff --git a/chrome/browser/rearc_bridge/attachment_lease.cc b/chrome/browser/rearc_bridge/attachment_lease.cc
+index ca25e78c78..3694968038 100644
+--- a/chrome/browser/rearc_bridge/attachment_lease.cc
++++ b/chrome/browser/rearc_bridge/attachment_lease.cc
+@@ -12,6 +12,7 @@
+ #include "base/check.h"
+ #include "base/logging.h"
+ #include "base/no_destructor.h"
++#include "chrome/browser/rearc_bridge/rearc_perf.h"
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
+ #include "chrome/browser/rearc_bridge/tab_session.h"
+ #include "chrome/browser/rearc_bridge/web_contents_view_delegate_mac.h"
+@@ -190,6 +191,9 @@ bool AttachmentLeaseRegistry::ResizeView(uint64_t tab_id,
+   lease->scale_hint = scale_hint;
+   ReArcContentHostSetSizeDip(lease->host_ref(), width_dip, height_dip,
+                              scale_hint);
++  if (TabSession* session = TabRegistry::Get().FindSession(tab_id)) {
++    perf::DidResizeView(tab_id, attachment_id, session->web_contents());
++  }
+   return true;
+ }
+ 
+@@ -213,6 +217,7 @@ bool AttachmentLeaseRegistry::SetViewVisible(uint64_t tab_id,
+     // §6 / web_contents.h:1043 guidance: visibility transitions drive
+     // WasShown/WasHidden, only on actual transitions.
+     if (visible) {
++      perf::WillShowTab(tab_id, attachment_id, contents);
+       contents->UpdateWebContentsVisibility(content::Visibility::VISIBLE);
+     } else {
+       contents->UpdateWebContentsVisibility(content::Visibility::HIDDEN);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 7299b43e0a..f7b6bf29d5 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 43, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 44, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -1171,6 +1171,94 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileGetPasswordLeakDetection(
+ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileSetPasswordLeakDetection(
+     uint64_t profile_id, bool enabled);
+ 
++// Performance metrics (perf_metrics, ABI 1.44). Every *_us time is
++// microseconds on mach_absolute_time's clock (base::TimeTicks on macOS), the
++// clock of CACurrentMediaTime() and NSEvent.timestamp: host and engine times
++// compare after multiplying the host's seconds by 1e6. Measurement only; with
++// no callback set nothing is attached and no behavior changes.
++//
++// Page timing: with a callback set, tabs created afterwards attach Chromium's
++// page_load_metrics (MetricsWebContentsObserver with its core UMA observer, so
++// PageLoad.PaintTiming.* histograms are recorded as in Chrome; no UKM) and
++// report main-frame milestones of each committed navigation once each, as the
++// renderer's timing update arrives (batched by Chromium, so the event can lag
++// its value_us). kind: 0 response start, 1 first paint, 2 first contentful
++// paint, 3 DOMContentLoaded event start, 4 load event start, 5 largest
++// contentful paint candidate (main frame and subframes merged, repeated for
++// each later candidate; size in pixels). navigation_id is the tab event's;
++// value_us = navigation_start_us + Chromium's offset. url borrowed.
++typedef struct ReArcPageTimingEvent {
++  uint64_t profile_id, tab_id, content_generation, navigation_id;
++  uint32_t kind;
++  int64_t navigation_start_us, value_us;
++  uint64_t size;
++  const char* url;
++} ReArcPageTimingEvent;
++typedef void (*ReArcPageTimingCallback)(void*, const ReArcPageTimingEvent*);
++REARC_ENGINE_EXPORT void ReArcEngineSetPageTimingCallback(ReArcPageTimingCallback, void* context);
++
++// View presentation feedback, with a callback set. kind 0 shown: the lease's
++// hidden-to-visible transition first calls WebContents::SetTabSwitchStartTime,
++// and the event carries Chromium's own Browser.Tabs.TotalSwitchDuration3
++// sample (1 ms resolution; presented_us = start_us + sample): status 0, or 1
++// when Chromium recorded it as incomplete (hidden again first). kind 1
++// resized: a ResizeView that changes the compositor viewport reports the first
++// renderer frame activated at the new pixel size (activated_us) and the
++// browser compositor's next presented frame after it (presented_us, an upper
++// bound within one frame; 0 if the view has no compositor). status 0, 2
++// superseded by a newer resize, 3 no frame within 2 s. width/height: pixels.
++typedef struct ReArcViewPresentationEvent {
++  uint64_t profile_id, tab_id, attachment_id, request_id;
++  uint32_t kind, status;
++  int64_t start_us, activated_us, presented_us;
++  int32_t width, height;
++} ReArcViewPresentationEvent;
++typedef void (*ReArcViewPresentationCallback)(void*, const ReArcViewPresentationEvent*);
++REARC_ENGINE_EXPORT void ReArcEngineSetViewPresentationCallback(ReArcViewPresentationCallback, void* context);
++
++// A browser-process snapshot of one UMA histogram after merging child-process
++// deltas (content::FetchHistogramsAsynchronously, 2 s bound), so values match
++// CDP Browser.getHistogram in Chrome. Buckets are [min, max). Deferred, exactly
++// once; not_found when no sample was recorded under that name. Borrowed.
++typedef struct ReArcHistogramBucket {
++  int64_t min, max, count;
++} ReArcHistogramBucket;
++typedef struct ReArcHistogramSnapshot {
++  const char* name;
++  int64_t count, sum;
++  const ReArcHistogramBucket* buckets;
++  size_t bucket_count;
++} ReArcHistogramSnapshot;
++typedef void (*ReArcHistogramCallback)(void* context, ReArcStatus status,
++                                       const ReArcHistogramSnapshot* histogram);
++// name: UTF-8, 1..256 bytes.
++REARC_ENGINE_EXPORT ReArcStatus ReArcMetricsGetHistogram(
++    const char* name, ReArcHistogramCallback completion, void* context);
++
++// The engine's processes: the browser (the host's own process) first, then
++// every live renderer and browser child process. type: 0 browser,
++// 1 renderer, 2 gpu, 3 utility (name: the service's display name), 4 other.
++// Renderers name their profile (0 if not a bridge profile), whether they host
++// an extension, and the registry tabs with a frame in them. Memory and CPU
++// from proc_pid_rusage(RUSAGE_INFO_V4): phys_footprint (Activity Monitor's
++// Memory column), resident size, user+system CPU. Deferred, exactly once.
++typedef struct ReArcProcessInfo {
++  int32_t pid;
++  uint32_t type;
++  const char* name;
++  uint64_t profile_id;
++  bool is_extension;
++  const uint64_t* tab_ids;
++  size_t tab_count;
++  uint64_t phys_footprint, resident_size;
++  int64_t cpu_time_us;
++} ReArcProcessInfo;
++typedef void (*ReArcProcessListCallback)(void* context, ReArcStatus status,
++                                         const ReArcProcessInfo* processes,
++                                         size_t count);
++REARC_ENGINE_EXPORT ReArcStatus ReArcEngineGetProcesses(
++    ReArcProcessListCallback completion, void* context);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 3145ebc8ba..c6ffbae4c9 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -36,6 +36,7 @@
+ #include "chrome/browser/rearc_bridge/ipc_tab_events.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
+ #include "chrome/browser/rearc_bridge/rearc_keep_alive.h"
++#include "chrome/browser/rearc_bridge/rearc_perf.h"
+ #include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
+ #include "chrome/browser/rearc_bridge/rearc_readiness.h"
+ #include "chrome/browser/rearc_bridge/tab_observer.h"
+@@ -111,6 +112,8 @@ void Drain() {
+     while (!deliveries.empty()) {
+       auto callback = std::move(deliveries.front());
+       deliveries.pop_front();
++      // perf-0: one interval per event or completion, dispatch to return.
++      REARC_ABI_INTERVAL(kDispatch);
+       std::move(callback).Run();
+     }
+     draining = false;
+@@ -226,6 +229,7 @@ void CompleteProfileOpen(std::string key, uint64_t id, bool otr,
+                            ReArcStatus failure = REARC_INTERNAL) {
+     auto it = profile_opens.find(key);
+     if (it == profile_opens.end()) return;  // Shutdown cancelled this request.
++    perf::ProfileOpenEnd(key, id != 0);
+     auto requests = std::move(it->second);
+     profile_opens.erase(it);
+     for (const auto& request : requests) {
+@@ -343,6 +347,7 @@ ReArcStatus OpenBridgeProfileDirectory(std::string directory,
+   auto& requests = a.profile_opens[key];
+   requests.push_back({completion, context});
+   if (requests.size() > 1) return REARC_OK;
++  perf::ProfileOpenBegin(key);
+   auto path = g_browser_process->profile_manager()->user_data_dir()
+                   .AppendASCII(directory);
+   auto open = base::BindOnce(
+@@ -357,6 +362,7 @@ ReArcStatus OpenBridgeProfileDirectory(std::string directory,
+           return;
+         }
+         if (validated) {
++          perf::ProfileOpenEnd(key, true);
+           auto requests = std::move(a.profile_opens.at(key));
+           a.profile_opens.erase(key);
+           for (const auto& request : requests) {
+@@ -472,6 +478,9 @@ void ABIInitializeTab(uint64_t id) {
+   AttachTabObserver(id);
+   EmitInitialSnapshotEvent(id);
+   ABIAttachServices(id);
++  if (auto* session = TabRegistry::Get().FindSession(id)) {
++    perf::AttachPageTiming(id, session->web_contents());
++  }
+ }
+ void ABITabDestroyed(uint64_t profile_id) {
+   auto& a = ABI::Get();
+@@ -556,6 +565,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "devtools" ||
+          std::string(feature) == "client_certificates" ||
+          std::string(feature) == "key_equivalent_events" ||
++         std::string(feature) == "perf_metrics" ||
+          std::string(feature) == "pip_embedded" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+@@ -793,6 +803,7 @@ ReArcStatus ReArcTabCreate(uint64_t profile_id,
+                            const char* value,
+                            uint64_t* tab_id) {
+   CHECK([NSThread isMainThread]);
++  REARC_ABI_INTERVAL(kTabCreate);
+   if (tab_id) {
+     *tab_id = 0;
+   }
+@@ -834,6 +845,7 @@ ReArcStatus ReArcTabClose(uint64_t id,
+                           ReArcCompletion completion,
+                           void* context) {
+   CHECK([NSThread isMainThread]);
++  REARC_ABI_INTERVAL(kTabClose);
+   if (!completion) {
+     return REARC_INVALID_ARGUMENT;
+   }
+@@ -855,6 +867,7 @@ ReArcStatus ReArcTabClose(uint64_t id,
+ ReArcStatus ReArcTabNavigate(uint64_t id,
+                              const char* value,
+                              uint32_t transition) {
++  REARC_ABI_INTERVAL(kTabNavigate);
+   rearc::TabSession* s;
+   if (auto status = rearc::ABICheckTab(id, &s)) {
+     return status;
+@@ -1011,6 +1024,7 @@ ReArcStatus ReArcViewAttach(uint64_t id,
+                             double scale,
+                             ReArcAttachment* out) {
+   CHECK([NSThread isMainThread]);
++  REARC_ABI_INTERVAL(kViewAttach);
+   if (out) {
+     *out = {};
+   }
+@@ -1041,6 +1055,7 @@ ReArcStatus ReArcViewAttach(uint64_t id,
+ }
+ ReArcStatus ReArcViewDetach(uint64_t id, uint64_t lease) {
+   CHECK([NSThread isMainThread]);
++  REARC_ABI_INTERVAL(kViewDetach);
+   if (!rearc::AttachmentLeaseRegistry::Get().DetachView(id, lease)) {
+     return REARC_STALE_ATTACHMENT;
+   }
+@@ -1053,6 +1068,7 @@ ReArcStatus ReArcViewResize(uint64_t id,
+                             double h,
+                             double scale) {
+   CHECK([NSThread isMainThread]);
++  REARC_ABI_INTERVAL(kViewResize);
+   if (!rearc::ValidSize(w, h, scale)) {
+     return REARC_INVALID_ARGUMENT;
+   }
+@@ -1063,6 +1079,7 @@ ReArcStatus ReArcViewResize(uint64_t id,
+ }
+ ReArcStatus ReArcViewSetVisible(uint64_t id, uint64_t lease, bool visible) {
+   CHECK([NSThread isMainThread]);
++  REARC_ABI_INTERVAL(kViewSetVisible);
+   auto& a = ABI::Get();
+   auto p = a.presentations.find(id);
+   if (p == a.presentations.end() || p->second.attachment_id != lease) {
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 73027c60c0..02fe7799b3 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.45.0";
++  return "0.46.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_history_abi.cc b/chrome/browser/rearc_bridge/rearc_history_abi.cc
+index 7e76265c6b..1295a8f3b1 100644
+--- a/chrome/browser/rearc_bridge/rearc_history_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_history_abi.cc
+@@ -21,6 +21,7 @@
+ #include "chrome/browser/history/history_service_factory.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_perf.h"
+ #include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
+ #include "components/history/core/browser/history_service.h"
+ #include "components/history/core/browser/history_types.h"
+@@ -119,6 +120,7 @@ void ABICancelHistory(uint64_t profile_id) {
+ 
+ ReArcStatus ReArcHistoryQuery(uint64_t profile, const char* text, uint32_t limit,
+                               ReArcHistoryCallback completion, void* context) {
++  REARC_ABI_INTERVAL(kHistoryQuery);
+   history::HistoryService* service;
+   if (auto status = rearc::Service(profile, &service)) return status;
+   if (!completion || !text || !limit || limit > 1000) return REARC_INVALID_ARGUMENT;
+diff --git a/chrome/browser/rearc_bridge/rearc_perf.cc b/chrome/browser/rearc_bridge/rearc_perf.cc
+new file mode 100644
+index 0000000000..469216e3ca
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_perf.cc
+@@ -0,0 +1,199 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_perf.h"
++
++#include <os/signpost.h>
++#include <pthread.h>
++
++#include <map>
++#include <string>
++
++#include "base/check.h"
++#include "base/no_destructor.h"
++
++namespace rearc::perf {
++namespace {
++
++enum class Category { kAbi, kTab, kProfile, kView };
++
++os_log_t Log(Category category) {
++  static os_log_t logs[] = {
++      os_log_create("net.rearc.engine", "abi"),
++      os_log_create("net.rearc.engine", "tab"),
++      os_log_create("net.rearc.engine", "profile"),
++      os_log_create("net.rearc.engine", "view"),
++  };
++  return logs[static_cast<int>(category)];
++}
++
++os_signpost_id_t Begin(Category category,
++                       void (*begin)(os_log_t, os_signpost_id_t)) {
++  os_log_t log = Log(category);
++  if (!os_signpost_enabled(log)) return 0;  // OS_SIGNPOST_ID_NULL
++  const os_signpost_id_t id = os_signpost_id_generate(log);
++  begin(log, id);
++  return id;
++}
++
++}  // namespace
++
++ScopedAbiInterval::ScopedAbiInterval(AbiCall call) : call_(call) {
++  os_log_t log = Log(Category::kAbi);
++  if (!os_signpost_enabled(log)) return;
++  const os_signpost_id_t id = os_signpost_id_generate(log);
++  id_ = id;
++  switch (call_) {
++    case AbiCall::kDispatch:
++      os_signpost_interval_begin(log, id, "Dispatch");
++      break;
++    case AbiCall::kTabCreate:
++      os_signpost_interval_begin(log, id, "TabCreate");
++      break;
++    case AbiCall::kTabClose:
++      os_signpost_interval_begin(log, id, "TabClose");
++      break;
++    case AbiCall::kTabNavigate:
++      os_signpost_interval_begin(log, id, "TabNavigate");
++      break;
++    case AbiCall::kViewAttach:
++      os_signpost_interval_begin(log, id, "ViewAttach");
++      break;
++    case AbiCall::kViewDetach:
++      os_signpost_interval_begin(log, id, "ViewDetach");
++      break;
++    case AbiCall::kViewResize:
++      os_signpost_interval_begin(log, id, "ViewResize");
++      break;
++    case AbiCall::kViewSetVisible:
++      os_signpost_interval_begin(log, id, "ViewSetVisible");
++      break;
++    case AbiCall::kHistoryQuery:
++      os_signpost_interval_begin(log, id, "HistoryQuery");
++      break;
++    case AbiCall::kAutocompleteStart:
++      os_signpost_interval_begin(log, id, "AutocompleteStart");
++      break;
++  }
++}
++
++ScopedAbiInterval::~ScopedAbiInterval() {
++  if (!id_) return;
++  os_log_t log = Log(Category::kAbi);
++  const os_signpost_id_t id = id_;
++  switch (call_) {
++    case AbiCall::kDispatch:
++      os_signpost_interval_end(log, id, "Dispatch");
++      break;
++    case AbiCall::kTabCreate:
++      os_signpost_interval_end(log, id, "TabCreate");
++      break;
++    case AbiCall::kTabClose:
++      os_signpost_interval_end(log, id, "TabClose");
++      break;
++    case AbiCall::kTabNavigate:
++      os_signpost_interval_end(log, id, "TabNavigate");
++      break;
++    case AbiCall::kViewAttach:
++      os_signpost_interval_end(log, id, "ViewAttach");
++      break;
++    case AbiCall::kViewDetach:
++      os_signpost_interval_end(log, id, "ViewDetach");
++      break;
++    case AbiCall::kViewResize:
++      os_signpost_interval_end(log, id, "ViewResize");
++      break;
++    case AbiCall::kViewSetVisible:
++      os_signpost_interval_end(log, id, "ViewSetVisible");
++      break;
++    case AbiCall::kHistoryQuery:
++      os_signpost_interval_end(log, id, "HistoryQuery");
++      break;
++    case AbiCall::kAutocompleteStart:
++      os_signpost_interval_end(log, id, "AutocompleteStart");
++      break;
++  }
++}
++
++uint64_t BeginView(ViewInterval interval) {
++  return Begin(Category::kView, interval == ViewInterval::kTabSwitchPresentation
++                                    ? +[](os_log_t log, os_signpost_id_t id) {
++                                        os_signpost_interval_begin(
++                                            log, id, "TabSwitchPresentation");
++                                      }
++                                    : +[](os_log_t log, os_signpost_id_t id) {
++                                        os_signpost_interval_begin(
++                                            log, id, "ResizeToPresentation");
++                                      });
++}
++
++void EndView(ViewInterval interval, uint64_t id) {
++  if (!id) return;
++  if (interval == ViewInterval::kTabSwitchPresentation) {
++    os_signpost_interval_end(Log(Category::kView), id, "TabSwitchPresentation");
++  } else {
++    os_signpost_interval_end(Log(Category::kView), id, "ResizeToPresentation");
++  }
++}
++
++void TabMilestone(uint32_t kind, uint64_t tab_id, uint64_t navigation_id) {
++  os_log_t log = Log(Category::kTab);
++  if (!os_signpost_enabled(log)) return;
++  // Kinds as ReArcPageTimingEvent.
++  switch (kind) {
++    case 0:
++      os_signpost_event_emit(log, OS_SIGNPOST_ID_EXCLUSIVE, "ResponseStart",
++                             "tab=%llu nav=%llu", tab_id, navigation_id);
++      break;
++    case 1:
++      os_signpost_event_emit(log, OS_SIGNPOST_ID_EXCLUSIVE, "FirstPaint",
++                             "tab=%llu nav=%llu", tab_id, navigation_id);
++      break;
++    case 2:
++      os_signpost_event_emit(log, OS_SIGNPOST_ID_EXCLUSIVE,
++                             "FirstContentfulPaint", "tab=%llu nav=%llu",
++                             tab_id, navigation_id);
++      break;
++    case 3:
++      os_signpost_event_emit(log, OS_SIGNPOST_ID_EXCLUSIVE,
++                             "DOMContentLoaded", "tab=%llu nav=%llu", tab_id,
++                             navigation_id);
++      break;
++    case 4:
++      os_signpost_event_emit(log, OS_SIGNPOST_ID_EXCLUSIVE, "LoadEventStart",
++                             "tab=%llu nav=%llu", tab_id, navigation_id);
++      break;
++    case 5:
++      os_signpost_event_emit(log, OS_SIGNPOST_ID_EXCLUSIVE,
++                             "LargestContentfulPaint", "tab=%llu nav=%llu",
++                             tab_id, navigation_id);
++      break;
++  }
++}
++
++namespace {
++std::map<std::string, os_signpost_id_t>& ProfileOpens() {
++  static base::NoDestructor<std::map<std::string, os_signpost_id_t>> opens;
++  return *opens;
++}
++}  // namespace
++
++void ProfileOpenBegin(const std::string& key) {
++  CHECK(pthread_main_np());
++  const os_signpost_id_t id =
++      Begin(Category::kProfile, [](os_log_t log, os_signpost_id_t id) {
++        os_signpost_interval_begin(log, id, "ProfileOpen");
++      });
++  if (id) ProfileOpens()[key] = id;
++}
++
++void ProfileOpenEnd(const std::string& key, bool ok) {
++  CHECK(pthread_main_np());
++  auto it = ProfileOpens().find(key);
++  if (it == ProfileOpens().end()) return;
++  os_signpost_interval_end(Log(Category::kProfile), it->second, "ProfileOpen",
++                           "ok=%d", ok);
++  ProfileOpens().erase(it);
++}
++
++}  // namespace rearc::perf
+diff --git a/chrome/browser/rearc_bridge/rearc_perf.h b/chrome/browser/rearc_bridge/rearc_perf.h
+new file mode 100644
+index 0000000000..146bc5b9d3
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_perf.h
+@@ -0,0 +1,81 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_PERF_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_PERF_H_
++
++#include <cstdint>
++#include <string>
++
++namespace content {
++class WebContents;
++}
++
++// perf-0: os_signpost intervals and events under subsystem net.rearc.engine
++// (docs/PERFORMANCE-PLAN.md §2.1), plus the hooks the perf_metrics ABI
++// (rearc_perf_metrics.cc) needs from the lease and tab code. Signposts cost a
++// branch when nothing records them (os_signpost_enabled).
++namespace rearc::perf {
++
++// Synchronous ABI entry points with an "abi" interval (entry to return), and
++// the delivery of each event or completion (dispatch to callback return).
++enum class AbiCall {
++  kDispatch,
++  kTabCreate,
++  kTabClose,
++  kTabNavigate,
++  kViewAttach,
++  kViewDetach,
++  kViewResize,
++  kViewSetVisible,
++  kHistoryQuery,
++  kAutocompleteStart,
++};
++
++class ScopedAbiInterval {
++ public:
++  explicit ScopedAbiInterval(AbiCall call);
++  ScopedAbiInterval(const ScopedAbiInterval&) = delete;
++  ScopedAbiInterval& operator=(const ScopedAbiInterval&) = delete;
++  ~ScopedAbiInterval();
++
++ private:
++  const AbiCall call_;
++  uint64_t id_ = 0;  // os_signpost_id_t; 0 when not recording.
++};
++
++// "view" intervals that end asynchronously, on presentation feedback. Begin
++// returns 0 when not recording; End ignores 0.
++enum class ViewInterval { kTabSwitchPresentation, kResizeToPresentation };
++uint64_t BeginView(ViewInterval interval);
++void EndView(ViewInterval interval, uint64_t id);
++
++// Tab events, timeline only (the ABI events carry the values).
++void TabMilestone(uint32_t kind, uint64_t tab_id, uint64_t navigation_id);
++
++// Profile opens by registry key, from the first request to its completion.
++void ProfileOpenBegin(const std::string& key);
++void ProfileOpenEnd(const std::string& key, bool ok);
++
++// Called by the lease registry (attachment_lease.cc) before the transitions
++// that produce presentation feedback (a hidden-again tab's incomplete switch is
++// recorded by Chromium itself). No-ops without a presentation callback.
++void WillShowTab(uint64_t tab_id,
++                 uint64_t attachment_id,
++                 content::WebContents* contents);
++void DidResizeView(uint64_t tab_id,
++                   uint64_t attachment_id,
++                   content::WebContents* contents);
++
++// From ABIInitializeTab: attaches page_load_metrics when a page timing
++// callback is set.
++void AttachPageTiming(uint64_t tab_id, content::WebContents* contents);
++
++}  // namespace rearc::perf
++
++// os_signpost stays out of this header: <os/signpost.h> brings mach-o macros
++// (PLATFORM_IOS) that collide with generated protobuf code.
++#define REARC_ABI_INTERVAL(call) \
++  ::rearc::perf::ScopedAbiInterval rearc_abi_interval(::rearc::perf::AbiCall::call)
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_PERF_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_perf_metrics.cc b/chrome/browser/rearc_bridge/rearc_perf_metrics.cc
+new file mode 100644
+index 0000000000..8ef7c7cc25
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_perf_metrics.cc
+@@ -0,0 +1,680 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// perf-0 (perf_metrics, ABI 1.44): page timing, view presentation feedback,
++// histogram snapshots and the process list. Measurement only: nothing here is
++// attached or observed until the host sets the matching callback.
++
++#include <libproc.h>
++#include <mach/mach_time.h>
++#include <pthread.h>
++#include <sys/resource.h>
++
++#include <cmath>
++#include <deque>
++#include <map>
++#include <memory>
++#include <optional>
++#include <set>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/metrics/histogram_base.h"
++#include "base/metrics/histogram_samples.h"
++#include "base/metrics/statistics_recorder.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/time/time.h"
++#include "base/timer/timer.h"
++#include "cc/trees/render_frame_metadata.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
++#include "chrome/browser/rearc_bridge/rearc_perf.h"
++#include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "components/page_load_metrics/browser/metrics_web_contents_observer.h"
++#include "components/page_load_metrics/browser/observers/core/largest_contentful_paint_handler.h"
++#include "components/page_load_metrics/browser/observers/core/uma_page_load_metrics_observer.h"
++#include "components/page_load_metrics/browser/page_load_metrics_embedder_base.h"
++#include "components/page_load_metrics/browser/page_load_metrics_observer.h"
++#include "components/page_load_metrics/browser/page_load_metrics_observer_delegate.h"
++#include "components/page_load_metrics/browser/page_load_tracker.h"
++#include "components/page_load_metrics/common/page_load_metrics.mojom.h"
++#include "components/viz/common/frame_timing_details.h"
++#include "content/browser/renderer_host/render_frame_metadata_provider_impl.h"  // nogncheck
++#include "content/browser/renderer_host/render_widget_host_impl.h"  // nogncheck
++#include "content/browser/renderer_host/render_widget_host_view_base.h"  // nogncheck
++#include "content/public/browser/browser_child_process_host_iterator.h"
++#include "content/public/browser/child_process_data.h"
++#include "content/public/browser/histogram_fetcher.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_frame_metadata_provider.h"
++#include "content/public/browser/render_process_host.h"
++#include "content/public/browser/render_widget_host.h"
++#include "content/public/browser/render_widget_host_observer.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "content/public/common/process_type.h"
++#include "extensions/browser/process_map.h"
++#include "ui/compositor/compositor.h"
++#include "url/gurl.h"
++
++namespace rearc {
++namespace {
++
++int64_t Micros(base::TimeTicks ticks) {
++  return (ticks - base::TimeTicks()).InMicroseconds();
++}
++
++// --- Page timing -----------------------------------------------------------
++
++ReArcPageTimingCallback page_host = nullptr;
++void* page_host_context = nullptr;
++uint64_t page_epoch = 0;
++
++// Kinds as ReArcPageTimingEvent.
++enum PageKind : uint32_t {
++  kResponseStart = 0,
++  kFirstPaint = 1,
++  kFirstContentfulPaint = 2,
++  kDomContentLoaded = 3,
++  kLoadEventStart = 4,
++  kLargestContentfulPaint = 5,
++};
++
++void EmitPageTiming(uint64_t tab_id,
++                    uint64_t navigation_id,
++                    uint32_t kind,
++                    base::TimeTicks navigation_start,
++                    base::TimeDelta offset,
++                    uint64_t size,
++                    const std::string& url) {
++  perf::TabMilestone(kind, tab_id, navigation_id);
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  if (!page_host || !session) return;
++  ABIPost(base::BindOnce(
++      [](uint64_t expected, ReArcPageTimingEvent event, std::string url) {
++        if (!page_host || expected != page_epoch) return;
++        event.url = url.c_str();
++        page_host(page_host_context, &event);
++      },
++      page_epoch,
++      ReArcPageTimingEvent{session->profile_id(), tab_id,
++                           session->content_generation(), navigation_id, kind,
++                           Micros(navigation_start),
++                           Micros(navigation_start + offset), size, nullptr},
++      url));
++}
++
++// Forwards the main frame's milestones; one instance per page load.
++class PageTimingObserver : public page_load_metrics::PageLoadMetricsObserver {
++ public:
++  explicit PageTimingObserver(uint64_t tab_id) : tab_id_(tab_id) {}
++
++  const char* GetObserverName() const override {
++    return "ReArcPageTimingObserver";
++  }
++  ObservePolicy OnFencedFramesStart(content::NavigationHandle*,
++                                    const GURL&) override {
++    return STOP_OBSERVING;
++  }
++  ObservePolicy OnPrerenderStart(content::NavigationHandle*,
++                                 const GURL&) override {
++    return STOP_OBSERVING;
++  }
++  ObservePolicy OnCommit(content::NavigationHandle* handle) override {
++    navigation_id_ = static_cast<uint64_t>(handle->GetNavigationId());
++    url_ = handle->GetURL().spec();
++    return CONTINUE_OBSERVING;
++  }
++  void OnTimingUpdate(
++      content::RenderFrameHost* subframe_rfh,
++      const page_load_metrics::mojom::PageLoadTiming& timing) override {
++    if (!response_sent_ && timing.response_start) {
++      response_sent_ = true;
++      Emit(kResponseStart, *timing.response_start);
++    }
++    const auto& lcp = GetDelegate()
++                          .GetLargestContentfulPaintHandler()
++                          .MergeMainFrameAndSubframes();
++    if (lcp.ContainsValidTime() &&
++        (!last_lcp_ || *lcp.Time() > *last_lcp_ ||
++         lcp.Size() != last_lcp_size_)) {
++      last_lcp_ = lcp.Time();
++      last_lcp_size_ = lcp.Size();
++      Emit(kLargestContentfulPaint, *lcp.Time(), lcp.Size());
++    }
++  }
++  void OnFirstPaintInPage(
++      const page_load_metrics::mojom::PageLoadTiming& timing) override {
++    if (timing.paint_timing->first_paint) {
++      Emit(kFirstPaint, *timing.paint_timing->first_paint);
++    }
++  }
++  void OnFirstContentfulPaintInPage(
++      const page_load_metrics::mojom::PageLoadTiming& timing) override {
++    Emit(kFirstContentfulPaint, *timing.paint_timing->first_contentful_paint);
++  }
++  void OnDomContentLoadedEventStart(
++      const page_load_metrics::mojom::PageLoadTiming& timing) override {
++    Emit(kDomContentLoaded,
++         *timing.document_timing->dom_content_loaded_event_start);
++  }
++  void OnLoadEventStart(
++      const page_load_metrics::mojom::PageLoadTiming& timing) override {
++    Emit(kLoadEventStart, *timing.document_timing->load_event_start);
++  }
++
++ private:
++  void Emit(uint32_t kind, base::TimeDelta offset, uint64_t size = 0) {
++    EmitPageTiming(tab_id_, navigation_id_, kind,
++                   GetDelegate().GetNavigationStart(), offset, size, url_);
++  }
++
++  const uint64_t tab_id_;
++  uint64_t navigation_id_ = 0;
++  std::string url_;
++  bool response_sent_ = false;
++  std::optional<base::TimeDelta> last_lcp_;
++  uint64_t last_lcp_size_ = 0;
++};
++
++// Chromium's core UMA observer (PageLoad.PaintTiming.* and friends, as Chrome
++// records them, so CDP Browser.getHistogram in Chrome compares like for like)
++// plus the forwarder. Not the other common or chrome/ observers: those bring
++// UKM, performance_manager and services that registry tabs do not have.
++class ReArcPageLoadMetricsEmbedder
++    : public page_load_metrics::PageLoadMetricsEmbedderBase {
++ public:
++  ReArcPageLoadMetricsEmbedder(content::WebContents* contents, uint64_t tab_id)
++      : PageLoadMetricsEmbedderBase(contents), tab_id_(tab_id) {}
++  ~ReArcPageLoadMetricsEmbedder() override = default;
++
++  void RegisterObservers(page_load_metrics::PageLoadTracker* tracker,
++                         content::NavigationHandle* handle) override {
++    tracker->AddObserver(std::make_unique<UmaPageLoadMetricsObserver>());
++    tracker->AddObserver(std::make_unique<PageTimingObserver>(tab_id_));
++  }
++  bool IsNewTabPageUrl(const GURL&) override { return false; }
++  bool IsNoStatePrefetch(content::WebContents*) override { return false; }
++  bool IsExtensionUrl(const GURL& url) override {
++    return url.SchemeIs("chrome-extension");
++  }
++  bool IsNonTabWebUI(const GURL&) override { return false; }
++
++ private:
++  const uint64_t tab_id_;
++};
++
++// --- View presentation -----------------------------------------------------
++
++ReArcViewPresentationCallback view_host = nullptr;
++void* view_host_context = nullptr;
++uint64_t view_epoch = 0;
++uint64_t next_request_id = 1;
++
++void EmitPresentation(ReArcViewPresentationEvent event) {
++  ABIPost(base::BindOnce(
++      [](uint64_t expected, ReArcViewPresentationEvent event) {
++        if (!view_host || expected != view_epoch) return;
++        view_host(view_host_context, &event);
++      },
++      view_epoch, event));
++}
++
++// Tab shows awaiting Chromium's TotalSwitchDuration3 sample. Samples carry no
++// tab, so each goes to the pending show whose elapsed time it matches best.
++struct PendingShow {
++  ReArcViewPresentationEvent event;
++  base::TimeTicks start;
++  uint64_t signpost = 0;
++};
++
++class ShowTracker {
++ public:
++  static ShowTracker& Get() {
++    static base::NoDestructor<ShowTracker> tracker;
++    return *tracker;
++  }
++
++  void Start() {
++    if (complete_) return;
++    complete_ = std::make_unique<
++        base::StatisticsRecorder::ScopedHistogramSampleObserver>(
++        "Browser.Tabs.TotalSwitchDuration3",
++        base::BindRepeating(&ShowTracker::OnSample, base::Unretained(this),
++                            0u));
++    incomplete_ = std::make_unique<
++        base::StatisticsRecorder::ScopedHistogramSampleObserver>(
++        "Browser.Tabs.TotalIncompleteSwitchDuration3",
++        base::BindRepeating(&ShowTracker::OnSample, base::Unretained(this),
++                            1u));
++  }
++  void Stop() {
++    complete_.reset();
++    incomplete_.reset();
++    for (auto& show : pending_) perf::EndView(perf::ViewInterval::kTabSwitchPresentation, show.signpost);
++    pending_.clear();
++  }
++
++  void Add(PendingShow show) {
++    const base::TimeTicks now = base::TimeTicks::Now();
++    // A show Chromium never measured (no live widget) must not take a later
++    // sample.
++    std::erase_if(pending_, [now](const PendingShow& old) {
++      if (now - old.start < base::Seconds(5)) return false;
++      perf::EndView(perf::ViewInterval::kTabSwitchPresentation, old.signpost);
++      return true;
++    });
++    pending_.push_back(std::move(show));
++  }
++
++ private:
++  void OnSample(uint32_t status,
++                std::string_view,
++                uint64_t,
++                base::HistogramBase::Sample32 sample_ms) {
++    if (pending_.empty()) return;
++    const base::TimeTicks now = base::TimeTicks::Now();
++    auto best = pending_.end();
++    double best_error = 0;
++    for (auto it = pending_.begin(); it != pending_.end(); ++it) {
++      const double elapsed = (now - it->start).InMillisecondsF();
++      // The sample is recorded on presentation feedback, so it never exceeds
++      // the time since its show.
++      if (elapsed + 1 < sample_ms) continue;
++      const double error = std::abs(elapsed - sample_ms);
++      if (best == pending_.end() || error < best_error) {
++        best = it;
++        best_error = error;
++      }
++    }
++    if (best == pending_.end()) return;
++    ReArcViewPresentationEvent event = best->event;
++    event.status = status;
++    event.presented_us =
++        event.start_us + static_cast<int64_t>(sample_ms) * 1000;
++    perf::EndView(perf::ViewInterval::kTabSwitchPresentation, best->signpost);
++    pending_.erase(best);
++    EmitPresentation(event);
++  }
++
++  std::unique_ptr<base::StatisticsRecorder::ScopedHistogramSampleObserver>
++      complete_, incomplete_;
++  std::vector<PendingShow> pending_;
++};
++
++// One pending resize per tab: the first renderer frame activated at the new
++// viewport size, then the browser compositor's next presentation. The
++// provider belongs to the widget, which a WebContents destroys before its
++// user data (and replaces on renderer swaps): the watcher lets go of both when
++// the widget goes.
++class ResizeWatcher
++    : public content::WebContentsUserData<ResizeWatcher>,
++      public content::RenderFrameMetadataProvider::Observer,
++      public content::RenderWidgetHostObserver {
++ public:
++  ~ResizeWatcher() override {
++    Detach();
++    Finish(3);
++  }
++
++  void Begin(uint64_t tab_id, uint64_t attachment_id) {
++    auto* view = static_cast<content::RenderWidgetHostViewBase*>(
++        GetWebContents().GetRenderWidgetHostView());
++    if (!view) return;
++    const gfx::Size target = view->GetCompositorViewportPixelSize();
++    if (target.IsEmpty()) return;
++    if (pending_ && target == target_) return;
++    if (!pending_ && target == presented_size_) return;
++    Finish(2);
++    Attach(content::RenderWidgetHostImpl::From(view->GetRenderWidgetHost()));
++    if (!provider_) return;
++    TabSession* session = TabRegistry::Get().FindSession(tab_id);
++    target_ = target;
++    start_ = base::TimeTicks::Now();
++    event_ = ReArcViewPresentationEvent{
++        session ? session->profile_id() : 0,
++        tab_id,
++        attachment_id,
++        next_request_id++,
++        1,
++        0,
++        Micros(start_),
++        0,
++        0,
++        target.width(),
++        target.height()};
++    signpost_ = perf::BeginView(perf::ViewInterval::kResizeToPresentation);
++    pending_ = true;
++    timeout_.Start(FROM_HERE, base::Seconds(2),
++                   base::BindOnce(&ResizeWatcher::Finish,
++                                  base::Unretained(this), 3u));
++  }
++
++  // content::RenderFrameMetadataProvider::Observer:
++  void OnRenderFrameMetadataChangedBeforeActivation(
++      const cc::RenderFrameMetadata&) override {}
++  void OnRenderFrameMetadataChangedAfterActivation(
++      base::TimeTicks activation_time) override {
++    if (!pending_ || event_.activated_us || !provider_) return;
++    if (provider_->LastRenderFrameMetadata().viewport_size_in_pixels !=
++        target_) {
++      return;
++    }
++    event_.activated_us = Micros(activation_time);
++    auto* view = static_cast<content::RenderWidgetHostViewBase*>(
++        GetWebContents().GetRenderWidgetHostView());
++    ui::Compositor* compositor = view ? view->GetCompositor() : nullptr;
++    if (!compositor) {
++      Finish(0);
++      return;
++    }
++    compositor->RequestSuccessfulPresentationTimeForNextFrame(base::BindOnce(
++        [](base::WeakPtr<ResizeWatcher> watcher, uint64_t request_id,
++           const viz::FrameTimingDetails& details) {
++          if (!watcher || !watcher->pending_ ||
++              watcher->event_.request_id != request_id) {
++            return;
++          }
++          watcher->event_.presented_us =
++              Micros(details.presentation_feedback.timestamp);
++          watcher->Finish(0);
++        },
++        weak_factory_.GetWeakPtr(), event_.request_id));
++    // The activation itself may not damage the browser layer tree: force a frame.
++    compositor->ScheduleFullRedraw();
++  }
++  void OnRenderFrameSubmission() override {}
++  void OnLocalSurfaceIdChanged(const cc::RenderFrameMetadata&) override {}
++
++  // content::RenderWidgetHostObserver:
++  void RenderWidgetHostDestroyed(content::RenderWidgetHost* widget) override {
++    // Still alive here: the widget notifies before destroying its members.
++    Detach();
++    Finish(3);
++  }
++
++ private:
++  friend class content::WebContentsUserData<ResizeWatcher>;
++  explicit ResizeWatcher(content::WebContents* contents)
++      : content::WebContentsUserData<ResizeWatcher>(*contents) {}
++
++  void Attach(content::RenderWidgetHostImpl* widget) {
++    content::RenderFrameMetadataProviderImpl* provider =
++        widget ? widget->render_frame_metadata_provider() : nullptr;
++    if (provider == provider_) return;
++    Detach();
++    if (!provider) return;
++    provider_ = provider;
++    widget_ = widget;
++    provider_->AddObserver(this);
++    widget_->AddObserver(this);
++  }
++  void Detach() {
++    if (provider_) provider_->RemoveObserver(this);
++    if (widget_) widget_->RemoveObserver(this);
++    provider_ = nullptr;
++    widget_ = nullptr;
++  }
++
++  void Finish(uint32_t status) {
++    if (!pending_) return;
++    pending_ = false;
++    timeout_.Stop();
++    event_.status = status;
++    if (status == 0) presented_size_ = target_;
++    perf::EndView(perf::ViewInterval::kResizeToPresentation, signpost_);
++    signpost_ = 0;
++    EmitPresentation(event_);
++  }
++
++  raw_ptr<content::RenderFrameMetadataProviderImpl> provider_ = nullptr;
++  raw_ptr<content::RenderWidgetHostImpl> widget_ = nullptr;
++  bool pending_ = false;
++  gfx::Size target_, presented_size_;
++  base::TimeTicks start_;
++  ReArcViewPresentationEvent event_{};
++  uint64_t signpost_ = 0;
++  base::OneShotTimer timeout_;
++  base::WeakPtrFactory<ResizeWatcher> weak_factory_{this};
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(ResizeWatcher);
++
++// --- Process list ----------------------------------------------------------
++
++struct ProcessRow {
++  int32_t pid = 0;
++  uint32_t type = 4;
++  std::string name;
++  uint64_t profile_id = 0;
++  bool is_extension = false;
++  std::vector<uint64_t> tab_ids;
++};
++
++void FillUsage(ReArcProcessInfo& info) {
++  rusage_info_v4 usage{};
++  if (proc_pid_rusage(info.pid, RUSAGE_INFO_V4,
++                      reinterpret_cast<rusage_info_t*>(&usage)) != 0) {
++    return;
++  }
++  info.phys_footprint = usage.ri_phys_footprint;
++  info.resident_size = usage.ri_resident_size;
++  // ri_*_time are mach absolute time units.
++  mach_timebase_info_data_t timebase;
++  mach_timebase_info(&timebase);
++  const uint64_t nanos =
++      (usage.ri_user_time + usage.ri_system_time) * timebase.numer /
++      timebase.denom;
++  info.cpu_time_us = static_cast<int64_t>(nanos / 1000);
++}
++
++}  // namespace
++
++namespace perf {
++
++void AttachPageTiming(uint64_t tab_id, content::WebContents* contents) {
++  CHECK(pthread_main_np());
++  if (!page_host || !contents ||
++      page_load_metrics::MetricsWebContentsObserver::FromWebContents(
++          contents)) {
++    return;
++  }
++  page_load_metrics::MetricsWebContentsObserver::CreateForWebContents(
++      contents,
++      std::make_unique<ReArcPageLoadMetricsEmbedder>(contents, tab_id));
++}
++
++void WillShowTab(uint64_t tab_id,
++                 uint64_t attachment_id,
++                 content::WebContents* contents) {
++  CHECK(pthread_main_np());
++  if (!view_host || !contents || !contents->GetRenderWidgetHostView() ||
++      !contents->GetPrimaryMainFrame()->IsRenderFrameLive()) {
++    return;
++  }
++  const base::TimeTicks start = base::TimeTicks::Now();
++  // As Chrome's tab strip does (loaded: not loading; registry tabs are never
++  // frozen by a tab helper).
++  const content::RenderWidgetHostView* rwhv = contents->GetRenderWidgetHostView();
++  contents->SetTabSwitchStartTime(start, !contents->IsLoading(),
++                                  rwhv->HasSavedCompositorFrame(),
++                                  /*destination_is_frozen=*/false);
++  TabSession* session = TabRegistry::Get().FindSession(tab_id);
++  PendingShow show{
++      ReArcViewPresentationEvent{session ? session->profile_id() : 0, tab_id,
++                                 attachment_id, next_request_id++, 0, 0,
++                                 Micros(start), 0, 0, 0, 0},
++      start};
++  if (auto* view = static_cast<content::RenderWidgetHostViewBase*>(
++          contents->GetRenderWidgetHostView())) {
++    const gfx::Size size = view->GetCompositorViewportPixelSize();
++    show.event.width = size.width();
++    show.event.height = size.height();
++  }
++  show.signpost = BeginView(ViewInterval::kTabSwitchPresentation);
++  ShowTracker::Get().Add(std::move(show));
++}
++
++void DidResizeView(uint64_t tab_id,
++                   uint64_t attachment_id,
++                   content::WebContents* contents) {
++  CHECK(pthread_main_np());
++  if (!view_host || !contents) return;
++  ResizeWatcher::GetOrCreateForWebContents(contents)->Begin(tab_id,
++                                                            attachment_id);
++}
++
++}  // namespace perf
++}  // namespace rearc
++
++void ReArcEngineSetPageTimingCallback(ReArcPageTimingCallback callback,
++                                      void* context) {
++  CHECK(pthread_main_np());
++  ++rearc::page_epoch;
++  rearc::page_host = callback;
++  rearc::page_host_context = context;
++}
++
++void ReArcEngineSetViewPresentationCallback(
++    ReArcViewPresentationCallback callback,
++    void* context) {
++  CHECK(pthread_main_np());
++  ++rearc::view_epoch;
++  rearc::view_host = callback;
++  rearc::view_host_context = context;
++  if (callback) {
++    rearc::ShowTracker::Get().Start();
++  } else {
++    rearc::ShowTracker::Get().Stop();
++  }
++}
++
++ReArcStatus ReArcMetricsGetHistogram(const char* name,
++                                     ReArcHistogramCallback completion,
++                                     void* context) {
++  CHECK(pthread_main_np());
++  if (!name || !completion) return REARC_INVALID_ARGUMENT;
++  std::string histogram(name);
++  if (histogram.empty() || histogram.size() > 256 ||
++      !base::IsStringUTF8(histogram)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  content::FetchHistogramsAsynchronously(
++      base::SingleThreadTaskRunner::GetCurrentDefault(),
++      base::BindOnce(
++          [](std::string name, ReArcHistogramCallback completion,
++             void* context) {
++            base::HistogramBase* found =
++                base::StatisticsRecorder::FindHistogram(name);
++            std::unique_ptr<base::HistogramSamples> samples =
++                found ? found->SnapshotSamples() : nullptr;
++            if (!samples || samples->TotalCount() == 0) {
++              completion(context, REARC_NOT_FOUND, nullptr);
++              return;
++            }
++            std::vector<ReArcHistogramBucket> buckets;
++            for (auto it = samples->Iterator(); !it->Done(); it->Next()) {
++              base::HistogramBase::Sample32 min = 0;
++              int64_t max = 0;
++              base::HistogramBase::Count32 count = 0;
++              it->Get(&min, &max, &count);
++              buckets.push_back({min, max, count});
++            }
++            ReArcHistogramSnapshot snapshot{name.c_str(),
++                                            samples->TotalCount(),
++                                            samples->sum(), buckets.data(),
++                                            buckets.size()};
++            completion(context, REARC_OK, &snapshot);
++          },
++          std::move(histogram), completion, context),
++      base::Seconds(2));
++  return REARC_OK;
++}
++
++ReArcStatus ReArcEngineGetProcesses(ReArcProcessListCallback completion,
++                                    void* context) {
++  CHECK(pthread_main_np());
++  if (!completion) return REARC_INVALID_ARGUMENT;
++  rearc::ABIPost(base::BindOnce(
++      [](ReArcProcessListCallback completion, void* context) {
++        std::vector<rearc::ProcessRow> rows;
++        rows.push_back({static_cast<int32_t>(getpid()), 0, "browser"});
++        std::map<int, size_t> renderers;
++        for (auto it = content::RenderProcessHost::AllHostsIterator();
++             !it.IsAtEnd(); it.Advance()) {
++          content::RenderProcessHost* host = it.GetCurrentValue();
++          if (!host->IsInitializedAndNotDead() || !host->GetProcess().IsValid()) {
++            continue;
++          }
++          rearc::ProcessRow row;
++          row.pid = host->GetProcess().Pid();
++          row.type = 1;
++          content::BrowserContext* context = host->GetBrowserContext();
++          row.profile_id =
++              rearc::BridgeProfileId(Profile::FromBrowserContext(context));
++          if (auto* map = extensions::ProcessMap::Get(context)) {
++            row.is_extension = map->Contains(host->GetDeprecatedID());
++          }
++          renderers[host->GetDeprecatedID()] = rows.size();
++          rows.push_back(std::move(row));
++        }
++        auto& registry = rearc::TabRegistry::Get();
++        for (uint64_t id : registry.SessionIds()) {
++          rearc::TabSession* session = registry.FindSession(id);
++          if (!session) continue;
++          std::set<size_t> hosting;
++          session->web_contents()->ForEachRenderFrameHost(
++              [&](content::RenderFrameHost* frame) {
++                auto found =
++                    renderers.find(frame->GetProcess()->GetDeprecatedID());
++                if (found != renderers.end()) hosting.insert(found->second);
++              });
++          for (size_t index : hosting) rows[index].tab_ids.push_back(id);
++        }
++        for (content::BrowserChildProcessHostIterator it; !it.Done(); ++it) {
++          const base::Process& process = it.GetProcess();
++          if (!process.IsValid()) continue;
++          const content::ChildProcessData& data = it.GetData();
++          rearc::ProcessRow row;
++          row.pid = process.Pid();
++          row.type = data.process_type == content::PROCESS_TYPE_GPU ? 2
++                     : data.process_type == content::PROCESS_TYPE_UTILITY ? 3
++                                                                          : 4;
++          row.name = data.metrics_name.empty() ? base::UTF16ToUTF8(data.name)
++                                               : data.metrics_name;
++          rows.push_back(std::move(row));
++        }
++        std::vector<ReArcProcessInfo> infos;
++        for (const auto& row : rows) {
++          ReArcProcessInfo info{row.pid,
++                                row.type,
++                                row.name.c_str(),
++                                row.profile_id,
++                                row.is_extension,
++                                row.tab_ids.data(),
++                                row.tab_ids.size(),
++                                0,
++                                0,
++                                0};
++          rearc::FillUsage(info);
++          infos.push_back(info);
++        }
++        completion(context, REARC_OK, infos.data(), infos.size());
++      },
++      completion, context));
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_search_abi.cc b/chrome/browser/rearc_bridge/rearc_search_abi.cc
+index 16f908bef1..5291cce1fd 100644
+--- a/chrome/browser/rearc_bridge/rearc_search_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_search_abi.cc
+@@ -20,6 +20,7 @@
+ #include "chrome/browser/autocomplete/chrome_autocomplete_scheme_classifier.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_perf.h"
+ #include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
+ #include "chrome/browser/search_engines/template_url_service_factory.h"
+ #include "components/omnibox/browser/autocomplete_classifier.h"
+@@ -451,6 +452,7 @@ ReArcStatus ReArcAutocompleteStart(uint64_t profile_id, const char* text,
+                                    ReArcAutocompleteCallback completion,
+                                    void* context, uint64_t* query_id) {
+   CHECK(pthread_main_np());
++  REARC_ABI_INTERVAL(kAutocompleteStart);
+   if (query_id) *query_id = 0;
+   rearc::State* state;
+   if (auto status = rearc::Lookup(profile_id, &state)) return status;
+-- 
+2.54.0 (Apple Git-157)
+

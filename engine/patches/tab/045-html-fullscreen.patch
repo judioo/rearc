@@ -1,0 +1,399 @@
+From 8dc537d8c003ac576736c02eac285df1d5189f0f Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 11:32:42 +0400
+Subject: [PATCH] P-TAB-001 wave 18e: route HTML tab fullscreen to the host
+
+Implement the browser-less WebContentsDelegate fullscreen contract: a presented tab with a registered host callback enters Chromium tab fullscreen, the host receives an entered event to make its window fullscreen, and the renderer is resynchronized so the page's request resolves. Escape, page exit, navigation, hiding, close, host exit and callback replacement leave fullscreen with a typed exit reason. Without a callback page requests are refused, as before. ABI 1.27 / bridge 0.29.0; build p73, native refusal, entry and host/escape/page/hidden/close exits pass.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/BUILD.gn                       |   2 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  26 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../browser/rearc_bridge/rearc_fullscreen.cc  | 174 ++++++++++++++++++
+ .../browser/rearc_bridge/rearc_fullscreen.h   |  25 +++
+ chrome/browser/rearc_bridge/tab_delegate.cc   |  32 ++++
+ chrome/browser/rearc_bridge/tab_delegate.h    |  12 ++
+ 8 files changed, 272 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_fullscreen.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_fullscreen.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 71bd6732d5..dd90f87ccc 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1489,6 +1489,8 @@ source_set("core") {
+       "rearc_bridge/rearc_downloads_abi.cc",
+       "rearc_bridge/rearc_history_abi.cc",
+       "rearc_bridge/rearc_search_abi.cc",
++      "rearc_bridge/rearc_fullscreen.cc",
++      "rearc_bridge/rearc_fullscreen.h",
+       "rearc_bridge/discard_adapter.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+       "rearc_bridge/rearc_file_chooser.cc",
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index d3766174c2..29fb241fb0 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 26, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 27, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -287,6 +287,30 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcTabDiscard(uint64_t tab_id);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetDiscardState(uint64_t tab_id,
+                                                         bool* discarded);
+ 
++// HTML fullscreen (html_fullscreen, ABI 1.27). Element.requestFullscreen()
++// in a presented tab enters Chromium tab fullscreen; the event asks the host
++// to make the window fullscreen (and hide its chrome) around that view. The
++// page sees fullscreen once granted; the host resizes the view as usual.
++// Without a callback, page requests are refused. Escape exits, as do the
++// page, navigation, hiding the view, close and callback replacement.
++// phase: 0 entered, 1 exited. reason (exit only): 0 page/engine, 1 host,
++// 2 escape key, 3 closed, 4 hidden. display_id: page-requested screen (Chromium
++// display ID, -1 none). Events are deferred and borrowed for the callback.
++typedef struct ReArcFullscreenEvent {
++  uint64_t profile_id, tab_id, content_generation;
++  uint32_t phase, reason;
++  int64_t display_id;
++} ReArcFullscreenEvent;
++typedef void (*ReArcFullscreenCallback)(void* context,
++                                        const ReArcFullscreenEvent* event);
++REARC_ENGINE_EXPORT void ReArcEngineSetFullscreenCallback(
++    ReArcFullscreenCallback callback, void* context);
++// Host-initiated exit (e.g. leaving native fullscreen). Not fullscreen:
++// invalid_state. The exit event (reason 1) follows, deferred.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabExitFullscreen(uint64_t tab_id);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetFullscreenState(uint64_t tab_id,
++                                                           bool* fullscreen);
++
+ 
+ // Register a +0 NSWindow* before attachment; engine retains until Closed/Run
+ // returns. Duplicate/zero IDs rejected. Closing a window keeps its tabs alive.
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 7aeea0cc7c..a715f9b4c8 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -540,6 +540,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "context_menu" ||
+          std::string(feature) == "password_prompts" ||
+          std::string(feature) == "tab_discard" ||
++         std::string(feature) == "html_fullscreen" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 60f6bb9530..41fa0507a7 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.28.0";
++  return "0.29.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_fullscreen.cc b/chrome/browser/rearc_bridge/rearc_fullscreen.cc
+new file mode 100644
+index 0000000000..a9a5abef6e
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_fullscreen.cc
+@@ -0,0 +1,174 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_fullscreen.h"
++
++#include <pthread.h>
++
++#include <vector>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "components/input/native_web_keyboard_event.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_view_host.h"
++#include "content/public/browser/render_widget_host.h"
++#include "content/public/browser/visibility.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "ui/events/keycodes/keyboard_codes.h"
++
++namespace rearc {
++namespace {
++ReArcFullscreenCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0;
++enum Reason : uint32_t { kPage = 0, kHost = 1, kEscape = 2, kClosed = 3, kHidden = 4 };
++class State : public content::WebContentsObserver,
++              public content::WebContentsUserData<State> {
++ public:
++  bool fullscreen() const { return fullscreen_; }
++  void Enter(uint64_t tab_id, int64_t display_id) {
++    // Identity is captured now: the session can be gone by the close event.
++    TabSession* session = TabRegistry::Get().FindSession(tab_id);
++    event_ = {session ? session->profile_id() : 0, tab_id,
++              session ? session->content_generation() : 0, 0, 0, display_id};
++    fullscreen_ = true;
++    Publish(0, 0, display_id);
++    Synchronize();
++  }
++  void Exited() {
++    if (!fullscreen_) return;
++    fullscreen_ = false;
++    Publish(1, reason_, event_.display_id);
++    reason_ = kPage;
++    Synchronize();
++  }
++  void Exit(Reason reason) {
++    if (!fullscreen_) return;
++    reason_ = reason;
++    // Content calls back into ExitFullscreenModeForTab, then resynchronizes.
++    web_contents()->ExitFullscreen(false);
++    if (fullscreen_) {
++      Exited();  // Defensive: never leave the host believing we're fullscreen.
++    }
++  }
++  void OnVisibilityChanged(content::Visibility visibility) override {
++    // Chrome leaves tab fullscreen when a tab stops being presented. Close
++    // invalidates the lease (hiding the view) before destroying contents.
++    if (visibility != content::Visibility::HIDDEN) return;
++    TabSession* session = TabRegistry::Get().FindSession(event_.tab_id);
++    Exit(session && session->close_state() == TabSession::CloseState::kOpen
++             ? kHidden
++             : kClosed);
++  }
++  void WebContentsDestroyed() override {
++    if (fullscreen_) {
++      reason_ = kClosed;
++      Exited();
++    }
++  }
++
++ private:
++  friend class content::WebContentsUserData<State>;
++  explicit State(content::WebContents* contents)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<State>(*contents) {}
++  void Synchronize() {
++    if (auto* frame = web_contents()->GetPrimaryMainFrame()) {
++      frame->GetRenderViewHost()->GetWidget()->SynchronizeVisualProperties();
++    }
++  }
++  void Publish(uint32_t phase, uint32_t reason, int64_t display_id) {
++    ReArcFullscreenEvent event = event_;
++    event.phase = phase;
++    event.reason = reason;
++    event.display_id = display_id;
++    ABIPost(base::BindOnce(
++        [](uint64_t expected, ReArcFullscreenEvent event) {
++          if (host && expected == epoch) host(host_context, &event);
++        },
++        epoch, event));
++  }
++  ReArcFullscreenEvent event_{};
++  bool fullscreen_ = false;
++  Reason reason_ = kPage;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(State);
++std::vector<State*> FullscreenStates() {
++  std::vector<State*> states;
++  for (uint64_t id : TabRegistry::Get().SessionIds()) {
++    if (auto* session = TabRegistry::Get().FindSession(id)) {
++      if (auto* state = State::FromWebContents(session->web_contents());
++          state && state->fullscreen()) {
++        states.push_back(state);
++      }
++    }
++  }
++  return states;
++}
++}  // namespace
++
++bool CanEnterHostFullscreen(uint64_t tab_id, content::RenderFrameHost* frame) {
++  CHECK(pthread_main_np());
++  auto* contents = content::WebContents::FromRenderFrameHost(frame);
++  // The host must render the transition; never fullscreen an unpresented tab.
++  return host && contents && ABIHasVisibilityIntent(tab_id) &&
++         contents->GetVisibility() != content::Visibility::HIDDEN;
++}
++void EnterHostFullscreen(uint64_t tab_id, content::RenderFrameHost* frame,
++                         int64_t display_id) {
++  auto* contents = content::WebContents::FromRenderFrameHost(frame);
++  State::GetOrCreateForWebContents(contents)->Enter(tab_id, display_id);
++}
++void ExitHostFullscreen(content::WebContents* contents) {
++  if (auto* state = State::FromWebContents(contents)) state->Exited();
++}
++bool IsHostFullscreen(const content::WebContents* contents) {
++  auto* state =
++      State::FromWebContents(const_cast<content::WebContents*>(contents));
++  return state && state->fullscreen();
++}
++bool HandleHostFullscreenKey(content::WebContents* contents,
++                             const input::NativeWebKeyboardEvent& event) {
++  auto* state = State::FromWebContents(contents);
++  if (!state || !state->fullscreen() ||
++      event.windows_key_code != ui::VKEY_ESCAPE ||
++      event.GetType() != input::NativeWebKeyboardEvent::Type::kRawKeyDown) {
++    return false;
++  }
++  state->Exit(kEscape);
++  return true;
++}
++}  // namespace rearc
++
++void ReArcEngineSetFullscreenCallback(ReArcFullscreenCallback callback,
++                                      void* context) {
++  CHECK(pthread_main_np());
++  // The replaced host can no longer render fullscreen: leave it everywhere.
++  for (auto* state : rearc::FullscreenStates()) state->Exit(rearc::kHost);
++  ++rearc::epoch;
++  rearc::host = callback;
++  rearc::host_context = context;
++}
++ReArcStatus ReArcTabExitFullscreen(uint64_t tab_id) {
++  rearc::TabSession* session;
++  if (auto status = rearc::ABICheckTab(tab_id, &session)) return status;
++  auto* state = rearc::State::FromWebContents(session->web_contents());
++  if (!state || !state->fullscreen()) return REARC_INVALID_STATE;
++  state->Exit(rearc::kHost);
++  return REARC_OK;
++}
++ReArcStatus ReArcTabGetFullscreenState(uint64_t tab_id, bool* fullscreen) {
++  if (fullscreen) *fullscreen = false;
++  rearc::TabSession* session;
++  if (auto status = rearc::ABICheckTab(tab_id, &session)) return status;
++  if (!fullscreen) return REARC_INVALID_ARGUMENT;
++  *fullscreen = rearc::IsHostFullscreen(session->web_contents());
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_fullscreen.h b/chrome/browser/rearc_bridge/rearc_fullscreen.h
+new file mode 100644
+index 0000000000..dafb57d569
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_fullscreen.h
+@@ -0,0 +1,25 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_FULLSCREEN_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_FULLSCREEN_H_
++#include <cstdint>
++namespace content {
++class RenderFrameHost;
++class WebContents;
++}
++namespace input {
++struct NativeWebKeyboardEvent;
++}
++namespace rearc {
++// ReArcTabDelegate's tab fullscreen routing (html_fullscreen, ABI 1.27).
++bool CanEnterHostFullscreen(uint64_t tab_id, content::RenderFrameHost* frame);
++void EnterHostFullscreen(uint64_t tab_id, content::RenderFrameHost* frame,
++                         int64_t display_id);
++void ExitHostFullscreen(content::WebContents* contents);
++bool IsHostFullscreen(const content::WebContents* contents);
++// Escape while tab-fullscreen exits, as Chrome's FullscreenController does.
++bool HandleHostFullscreenKey(content::WebContents* contents,
++                             const input::NativeWebKeyboardEvent& event);
++}  // namespace rearc
++#endif
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 247e5953cd..a22c46f100 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/rearc_bridge/tab_delegate.h"
+ #include "chrome/browser/rearc_bridge/rearc_file_chooser.h"
++#include "chrome/browser/rearc_bridge/rearc_fullscreen.h"
+ 
+ #include <utility>
+ 
+@@ -18,6 +19,8 @@
+ #include "chrome/browser/rearc_bridge/tab_adoption.h"
+ #include "components/find_in_page/find_tab_helper.h"
+ #include "content/public/browser/file_select_listener.h"
++#include "content/public/browser/keyboard_event_processing_result.h"
++#include "third_party/blink/public/mojom/frame/fullscreen.mojom.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
+ #include "content/public/browser/web_contents.h"
+@@ -171,6 +174,35 @@ void ReArcTabDelegate::FindReply(content::WebContents* web_contents,
+   }
+ }
+ 
++bool ReArcTabDelegate::CanEnterFullscreenModeForTab(
++    content::RenderFrameHost* requesting_frame) {
++  return CanEnterHostFullscreen(tab_id_, requesting_frame);
++}
++
++void ReArcTabDelegate::EnterFullscreenModeForTab(
++    content::RenderFrameHost* requesting_frame,
++    const blink::mojom::FullscreenOptions& options) {
++  EnterHostFullscreen(tab_id_, requesting_frame, options.display_id);
++}
++
++void ReArcTabDelegate::ExitFullscreenModeForTab(
++    content::WebContents* web_contents) {
++  ExitHostFullscreen(web_contents);
++}
++
++bool ReArcTabDelegate::IsFullscreenForTabOrPending(
++    const content::WebContents* web_contents) {
++  return IsHostFullscreen(web_contents);
++}
++
++content::KeyboardEventProcessingResult ReArcTabDelegate::PreHandleKeyboardEvent(
++    content::WebContents* source,
++    const input::NativeWebKeyboardEvent& event) {
++  return HandleHostFullscreenKey(source, event)
++             ? content::KeyboardEventProcessingResult::HANDLED
++             : content::KeyboardEventProcessingResult::NOT_HANDLED;
++}
++
+ void ReArcTabDelegate::WebContentsCreated(
+     content::WebContents* source_contents,
+     const content::GlobalRenderFrameHostId& opener_id,
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.h b/chrome/browser/rearc_bridge/tab_delegate.h
+index fbf243410f..2caed991f8 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.h
++++ b/chrome/browser/rearc_bridge/tab_delegate.h
+@@ -78,6 +78,18 @@ class ReArcTabDelegate : public content::WebContentsDelegate {
+                  const gfx::Rect& selection_rect,
+                  int active_match_ordinal,
+                  bool final_update) override;
++  // Wave 18e: tab fullscreen rendered by the host (html_fullscreen).
++  bool CanEnterFullscreenModeForTab(
++      content::RenderFrameHost* requesting_frame) override;
++  void EnterFullscreenModeForTab(
++      content::RenderFrameHost* requesting_frame,
++      const blink::mojom::FullscreenOptions& options) override;
++  void ExitFullscreenModeForTab(content::WebContents* web_contents) override;
++  bool IsFullscreenForTabOrPending(
++      const content::WebContents* web_contents) override;
++  content::KeyboardEventProcessingResult PreHandleKeyboardEvent(
++      content::WebContents* source,
++      const input::NativeWebKeyboardEvent& event) override;
+   // Wave 18b: attach browser-less helpers before the new contents navigates.
+   void WebContentsCreated(content::WebContents* source_contents,
+                           const content::GlobalRenderFrameHostId& opener_id,
+-- 
+2.54.0 (Apple Git-157)
+

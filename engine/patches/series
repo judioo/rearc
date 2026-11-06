@@ -1,0 +1,79 @@
+# ReArc patch overlay — apply order.
+# One patch path per line, relative to this directory. '#' lines are comments.
+# fetch.sh --apply-overlay applies these in order with `git apply --3way --index`.
+#
+# Applied entries:
+chrome/001-rearc-about-branding.patch        # P-BUILD-001 branding slice 1 (UA brand token)
+app/002-app-host-runloop.patch               # P-APP-001 REQUIRED (slice 1)
+app/003-app-delegate-menu-install.patch      # P-APP-001 REQUIRED (wave-5 slice 1: delegate/menu install)
+app/004-main-loop-end-finalization.patch     # P-APP-001 REQUIRED (wave-5 slice 2: DidEndMainMessageLoop bridge finalization)
+app/005-readiness-keepalive-profile-seams.patch # P-APP-001 REQUIRED (wave-5 slice 3: readiness/keepalive/profile seams, scaffolding)
+tab/006-embedded-mode-view-delegate.patch  # P-TAB-001 REQUIRED (wave-6 slice S1: ambient embedded-mode flag + GetWebContentsViewDelegate branch)
+tab/007-tab-registry-session-delegate.patch # P-TAB-001 REQUIRED (wave-6 slice S2: browser-less TabRegistry/TabSession/delegate skeleton)
+tab/008-tab-events-observer.patch # P-TAB-001 REQUIRED (wave-7 slice S3: typed tab/navigation event surface + per-session observer)
+tab/009-content-host-attachment-lease.patch # P-TAB-001 REQUIRED (wave-7 slice S4: native content host + attachment lease)
+tab/010-service-events-favicon-adapter.patch # P-TAB-001 REQUIRED (wave-8 S5: service events + favicon)
+tab/011-media-session-adapter.patch # P-TAB-001 REQUIRED (wave-8 S5: per-tab media adapter)
+tab/012-visible-security-state-adapter.patch # P-TAB-001 REQUIRED (wave-8 S5: visible security-state adapter)
+tab/013-conservative-javascript-dialog-manager.patch # P-TAB-001 REQUIRED (wave-8 S5: conservative JavaScript dialog manager)
+tab/014-adopt-created-tab-contents.patch # P-TAB-001 REQUIRED (wave-9 S6: Chromium-created content adoption)
+tab/015-serialized-close-controller.patch # P-TAB-001 REQUIRED (wave-9 S6: serialized close + deferred teardown)
+tab/016-s5-review-fixes.patch # P-TAB-001 REQUIRED (S5 follow-up: security/favicon review fixes)
+tab/017-exported-core-c-abi.patch # P-TAB-001 / P-APP-001 / P-NAV-001 REQUIRED (wave 10 core C ABI)
+tab/018-exported-services-c-abi.patch # P-TAB-001 / P-NAV-001 REQUIRED (wave 10 services C ABI)
+tab/019-trusted-navigation-schemes.patch # P-TAB-001 / P-NAV-001 (wave 12 URL admission)
+tab/020-script-evaluation-results.patch # P-TAB-001 / P-NAV-001 (wave 12 script evaluation)
+tab/021-media-metadata-snapshot-semantics.patch # P-TAB-001 (wave 12 media metadata)
+tab/022-initial-document-lazy-page-services.patch # P-TAB-001 / P-NAV-001 (wave 12 initial document)
+tab/023-keychain-authorization-shutdown.patch # P-APP-001 / P-TAB-001 (wave 12 blocked Keychain shutdown)
+tab/024-profile-lifecycle-isolation.patch # P-PROF-001 wave 14: isolate named and off-the-record profiles
+tab/025-evaluation-document-identity.patch # P-TAB-001 wave 14: attach committed document identity to evaluations
+tab/026-page-zoom-controller.patch # P-TAB-001 wave 14: expose Chromium page zoom and change events
+tab/027-isolated-world-page-messages.patch # P-TAB-001 wave 14: deliver bounded isolated-world page messages
+chrome/002-safe-storage-build-branding.patch # P-BUILD-001 wave 14: derive Safe Storage and bundle IDs from branding
+tab/028-os-permission-shutdown.patch # P-APP-001 wave 16: stop waiting for read-only macOS permission probes
+tab/029-shutdown-pending-closes.patch # P-APP-001 wave 16: join pending tab closes during shutdown
+tab/030-existing-profile-directory.patch # P-PROF-001 wave 16: open existing profile directories in place
+tab/031-hidden-tab-policy-evidence.patch # P-TAB-001 wave 16: record hidden-tab throttling evidence
+tab/032-audited-daily-webui-admission.patch # P-TAB-001 wave 18: admit audited daily-use Chromium WebUI
+tab/033-browserless-tab-helpers.patch # P-TAB-001 wave 18b: attach audited browser-less Chromium tab helpers
+tab/034-find-in-page.patch # P-TAB-001 wave 18b: find in page over Chromium FindTabHelper
+tab/035-download-events-actions.patch # P-TAB-001 wave 18b: Chromium download events, actions and policy
+tab/036-javascript-dialog-requests.patch # P-TAB-001 wave 18c: host-rendered JavaScript dialogs
+tab/037-file-chooser-requests.patch # P-TAB-001 wave 18c: host file and save panels
+tab/038-permission-prompt-requests.patch # P-TAB-001 wave 18c: Chromium permissions with host prompts
+tab/039-page-context-menu.patch # P-TAB-001 wave 18c: host menus and Chromium commands
+tab/040-password-prompt-requests.patch # P-TAB-001 wave 18c: host password save/update offers
+tab/041-profile-history-query.patch # P-TAB-001 wave 18d: profile history query and removal
+tab/042-dangerous-download-actions.patch # P-TAB-001 wave 18d: explicit download warning keep/discard
+tab/043-preserving-tab-discard.patch # P-TAB-001 wave 18d: S7 preserving discard and reload
+tab/044-default-search-autocomplete.patch # P-TAB-001 wave 18e: default search and cancellable autocomplete
+tab/045-html-fullscreen.patch # P-TAB-001 wave 18e: HTML tab fullscreen events and host exit
+tab/046-host-pdf-printing.patch # P-TAB-001 wave 18e: PDF printing and print requests for the host
+tab/047-page-drop-policy.patch # P-TAB-001 wave 18e: host drop policy and private drag rejection
+tab/048-video-picture-in-picture.patch # P-PIP-001 wave 18e: manual video Picture-in-Picture
+tab/049-extension-tab-helpers.patch # P-TAB-001 wave 18f: extension tab helpers, tab-ID APIs and content scripts
+tab/050-extension-install-prompts.patch # P-TAB-001 wave 18f: host extension install/uninstall prompts, no Browser windows
+tab/051-extension-actions-popups.patch # P-TAB-001 wave 18f: extension toolbar actions and hosted action popups
+tab/052-autofill-suggestions.patch # P-TAB-001 wave 18f: host-rendered address/card/password suggestions
+tab/053-password-leak-detection-pref.patch # P-TAB-001 wave 18f: password leak detection preference
+tab/054-extension-shell-windows.patch # P-TAB-001 wave 18g: host extension tabs and logical shell windows
+tab/055-local-autofill-save-offers.patch # P-TAB-001 wave 18g: local card/address save requests
+tab/056-host-http-auth.patch # P-TAB-001 wave 18g: host Basic/Digest authentication
+tab/057-modified-link-open-requests.patch # P-TAB-001 wave 18g: modifier/context-menu link creation with referrer
+tab/058-hosted-devtools.patch # P-TAB-001 wave 18h: bundled DevTools frontend as a registry tab
+tab/059-host-client-certificates.patch # P-TAB-001 wave 18h: host TLS client-certificate selection
+tab/060-release-framework-exports.patch # P-TAB-001 release: export the whole C ABI from the non-component framework
+tab/061-host-key-equivalent-events.patch # P-TAB-001 wave 30: page key-equivalent verdicts to the host
+tab/062-embedded-video-overlay.patch # P-TAB-001 wave 32: embedded video PiP overlay and media actions
+tab/063-host-perf-metrics.patch # P-TAB-001 perf-0: page timing, presentation feedback, histograms, processes
+tab/064-host-early-window.patch # P-TAB-001 launch: early window callback at PreCreateThreads, before ready
+#
+# Planned inventory (see README.md and engine/docs/ENGINE.md §4);
+# uncomment as patches land:
+#
+# chrome/004-bridge-mojo-interfaces.patch    # P-MOJO-001 REQUIRED (v1.1)
+# chrome/004-bridge-mojo-interfaces.patch    # P-MOJO-001 REQUIRED (v1.1)
+# chrome/005-navigation-event-bridge.patch   # P-NAV-001 REQUIRED
+# chrome/006-native-pip-routing.patch        # P-PIP-001 NICE-TO-HAVE (video PiP landed as tab/048, embedded as tab/062)
+# components/001-space-storage-partition.patch # P-PROF-001 NICE-TO-HAVE

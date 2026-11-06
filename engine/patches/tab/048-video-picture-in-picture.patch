@@ -1,0 +1,450 @@
+From 5e59268cef7faddcf4ebee39c162e7d52197eb12 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 12:23:53 +0400
+Subject: [PATCH] P-PIP-001 wave 18e: video Picture-in-Picture for registry
+ tabs
+
+Route browser-less EnterPictureInPicture/ExitPictureInPicture to Chromium's PictureInPictureWindowManager and its Views overlay window once the host registers a PiP callback. ReArcTabSetPictureInPicture now enters through the tab's MediaSession (Chromium's own availability rule) and exits; media events carry real pip_available/pip_active. Entered/exited events and a back-to-tab focus request (only the activation that follows PiP's back-to-tab, never page window.focus()) reach the host. Without a callback page and host requests fail as before; Document PiP stays unsupported. ABI 1.30 / bridge 0.32.0; build p77, native refusal, page and host entry, host exit, back-to-tab and close while active pass.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/BUILD.gn                       |   2 +
+ .../browser/rearc_bridge/ipc_service_events.h |   3 +-
+ chrome/browser/rearc_bridge/media_adapter.cc  |  22 +++
+ chrome/browser/rearc_bridge/media_adapter.h   |   6 +-
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  24 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ chrome/browser/rearc_bridge/rearc_pip.cc      | 140 ++++++++++++++++++
+ chrome/browser/rearc_bridge/rearc_pip.h       |  23 +++
+ .../rearc_bridge/rearc_services_abi.cc        |   3 +-
+ chrome/browser/rearc_bridge/tab_delegate.cc   |  14 ++
+ chrome/browser/rearc_bridge/tab_delegate.h    |   4 +
+ 12 files changed, 236 insertions(+), 8 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_pip.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_pip.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 1485e0fddc..67699a148e 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1495,6 +1495,8 @@ source_set("core") {
+       "rearc_bridge/rearc_print.h",
+       "rearc_bridge/rearc_drop_policy.h",
+       "rearc_bridge/rearc_drop_policy.mm",
++      "rearc_bridge/rearc_pip.cc",
++      "rearc_bridge/rearc_pip.h",
+       "rearc_bridge/discard_adapter.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+       "rearc_bridge/rearc_file_chooser.cc",
+diff --git a/chrome/browser/rearc_bridge/ipc_service_events.h b/chrome/browser/rearc_bridge/ipc_service_events.h
+index 4038a83d6c..6ebe111e60 100644
+--- a/chrome/browser/rearc_bridge/ipc_service_events.h
++++ b/chrome/browser/rearc_bridge/ipc_service_events.h
+@@ -69,8 +69,7 @@ struct ServiceEvent {
+   MediaPlayback playback = MediaPlayback::kUnknown;
+   bool audible = false;
+   bool muted = false;
+-  // Baseline v1: pip_native is not advertised (IPC-CONTRACT §7), so both are
+-  // always false; fields exist so the transport's serializer is stable.
++  // False unless picture_in_picture (ABI 1.30) is in use: see media_adapter.h.
+   bool pip_available = false;
+   bool pip_active = false;
+   bool has_metadata = false;
+diff --git a/chrome/browser/rearc_bridge/media_adapter.cc b/chrome/browser/rearc_bridge/media_adapter.cc
+index 7cda59ce1c..798a8b40c4 100644
+--- a/chrome/browser/rearc_bridge/media_adapter.cc
++++ b/chrome/browser/rearc_bridge/media_adapter.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/rearc_bridge/media_adapter.h"
++#include "chrome/browser/rearc_bridge/rearc_pip.h"
+ 
+ #include <pthread.h>
+ 
+@@ -47,6 +48,9 @@ class MediaAdapter : public content::WebContentsObserver,
+     // audio focus, and of the MediaSessionInfo's player mute field.
+     event_.audible = web_contents()->IsCurrentlyAudible();
+     event_.muted = web_contents()->IsAudioMuted();
++    event_.pip_available =
++        HostPictureInPictureEnabled() && CanEnterPictureInPicture();
++    event_.pip_active = web_contents()->HasPictureInPictureVideo();
+     EmitServiceEvent(event_);
+   }
+ 
+@@ -84,8 +88,18 @@ class MediaAdapter : public content::WebContentsObserver,
+ 
+   void MediaSessionActionsChanged(
+       const std::vector<MediaSessionAction>& actions) override {
++    const bool pip = CanEnterPictureInPicture();
+     actions_ = actions;
++    if (pip != CanEnterPictureInPicture()) {
++      Publish();
++    }
++  }
++  bool CanEnterPictureInPicture() const {
++    return std::find(actions_.begin(), actions_.end(),
++                     MediaSessionAction::kEnterPictureInPicture) !=
++           actions_.end();
+   }
++  void MediaPictureInPictureChanged(bool) override { Publish(); }
+   void MediaSessionImagesChanged(
+       const base::flat_map<media_session::mojom::MediaSessionImageType,
+                            std::vector<media_session::MediaImage>>& images)
+@@ -230,6 +244,14 @@ MediaCommandResult MediaSetPlayback(uint64_t tab_id,
+                  : MediaCommandResult::kInvalidState;
+ }
+ 
++bool MediaCanEnterPictureInPicture(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  auto* session = TabRegistry::Get().FindSession(tab_id);
++  auto* adapter =
++      session ? MediaAdapter::FromWebContents(session->web_contents()) : nullptr;
++  return adapter && adapter->CanEnterPictureInPicture();
++}
++
+ MediaCommandResult MediaSetMuted(uint64_t tab_id, bool muted) {
+   CHECK(pthread_main_np());
+   auto* session = TabRegistry::Get().FindSession(tab_id);
+diff --git a/chrome/browser/rearc_bridge/media_adapter.h b/chrome/browser/rearc_bridge/media_adapter.h
+index 9b61b1e674..1011f5ced5 100644
+--- a/chrome/browser/rearc_bridge/media_adapter.h
++++ b/chrome/browser/rearc_bridge/media_adapter.h
+@@ -20,8 +20,10 @@ MediaCommandResult MediaSetPlayback(uint64_t tab_id,
+                                     MediaPlaybackAction action);
+ MediaCommandResult MediaSetMuted(uint64_t tab_id, bool muted);
+ 
+-// PiP control and artwork retrieval remain unadvertised. Events carry false
+-// pip_available/pip_active until a tested native controller seam exists.
++// Wave 18e (picture_in_picture): pip_available is Chromium's media-session
++// kEnterPictureInPicture availability while a host PiP callback is set;
++// pip_active is the tab's video PiP state. Artwork stays unadvertised.
++bool MediaCanEnterPictureInPicture(uint64_t tab_id);
+ 
+ }  // namespace rearc
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 74e6604574..c5098ef37d 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 29, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 30, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -429,9 +429,29 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcTabMediaAction(uint64_t tab_id,
+                                                     uint32_t action);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetMuted(uint64_t tab_id, bool muted);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcEnginePauseAllMedia(void);
+-// PiP is unsupported at this pin's browser-less delegate integration.
++// Before ABI 1.30 (or without a picture_in_picture callback): unsupported.
++// With it: true asks Chromium's media session to put the tab's eligible video
++// in PiP (media event pip_available; else invalid_state; already in PiP: OK);
++// the entered event follows. false exits (not in PiP: invalid_state).
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetPictureInPicture(uint64_t tab_id,
+                                                             bool active);
++// Video Picture-in-Picture (picture_in_picture, ABI 1.30). Registering a
++// callback enables Chromium's PictureInPictureWindowManager for registry tabs:
++// video.requestPictureInPicture() and ReArcTabSetPictureInPicture open
++// Chromium's floating overlay window (play/pause, back to tab, close). One
++// PiP window exists process-wide; a new one replaces it. Without a callback,
++// page requests fail as before. Media events then carry real pip_available /
++// pip_active. phase: 0 entered, 1 exited (page, window close, host, close,
++// navigation, replacement), 2 back-to-tab: present and focus the tab. Page
++// window.focus() is never surfaced. Document PiP stays unsupported.
++typedef struct ReArcPictureInPictureEvent {
++  uint64_t profile_id, tab_id, content_generation;
++  uint32_t phase;
++} ReArcPictureInPictureEvent;
++typedef void (*ReArcPictureInPictureCallback)(
++    void* context, const ReArcPictureInPictureEvent* event);
++REARC_ENGINE_EXPORT void ReArcEngineSetPictureInPictureCallback(
++    ReArcPictureInPictureCallback callback, void* context);
+ // Output is +1 malloc PNG, free with ReArcBufferFree. Bound to tab/profile.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcFaviconGet(uint64_t tab_id,
+                                                 const char* icon_ref,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 4b773e120d..b49a8c3128 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -543,6 +543,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "html_fullscreen" ||
+          std::string(feature) == "printing" ||
+          std::string(feature) == "page_drops" ||
++         std::string(feature) == "picture_in_picture" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index f11343aeff..a9a9a329f3 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.31.0";
++  return "0.32.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_pip.cc b/chrome/browser/rearc_bridge/rearc_pip.cc
+new file mode 100644
+index 0000000000..99e49ad5ea
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_pip.cc
+@@ -0,0 +1,140 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_pip.h"
++
++#include <pthread.h>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
++#include "chrome/browser/rearc_bridge/media_adapter.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "content/public/browser/media_session.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++
++namespace rearc {
++namespace {
++ReArcPictureInPictureCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0;
++class State : public content::WebContentsObserver,
++              public content::WebContentsUserData<State> {
++ public:
++  void Bind(uint64_t tab_id) {
++    TabSession* session = TabRegistry::Get().FindSession(tab_id);
++    event_ = {session ? session->profile_id() : 0, tab_id,
++              session ? session->content_generation() : 0, 0};
++  }
++  bool TakeFocus() {
++    bool focus = focus_window_;
++    focus_window_ = false;
++    return focus;
++  }
++  void Publish(uint32_t phase) {
++    ReArcPictureInPictureEvent event = event_;
++    event.phase = phase;
++    ABIPost(base::BindOnce(
++        [](uint64_t expected, ReArcPictureInPictureEvent event) {
++          if (host && expected == epoch) host(host_context, &event);
++        },
++        epoch, event));
++  }
++  void MediaPictureInPictureChanged(bool active) override {
++    if (active == active_) return;
++    active_ = active;
++    Publish(active ? 0 : 1);
++    if (!active) {
++      // Back to tab closes the window, then activates the initiator in the
++      // same task: only that activation is a PiP focus request.
++      focus_window_ = true;
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(&State::EndFocusWindow,
++                                    weak_.GetWeakPtr()));
++    }
++  }
++  void WebContentsDestroyed() override {
++    if (active_) {
++      active_ = false;
++      Publish(1);
++    }
++  }
++
++ private:
++  friend class content::WebContentsUserData<State>;
++  explicit State(content::WebContents* contents)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<State>(*contents) {}
++  void EndFocusWindow() { focus_window_ = false; }
++  ReArcPictureInPictureEvent event_{};
++  bool active_ = false, focus_window_ = false;
++  base::WeakPtrFactory<State> weak_{this};
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(State);
++}  // namespace
++
++bool HostPictureInPictureEnabled() {
++  return host;
++}
++content::PictureInPictureResult EnterHostPictureInPicture(
++    uint64_t tab_id, content::WebContents* contents) {
++  CHECK(pthread_main_np());
++  // ABI <=1.29 behavior without a host callback: the page's request fails.
++  if (!host) return content::PictureInPictureResult::kNotSupported;
++  State::GetOrCreateForWebContents(contents)->Bind(tab_id);
++  return PictureInPictureWindowManager::GetInstance()
++      ->EnterVideoPictureInPicture(contents);
++}
++void ExitHostPictureInPicture() {
++  PictureInPictureWindowManager::GetInstance()->ExitPictureInPicture();
++}
++bool TakeHostPictureInPictureFocus(uint64_t tab_id) {
++  auto* session = TabRegistry::Get().FindSession(tab_id);
++  auto* state = session ? State::FromWebContents(session->web_contents())
++                        : nullptr;
++  if (!state || !state->TakeFocus()) return false;
++  state->Publish(2);
++  return true;
++}
++ReArcStatus SetHostPictureInPicture(uint64_t tab_id,
++                                    content::WebContents* contents,
++                                    bool active) {
++  if (!host) return REARC_UNSUPPORTED;
++  if (!active) {
++    if (!contents->HasPictureInPictureVideo()) return REARC_INVALID_STATE;
++    content::MediaSession::Get(contents)->ExitPictureInPicture();
++    return REARC_OK;
++  }
++  if (contents->HasPictureInPictureVideo()) return REARC_OK;
++  // Chromium's own availability (one eligible video player or a page
++  // 'enterpictureinpicture' handler), as Global Media Controls use it.
++  if (!MediaCanEnterPictureInPicture(tab_id)) return REARC_INVALID_STATE;
++  State::GetOrCreateForWebContents(contents)->Bind(tab_id);
++  content::MediaSession::Get(contents)->EnterPictureInPicture();
++  return REARC_OK;
++}
++}  // namespace rearc
++
++void ReArcEngineSetPictureInPictureCallback(
++    ReArcPictureInPictureCallback callback, void* context) {
++  CHECK(pthread_main_np());
++  // The replaced host can no longer own the window it was told about.
++  if (rearc::host) {
++    for (uint64_t id : rearc::TabRegistry::Get().SessionIds()) {
++      auto* session = rearc::TabRegistry::Get().FindSession(id);
++      if (session && session->web_contents()->HasPictureInPictureVideo()) {
++        rearc::ExitHostPictureInPicture();
++        break;
++      }
++    }
++  }
++  ++rearc::epoch;
++  rearc::host = callback;
++  rearc::host_context = context;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_pip.h b/chrome/browser/rearc_bridge/rearc_pip.h
+new file mode 100644
+index 0000000000..ba1671c83f
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_pip.h
+@@ -0,0 +1,23 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_PIP_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_PIP_H_
++#include <cstdint>
++#include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
++#include "content/public/browser/web_contents_delegate.h"
++namespace rearc {
++// Video Picture-in-Picture (picture_in_picture, ABI 1.30): Chromium's own
++// PictureInPictureWindowManager/overlay window, enabled by a host callback.
++bool HostPictureInPictureEnabled();
++content::PictureInPictureResult EnterHostPictureInPicture(
++    uint64_t tab_id, content::WebContents* contents);
++void ExitHostPictureInPicture();
++// True (and consumed) when activation is PiP's "back to tab".
++bool TakeHostPictureInPictureFocus(uint64_t tab_id);
++// ReArcTabSetPictureInPicture implementation for an existing session.
++ReArcStatus SetHostPictureInPicture(uint64_t tab_id,
++                                    content::WebContents* contents,
++                                    bool active);
++}  // namespace rearc
++#endif
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 65ec030f59..962860f24d 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -33,6 +33,7 @@
+ #include "chrome/browser/rearc_bridge/ipc_service_events.h"
+ #include "chrome/browser/rearc_bridge/media_adapter.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_pip.h"
+ #include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
+ #include "chrome/browser/rearc_bridge/security_adapter.h"
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
+@@ -1165,7 +1166,7 @@ ReArcStatus ReArcTabSetPictureInPicture(uint64_t id, bool active) {
+   if (auto status = rearc::ABICheckTab(id, &s)) {
+     return status;
+   }
+-  return REARC_UNSUPPORTED;
++  return rearc::SetHostPictureInPicture(id, s->web_contents(), active);
+ }
+ ReArcStatus ReArcFaviconGet(uint64_t id,
+                             const char* ref,
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 06cdabdb97..794ffb7483 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -6,6 +6,7 @@
+ #include "chrome/browser/rearc_bridge/rearc_file_chooser.h"
+ #include "chrome/browser/rearc_bridge/rearc_drop_policy.h"
+ #include "chrome/browser/rearc_bridge/rearc_fullscreen.h"
++#include "chrome/browser/rearc_bridge/rearc_pip.h"
+ 
+ #include <utility>
+ 
+@@ -92,6 +93,10 @@ content::WebContents* ReArcTabDelegate::AddNewContents(
+ }
+ 
+ void ReArcTabDelegate::ActivateContents(content::WebContents* contents) {
++  // PiP's "back to tab" is the only activation surfaced (as a host event).
++  if (TakeHostPictureInPictureFocus(tab_id_)) {
++    return;
++  }
+   // No focus stealing day-one: page-initiated activation (window.focus()) is
+   // not honored until S4's host view and S6's focus policy wire AppKit
+   // first-responder routing through the attachment lease.
+@@ -216,6 +221,15 @@ bool ReArcTabDelegate::CanDragEnter(
+   return FilterHostDropData(&filtered);
+ }
+ 
++content::PictureInPictureResult ReArcTabDelegate::EnterPictureInPicture(
++    content::WebContents* web_contents) {
++  return EnterHostPictureInPicture(tab_id_, web_contents);
++}
++
++void ReArcTabDelegate::ExitPictureInPicture() {
++  ExitHostPictureInPicture();
++}
++
+ void ReArcTabDelegate::WebContentsCreated(
+     content::WebContents* source_contents,
+     const content::GlobalRenderFrameHostId& opener_id,
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.h b/chrome/browser/rearc_bridge/tab_delegate.h
+index 65c3b49284..ddf86c57b9 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.h
++++ b/chrome/browser/rearc_bridge/tab_delegate.h
+@@ -95,6 +95,10 @@ class ReArcTabDelegate : public content::WebContentsDelegate {
+   bool CanDragEnter(content::WebContents* source,
+                     const content::DropData& data,
+                     blink::DragOperationsMask operations_allowed) override;
++  // Wave 18e: video Picture-in-Picture (picture_in_picture).
++  content::PictureInPictureResult EnterPictureInPicture(
++      content::WebContents* web_contents) override;
++  void ExitPictureInPicture() override;
+   // Wave 18b: attach browser-less helpers before the new contents navigates.
+   void WebContentsCreated(content::WebContents* source_contents,
+                           const content::GlobalRenderFrameHostId& opener_id,
+-- 
+2.54.0 (Apple Git-157)
+

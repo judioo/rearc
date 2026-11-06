@@ -1,0 +1,12 @@
+ReArc
+Copyright 2026 Judioo
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+engine/patches/ contains modifications to Chromium, Copyright The Chromium
+Authors, distributed under a BSD-style license:
+https://chromium.googlesource.com/chromium/src/+/main/LICENSE
+Chromium itself is not included in this repository.
+
+"Arc" is a trademark of The Browser Company of New York, Inc. ReArc is not
+affiliated with or endorsed by The Browser Company.

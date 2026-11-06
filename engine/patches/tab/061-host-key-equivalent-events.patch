@@ -1,0 +1,316 @@
+From 768b6838327de316ee590570a8d7902cb3dd22dd Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 22:59:21 +0400
+Subject: [PATCH] P-TAB-001 wave 30: report page key-equivalent verdicts to the
+ host
+
+A Command or Control key-down that reaches page content goes to the renderer
+first (RenderWidgetHostViewCocoa performKeyEquivalent: returns YES for every
+key equivalent while it is first responder), and an unconsumed one reaches
+WebContentsDelegate::HandleKeyboardEvent, which the bridge never overrode: the
+key was dropped and the host's menu never saw it. Observe every widget of the
+tab (attached in PreHandleKeyboardEvent, before the key is forwarded) and post
+the page's acknowledgement to the host: consumed when the page took the key,
+otherwise unconsumed, so the host runs its own shortcut. ABI 1.42 / bridge
+0.44.0 (key_equivalent_events). Existing ABI layouts remain unchanged.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/app/framework.exports                  |   1 +
+ chrome/app/framework.order                    |   1 +
+ chrome/browser/BUILD.gn                       |   2 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  20 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_key_equivalents.cc     | 129 ++++++++++++++++++
+ .../rearc_bridge/rearc_key_equivalents.h      |  19 +++
+ chrome/browser/rearc_bridge/tab_delegate.cc   |   2 +
+ 9 files changed, 175 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_key_equivalents.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_key_equivalents.h
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index e2f2b2cd63..89933e55a8 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -31,6 +31,7 @@ _ReArcStatusName
+ _ReArcEngineSetClientCertificateCallback
+ _ReArcClientCertificateRespond
+ _ReArcTabOpenDevTools
++_ReArcEngineSetKeyEquivalentCallback
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 85e3707996..a6f1d3f562 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -38,6 +38,7 @@ _ReArcStatusName
+ _ReArcEngineSetClientCertificateCallback
+ _ReArcClientCertificateRespond
+ _ReArcTabOpenDevTools
++_ReArcEngineSetKeyEquivalentCallback
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 939e95f78e..e0997e0299 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1491,6 +1491,8 @@ source_set("core") {
+       "rearc_bridge/rearc_search_abi.cc",
+       "rearc_bridge/rearc_fullscreen.cc",
+       "rearc_bridge/rearc_fullscreen.h",
++      "rearc_bridge/rearc_key_equivalents.cc",
++      "rearc_bridge/rearc_key_equivalents.h",
+       "rearc_bridge/rearc_print.cc",
+       "rearc_bridge/rearc_print.h",
+       "rearc_bridge/rearc_drop_policy.h",
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index d25a68010e..ca8a4b5918 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 41, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 42, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -1063,6 +1063,24 @@ REARC_ENGINE_EXPORT void ReArcEngineSetLinkOpenCallback(ReArcLinkOpenCallback, v
+ // registration replacement or 30 s timeout. Explicit rel=opener is unsupported.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcLinkOpenRespond(uint64_t request_id, uint64_t tab_id);
+ 
++// Page key equivalents (key_equivalent_events, ABI 1.42). With a callback
++// set, every Command or Control key-down a tab's page acknowledges is
++// reported once, after the page saw it: consumed true when the page took it
++// (a keydown handler's preventDefault, or an editing command such as Copy in
++// a field), false when Chromium would otherwise drop it unhandled. The host
++// runs its own shortcut for an unconsumed key; the engine never does.
++// key_code is the macOS virtual key code, modifiers the NSEventModifierFlags
++// shift/control/option/command bits, characters the key's text ignoring
++// modifiers (borrowed UTF-8). Delivered asynchronously on the main thread.
++typedef struct ReArcKeyEquivalentEvent {
++  uint64_t profile_id, tab_id, modifiers;
++  uint32_t key_code;
++  bool consumed;
++  const char* characters;
++} ReArcKeyEquivalentEvent;
++typedef void (*ReArcKeyEquivalentCallback)(void*, const ReArcKeyEquivalentEvent*);
++REARC_ENGINE_EXPORT void ReArcEngineSetKeyEquivalentCallback(ReArcKeyEquivalentCallback, void* context);
++
+ // Password leak detection (password_leak_detection, ABI 1.35): Chromium's
+ // profile.password_manager_leak_detection pref, default on as in Chrome. When
+ // on, a successfully submitted sign-in's credential is checked against
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 987cfbc5da..51707a50bf 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -555,6 +555,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "link_open_requests" ||
+          std::string(feature) == "devtools" ||
+          std::string(feature) == "client_certificates" ||
++         std::string(feature) == "key_equivalent_events" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 88370e1f38..fcaeb874c7 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.43.0";
++  return "0.44.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_key_equivalents.cc b/chrome/browser/rearc_bridge/rearc_key_equivalents.cc
+new file mode 100644
+index 0000000000..7031d55a14
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_key_equivalents.cc
+@@ -0,0 +1,129 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_key_equivalents.h"
++
++#include <pthread.h>
++
++#include <set>
++#include <string>
++#include <utility>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host.h"
++#include "content/public/browser/render_widget_host_observer.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "third_party/blink/public/common/input/web_input_event.h"
++#include "third_party/blink/public/common/input/web_keyboard_event.h"
++
++namespace rearc {
++namespace {
++ReArcKeyEquivalentCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0;
++
++// NSEventModifierFlags, so the host compares with its own NSEvent.
++constexpr uint64_t kShift = 1ull << 17, kControl = 1ull << 18,
++                   kOption = 1ull << 19, kCommand = 1ull << 20;
++
++// Watches every widget of one tab (main frame and out-of-process iframes) for
++// the page's verdict on Command/Control key-downs. Widgets are attached just
++// before a key is forwarded, and dropped when they are destroyed.
++class KeyAcks : public content::WebContentsUserData<KeyAcks>,
++                public content::RenderWidgetHost::InputEventObserver,
++                public content::RenderWidgetHostObserver {
++ public:
++  ~KeyAcks() override {
++    for (auto* widget : widgets_) {
++      widget->RemoveInputEventObserver(this);
++      widget->RemoveObserver(this);
++    }
++  }
++  void Attach(uint64_t tab_id) {
++    tab_id_ = tab_id;
++    GetWebContents().ForEachRenderFrameHost(
++        [this](content::RenderFrameHost* frame) {
++          auto* widget = frame->GetRenderWidgetHost();
++          if (!widget || !widgets_.insert(widget).second) return;
++          widget->AddInputEventObserver(this);
++          widget->AddObserver(this);
++        });
++  }
++
++  // content::RenderWidgetHost::InputEventObserver:
++  void OnInputEventAck(const content::RenderWidgetHost&,
++                       blink::mojom::InputEventResultSource,
++                       blink::mojom::InputEventResultState state,
++                       const blink::WebInputEvent& event) override {
++    if (!host || event.GetType() != blink::WebInputEvent::Type::kRawKeyDown) {
++      return;
++    }
++    const auto& key = static_cast<const blink::WebKeyboardEvent&>(event);
++    const int modifiers = key.GetModifiers();
++    if (!(modifiers & (blink::WebInputEvent::kMetaKey |
++                       blink::WebInputEvent::kControlKey))) {
++      return;
++    }
++    uint64_t flags = 0;
++    if (modifiers & blink::WebInputEvent::kShiftKey) flags |= kShift;
++    if (modifiers & blink::WebInputEvent::kControlKey) flags |= kControl;
++    if (modifiers & blink::WebInputEvent::kAltKey) flags |= kOption;
++    if (modifiers & blink::WebInputEvent::kMetaKey) flags |= kCommand;
++    TabSession* session = TabRegistry::Get().FindSession(tab_id_);
++    std::string characters = base::UTF16ToUTF8(key.unmodified_text.data());
++    // Posted: the host's shortcut may close this tab, and with it the widget
++    // still notifying its observers.
++    ABIPost(base::BindOnce(
++        [](uint64_t expected, uint64_t profile_id, uint64_t tab_id,
++           uint64_t flags, uint32_t key_code, bool consumed,
++           std::string characters) {
++          if (!host || expected != epoch) return;
++          ReArcKeyEquivalentEvent out{profile_id, tab_id, flags, key_code,
++                                      consumed, characters.c_str()};
++          host(host_context, &out);
++        },
++        epoch, session ? session->profile_id() : 0, tab_id_, flags,
++        static_cast<uint32_t>(key.native_key_code),
++        state == blink::mojom::InputEventResultState::kConsumed,
++        std::move(characters)));
++  }
++
++  // content::RenderWidgetHostObserver:
++  void RenderWidgetHostDestroyed(content::RenderWidgetHost* widget) override {
++    widget->RemoveInputEventObserver(this);
++    widget->RemoveObserver(this);
++    widgets_.erase(widget);
++  }
++
++ private:
++  friend class content::WebContentsUserData<KeyAcks>;
++  explicit KeyAcks(content::WebContents* contents)
++      : content::WebContentsUserData<KeyAcks>(*contents) {}
++  uint64_t tab_id_ = 0;
++  std::set<content::RenderWidgetHost*> widgets_;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(KeyAcks);
++}  // namespace
++
++void ObserveHostKeyEquivalents(uint64_t tab_id,
++                               content::WebContents* contents) {
++  if (!host || !contents) return;
++  KeyAcks::GetOrCreateForWebContents(contents)->Attach(tab_id);
++}
++}  // namespace rearc
++
++void ReArcEngineSetKeyEquivalentCallback(ReArcKeyEquivalentCallback callback,
++                                         void* context) {
++  CHECK(pthread_main_np());
++  ++rearc::epoch;
++  rearc::host = callback;
++  rearc::host_context = context;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_key_equivalents.h b/chrome/browser/rearc_bridge/rearc_key_equivalents.h
+new file mode 100644
+index 0000000000..cef74a4aa6
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_key_equivalents.h
+@@ -0,0 +1,19 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_KEY_EQUIVALENTS_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_KEY_EQUIVALENTS_H_
++
++#include <cstdint>
++
++namespace content {
++class WebContents;
++}
++
++namespace rearc {
++// Wave 30 (key_equivalent_events): called before a key reaches the page, so
++// the page's acknowledgement of a Command/Control key-down reaches the host.
++void ObserveHostKeyEquivalents(uint64_t tab_id, content::WebContents* contents);
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_KEY_EQUIVALENTS_H_
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 054055dc97..25487f52a0 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -7,6 +7,7 @@
+ #include "chrome/browser/rearc_bridge/rearc_file_chooser.h"
+ #include "chrome/browser/rearc_bridge/rearc_drop_policy.h"
+ #include "chrome/browser/rearc_bridge/rearc_fullscreen.h"
++#include "chrome/browser/rearc_bridge/rearc_key_equivalents.h"
+ #include "chrome/browser/rearc_bridge/rearc_pip.h"
+ #include "chrome/browser/rearc_bridge/rearc_extension_actions.h"
+ #include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
+@@ -216,6 +217,7 @@ bool ReArcTabDelegate::IsFullscreenForTabOrPending(
+ content::KeyboardEventProcessingResult ReArcTabDelegate::PreHandleKeyboardEvent(
+     content::WebContents* source,
+     const input::NativeWebKeyboardEvent& event) {
++  ObserveHostKeyEquivalents(tab_id_, source);
+   return HandleHostFullscreenKey(source, event)
+              ? content::KeyboardEventProcessingResult::HANDLED
+              : content::KeyboardEventProcessingResult::NOT_HANDLED;
+-- 
+2.54.0 (Apple Git-157)
+

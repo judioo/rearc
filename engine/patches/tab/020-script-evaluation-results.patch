@@ -1,0 +1,353 @@
+# Patch-ID: P-TAB-001 / P-NAV-001 (wave 12, script results)
+# Area: tab.
+# Rationale: trusted boost editor/element picker need asynchronous JSON-valued
+#   evaluation in per-boost isolated worlds or explicit primary main world,
+#   with bounded deadlines and cancellation rather than stale document results.
+# Last-Rebased: 2026-11-02 (Chromium 156.0.8078.74).
+# Frozen-file exceptions: extend existing ABI/services and export lists only;
+#   no public structure size changes, page bridge, user activation or browser
+#   target. data documents are eligible for restricted page evaluation.
+# Validation: build-p31 (attempt 2); smoke-tab020 G1-G5; native eval/core/
+#   services/URLs; nm-tab020 (39 exports via framework).
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index e34d4feba7..dfd4a84835 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -61,3 +61,4 @@ _ReArcTabSetScripts
+ _ReArcTabRefreshStyles
+ _ReArcTabSetLinkPeek
+ _ReArcTabCaptureSnapshot
++_ReArcTabEvaluateScript
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 68f063d54e..b340320d9d 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -72,6 +72,7 @@ _ReArcTabSetScripts
+ _ReArcTabRefreshStyles
+ _ReArcTabSetLinkPeek
+ _ReArcTabCaptureSnapshot
++_ReArcTabEvaluateScript
+ 
+ # _ChromeMain must be listed last.  That's the whole point of this file.
+ _ChromeMain
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 015ccb261b..8777173e99 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -38,9 +38,11 @@ enum {
+   REARC_STALE_ATTACHMENT = 13,
+   REARC_TOO_LARGE = 14,
+   REARC_CANCELLED = 15,
+-  REARC_INTERNAL = 16
++  REARC_INTERNAL = 16,
++  REARC_SCRIPT_ERROR = 17,
++  REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 1, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 2, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -255,6 +257,30 @@ ReArcTabCaptureSnapshot(uint64_t tab_id,
+                         ReArcSnapshotCallback completion,
+                         void* context);
+ 
++// Evaluate an expression in the current primary document; awaits Promises.
++// world: 0 isolated rearc.boost.<boost_id> (null => editor), 1 main world
++// (boost_id must be null). IDs follow ReArcScript.id rules. No user activation.
++// timeout_ms: 1..30000, includes context lookup; <=1 MiB UTF-8 source.
++// One evaluation per tab. Navigation/close cancels; timeout ends observation,
++// not JS side effects. Successful JSON (undefined => null) and error JSON are
++// borrowed for callback duration; copy immediately, never BufferFree them.
++// Errors: status plus {code,message,details?}; success has null error_json.
++// Unsupported on file/WebUI. Completion always carries the captured generation.
++typedef void (*ReArcScriptCallback)(void* context,
++                                    ReArcStatus status,
++                                    uint64_t tab_id,
++                                    uint64_t content_generation,
++                                    const char* json,
++                                    const char* error_json);
++REARC_ENGINE_EXPORT ReArcStatus
++ReArcTabEvaluateScript(uint64_t tab_id,
++                        const char* source,
++                        uint32_t world,
++                        const char* boost_id,
++                        uint32_t timeout_ms,
++                        ReArcScriptCallback completion,
++                        void* context);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 4a3cc73f2d..6d3b87c57c 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -390,8 +390,10 @@ bool ReArcEngineHasFeature(const char* feature) {
+                                       "stale_attachment",
+                                       "too_large",
+                                       "cancelled",
+-                                      "internal"};
+-  return status >= 0 && status <= REARC_INTERNAL ? names[status] : "internal";
++                                      "internal",
++                                      "script_error",
++                                      "timeout"};
++  return status >= 0 && status <= REARC_TIMEOUT ? names[status] : "internal";
+ }
+ ReArcStatus ReArcEngineConfigure(uint32_t version,
+                                  const ReArcCallbacks* callbacks,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index d2f9d3e10b..03ef9cf7f7 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.3.0";
++  return "0.4.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 60f8b90282..1b0a471933 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -38,6 +38,7 @@
+ #include "content/public/browser/devtools_agent_host.h"
+ #include "content/public/browser/devtools_agent_host_client.h"
+ #include "content/public/browser/media_session.h"
++#include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_observer.h"
+@@ -217,8 +218,8 @@ auto& Pages() {
+ 
+ // Internal, per-WebContents CDP client: no remote debugging server, no protocol
+ // entry point exported to the host. Restricted to the current top-level page;
+-// no browser target, files, WebUI, user-gesture grants or main-world
+-// evaluation.
++// no browser target, files, WebUI or user-gesture grants. Host evaluation
++// selects the primary document and an explicit isolated/main world.
+ class PageServices : public content::DevToolsAgentHostClient,
+                      public content::WebContentsObserver {
+  public:
+@@ -253,7 +254,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+   bool MayReadLocalFiles() override { return false; }
+   bool MayWriteLocalFiles() override { return false; }
+   bool MayAttachToURL(const GURL& url, bool webui) override {
+-    return !webui && (url.is_empty() || url.SchemeIsHTTPOrHTTPS() ||
++    return !webui && (url.is_empty() || url.SchemeIsHTTPOrHTTPS() || url.SchemeIs("data") ||
+                       url.spec() == "about:blank");
+   }
+   bool MayAttachToRenderFrameHost(content::RenderFrameHost* frame) override {
+@@ -270,6 +271,9 @@ class PageServices : public content::DevToolsAgentHostClient,
+     if (handle->IsInPrimaryMainFrame() && !handle->IsSameDocument()) {
+       ++document_epoch_;
+       contexts_.clear();
++      if (evaluation_callback_) {
++        FinishEvaluation(REARC_CANCELLED, {}, "navigation", "Document navigated");
++      }
+       // Snapshot results cannot cross documents even within one content gen.
+       if (snapshot_callback_) {
+         FinishSnapshot(REARC_CANCELLED, {});
+@@ -306,7 +310,10 @@ class PageServices : public content::DevToolsAgentHostClient,
+         auto* result = value->FindDict("result");
+         std::move(callback).Run(
+             value->contains("error") ? REARC_UNSUPPORTED : REARC_OK,
+-            result ? result->Clone() : base::DictValue());
++            result ? result->Clone()
++                   : base::DictValue().Set("protocolError",
++                       value->FindDict("error") ? value->FindDict("error")->Clone()
++                                                : base::DictValue()));
+       }
+       return;
+     }
+@@ -414,6 +421,58 @@ class PageServices : public content::DevToolsAgentHostClient,
+   }
+   bool peek_busy() const { return peek_installing_; }
+ 
++  bool evaluation_busy() const { return evaluation_callback_ != nullptr; }
++  bool navigation_pending() const {
++    return web_contents()->GetController().GetPendingEntry() != nullptr;
++  }
++  bool evaluation_allowed() const {
++    const GURL& url = web_contents()->GetLastCommittedURL();
++    return url.SchemeIsHTTPOrHTTPS() || url.SchemeIs("data") ||
++           url.spec() == "about:blank";
++  }
++  void EvaluateScript(std::string source, std::string world,
++                      uint32_t timeout_ms, ReArcScriptCallback callback,
++                      void* context) {
++    evaluation_callback_ = callback;
++    evaluation_context_ = context;
++    const uint64_t request = ++evaluation_request_;
++    evaluation_timeout_.Start(
++        FROM_HERE, base::Milliseconds(timeout_ms),
++        base::BindOnce(&PageServices::FinishEvaluation,
++                       weak_factory_.GetWeakPtr(), REARC_TIMEOUT, std::string(),
++                       "timeout", "Evaluation deadline exceeded", base::DictValue()));
++    if (world.empty()) {
++      RunEvaluation(request, std::move(source), 0);
++      return;
++    }
++    Send("Page.getFrameTree", {}, base::BindOnce(
++        [](base::WeakPtr<PageServices> self, uint64_t request,
++           std::string source, std::string world, ReArcStatus status,
++           base::DictValue result) {
++          if (!self || !self->EvaluationCurrent(request)) return;
++          const auto* frame = result.FindStringByDottedPath("frameTree.frame.id");
++          if (status || !frame) {
++            self->FinishEvaluation(status ? status : REARC_INTERNAL, {},
++                                   "context", "Primary frame unavailable", std::move(result));
++            return;
++          }
++          self->Send("Page.createIsolatedWorld", base::DictValue()
++              .Set("frameId", *frame).Set("worldName", world)
++              .Set("grantUniveralAccess", false), base::BindOnce(
++              [](base::WeakPtr<PageServices> self, uint64_t request,
++                 std::string source, ReArcStatus status, base::DictValue result) {
++                if (!self || !self->EvaluationCurrent(request)) return;
++                auto id = result.FindInt("executionContextId");
++                if (status || !id) {
++                  self->FinishEvaluation(status ? status : REARC_INTERNAL, {},
++                                         "context", "Isolated world unavailable", std::move(result));
++                  return;
++                }
++                self->RunEvaluation(request, std::move(source), *id);
++              }, self, request, std::move(source)));
++        }, weak_factory_.GetWeakPtr(), request, std::move(source), std::move(world)));
++  }
++
+   void Snapshot(uint32_t scope, ReArcSnapshotCallback callback, void* context) {
+     snapshot_callback_ = callback;
+     snapshot_context_ = context;
+@@ -469,6 +528,9 @@ class PageServices : public content::DevToolsAgentHostClient,
+   void CancelPending(ReArcStatus status) {
+     // Callbacks can start follow-up commands; detached state rejects them.
+     attached_ = false;
++    if (evaluation_callback_) {
++      FinishEvaluation(status, {}, "closed", "Evaluation target closed");
++    }
+     auto pending = std::move(pending_);
+     for (auto& [id, p] : pending) {
+       if (p->reply) {
+@@ -479,6 +541,67 @@ class PageServices : public content::DevToolsAgentHostClient,
+       FinishSnapshot(status, {});
+     }
+   }
++  bool EvaluationCurrent(uint64_t request) const {
++    return evaluation_callback_ && evaluation_request_ == request;
++  }
++  void RunEvaluation(uint64_t request, std::string source, int context_id) {
++    base::DictValue params;
++    params.Set("expression", std::move(source));
++    params.Set("awaitPromise", true);
++    params.Set("returnByValue", true);
++    params.Set("userGesture", false);
++    if (context_id) params.Set("contextId", context_id);
++    Send("Runtime.evaluate", std::move(params), base::BindOnce(
++        [](base::WeakPtr<PageServices> self, uint64_t request,
++           ReArcStatus status, base::DictValue result) {
++          if (!self || !self->EvaluationCurrent(request)) return;
++          if (status) {
++            self->FinishEvaluation(status, {}, "protocol", "Evaluation protocol failure", std::move(result));
++            return;
++          }
++          if (auto* exception = result.FindDict("exceptionDetails")) {
++            self->FinishEvaluation(REARC_SCRIPT_ERROR, {}, "exception", "JavaScript exception", exception->Clone());
++            return;
++          }
++          const auto* remote = result.FindDict("result");
++          if (!remote) {
++            self->FinishEvaluation(REARC_INTERNAL, {}, "protocol", "Missing evaluation result");
++            return;
++          }
++          if (const auto* value = remote->Find("value")) {
++            auto json = base::WriteJson(*value);
++            if (json && json->size() <= REARC_MAX_BLOB_BYTES) {
++              self->FinishEvaluation(REARC_OK, std::move(*json), {}, {});
++              return;
++            }
++            self->FinishEvaluation(REARC_TOO_LARGE, {}, "result", "JSON result exceeds limit");
++          } else if (remote->FindString("type") && *remote->FindString("type") == "undefined") {
++            self->FinishEvaluation(REARC_OK, "null", {}, {});
++          } else {
++            self->FinishEvaluation(REARC_SCRIPT_ERROR, {}, "serialization", "Result is not JSON serializable", remote->Clone());
++          }
++        }, weak_factory_.GetWeakPtr(), request));
++  }
++  void FinishEvaluation(ReArcStatus status, std::string json,
++                        std::string code, std::string message,
++                        base::DictValue details = {}) {
++    if (!evaluation_callback_) return;
++    evaluation_timeout_.Stop();
++    auto callback = evaluation_callback_;
++    evaluation_callback_ = nullptr;
++    std::string error;
++    if (status) {
++      error = base::WriteJson(base::DictValue().Set("code", code)
++          .Set("message", message).Set("details", std::move(details))).value();
++    }
++    ABIPost(base::BindOnce(
++        [](ReArcScriptCallback callback, void* context, ReArcStatus status,
++           uint64_t tab, uint64_t generation, std::string json, std::string error) {
++          callback(context, status, tab, generation, status ? nullptr : json.c_str(),
++                   status ? error.c_str() : nullptr);
++        }, callback, evaluation_context_.get(), status, tab_id_, generation_,
++        std::move(json), std::move(error)));
++  }
+   void RemoveNextScript() {
+     if (script_ids_.empty()) {
+       scripts_.clear();
+@@ -729,6 +852,10 @@ class PageServices : public content::DevToolsAgentHostClient,
+   raw_ptr<void> install_context_ = nullptr;
+   ReArcSnapshotCallback snapshot_callback_ = nullptr;
+   raw_ptr<void> snapshot_context_ = nullptr;
++  ReArcScriptCallback evaluation_callback_ = nullptr;
++  raw_ptr<void> evaluation_context_ = nullptr;
++  uint64_t evaluation_request_ = 0;
++  base::OneShotTimer evaluation_timeout_;
+   base::WeakPtrFactory<PageServices> weak_factory_{this};
+ };
+ 
+@@ -778,7 +905,7 @@ bool ABIHasServiceFeature(const char* feature) {
+   return name == "media_session" || name == "favicon" ||
+          name == "security_state" || name == "user_scripts" ||
+          name == "link_peek" || name == "snapshot_viewport" ||
+-         name == "snapshot_full_page";
++         name == "snapshot_full_page" || name == "script_evaluation";
+ }
+ }  // namespace rearc
+ 
+@@ -995,3 +1122,29 @@ ReArcStatus ReArcTabCaptureSnapshot(uint64_t id,
+   page->Snapshot(scope, completion, context);
+   return REARC_OK;
+ }
++
++ReArcStatus ReArcTabEvaluateScript(uint64_t id, const char* source,
++                                    uint32_t world, const char* boost_id,
++                                    uint32_t timeout_ms,
++                                    ReArcScriptCallback completion,
++                                    void* context) {
++  CHECK(pthread_main_np());
++  if (!source || !base::IsStringUTF8(source) || !completion || world > 1 ||
++      !timeout_ms || timeout_ms > 30000 || (world == 1 && boost_id)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  if (std::strlen(source) > 1048576) return REARC_TOO_LARGE;
++  std::string name = boost_id ? boost_id : "editor";
++  if (name.empty() || name.size() > 128 ||
++      !std::ranges::all_of(name, [](unsigned char c) {
++        return base::IsAsciiAlpha(c) || base::IsAsciiDigit(c) || c == '_' || c == '-';
++      })) return REARC_INVALID_ARGUMENT;
++  rearc::PageServices* page;
++  if (auto status = rearc::FindPage(id, &page)) return status;
++  if (page->navigation_pending()) return REARC_INVALID_STATE;
++  if (!page->evaluation_allowed()) return REARC_UNSUPPORTED;
++  if (page->evaluation_busy()) return REARC_BUSY;
++  page->EvaluateScript(source, world ? std::string() : "rearc.boost." + name,
++                       timeout_ms, completion, context);
++  return REARC_OK;
++}

@@ -1,0 +1,1041 @@
+From 106077933fdbfbc712135e6df3d27c3db3735aed Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Thu, 5 Nov 2026 01:54:06 +0400
+Subject: [PATCH] P-TAB-001 wave 32: embedded video Picture-in-Picture and
+ media actions for the host
+
+Arc renders its PiP video into a native view the shell places, not a
+floating Chromium window. With ReArcEngineSetVideoOverlayCallback set,
+ChromeContentBrowserClient::CreateWindowForVideoPictureInPicture returns a
+HostVideoOverlay for a tab that entered PiP through the bridge: a
+content::VideoOverlayWindow that owns a layer-hosting NSView, a
+RecyclableCompositorMac and a DisplayCALayerTree, and shows the video's
+surface (AddChildFrameSink + LayerSurface) aspect-fit in black. The video
+keeps its native frame rate while the tab is hidden, and the compositor
+draws only while a session is shown and the view is in a window. Events:
+created (+1 view), shown, hidden, closed, natural size, coalesced and
+deduplicated state, position, source title, first CALayer update. Calls:
+ReArcVideoOverlayAction (transport, mute, back to tab, close), Seek,
+SetBounds (sizes the renderer's video) and ReadPixel (a CopyOutputRequest
+read-back of the composited view). Without the callback tab/048's window is
+unchanged. ReArcTabGetMediaActions publishes the media session's actions as
+bits, and a media event now follows every change of them. ABI 1.43 /
+bridge 0.45.0 (pip_embedded); framework.exports and framework.order list
+the six new functions. Existing ABI layouts remain unchanged.
+
+Last rebased: 2026-11-05 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/app/framework.exports                  |   6 +
+ chrome/app/framework.order                    |   6 +
+ chrome/browser/BUILD.gn                       |   4 +
+ .../browser/chrome_content_browser_client.cc  |   7 +
+ chrome/browser/rearc_bridge/media_adapter.cc  |  39 +-
+ chrome/browser/rearc_bridge/media_adapter.h   |   2 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  80 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ chrome/browser/rearc_bridge/rearc_pip.cc      |   8 +
+ chrome/browser/rearc_bridge/rearc_pip.h       |   4 +
+ .../rearc_bridge/rearc_services_abi.cc        |  11 +
+ .../rearc_bridge/rearc_video_overlay.h        |  22 +
+ .../rearc_bridge/rearc_video_overlay.mm       | 610 ++++++++++++++++++
+ 14 files changed, 799 insertions(+), 3 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_video_overlay.h
+ create mode 100644 chrome/browser/rearc_bridge/rearc_video_overlay.mm
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 89933e55a8..f3b9bc5668 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -32,6 +32,12 @@ _ReArcEngineSetClientCertificateCallback
+ _ReArcClientCertificateRespond
+ _ReArcTabOpenDevTools
+ _ReArcEngineSetKeyEquivalentCallback
++_ReArcTabGetMediaActions
++_ReArcEngineSetVideoOverlayCallback
++_ReArcVideoOverlayAction
++_ReArcVideoOverlaySeek
++_ReArcVideoOverlaySetBounds
++_ReArcVideoOverlayReadPixel
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index a6f1d3f562..7d6bec39bf 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -39,6 +39,12 @@ _ReArcEngineSetClientCertificateCallback
+ _ReArcClientCertificateRespond
+ _ReArcTabOpenDevTools
+ _ReArcEngineSetKeyEquivalentCallback
++_ReArcTabGetMediaActions
++_ReArcEngineSetVideoOverlayCallback
++_ReArcVideoOverlayAction
++_ReArcVideoOverlaySeek
++_ReArcVideoOverlaySetBounds
++_ReArcVideoOverlayReadPixel
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index e0997e0299..04e690932c 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1499,6 +1499,8 @@ source_set("core") {
+       "rearc_bridge/rearc_drop_policy.mm",
+       "rearc_bridge/rearc_pip.cc",
+       "rearc_bridge/rearc_pip.h",
++      "rearc_bridge/rearc_video_overlay.h",
++      "rearc_bridge/rearc_video_overlay.mm",
+       "rearc_bridge/rearc_extension_prompts.cc",
+       "rearc_bridge/rearc_extension_prompts.h",
+       "rearc_bridge/rearc_extension_actions.cc",
+@@ -1528,6 +1530,8 @@ source_set("core") {
+       "rearc_bridge/rearc_password_prompt.cc",
+       "rearc_bridge/rearc_password_prompt.h",
+     ]
++    # Wave 32 (pip_embedded): the embedded video overlay's CALayer tree.
++    deps += [ "//ui/accelerated_widget_mac" ]
+   }
+ 
+   if (is_win) {
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 146d67ae10..59d8883833 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -179,6 +179,7 @@
+ // like the rearc_bridge sources it references; guarded so the file keeps
+ // compiling on other platforms.
+ #include "chrome/browser/rearc_bridge/engine_mode.h"
++#include "chrome/browser/rearc_bridge/rearc_video_overlay.h"
+ #include "chrome/browser/rearc_bridge/web_contents_view_delegate_mac.h"
+ #endif
+ #include "chrome/browser/renderer_host/chrome_navigation_ui_data.h"
+@@ -7517,6 +7518,12 @@ bool ChromeContentBrowserClient::HandleExternalProtocol(
+ std::unique_ptr<content::VideoOverlayWindow>
+ ChromeContentBrowserClient::CreateWindowForVideoPictureInPicture(
+     content::VideoPictureInPictureWindowController* controller) {
++#if BUILDFLAG(IS_MAC)
++  // Wave 32 (pip_embedded): a registry tab's video goes to the host's view.
++  if (auto overlay = rearc::CreateHostVideoOverlay(controller)) {
++    return overlay;
++  }
++#endif
+   return CreateVideoOverlayWindow(controller);
+ }
+ 
+diff --git a/chrome/browser/rearc_bridge/media_adapter.cc b/chrome/browser/rearc_bridge/media_adapter.cc
+index 798a8b40c4..1689ff2a3a 100644
+--- a/chrome/browser/rearc_bridge/media_adapter.cc
++++ b/chrome/browser/rearc_bridge/media_adapter.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/rearc_bridge/media_adapter.h"
+ #include "chrome/browser/rearc_bridge/rearc_pip.h"
++#include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
+ 
+ #include <pthread.h>
+ 
+@@ -89,11 +90,39 @@ class MediaAdapter : public content::WebContentsObserver,
+   void MediaSessionActionsChanged(
+       const std::vector<MediaSessionAction>& actions) override {
+     const bool pip = CanEnterPictureInPicture();
++    const uint32_t bits = ActionBits();
+     actions_ = actions;
+-    if (pip != CanEnterPictureInPicture()) {
++    // Hosts read the bits with ReArcTabGetMediaActions (wave 32) on the
++    // event that follows a change.
++    if (pip != CanEnterPictureInPicture() || bits != ActionBits()) {
+       Publish();
+     }
+   }
++  uint32_t ActionBits() const {
++    if (!controllable_) return 0;
++    uint32_t bits = 0;
++    for (auto action : actions_) {
++      switch (action) {
++        case MediaSessionAction::kPlay: bits |= REARC_MEDIA_ACTION_PLAY; break;
++        case MediaSessionAction::kPause: bits |= REARC_MEDIA_ACTION_PAUSE; break;
++        case MediaSessionAction::kPreviousTrack:
++          bits |= REARC_MEDIA_ACTION_PREVIOUS_TRACK;
++          break;
++        case MediaSessionAction::kNextTrack:
++          bits |= REARC_MEDIA_ACTION_NEXT_TRACK;
++          break;
++        case MediaSessionAction::kSeekTo:
++          bits |= REARC_MEDIA_ACTION_SEEK;
++          break;
++        case MediaSessionAction::kEnterPictureInPicture:
++          bits |= REARC_MEDIA_ACTION_PICTURE_IN_PICTURE;
++          break;
++        case MediaSessionAction::kSkipAd: bits |= REARC_MEDIA_ACTION_SKIP_AD; break;
++        default: break;
++      }
++    }
++    return bits;
++  }
+   bool CanEnterPictureInPicture() const {
+     return std::find(actions_.begin(), actions_.end(),
+                      MediaSessionAction::kEnterPictureInPicture) !=
+@@ -244,6 +273,14 @@ MediaCommandResult MediaSetPlayback(uint64_t tab_id,
+                  : MediaCommandResult::kInvalidState;
+ }
+ 
++uint32_t MediaActionBits(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  auto* session = TabRegistry::Get().FindSession(tab_id);
++  auto* adapter =
++      session ? MediaAdapter::FromWebContents(session->web_contents()) : nullptr;
++  return adapter ? adapter->ActionBits() : 0;
++}
++
+ bool MediaCanEnterPictureInPicture(uint64_t tab_id) {
+   CHECK(pthread_main_np());
+   auto* session = TabRegistry::Get().FindSession(tab_id);
+diff --git a/chrome/browser/rearc_bridge/media_adapter.h b/chrome/browser/rearc_bridge/media_adapter.h
+index 1011f5ced5..d54308c136 100644
+--- a/chrome/browser/rearc_bridge/media_adapter.h
++++ b/chrome/browser/rearc_bridge/media_adapter.h
+@@ -24,6 +24,8 @@ MediaCommandResult MediaSetMuted(uint64_t tab_id, bool muted);
+ // kEnterPictureInPicture availability while a host PiP callback is set;
+ // pip_active is the tab's video PiP state. Artwork stays unadvertised.
+ bool MediaCanEnterPictureInPicture(uint64_t tab_id);
++// Wave 32 (pip_embedded): REARC_MEDIA_ACTION_* bits of the tab's session.
++uint32_t MediaActionBits(uint64_t tab_id);
+ 
+ }  // namespace rearc
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index ca8a4b5918..7299b43e0a 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 42, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 43, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -459,6 +459,84 @@ typedef void (*ReArcPictureInPictureCallback)(
+     void* context, const ReArcPictureInPictureEvent* event);
+ REARC_ENGINE_EXPORT void ReArcEngineSetPictureInPictureCallback(
+     ReArcPictureInPictureCallback callback, void* context);
++// Media session actions (pip_embedded, ABI 1.43): the tab's current
++// Chromium media-session actions as REARC_MEDIA_ACTION_* bits; 0 without a
++// session. A media service event follows every change of these bits.
++enum {
++  REARC_MEDIA_ACTION_PLAY = 1u << 0,
++  REARC_MEDIA_ACTION_PAUSE = 1u << 1,
++  REARC_MEDIA_ACTION_PREVIOUS_TRACK = 1u << 2,
++  REARC_MEDIA_ACTION_NEXT_TRACK = 1u << 3,
++  REARC_MEDIA_ACTION_SEEK = 1u << 4,
++  REARC_MEDIA_ACTION_PICTURE_IN_PICTURE = 1u << 5,
++  REARC_MEDIA_ACTION_SKIP_AD = 1u << 6
++};
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetMediaActions(uint64_t tab_id,
++                                                        uint32_t* actions);
++// Embedded video Picture-in-Picture (pip_embedded, ABI 1.43). With a callback
++// set, a registry tab's video PiP (page request or ReArcTabSetPictureInPicture)
++// renders into an engine-owned layer-backed NSView handed to the host instead
++// of Chromium's floating window; without one, tab/048's window is used. The
++// video keeps its native frame rate while its tab is hidden, and only while
++// the view is in a visible window. One overlay exists per tab's controller;
++// Chromium keeps one PiP session process-wide.
++// kind: 0 created (view is +1; release with ReArcViewRelease after closed),
++// 1 shown (session started), 2 hidden (session ended; the view stays valid
++// for a later shown), 3 closed (overlay destroyed; never another event),
++// 4 natural size (width/height, video pixels), 5 state (playback 0 playing,
++// 1 paused, 2 ended; buttons; muted), 6 position (seconds; duration < 0 for
++// live; rate 0 paused), 7 source title (borrowed), 8 first CALayer tree
++// update after shown.
++// The host places the view and reports its screen rect with SetBounds; the
++// renderer sizes the video to it. Events arrive on the main thread.
++enum {
++  REARC_VIDEO_OVERLAY_BUTTON_PLAY_PAUSE = 1u << 0,
++  REARC_VIDEO_OVERLAY_BUTTON_NEXT_TRACK = 1u << 1,
++  REARC_VIDEO_OVERLAY_BUTTON_PREVIOUS_TRACK = 1u << 2,
++  REARC_VIDEO_OVERLAY_BUTTON_SKIP_AD = 1u << 3,
++  REARC_VIDEO_OVERLAY_BUTTON_MICROPHONE = 1u << 4,
++  REARC_VIDEO_OVERLAY_BUTTON_CAMERA = 1u << 5,
++  REARC_VIDEO_OVERLAY_BUTTON_HANG_UP = 1u << 6
++};
++typedef struct ReArcVideoOverlayEvent {
++  uint64_t profile_id, tab_id, content_generation, overlay_id;
++  uint32_t kind;
++  void* view;
++  double width, height;
++  uint32_t playback, buttons;
++  bool muted, microphone_muted, camera_on;
++  double duration, position, rate;
++  const char* title;
++} ReArcVideoOverlayEvent;
++typedef void (*ReArcVideoOverlayCallback)(void* context,
++                                          const ReArcVideoOverlayEvent* event);
++// Replacing or clearing the callback ends a shown session first.
++REARC_ENGINE_EXPORT void ReArcEngineSetVideoOverlayCallback(
++    ReArcVideoOverlayCallback callback, void* context);
++// action: 0 toggle play/pause, 1 next track, 2 previous track, 3 skip ad,
++// 4 toggle microphone, 5 toggle camera, 6 hang up, 7 back to tab (ends the
++// session; PiP phase 2 follows), 8 close, 9 close and pause, 10 play,
++// 11 pause, 12 mute, 13 unmute. Unknown overlay: not_found; not shown:
++// invalid_state.
++REARC_ENGINE_EXPORT ReArcStatus ReArcVideoOverlayAction(uint64_t overlay_id,
++                                                        uint32_t action);
++REARC_ENGINE_EXPORT ReArcStatus ReArcVideoOverlaySeek(uint64_t overlay_id,
++                                                      double seconds);
++// The view's rect in screen points (y down from the primary display's top).
++REARC_ENGINE_EXPORT ReArcStatus ReArcVideoOverlaySetBounds(uint64_t overlay_id,
++                                                           double x,
++                                                           double y,
++                                                           double width,
++                                                           double height);
++// Reads back the centre pixel of the view's composited output (the video
++// as the view shows it; tests, diagnostics). The callback runs once on the
++// main thread: OK with 0xRRGGBBAA, invalid_state when the session ends or the
++// view is not drawing, timeout after 5 s. Not shown: invalid_state, no call.
++typedef void (*ReArcVideoOverlayPixelCallback)(void* context,
++                                               ReArcStatus status,
++                                               uint32_t rgba);
++REARC_ENGINE_EXPORT ReArcStatus ReArcVideoOverlayReadPixel(
++    uint64_t overlay_id, ReArcVideoOverlayPixelCallback callback, void* context);
+ // Output is +1 malloc PNG, free with ReArcBufferFree. Bound to tab/profile.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcFaviconGet(uint64_t tab_id,
+                                                 const char* icon_ref,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 51707a50bf..3145ebc8ba 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -556,6 +556,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "devtools" ||
+          std::string(feature) == "client_certificates" ||
+          std::string(feature) == "key_equivalent_events" ||
++         std::string(feature) == "pip_embedded" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index fcaeb874c7..73027c60c0 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.44.0";
++  return "0.45.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_pip.cc b/chrome/browser/rearc_bridge/rearc_pip.cc
+index 99e49ad5ea..63742d54b3 100644
+--- a/chrome/browser/rearc_bridge/rearc_pip.cc
++++ b/chrome/browser/rearc_bridge/rearc_pip.cc
+@@ -31,6 +31,7 @@ class State : public content::WebContentsObserver,
+     event_ = {session ? session->profile_id() : 0, tab_id,
+               session ? session->content_generation() : 0, 0};
+   }
++  const ReArcPictureInPictureEvent& ids() const { return event_; }
+   bool TakeFocus() {
+     bool focus = focus_window_;
+     focus_window_ = false;
+@@ -102,6 +103,13 @@ bool TakeHostPictureInPictureFocus(uint64_t tab_id) {
+   state->Publish(2);
+   return true;
+ }
++bool HostPictureInPictureIds(content::WebContents* contents,
++                             ReArcPictureInPictureEvent* ids) {
++  auto* state = State::FromWebContents(contents);
++  if (!state || !state->ids().tab_id) return false;
++  *ids = state->ids();
++  return true;
++}
+ ReArcStatus SetHostPictureInPicture(uint64_t tab_id,
+                                     content::WebContents* contents,
+                                     bool active) {
+diff --git a/chrome/browser/rearc_bridge/rearc_pip.h b/chrome/browser/rearc_bridge/rearc_pip.h
+index ba1671c83f..7188bf38e4 100644
+--- a/chrome/browser/rearc_bridge/rearc_pip.h
++++ b/chrome/browser/rearc_bridge/rearc_pip.h
+@@ -19,5 +19,9 @@ bool TakeHostPictureInPictureFocus(uint64_t tab_id);
+ ReArcStatus SetHostPictureInPicture(uint64_t tab_id,
+                                     content::WebContents* contents,
+                                     bool active);
++// Wave 32 (pip_embedded): the registry IDs bound when the tab entered PiP;
++// false for a WebContents that never entered PiP through the bridge.
++bool HostPictureInPictureIds(content::WebContents* contents,
++                             ReArcPictureInPictureEvent* ids);
+ }  // namespace rearc
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 5e9f4c3544..aa3ff0fc3f 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -1170,6 +1170,17 @@ ReArcStatus ReArcEnginePauseAllMedia(void) {
+   }
+   return REARC_OK;
+ }
++ReArcStatus ReArcTabGetMediaActions(uint64_t id, uint32_t* actions) {
++  if (!actions) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  rearc::TabSession* s;
++  if (auto status = rearc::ABICheckTab(id, &s)) {
++    return status;
++  }
++  *actions = rearc::MediaActionBits(id);
++  return REARC_OK;
++}
+ ReArcStatus ReArcTabSetPictureInPicture(uint64_t id, bool active) {
+   rearc::TabSession* s;
+   if (auto status = rearc::ABICheckTab(id, &s)) {
+diff --git a/chrome/browser/rearc_bridge/rearc_video_overlay.h b/chrome/browser/rearc_bridge/rearc_video_overlay.h
+new file mode 100644
+index 0000000000..9c7c2e8d50
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_video_overlay.h
+@@ -0,0 +1,22 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_VIDEO_OVERLAY_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_VIDEO_OVERLAY_H_
++
++#include <memory>
++
++namespace content {
++class VideoOverlayWindow;
++class VideoPictureInPictureWindowController;
++}  // namespace content
++
++namespace rearc {
++// Wave 32 (pip_embedded): with a host video overlay callback set, a registry
++// tab's video PiP renders into an NSView handed to the host instead of
++// Chromium's floating window. nullptr keeps Chromium's window (tab/048).
++std::unique_ptr<content::VideoOverlayWindow> CreateHostVideoOverlay(
++    content::VideoPictureInPictureWindowController* controller);
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_VIDEO_OVERLAY_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_video_overlay.mm b/chrome/browser/rearc_bridge/rearc_video_overlay.mm
+new file mode 100644
+index 0000000000..88d3902542
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_video_overlay.mm
+@@ -0,0 +1,610 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_video_overlay.h"
++
++#import <Cocoa/Cocoa.h>
++#include <pthread.h>
++
++#include <algorithm>
++#include <cmath>
++#include <map>
++#include <optional>
++#include <string>
++#include <utility>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/ref_counted.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_pip.h"
++#include "components/viz/common/frame_sinks/copy_output_request.h"
++#include "components/viz/common/frame_sinks/copy_output_result.h"
++#include "components/viz/common/surfaces/surface_id.h"
++#include "content/public/browser/context_factory.h"
++#include "content/public/browser/overlay_window.h"
++#include "content/public/browser/video_picture_in_picture_window_controller.h"
++#include "content/public/browser/web_contents.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "third_party/skia/include/core/SkColor.h"
++#include "ui/accelerated_widget_mac/accelerated_widget_mac.h"
++#include "ui/accelerated_widget_mac/display_ca_layer_tree.h"
++#include "ui/compositor/compositor.h"
++#include "ui/compositor/layer_solid_color.h"
++#include "ui/compositor/layer_surface.h"
++#include "ui/compositor/recyclable_compositor_mac.h"
++#include "ui/display/display.h"
++#include "ui/display/screen.h"
++#include "ui/gfx/geometry/dip_util.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/mac/coordinate_conversion.h"
++
++namespace rearc {
++class HostVideoOverlay;
++}
++
++// The host-facing view: layer-hosting, so the compositor's CALayer tree is
++// its whole content. It takes no mouse events; the host's own views over it
++// handle clicks and hover.
++@interface ReArcVideoOverlayView : NSView {
++  raw_ptr<rearc::HostVideoOverlay> _owner;
++}
++- (instancetype)initWithOwner:(rearc::HostVideoOverlay*)owner;
++- (void)clearOwner;
++@end
++
++namespace rearc {
++namespace {
++ReArcVideoOverlayCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0;
++uint64_t next_overlay_id = 1;
++
++std::map<uint64_t, HostVideoOverlay*>& Overlays() {
++  static base::NoDestructor<std::map<uint64_t, HostVideoOverlay*>> overlays;
++  return *overlays;
++}
++}  // namespace
++
++class HostVideoOverlay : public content::VideoOverlayWindow,
++                         public ui::AcceleratedWidgetMacNSView {
++ public:
++  HostVideoOverlay(content::VideoPictureInPictureWindowController* controller,
++                   const ReArcPictureInPictureEvent& ids)
++      : controller_(controller), id_(next_overlay_id++) {
++    base_ = {ids.profile_id, ids.tab_id, ids.content_generation, id_};
++    view_ = [[ReArcVideoOverlayView alloc] initWithOwner:this];
++    CALayer* background = [CALayer layer];
++    background.backgroundColor = [[NSColor blackColor] CGColor];
++    tree_ = std::make_unique<ui::DisplayCALayerTree>(background);
++    [view_ setLayer:background];
++    [view_ setWantsLayer:YES];
++
++    compositor_ = std::make_unique<ui::RecyclableCompositorMac>(
++        content::GetContextFactory());
++    root_ = std::make_unique<ui::LayerSolidColor>();
++    root_->SetName("ReArcVideoOverlay:Root");
++    root_->SetColor(SkColors::kBlack);
++    video_ = std::make_unique<ui::LayerSurface>();
++    video_->SetName("ReArcVideoOverlay:Video");
++    video_->SetFallbackBackgroundColor(SkColors::kBlack);
++    root_->Add(video_.get());
++    compositor_->compositor()->SetRootLayer(root_.get());
++    compositor_->compositor()->SetBackgroundColor(SK_ColorBLACK);
++    compositor_->widget()->SetNSView(this);
++    Overlays()[id_] = this;
++
++    ReArcVideoOverlayEvent created = base_;
++    created.kind = 0;
++    Emit(created, /*with_view=*/true);
++  }
++
++  ~HostVideoOverlay() override {
++    Overlays().erase(id_);
++    UnregisterVideoSink();
++    [view_ clearOwner];
++    compositor_->widget()->ResetNSView();
++    compositor_->compositor()->SetRootLayer(nullptr);
++    compositor_.reset();
++    tree_.reset();
++    video_.reset();
++    root_.reset();
++    ReArcVideoOverlayEvent closed = base_;
++    closed.kind = 3;
++    Emit(closed);
++  }
++
++  // content::VideoOverlayWindow:
++  bool IsActive() const override { return false; }
++  // The controller also calls this when its WebContents goes away; the
++  // overlay itself is destroyed with the controller.
++  void Close() override { Hide(); }
++  void ShowInactive() override {
++    if (shown_) return;
++    shown_ = true;
++    first_frame_pending_ = true;
++    emitted_state_.reset();
++    StateChanged();
++    ReArcVideoOverlayEvent shown = base_;
++    shown.kind = 1;
++    Emit(shown);
++    UpdateGeometry();
++  }
++  void Hide() override {
++    if (!shown_) return;
++    shown_ = false;
++    UnregisterVideoSink();
++    UpdateGeometry();
++    ReArcVideoOverlayEvent hidden = base_;
++    hidden.kind = 2;
++    Emit(hidden);
++  }
++  bool IsVisible() const override { return shown_; }
++  gfx::Rect GetBounds() override { return bounds_; }
++  void UpdateNaturalSize(const gfx::Size& natural_size) override {
++    natural_size_ = natural_size;
++    LayoutVideo();
++    ReArcVideoOverlayEvent size = base_;
++    size.kind = 4;
++    size.width = natural_size.width();
++    size.height = natural_size.height();
++    Emit(size);
++  }
++  void SetPlaybackState(PlaybackState state) override {
++    state_.playback = state == kPlaying ? 0 : state == kPaused ? 1 : 2;
++    StateChanged();
++  }
++  void SetPlayPauseButtonVisibility(bool visible) override {
++    SetButton(REARC_VIDEO_OVERLAY_BUTTON_PLAY_PAUSE, visible);
++  }
++  void SetSkipAdButtonVisibility(bool visible) override {
++    SetButton(REARC_VIDEO_OVERLAY_BUTTON_SKIP_AD, visible);
++  }
++  void SetNextTrackButtonVisibility(bool visible) override {
++    SetButton(REARC_VIDEO_OVERLAY_BUTTON_NEXT_TRACK, visible);
++  }
++  void SetPreviousTrackButtonVisibility(bool visible) override {
++    SetButton(REARC_VIDEO_OVERLAY_BUTTON_PREVIOUS_TRACK, visible);
++  }
++  void SetHidePictureInPictureButtonVisibility(bool) override {}
++  void SetMicrophoneMuted(bool muted) override {
++    state_.microphone_muted = muted;
++    StateChanged();
++  }
++  void SetCameraState(bool on) override {
++    state_.camera_on = on;
++    StateChanged();
++  }
++  void SetMediaMuted(bool muted) override {
++    state_.muted = muted;
++    StateChanged();
++  }
++  void SetToggleMicrophoneButtonVisibility(bool visible) override {
++    SetButton(REARC_VIDEO_OVERLAY_BUTTON_MICROPHONE, visible);
++  }
++  void SetToggleCameraButtonVisibility(bool visible) override {
++    SetButton(REARC_VIDEO_OVERLAY_BUTTON_CAMERA, visible);
++  }
++  void SetHangUpButtonVisibility(bool visible) override {
++    SetButton(REARC_VIDEO_OVERLAY_BUTTON_HANG_UP, visible);
++  }
++  void SetNextSlideButtonVisibility(bool) override {}
++  void SetPreviousSlideButtonVisibility(bool) override {}
++  void SetMediaPosition(const media_session::MediaPosition& position) override {
++    ReArcVideoOverlayEvent event = base_;
++    event.kind = 6;
++    event.duration = position.duration().is_max()
++                         ? -1
++                         : position.duration().InSecondsF();
++    event.position = position.GetPosition().InSecondsF();
++    event.rate = position.playback_rate();
++    Emit(event);
++  }
++  void SetSourceTitle(const std::u16string& title) override {
++    ReArcVideoOverlayEvent event = base_;
++    event.kind = 7;
++    Emit(event, false, base::UTF16ToUTF8(title));
++  }
++  void SetFaviconImages(const std::vector<media_session::MediaImage>&) override {}
++  void SetSurfaceId(const viz::SurfaceId& surface_id) override {
++    UnregisterVideoSink();
++    compositor_->compositor()->AddChildFrameSink(surface_id.frame_sink_id());
++    registered_sink_ = surface_id.frame_sink_id();
++    surface_id_ = surface_id;
++    video_->SetShowSurface(surface_id_, video_->bounds().size(),
++                           cc::DeadlinePolicy::UseDefaultDeadline(),
++                           /*stretch_content_to_fill_bounds=*/true);
++  }
++  void SetPlaybackControlsVisibility(bool) override {}
++  void SetImmersiveVideoOptions(const content::ImmersiveOptions&) override {}
++
++  // ui::AcceleratedWidgetMacNSView:
++  void AcceleratedWidgetCALayerParamsUpdated(
++      gfx::CALayerParams params) override {
++    tree_->UpdateCALayerTree(std::move(params));
++    if (shown_ && first_frame_pending_ && surface_id_.is_valid()) {
++      first_frame_pending_ = false;
++      ReArcVideoOverlayEvent event = base_;
++      event.kind = 8;
++      Emit(event);
++    }
++  }
++
++  // The view moved, resized, changed scale or visibility.
++  void UpdateGeometry() {
++    NSWindow* window = [view_ window];
++    const NSSize size = [view_ bounds].size;
++    // Window visibility is not required: a host may order its window in after
++    // parenting the view, which no view notification reports. Hosts take the
++    // view out of windows they hide.
++    const bool drawing = shown_ && window &&
++                         ![view_ isHiddenOrHasHiddenAncestor] &&
++                         size.width >= 1 && size.height >= 1;
++    if (!drawing) {
++      if (!suspended_) {
++        compositor_->compositor()->SetVisible(false);
++        compositor_->Suspend();
++        suspended_ = true;
++      }
++      return;
++    }
++    const float scale = [window backingScaleFactor];
++    const display::Display display =
++        display::Screen::Get()->GetDisplayNearestView(gfx::NativeView(view_));
++    const gfx::Size dip(std::round(size.width), std::round(size.height));
++    compositor_->UpdateSurface(
++        gfx::ToRoundedSize(gfx::ConvertSizeToPixels(dip, scale)), scale,
++        display.GetColorSpaces(), display.id(), display.display_frequency());
++    root_->SetBounds(gfx::Rect(dip));
++    LayoutVideo();
++    if (suspended_) {
++      compositor_->compositor()->SetVisible(true);
++      compositor_->Unsuspend();
++      suspended_ = false;
++    }
++    // Hosts that do not report bounds still get a usable size.
++    if (!host_bounds_) {
++      NSRect screen =
++          [window convertRectToScreen:[view_ convertRect:[view_ bounds]
++                                                  toView:nil]];
++      SetScreenBounds(gfx::ScreenRectFromNSRect(screen), false);
++    }
++  }
++
++  void SetScreenBounds(const gfx::Rect& bounds, bool from_host) {
++    host_bounds_ = host_bounds_ || from_host;
++    if (bounds.IsEmpty() || bounds == bounds_) return;
++    bounds_ = bounds;
++    // Sizes the renderer's PiP video to the view (only while shown).
++    controller_->UpdateLayerBounds();
++  }
++
++  ReArcStatus Action(uint32_t action) {
++    if (action > 13) return REARC_INVALID_ARGUMENT;
++    if (!shown_) return REARC_INVALID_STATE;
++    using UiBehavior = PictureInPictureWindowManager::UiBehavior;
++    auto* manager = PictureInPictureWindowManager::GetInstance();
++    switch (action) {
++      case 0: controller_->TogglePlayPause(); break;
++      case 1: controller_->NextTrack(); break;
++      case 2: controller_->PreviousTrack(); break;
++      case 3: controller_->SkipAd(); break;
++      case 4: controller_->ToggleMicrophone(); break;
++      case 5: controller_->ToggleCamera(); break;
++      case 6: controller_->HangUp(); break;
++      case 7:
++        if (!manager->ExitPictureInPictureViaWindowUi(
++                UiBehavior::kCloseWindowAndFocusOpener)) {
++          controller_->CloseAndFocusInitiator();
++        }
++        break;
++      case 8:
++      case 9: {
++        const bool pause = action == 9;
++        if (!manager->ExitPictureInPictureViaWindowUi(
++                pause ? UiBehavior::kCloseWindowAndPauseVideo
++                      : UiBehavior::kCloseWindowOnly)) {
++          controller_->Close(pause);
++        }
++        break;
++      }
++      case 10: controller_->Play(); break;
++      case 11: controller_->Pause(); break;
++      case 12:
++      case 13: controller_->RequestMute(action == 12); break;
++    }
++    return REARC_OK;
++  }
++
++  ReArcStatus Seek(double seconds) {
++    if (!shown_) return REARC_INVALID_STATE;
++    if (!std::isfinite(seconds) || seconds < 0) return REARC_INVALID_ARGUMENT;
++    controller_->SeekTo(base::Seconds(seconds));
++    return REARC_OK;
++  }
++
++  bool shown() const { return shown_; }
++
++  // A copy of the composited view: what it shows, embedded video included.
++  ReArcStatus ReadPixel(ReArcVideoOverlayPixelCallback callback,
++                        void* context) {
++    if (!shown_ || suspended_) return REARC_INVALID_STATE;
++    struct Pending {
++      ReArcVideoOverlayPixelCallback callback;
++      uintptr_t context;  // The host's, passed back untouched.
++      bool done = false;
++      void Finish(ReArcStatus status, uint32_t rgba) {
++        if (done) return;
++        done = true;
++        callback(reinterpret_cast<void*>(context), status, rgba);
++      }
++    };
++    auto pending = base::MakeRefCounted<base::RefCountedData<Pending>>(
++        Pending{callback, reinterpret_cast<uintptr_t>(context)});
++    auto request = std::make_unique<viz::CopyOutputRequest>(
++        viz::CopyOutputRequest::ResultFormat::RGBA,
++        viz::CopyOutputRequest::ResultDestination::kSystemMemory,
++        base::BindOnce(
++            [](scoped_refptr<base::RefCountedData<Pending>> pending,
++               std::unique_ptr<viz::CopyOutputResult> result) {
++              if (!result || result->IsEmpty()) {
++                pending->data.Finish(REARC_INVALID_STATE, 0);
++                return;
++              }
++              auto access = result->ScopedAccessSkBitmap();
++              const SkBitmap& bitmap = access.bitmap();
++              if (bitmap.drawsNothing()) {
++                pending->data.Finish(REARC_INVALID_STATE, 0);
++                return;
++              }
++              const SkColor c =
++                  bitmap.getColor(bitmap.width() / 2, bitmap.height() / 2);
++              pending->data.Finish(
++                  REARC_OK, (uint32_t(SkColorGetR(c)) << 24) |
++                                (uint32_t(SkColorGetG(c)) << 16) |
++                                (uint32_t(SkColorGetB(c)) << 8) |
++                                SkColorGetA(c));
++            },
++            pending));
++    request->set_result_task_runner(
++        base::SingleThreadTaskRunner::GetCurrentDefault());
++    root_->RequestCopyOfOutput(std::move(request));
++    compositor_->compositor()->ScheduleFullRedraw();
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(
++            [](scoped_refptr<base::RefCountedData<Pending>> pending) {
++              pending->data.Finish(REARC_TIMEOUT, 0);
++            },
++            pending),
++        base::Seconds(5));
++    return REARC_OK;
++  }
++
++ private:
++  void SetButton(uint32_t bit, bool visible) {
++    state_.buttons = visible ? state_.buttons | bit : state_.buttons & ~bit;
++    StateChanged();
++  }
++  // One state event per task, however many setters ran in it.
++  void StateChanged() {
++    if (state_pending_) return;
++    state_pending_ = true;
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&HostVideoOverlay::FlushState,
++                                  weak_.GetWeakPtr()));
++  }
++  void FlushState() {
++    state_pending_ = false;
++    // Chromium re-sends the same state on most media session updates.
++    if (emitted_state_ && *emitted_state_ == state_) return;
++    emitted_state_ = state_;
++    ReArcVideoOverlayEvent event = base_;
++    event.kind = 5;
++    event.playback = state_.playback;
++    event.buttons = state_.buttons;
++    event.muted = state_.muted;
++    event.microphone_muted = state_.microphone_muted;
++    event.camera_on = state_.camera_on;
++    Emit(event);
++  }
++  // Aspect-fit inside the view, letterboxed in black.
++  void LayoutVideo() {
++    const gfx::Size area = root_->bounds().size();
++    gfx::Rect rect(area);
++    if (!natural_size_.IsEmpty() && !area.IsEmpty()) {
++      const double aspect =
++          double(natural_size_.width()) / natural_size_.height();
++      const double width = std::min<double>(area.width(), area.height() * aspect);
++      const double height = width / aspect;
++      rect = gfx::Rect(std::round((area.width() - width) / 2),
++                       std::round((area.height() - height) / 2),
++                       std::round(width), std::round(height));
++    }
++    video_->SetBounds(rect);
++    if (surface_id_.is_valid()) {
++      video_->SetSurfaceSize(rect.size());
++    }
++  }
++  void UnregisterVideoSink() {
++    if (registered_sink_.is_valid() && compositor_) {
++      compositor_->compositor()->RemoveChildFrameSink(registered_sink_);
++    }
++    registered_sink_ = viz::FrameSinkId();
++  }
++  void Emit(ReArcVideoOverlayEvent event,
++            bool with_view = false,
++            std::string title = std::string()) {
++    ABIPost(base::BindOnce(
++        [](uint64_t expected, ReArcVideoOverlayEvent event,
++           ReArcVideoOverlayView* view, std::string title) {
++          if (!host || expected != epoch) return;
++          if (view) {
++            event.view = const_cast<void*>(CFBridgingRetain(view));
++          }
++          event.title = title.c_str();
++          host(host_context, &event);
++        },
++        epoch, event, with_view ? view_ : nil, std::move(title)));
++  }
++
++  struct State {
++    uint32_t playback = 0, buttons = 0;
++    bool muted = false, microphone_muted = false, camera_on = false;
++    bool operator==(const State&) const = default;
++  };
++
++  const raw_ptr<content::VideoPictureInPictureWindowController> controller_;
++  const uint64_t id_;
++  ReArcVideoOverlayEvent base_{};
++  ReArcVideoOverlayView* __strong view_ = nil;
++  std::unique_ptr<ui::DisplayCALayerTree> tree_;
++  std::unique_ptr<ui::RecyclableCompositorMac> compositor_;
++  std::unique_ptr<ui::LayerSolidColor> root_;
++  std::unique_ptr<ui::LayerSurface> video_;
++  viz::SurfaceId surface_id_;
++  viz::FrameSinkId registered_sink_;
++  gfx::Size natural_size_;
++  gfx::Rect bounds_{0, 0, 320, 180};
++  State state_;
++  std::optional<State> emitted_state_;
++  bool shown_ = false, suspended_ = true, host_bounds_ = false;
++  bool first_frame_pending_ = false, state_pending_ = false;
++  base::WeakPtrFactory<HostVideoOverlay> weak_{this};
++};
++
++std::unique_ptr<content::VideoOverlayWindow> CreateHostVideoOverlay(
++    content::VideoPictureInPictureWindowController* controller) {
++  CHECK(pthread_main_np());
++  ReArcPictureInPictureEvent ids{};
++  if (!host || !controller->GetWebContents() ||
++      !HostPictureInPictureIds(controller->GetWebContents(), &ids)) {
++    return nullptr;
++  }
++  return std::make_unique<HostVideoOverlay>(controller, ids);
++}
++}  // namespace rearc
++
++@implementation ReArcVideoOverlayView
++- (instancetype)initWithOwner:(rearc::HostVideoOverlay*)owner {
++  if ((self = [super initWithFrame:NSMakeRect(0, 0, 320, 180)])) {
++    _owner = owner;
++  }
++  return self;
++}
++- (void)clearOwner {
++  _owner = nullptr;
++}
++- (BOOL)isFlipped {
++  return YES;
++}
++- (NSView*)hitTest:(NSPoint)point {
++  return nil;
++}
++- (void)viewDidMoveToWindow {
++  [super viewDidMoveToWindow];
++  NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
++  [center removeObserver:self];
++  if (NSWindow* window = [self window]) {
++    for (NSNotificationName name in @[
++           NSWindowDidChangeOcclusionStateNotification,
++           NSWindowDidChangeBackingPropertiesNotification,
++           NSWindowDidMoveNotification, NSWindowDidChangeScreenNotification
++         ]) {
++      [center addObserver:self
++                 selector:@selector(windowChanged:)
++                     name:name
++                   object:window];
++    }
++  }
++  [self geometryChanged];
++}
++- (void)windowChanged:(NSNotification*)notification {
++  [self geometryChanged];
++}
++- (void)setFrameSize:(NSSize)size {
++  [super setFrameSize:size];
++  [self geometryChanged];
++}
++- (void)viewDidHide {
++  [super viewDidHide];
++  [self geometryChanged];
++}
++- (void)viewDidUnhide {
++  [super viewDidUnhide];
++  [self geometryChanged];
++}
++- (void)dealloc {
++  [[NSNotificationCenter defaultCenter] removeObserver:self];
++}
++- (void)geometryChanged {
++  if (_owner) {
++    _owner->UpdateGeometry();
++  }
++}
++@end
++
++void ReArcEngineSetVideoOverlayCallback(ReArcVideoOverlayCallback callback,
++                                        void* context) {
++  CHECK(pthread_main_np());
++  // The replaced host can no longer show the video it was handed.
++  for (auto& [id, overlay] : rearc::Overlays()) {
++    if (overlay->shown()) {
++      rearc::ExitHostPictureInPicture();
++      break;
++    }
++  }
++  ++rearc::epoch;
++  rearc::host = callback;
++  rearc::host_context = context;
++}
++
++ReArcStatus ReArcVideoOverlayAction(uint64_t overlay_id, uint32_t action) {
++  CHECK(pthread_main_np());
++  auto it = rearc::Overlays().find(overlay_id);
++  return it == rearc::Overlays().end() ? REARC_NOT_FOUND
++                                       : it->second->Action(action);
++}
++
++ReArcStatus ReArcVideoOverlaySeek(uint64_t overlay_id, double seconds) {
++  CHECK(pthread_main_np());
++  auto it = rearc::Overlays().find(overlay_id);
++  return it == rearc::Overlays().end() ? REARC_NOT_FOUND
++                                       : it->second->Seek(seconds);
++}
++
++ReArcStatus ReArcVideoOverlaySetBounds(uint64_t overlay_id,
++                                       double x,
++                                       double y,
++                                       double width,
++                                       double height) {
++  CHECK(pthread_main_np());
++  auto it = rearc::Overlays().find(overlay_id);
++  if (it == rearc::Overlays().end()) return REARC_NOT_FOUND;
++  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(width) ||
++      !std::isfinite(height) || width < 1 || height < 1 || width > 16384 ||
++      height > 16384) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  it->second->SetScreenBounds(
++      gfx::Rect(std::round(x), std::round(y), std::round(width),
++                std::round(height)),
++      true);
++  return REARC_OK;
++}
++
++ReArcStatus ReArcVideoOverlayReadPixel(uint64_t overlay_id,
++                                      ReArcVideoOverlayPixelCallback callback,
++                                      void* context) {
++  CHECK(pthread_main_np());
++  if (!callback) return REARC_INVALID_ARGUMENT;
++  auto it = rearc::Overlays().find(overlay_id);
++  if (it == rearc::Overlays().end()) return REARC_NOT_FOUND;
++  return it->second->ReadPixel(callback, context);
++}
+-- 
+2.54.0 (Apple Git-157)
+

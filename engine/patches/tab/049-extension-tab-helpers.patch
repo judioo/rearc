@@ -1,0 +1,234 @@
+From 36b60ad909804668ca4cd9071724080bfa2a9771 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 13:45:17 +0400
+Subject: [PATCH] P-TAB-001 wave 18f: attach extension tab helpers to registry
+ tabs
+
+Give browser-less kTabContents tabs Chromium's extension tab helpers as TabHelpers attaches them: the extension view type, extensions::TabHelper (ScriptExecutor, ExtensionActionRunner, ActiveTabPermissionGranter), a SessionTabHelper without a SessionService delegate (extension tab IDs, no window session state) and WebNavigationTabObserver. ExtensionTabUtil::GetTabById resolves open registry tabs to contents only (no WindowController, TAB_INDEX_NONE), as it already does for prerendered tabs, so scripting.executeScript, tabs.sendMessage and webNavigation reach them. Registry tabs stay outside tabs.query/windows.*. ABI 1.31 / bridge 0.33.0 (extension_tab_helpers); build p78, native content script, runtime messaging with sender.tab, webNavigation, tabs.sendMessage, executeScript by tab ID and OTR non-injection pass with a local --load-extension fixture.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../browser/extensions/extension_tab_util.cc  | 15 +++++
+ .../rearc_bridge/browserless_tab_helpers.cc   | 61 +++++++++++++++++++
+ .../rearc_bridge/browserless_tab_helpers.h    | 13 ++++
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  9 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |  1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |  2 +-
+ 6 files changed, 99 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/extensions/extension_tab_util.cc b/chrome/browser/extensions/extension_tab_util.cc
+index dd919b9675..17dece6560 100644
+--- a/chrome/browser/extensions/extension_tab_util.cc
++++ b/chrome/browser/extensions/extension_tab_util.cc
+@@ -3,6 +3,9 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/extension_tab_util.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#endif
+ 
+ #include <stddef.h>
+ 
+@@ -672,6 +675,18 @@ bool ExtensionTabUtil::GetTabById(int tab_id,
+     }
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  // ReArc wave 18f: browser-less registry tabs have no WindowController either;
++  // like prerendered tabs below, they resolve to contents only.
++  if (WebContents* registry_contents = rearc::FindBrowserlessExtensionTab(
++          tab_id, profile, include_incognito)) {
++    if (out_contents) {
++      *out_contents = registry_contents;
++    }
++    return true;
++  }
++#endif
++
+   // Prerendering tab is not visible and it cannot be in `TabStripModel`, if the
+   // tab id exists as a prerendering tab, and the API will returns
+   // `api::tabs::TAB_INDEX_NONE` for `out_tab_index` and a valid `WebContents`.
+diff --git a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+index 48a21d3163..995429f95c 100644
+--- a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
++++ b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+@@ -9,6 +9,8 @@
+ #include <memory>
+ 
+ #include "base/check.h"
++#include "chrome/browser/extensions/api/web_navigation/web_navigation_tab_observer.h"  // nogncheck
++#include "chrome/browser/extensions/tab_helper.h"  // nogncheck
+ #include "chrome/browser/history/history_tab_helper.h"
+ #include "chrome/browser/password_manager/chrome_password_manager_client.h"
+ #include "chrome/browser/printing/printing_init.h"
+@@ -22,8 +24,12 @@
+ #include "components/find_in_page/find_tab_helper.h"
+ #include "components/zoom/zoom_controller.h"
+ #include "components/permissions/permission_request_manager.h"
++#include "components/sessions/content/session_tab_helper.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_user_data.h"
++#include "extensions/browser/extension_web_contents_observer.h"
++#include "extensions/browser/view_type_utils.h"
++#include "extensions/common/mojom/view_type.mojom.h"
+ 
+ namespace rearc {
+ namespace {
+@@ -87,6 +93,61 @@ void AttachBrowserlessTabHelpers(content::WebContents* contents) {
+   // Wave 18e: PDF generation for host printing. PrintViewManager's preview
+   // and system-dialog paths are routed to the host for registry tabs.
+   printing::InitializePrintingForWebContents(contents);
++
++  // Wave 18f: Chromium's extension tab helpers, as TabHelpers attaches them.
++  // Extension popups hosted as registry contents (kExtensionPopup) keep their
++  // view type and get no tab identity, like ExtensionViewHost contents.
++  if (extensions::GetViewType(contents) ==
++      extensions::mojom::ViewType::kInvalid) {
++    extensions::SetViewType(contents,
++                            extensions::mojom::ViewType::kTabContents);
++  }
++  if (extensions::GetViewType(contents) ==
++      extensions::mojom::ViewType::kTabContents) {
++    // The extension tab ID, without a SessionService delegate: registry tabs
++    // are not part of Chromium's window session state.
++    if (!sessions::SessionTabHelper::FromWebContents(contents)) {
++      sessions::SessionTabHelper::CreateForWebContents(
++          contents, sessions::SessionTabHelper::DelegateLookup());
++      if (auto* observer =
++              extensions::ExtensionWebContentsObserver::GetForWebContents(
++                  contents)) {
++        observer->ListenToWindowIdChangesFrom(
++            sessions::SessionTabHelper::FromWebContents(contents));
++      }
++    }
++    extensions::WebNavigationTabObserver::CreateForWebContents(contents);
++    extensions::TabHelper::CreateForWebContents(contents);
++  }
++}
++
++content::WebContents* FindBrowserlessExtensionTab(int extension_tab_id,
++                                                  Profile* profile,
++                                                  bool include_incognito) {
++  CHECK(pthread_main_np());
++  if (!profile) {
++    return nullptr;
++  }
++  auto& registry = TabRegistry::Get();
++  for (uint64_t id : registry.SessionIds()) {
++    TabSession* session = registry.FindSession(id);
++    if (!session || session->close_state() != TabSession::CloseState::kOpen) {
++      continue;
++    }
++    content::WebContents* contents = session->web_contents();
++    Profile* owner = Profile::FromBrowserContext(contents->GetBrowserContext());
++    if (owner != profile &&
++        !(include_incognito && profile->IsSameOrParent(owner))) {
++      continue;
++    }
++    if (extensions::GetViewType(contents) ==
++            extensions::mojom::ViewType::kTabContents &&
++        sessions::SessionTabHelper::IdForTab(contents).id() ==
++            extension_tab_id) {
++      return contents;
++    }
++  }
++  return nullptr;
+ }
+ 
+ bool IsBrowserlessTabContents(const content::WebContents* contents) {
+diff --git a/chrome/browser/rearc_bridge/browserless_tab_helpers.h b/chrome/browser/rearc_bridge/browserless_tab_helpers.h
+index 19e1825469..4dd2f99543 100644
+--- a/chrome/browser/rearc_bridge/browserless_tab_helpers.h
++++ b/chrome/browser/rearc_bridge/browserless_tab_helpers.h
+@@ -5,6 +5,8 @@
+ #ifndef CHROME_BROWSER_REARC_BRIDGE_BROWSERLESS_TAB_HELPERS_H_
+ #define CHROME_BROWSER_REARC_BRIDGE_BROWSERLESS_TAB_HELPERS_H_
+ 
++class Profile;
++
+ namespace content {
+ class WebContents;
+ }  // namespace content
+@@ -16,6 +18,9 @@ namespace rearc {
+ // (ContentAutofillDriverFactory), ChromePasswordManagerClient
+ // (ContentPasswordManagerDriverFactory), HistoryTabHelper for non-OTR
+ // profiles, FindTabHelper and the download NavigationMonitor observer.
++// Wave 18f adds the extension tab helpers (TabHelper, its ScriptExecutor,
++// ExtensionActionRunner and ActiveTabPermissionGranter, a SessionTabHelper
++// without SessionService, WebNavigationTabObserver) to kTabContents views.
+ // TabHelpers::AttachTabHelpers and TabFeatures are deliberately not used:
+ // both assume a TabStripModel/TabInterface and attach prompt UI helpers
+ // (PermissionRequestManager, ManagePasswordsUIController, TabDialogs) whose
+@@ -29,6 +34,14 @@ void AttachBrowserlessTabHelpers(content::WebContents* contents);
+ // as the browser-less equivalent. Main thread only.
+ bool IsBrowserlessTabContents(const content::WebContents* contents);
+ 
++// Wave 18f: the open registry tab whose extension tab ID (SessionTabHelper)
++// is `extension_tab_id`, in `profile` or, with `include_incognito`, one of
++// its off-the-record profiles. Registry tabs have no WindowController; callers
++// get contents only, as for Chromium's prerendered tabs. Main thread only.
++content::WebContents* FindBrowserlessExtensionTab(int extension_tab_id,
++                                                  Profile* profile,
++                                                  bool include_incognito);
++
+ }  // namespace rearc
+ 
+ #endif  // CHROME_BROWSER_REARC_BRIDGE_BROWSERLESS_TAB_HELPERS_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index c5098ef37d..4e78785b78 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 30, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 31, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -251,6 +251,13 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcAutocompleteStop(uint64_t profile_id);
+ // ChromePasswordManagerClient. Visits reach HistoryService/chrome://history;
+ // saved credentials fill and usage updates reach the password store. No
+ // save/update offers require the password_prompts callback (ABI 1.22).
++// ABI 1.31 (extension_tab_helpers): tabs also carry Chromium's extension tab
++// helpers (TabHelper: ScriptExecutor, ExtensionActionRunner, activeTab
++// granter; SessionTabHelper without SessionService; WebNavigationTabObserver),
++// so content scripts, runtime messaging, webNavigation and tab-ID based APIs
++// (scripting.executeScript, tabs.sendMessage, tabs.get) reach registry tabs.
++// Registry tabs belong to no extension window: tabs.query/windows.* do not
++// list them and extension APIs that need a window fail rather than opening one.
+ // IDs are engine allocated, never reused. Any live profile is admitted.
+ // space_id is a nonzero shell label. New tabs stage hidden; attach separately.
+ // null URL keeps the initial empty about:blank document without a synthetic
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index b49a8c3128..9348cf209a 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -544,6 +544,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "printing" ||
+          std::string(feature) == "page_drops" ||
+          std::string(feature) == "picture_in_picture" ||
++         std::string(feature) == "extension_tab_helpers" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index a9a9a329f3..af8ee2d838 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.32.0";
++  return "0.33.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,241 @@
+From 52406c2b9313c7d0a1a62c9050b5428d1836b91d Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Tue, 3 Nov 2026 14:26:42 +0400
+Subject: [PATCH] P-PROF-001 wave 16: open existing profile directories in
+ place
+
+Expose an additive directory-token API so a host can assign existing Default data to a shell profile without moving live databases. Validate exact disk spelling and reject symlinks asynchronously, preserve startup lifetime, coalesce initialized contexts and retain create-if-missing behavior under concurrent opens. Preserve ABI 1.10 layouts and advertise profile_directory in ABI 1.13.
+
+Last rebased: 2026-11-03 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/app/framework.exports                  |   1 +
+ chrome/app/framework.order                    |   1 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |   7 +-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  | 109 +++++++++++++++---
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ 5 files changed, 99 insertions(+), 21 deletions(-)
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 911e1f098c..8ade88261b 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -33,6 +33,7 @@ _ReArcEngineRun
+ _ReArcEngineShutdown
+ _ReArcEngineDefaultProfile
+ _ReArcProfileOpen
++_ReArcProfileOpenDirectory
+ _ReArcProfileCreateOffTheRecord
+ _ReArcProfileClose
+ _ReArcTabCreate
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 2eb3aa59f1..0917fa7061 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -40,6 +40,7 @@ _ReArcEngineRun
+ _ReArcEngineShutdown
+ _ReArcEngineDefaultProfile
+ _ReArcProfileOpen
++_ReArcProfileOpenDirectory
+ _ReArcProfileCreateOffTheRecord
+ _ReArcProfileClose
+ _ReArcTabCreate
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index e57494119f..9d2b13b488 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 12, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 13, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -120,6 +120,11 @@ typedef void (*ReArcProfileCallback)(void* context, ReArcStatus status,
+                                      uint64_t profile_id, bool off_the_record);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileOpen(
+     const char* name, ReArcProfileCallback completion, void* context);
++// Open an existing direct-child profile directory, e.g. "Default", in place.
++// Exact ASCII disk spelling; no paths/symlinks. Missing -> async not_found.
++// Reuses an already-open identity. The startup profile still cannot be closed.
++REARC_ENGINE_EXPORT ReArcStatus ReArcProfileOpenDirectory(
++    const char* directory, ReArcProfileCallback completion, void* context);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileCreateOffTheRecord(
+     uint64_t parent_id, ReArcProfileCallback completion, void* context);
+ // Sequential tab close, beforeunload veto restores availability. Close children
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 4704726fa8..1a65fdc8d7 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -16,6 +16,9 @@
+ #include <vector>
+ 
+ #include "base/check.h"
++#include "base/files/file_enumerator.h"
++#include "base/files/file_util.h"
++#include "base/task/thread_pool.h"
+ #include "base/functional/bind.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/no_destructor.h"
+@@ -219,7 +222,8 @@ void ReconcileWindow(uint64_t id) {
+     }
+   }
+ 
+-  void CompleteProfileOpen(std::string key, uint64_t id, bool otr) {
++  void CompleteProfileOpen(std::string key, uint64_t id, bool otr,
++                           ReArcStatus failure = REARC_INTERNAL) {
+     auto it = profile_opens.find(key);
+     if (it == profile_opens.end()) return;  // Shutdown cancelled this request.
+     auto requests = std::move(it->second);
+@@ -227,7 +231,7 @@ void CompleteProfileOpen(std::string key, uint64_t id, bool otr) {
+     for (const auto& request : requests) {
+       // Reentrant shutdown from an earlier coalesced callback cancels the rest.
+       const ReArcStatus status = stopping ? REARC_CANCELLED :
+-                                  id ? REARC_OK : REARC_INTERNAL;
++                                  id ? REARC_OK : failure;
+       request.callback(request.context, status, status ? 0 : id, otr);
+     }
+   }
+@@ -328,6 +332,72 @@ ReArcStatus Available() {
+   auto& a = ABI::Get();
+   return a.ready && !a.stopping ? REARC_OK : REARC_ENGINE_NOT_READY;
+ }
++ReArcStatus OpenBridgeProfileDirectory(std::string directory,
++                                      bool require_existing,
++                                      ReArcProfileCallback completion,
++                                      void* context) {
++  auto& a = ABI::Get();
++  if (a.closing_profile) return REARC_BUSY;
++  // Validation must not turn a concurrent create-if-missing open into failure.
++  const std::string key = require_existing ? "@directory-" + directory : directory;
++  auto& requests = a.profile_opens[key];
++  requests.push_back({completion, context});
++  if (requests.size() > 1) return REARC_OK;
++  auto path = g_browser_process->profile_manager()->user_data_dir()
++                  .AppendASCII(directory);
++  auto open = base::BindOnce(
++      [](std::string key, base::FilePath path, bool validated,
++         ReArcStatus status) {
++        auto& a = ABI::Get();
++        if (!a.profile_opens.contains(key)) return;
++        if (status != REARC_OK) {
++          ABIPost(base::BindOnce([](std::string key, ReArcStatus status) {
++            ABI::Get().CompleteProfileOpen(std::move(key), 0, false, status);
++          }, std::move(key), status));
++          return;
++        }
++        if (validated) {
++          auto requests = std::move(a.profile_opens.at(key));
++          a.profile_opens.erase(key);
++          for (const auto& request : requests) {
++            OpenBridgeProfileDirectory(path.BaseName().value(), false,
++                                       request.callback, request.context);
++          }
++          return;
++        }
++        g_browser_process->profile_manager()->CreateProfileAsync(
++            path, base::BindOnce([](std::string key, Profile* profile) {
++              if (!ABI::Get().profile_opens.contains(key)) return;
++              const bool supported = !profile || profile->IsRegularProfile();
++              if (profile && supported) RegisterBridgeProfile(profile, false);
++              ABIPost(base::BindOnce([](std::string key, uint64_t id,
++                                       ReArcStatus failure) {
++                ABI::Get().CompleteProfileOpen(std::move(key), id, false, failure);
++              }, std::move(key), profile && supported ? BridgeProfileId(profile) : 0,
++                 supported ? REARC_INTERNAL : REARC_UNSUPPORTED));
++            }, std::move(key)));
++      }, key, path, require_existing);
++  if (require_existing) {
++    base::ThreadPool::PostTaskAndReplyWithResult(
++        FROM_HERE, {base::MayBlock()},
++        base::BindOnce([](base::FilePath path) -> ReArcStatus {
++          // Exact on-disk spelling avoids duplicate contexts on case-folded disks.
++          base::FileEnumerator entries(path.DirName(), false,
++              base::FileEnumerator::FILES | base::FileEnumerator::DIRECTORIES |
++                  base::FileEnumerator::SHOW_SYM_LINKS);
++          for (auto entry = entries.Next(); !entry.empty(); entry = entries.Next()) {
++            if (entry.BaseName() != path.BaseName()) continue;
++            if (base::IsLink(entry)) return REARC_INVALID_ARGUMENT;
++            return base::DirectoryExists(entry) ? REARC_OK : REARC_NOT_FOUND;
++          }
++          return REARC_NOT_FOUND;
++        }, path), std::move(open));
++  } else {
++    std::move(open).Run(REARC_OK);
++  }
++  return REARC_OK;
++}
++
+ bool AllowedURL(const GURL& url) {
+   if (!url.is_valid()) {
+     return false;
+@@ -448,6 +518,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "navigation_extended" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
++         std::string(feature) == "profile_directory" ||
+          std::string(feature) == "profile_off_the_record" ||
+          rearc::ABIHasServiceFeature(feature);
+ }
+@@ -599,25 +670,25 @@ ReArcStatus ReArcProfileOpen(const char* name, ReArcProfileCallback completion,
+       !std::ranges::all_of(key, [](unsigned char c) {
+         return base::IsAsciiAlpha(c) || base::IsAsciiDigit(c) || c == '_' || c == '-';
+       })) return REARC_INVALID_ARGUMENT;
+-  auto& a = ABI::Get();
+-  if (a.closing_profile) return REARC_BUSY;
+-  auto& requests = a.profile_opens[key];
+-  requests.push_back({completion, context});
+-  if (requests.size() > 1) return REARC_OK;
+-  auto* manager = g_browser_process->profile_manager();
+   // Hex keys preserve case-sensitive identity on case-insensitive macOS disks.
+-  auto path = manager->user_data_dir().AppendASCII(
+-      "ReArcProfile-" + base::HexEncode(key));
+-  manager->CreateProfileAsync(path, base::BindOnce([](std::string key, Profile* p) {
+-    auto& a = ABI::Get();
+-    if (!a.profile_opens.contains(key)) return;
+-    if (p) rearc::RegisterBridgeProfile(p, false);
+-    rearc::ABIPost(base::BindOnce([](std::string key, uint64_t id) {
+-      ABI::Get().CompleteProfileOpen(std::move(key), id, false);
+-    }, std::move(key), p ? rearc::BridgeProfileId(p) : 0));
+-  }, std::move(key)));
+-  return REARC_OK;
++  return rearc::OpenBridgeProfileDirectory(
++      "ReArcProfile-" + base::HexEncode(key), false, completion, context);
+ }
++ReArcStatus ReArcProfileOpenDirectory(const char* name,
++    ReArcProfileCallback completion, void* context) {
++  if (auto status = rearc::Available()) return status;
++  if (!name || !completion) return REARC_INVALID_ARGUMENT;
++  std::string directory(name);
++  if (directory.empty() || directory.size() > 128 ||
++      directory.front() == ' ' || directory.back() == ' ' ||
++      !std::ranges::all_of(directory, [](unsigned char c) {
++        return base::IsAsciiAlpha(c) || base::IsAsciiDigit(c) || c == '_' ||
++               c == '-' || c == ' ';
++      })) return REARC_INVALID_ARGUMENT;
++  return rearc::OpenBridgeProfileDirectory(
++      std::move(directory), true, completion, context);
++}
++
+ ReArcStatus ReArcProfileCreateOffTheRecord(uint64_t parent_id,
+     ReArcProfileCallback completion, void* context) {
+   if (auto status = rearc::Available()) return status;
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 6bf0b99bf9..6a79e45658 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.14.0";
++  return "0.15.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+-- 
+2.54.0 (Apple Git-157)
+

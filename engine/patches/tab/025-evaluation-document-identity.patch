@@ -1,0 +1,268 @@
+From b97593bb6a9f29713b5ec32bb27448476280ca2b Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Mon, 2 Nov 2026 18:21:35 +0400
+Subject: [PATCH] P-TAB-001 wave 14: attach committed document identity to
+ evaluations
+
+Add EvaluateScript2 and GetDocumentIdentity while preserving the original evaluation callback. Capture profile/tab/content/document generation and committed navigation ID at acceptance, including on cancellation and errors. Advertise script_evaluation_identity in ABI 1.7.
+
+Last rebased: 2026-11-02 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/app/framework.exports                  |  2 +
+ chrome/app/framework.order                    |  2 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   | 24 ++++++-
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |  2 +-
+ .../rearc_bridge/rearc_services_abi.cc        | 71 ++++++++++++++-----
+ 5 files changed, 83 insertions(+), 18 deletions(-)
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index d0c960fd1f..492cf6bfca 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -64,4 +64,6 @@ _ReArcTabSetScripts
+ _ReArcTabRefreshStyles
+ _ReArcTabSetLinkPeek
+ _ReArcTabCaptureSnapshot
++_ReArcTabGetDocumentIdentity
++_ReArcTabEvaluateScript2
+ _ReArcTabEvaluateScript
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 6eec453ff6..bace7b453c 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -75,6 +75,8 @@ _ReArcTabSetScripts
+ _ReArcTabRefreshStyles
+ _ReArcTabSetLinkPeek
+ _ReArcTabCaptureSnapshot
++_ReArcTabGetDocumentIdentity
++_ReArcTabEvaluateScript2
+ _ReArcTabEvaluateScript
+ 
+ # _ChromeMain must be listed last.  That's the whole point of this file.
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 3a86136b1c..73990db521 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 6, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 7, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -302,6 +302,28 @@ ReArcTabEvaluateScript(uint64_t tab_id,
+                         ReArcScriptCallback completion,
+                         void* context);
+ 
++// Additive result API: original EvaluateScript/callback remains ABI 1.5.
++// document_generation starts at 1 and advances on each cross-document commit
++// (including reload/BFCache restore); navigation_id is the last primary commit
++// ID, also updated on same-document commits. Initial empty doc has nav ID 0.
++typedef struct ReArcDocumentIdentity {
++  uint64_t profile_id, tab_id, content_generation;
++  uint64_t document_generation, navigation_id;
++} ReArcDocumentIdentity;
++typedef struct ReArcScriptResult {
++  ReArcStatus status;
++  ReArcDocumentIdentity document;
++  const char* json;
++  const char* error_json;
++} ReArcScriptResult;
++typedef void (*ReArcScriptCallback2)(void* context,
++                                     const ReArcScriptResult* result);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetDocumentIdentity(
++    uint64_t tab_id, ReArcDocumentIdentity* identity);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabEvaluateScript2(
++    uint64_t tab_id, const char* source, uint32_t world, const char* boost_id,
++    uint32_t timeout_ms, ReArcScriptCallback2 completion, void* context);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 932cf8178c..a2847a5f98 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.8.0";
++  return "0.9.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 086b8c0481..3504b78dab 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -266,7 +266,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+     if (handle->IsInPrimaryMainFrame() && !handle->IsSameDocument()) {
+       ++document_epoch_;
+       contexts_.clear();
+-      if (evaluation_callback_) {
++      if (evaluation_busy()) {
+         FinishEvaluation(REARC_CANCELLED, {}, "navigation", "Document navigated");
+       }
+       // Snapshot results cannot cross documents even within one content gen.
+@@ -275,6 +275,15 @@ class PageServices : public content::DevToolsAgentHostClient,
+       }
+     }
+   }
++  void DidFinishNavigation(content::NavigationHandle* handle) override {
++    if (handle->IsInPrimaryMainFrame() && handle->HasCommitted()) {
++      navigation_id_ = static_cast<uint64_t>(handle->GetNavigationId());
++      if (!handle->IsSameDocument()) ++document_generation_;
++    }
++  }
++  ReArcDocumentIdentity document() const {
++    return {profile_id_, tab_id_, generation_, document_generation_, navigation_id_};
++  }
+   void WebContentsDestroyed() override {
+     CHECK(pthread_main_np());
+     if (attached_) {
+@@ -431,7 +440,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+   }
+   bool peek_busy() const { return peek_installing_; }
+ 
+-  bool evaluation_busy() const { return evaluation_callback_ != nullptr; }
++  bool evaluation_busy() const { return evaluation_callback_ || evaluation_callback2_; }
+   bool navigation_pending() const {
+     return web_contents()->GetController().GetPendingEntry() != nullptr;
+   }
+@@ -442,8 +451,10 @@ class PageServices : public content::DevToolsAgentHostClient,
+   }
+   void EvaluateScript(std::string source, std::string world,
+                       uint32_t timeout_ms, ReArcScriptCallback callback,
+-                      void* context) {
++                      void* context, ReArcScriptCallback2 callback2 = nullptr) {
+     evaluation_callback_ = callback;
++    evaluation_callback2_ = callback2;
++    evaluation_document_ = document();
+     evaluation_context_ = context;
+     const uint64_t request = ++evaluation_request_;
+     evaluation_timeout_.Start(
+@@ -558,7 +569,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+   void CancelPending(ReArcStatus status) {
+     // Callbacks can start follow-up commands; detached state rejects them.
+     attached_ = false;
+-    if (evaluation_callback_) {
++    if (evaluation_busy()) {
+       FinishEvaluation(status, {}, "closed", "Evaluation target closed");
+     }
+     auto pending = std::move(pending_);
+@@ -572,7 +583,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+     }
+   }
+   bool EvaluationCurrent(uint64_t request) const {
+-    return evaluation_callback_ && evaluation_request_ == request;
++    return evaluation_busy() && evaluation_request_ == request;
+   }
+   void RunEvaluation(uint64_t request, std::string source, int context_id) {
+     base::DictValue params;
+@@ -615,23 +626,30 @@ class PageServices : public content::DevToolsAgentHostClient,
+   void FinishEvaluation(ReArcStatus status, std::string json,
+                         std::string code, std::string message,
+                         base::DictValue details = {}) {
+-    if (!evaluation_callback_) return;
++    if (!evaluation_busy()) return;
+     evaluation_timeout_.Stop();
+     auto callback = evaluation_callback_;
++    auto callback2 = evaluation_callback2_;
+     evaluation_callback_ = nullptr;
++    evaluation_callback2_ = nullptr;
+     std::string error;
+     if (status) {
+       error = base::WriteJson(base::DictValue().Set("code", code)
+           .Set("message", message).Set("details", std::move(details))).value();
+     }
+     ABIPost(base::BindOnce(
+-        [](ReArcScriptCallback callback, void* context, ReArcStatus status,
+-           uint64_t tab, uint64_t generation, std::string json, std::string error) {
+-          callback(context, status, tab, generation, status ? nullptr : json.c_str(),
+-                   status ? error.c_str() : nullptr);
+-        }, callback, evaluation_context_.get(), status, tab_id_, generation_,
++        [](ReArcScriptCallback callback, ReArcScriptCallback2 callback2,
++           void* context, ReArcStatus status, ReArcDocumentIdentity document,
++           std::string json, std::string error) {
++          ReArcScriptResult result{status, document, status ? nullptr : json.c_str(),
++                                   status ? error.c_str() : nullptr};
++          if (callback2) callback2(context, &result);
++          else callback(context, status, document.tab_id, document.content_generation,
++                        result.json, result.error_json);
++        }, callback, callback2, evaluation_context_.get(), status, evaluation_document_,
+         std::move(json), std::move(error)));
+   }
++
+   void RemoveNextScript() {
+     if (script_ids_.empty()) {
+       scripts_.clear();
+@@ -886,6 +904,9 @@ class PageServices : public content::DevToolsAgentHostClient,
+   ReArcSnapshotCallback snapshot_callback_ = nullptr;
+   raw_ptr<void> snapshot_context_ = nullptr;
+   ReArcScriptCallback evaluation_callback_ = nullptr;
++  ReArcScriptCallback2 evaluation_callback2_ = nullptr;
++  ReArcDocumentIdentity evaluation_document_{};
++  uint64_t document_generation_ = 1, navigation_id_ = 0;
+   raw_ptr<void> evaluation_context_ = nullptr;
+   uint64_t evaluation_request_ = 0;
+   base::OneShotTimer evaluation_timeout_;
+@@ -938,7 +959,7 @@ bool ABIHasServiceFeature(const char* feature) {
+   return name == "media_session" || name == "media_metadata_snapshot" || name == "favicon" ||
+          name == "security_state" || name == "user_scripts" ||
+          name == "link_peek" || name == "snapshot_viewport" ||
+-         name == "snapshot_full_page" || name == "script_evaluation";
++         name == "snapshot_full_page" || name == "script_evaluation" || name == "script_evaluation_identity";
+ }
+ }  // namespace rearc
+ 
+@@ -1159,13 +1180,13 @@ ReArcStatus ReArcTabCaptureSnapshot(uint64_t id,
+   return REARC_OK;
+ }
+ 
+-ReArcStatus ReArcTabEvaluateScript(uint64_t id, const char* source,
++static ReArcStatus EvaluateScript(uint64_t id, const char* source,
+                                     uint32_t world, const char* boost_id,
+                                     uint32_t timeout_ms,
+                                     ReArcScriptCallback completion,
+-                                    void* context) {
++                                    void* context, ReArcScriptCallback2 callback2) {
+   CHECK(pthread_main_np());
+-  if (!source || !base::IsStringUTF8(source) || !completion || world > 1 ||
++  if (!source || !base::IsStringUTF8(source) || (!completion && !callback2) || world > 1 ||
+       !timeout_ms || timeout_ms > 30000 || (world == 1 && boost_id)) {
+     return REARC_INVALID_ARGUMENT;
+   }
+@@ -1181,6 +1202,24 @@ ReArcStatus ReArcTabEvaluateScript(uint64_t id, const char* source,
+   if (!page->evaluation_allowed()) return REARC_UNSUPPORTED;
+   if (page->evaluation_busy()) return REARC_BUSY;
+   page->EvaluateScript(source, world ? std::string() : "rearc.boost." + name,
+-                       timeout_ms, completion, context);
++                       timeout_ms, completion, context, callback2);
++  return REARC_OK;
++}
++
++ReArcStatus ReArcTabEvaluateScript(uint64_t id, const char* source, uint32_t world,
++    const char* boost, uint32_t timeout, ReArcScriptCallback callback, void* context) {
++  return EvaluateScript(id, source, world, boost, timeout, callback, context, nullptr);
++}
++ReArcStatus ReArcTabEvaluateScript2(uint64_t id, const char* source, uint32_t world,
++    const char* boost, uint32_t timeout, ReArcScriptCallback2 callback, void* context) {
++  return EvaluateScript(id, source, world, boost, timeout, nullptr, context, callback);
++}
++ReArcStatus ReArcTabGetDocumentIdentity(uint64_t id, ReArcDocumentIdentity* out) {
++  CHECK(pthread_main_np());
++  if (!out) return REARC_INVALID_ARGUMENT;
++  *out = {};
++  rearc::PageServices* page;
++  if (auto status = rearc::FindPage(id, &page)) return status;
++  *out = page->document();
+   return REARC_OK;
+ }
+-- 
+2.54.0 (Apple Git-157)
+

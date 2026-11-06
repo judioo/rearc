@@ -1,0 +1,123 @@
+From 164051a14bee079c10359349f9d757c08cb24fb4 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 10:39:16 +0400
+Subject: [PATCH] P-TAB-001 wave 18d: expose explicit download warning keep and
+ discard
+
+Preserve ABI 1.17 events/actions and add warning snapshots plus keep/discard forwarding to Chromium validation and removal. Insecure validation precedes dangerous validation, matching the downloads page. ABI 1.24 / bridge 0.26.0; build p66 and native dangerous-content keep/discard plus legacy downloads pass.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ .../rearc_bridge/rearc_downloads_abi.cc       | 34 +++++++++++++++++++
+ .../browser/rearc_bridge/rearc_engine_abi.h   | 17 +++++++++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |  1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |  2 +-
+ 4 files changed, 52 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/rearc_bridge/rearc_downloads_abi.cc b/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+index 9f1ed6af9a..51d2320928 100644
+--- a/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+@@ -302,3 +302,37 @@ ReArcStatus ReArcDownloadAction(uint64_t profile_id,
+   }
+   return REARC_INVALID_ARGUMENT;
+ }
++
++ReArcStatus ReArcDownloadGetWarning(uint64_t profile, uint32_t id,
++                                    ReArcDownloadWarning* warning) {
++  CHECK(pthread_main_np());
++  if (warning) *warning = {};
++  if (auto status = rearc::Available()) return status;
++  if (!warning) return REARC_INVALID_ARGUMENT;
++  auto it = rearc::Downloads().find(profile);
++  if (it == rearc::Downloads().end()) return REARC_PROFILE_NOT_FOUND;
++  auto* item = it->second->Find(id);
++  if (!item) return REARC_NOT_FOUND;
++  warning->danger_type = static_cast<uint32_t>(item->GetDangerType());
++  warning->insecure_status = static_cast<uint32_t>(item->GetInsecureDownloadStatus());
++  warning->is_dangerous = item->IsDangerous();
++  warning->is_insecure = item->IsInsecure();
++  return REARC_OK;
++}
++ReArcStatus ReArcDownloadResolveDanger(uint64_t profile, uint32_t id,
++                                       uint32_t action) {
++  CHECK(pthread_main_np());
++  if (auto status = rearc::Available()) return status;
++  if (action > 1) return REARC_INVALID_ARGUMENT;
++  auto it = rearc::Downloads().find(profile);
++  if (it == rearc::Downloads().end()) return REARC_PROFILE_NOT_FOUND;
++  auto* item = it->second->Find(id);
++  if (!item) return REARC_NOT_FOUND;
++  if (item->IsDone() || (!item->IsDangerous() && !item->IsInsecure()))
++    return REARC_INVALID_STATE;
++  // Validation/Remove can synchronously delete the item. Never access it again.
++  if (action == 1) item->Remove();
++  else if (item->IsInsecure()) item->ValidateInsecureDownload();
++  else item->ValidateDangerousDownload();
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index c344627f54..a392185de6 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 23, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 24, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -133,6 +133,21 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileCreateOffTheRecord(
+ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileClose(
+     uint64_t profile_id, bool force, ReArcCompletion completion, void* context);
+ 
++// Warning actions (dangerous_downloads, ABI 1.24). Existing download event
++// danger_type and actions 0..5 retain their ABI 1.17 meaning/layout.
++typedef struct ReArcDownloadWarning {
++  uint32_t danger_type, insecure_status;
++  bool is_dangerous, is_insecure;
++} ReArcDownloadWarning;
++REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadGetWarning(
++    uint64_t profile_id, uint32_t download_id, ReArcDownloadWarning* warning);
++// action: 0 keep, 1 discard. Only an unfinished dangerous/insecure item.
++// Keep validates insecure first, then danger on a subsequent explicit call if
++// still dangerous, exactly as chrome://downloads does. Discard removes the
++// item and its file through DownloadItem::Remove. No automatic opening.
++REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadResolveDanger(
++    uint64_t profile_id, uint32_t download_id, uint32_t action);
++
+ // HistoryService queries/deletions (history_query, ABI 1.23). No OTR access.
+ // Empty text returns recent unique URLs, newest first. UTF-8 <=4096 bytes;
+ // limit 1..1000. visit_time_us is microseconds since Unix epoch; visit_count
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 08ccb5e20b..5f15cd8564 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -528,6 +528,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "password_autofill" ||
+          std::string(feature) == "find_in_page" ||
+          std::string(feature) == "downloads" ||
++         std::string(feature) == "dangerous_downloads" ||
+          std::string(feature) == "javascript_dialogs" ||
+          std::string(feature) == "file_chooser" ||
+          std::string(feature) == "permission_prompts" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 5a47112f22..891ccb6b9d 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.25.0";
++  return "0.26.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+-- 
+2.54.0 (Apple Git-157)
+

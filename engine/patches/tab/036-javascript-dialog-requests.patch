@@ -1,0 +1,338 @@
+From 4c2fa8c0bde46fa6e2c4b2932f6fc3dec4617c7a Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 09:33:08 +0400
+Subject: [PATCH] P-TAB-001 wave 18c: route JavaScript dialogs to the host
+
+Use the per-WebContents JavaScriptDialogManager for alert, confirm, prompt and beforeunload. Add deferred request/cancel events, single-use responses, and navigation/frame/close cancellation. Preserve conservative fallback without a host. ABI 1.18 / bridge 0.20.0. Build p54 and native dialogs host pass; full wave gates are recorded in WAVE-18C-REPORT.md.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ .../browser/rearc_bridge/rearc_abi_internal.h |   1 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  23 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_javascript_dialog_manager.cc        | 180 ++++++++++++------
+ .../rearc_javascript_dialog_manager.h         |   4 +-
+ .../rearc_bridge/rearc_services_abi.cc        |   1 +
+ 7 files changed, 149 insertions(+), 63 deletions(-)
+
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 1dbaff9cc4..59a5cdefb0 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -24,6 +24,7 @@ bool ABIHasServiceFeature(const char* feature);
+ // Wave 18b find in page (rearc_find_abi.cc), driven by the services hooks.
+ void ABIAttachFind(uint64_t tab_id);
+ void ABIDetachFind(uint64_t tab_id);
++void ABICancelJavaScriptDialogs(uint64_t tab_id);
+ // Wave 18b downloads (rearc_downloads_abi.cc), per registered bridge profile.
+ void ABIAttachDownloads(Profile* profile, uint64_t profile_id);
+ void ABIDetachDownloads(uint64_t profile_id);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 047476f1af..74ff3a5925 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 17, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 18, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -441,6 +441,27 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadAction(uint64_t profile_id,
+                                                     uint32_t download_id,
+                                                     uint32_t action);
+ 
++// JavaScript dialogs (javascript_dialogs, ABI 1.18). Register before tabs.
++// phase: 0 request, 1 cancelled (navigation/close/replacement/unregistration).
++// kind: 0 alert, 1 confirm, 2 prompt, 3 beforeunload. Strings borrowed.
++// No callback: conservative cancel, including beforeunload veto.
++typedef struct ReArcJavaScriptDialogEvent {
++  uint64_t profile_id, tab_id, content_generation, request_id;
++  uint32_t phase, kind;
++  const char* message;
++  const char* default_text;
++  const char* origin;
++  bool is_reload;
++} ReArcJavaScriptDialogEvent;
++typedef void (*ReArcJavaScriptDialogCallback)(
++    void* context, const ReArcJavaScriptDialogEvent* event);
++REARC_ENGINE_EXPORT void ReArcEngineSetJavaScriptDialogCallback(
++    ReArcJavaScriptDialogCallback callback, void* context);
++// Single use; stale/cancelled IDs -> not_found. text null means empty;
++// UTF-8 <=64 KiB. Beforeunload accept continues, false vetoes.
++REARC_ENGINE_EXPORT ReArcStatus ReArcJavaScriptDialogRespond(
++    uint64_t request_id, bool accept, const char* text);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 44cfe3543d..b15301487d 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -526,6 +526,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "password_autofill" ||
+          std::string(feature) == "find_in_page" ||
+          std::string(feature) == "downloads" ||
++         std::string(feature) == "javascript_dialogs" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 0022d190d2..beb8bc11bd 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.19.0";
++  return "0.20.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.cc b/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.cc
+index df33274e1f..65764537ba 100644
+--- a/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.cc
++++ b/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.cc
+@@ -1,84 +1,146 @@
+ // Copyright 2026 The ReArc Authors
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+-
+ #include "chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h"
+-
+ #include <pthread.h>
+-
++#include <map>
+ #include <string>
+ #include <utility>
+-
+ #include "base/check.h"
+-#include "base/functional/callback.h"
+-#include "base/logging.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
+ #include "content/public/browser/javascript_dialog_manager.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/web_contents_observer.h"
+ #include "content/public/browser/web_contents_user_data.h"
+ 
+ namespace rearc {
+ namespace {
+-
+-class ReArcJavaScriptDialogManager
+-    : public content::JavaScriptDialogManager,
+-      public content::WebContentsUserData<ReArcJavaScriptDialogManager> {
++class DialogManager;
++ReArcJavaScriptDialogCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t host_epoch = 0, next_id = 1;
++auto& Pending() {
++  static base::NoDestructor<std::map<uint64_t, base::WeakPtr<DialogManager>>> map;
++  return *map;
++}
++class DialogManager : public content::JavaScriptDialogManager,
++                      public content::WebContentsObserver,
++                      public content::WebContentsUserData<DialogManager> {
+  public:
+-  ~ReArcJavaScriptDialogManager() override = default;
+-
+-  void RunJavaScriptDialog(content::WebContents* web_contents,
+-                           content::RenderFrameHost* render_frame_host,
+-                           content::JavaScriptDialogType dialog_type,
+-                           const std::u16string& message_text,
+-                           const std::u16string& default_prompt_text,
+-                           DialogClosedCallback callback,
+-                           bool* did_suppress_message) override {
+-    CHECK(pthread_main_np());
+-    // We complete the callback ourselves. Setting this true as well would
+-    // ask WebContentsImpl to fake a second response after we return.
+-    *did_suppress_message = false;
+-    std::move(callback).Run(false, std::u16string());
++  ~DialogManager() override { Cancel(); }
++  void RunJavaScriptDialog(content::WebContents*, content::RenderFrameHost* frame,
++      content::JavaScriptDialogType kind, const std::u16string& message,
++      const std::u16string& text, DialogClosedCallback callback,
++      bool* suppressed) override {
++    *suppressed = false;
++    Start(frame, static_cast<uint32_t>(kind), message, text, false, std::move(callback));
+   }
+-
+-  void RunBeforeUnloadDialog(content::WebContents* web_contents,
+-                             content::RenderFrameHost* render_frame_host,
+-                             bool is_reload,
+-                             DialogClosedCallback callback) override {
+-    CHECK(pthread_main_np());
+-    VLOG(1)
+-        << "rearc: beforeunload confirmation cancelled (native UI unavailable)";
+-    // false is the upstream dialog result for stay/cancel, including reload.
+-    // No session destruction or close reply here: S6 owns the close pipeline.
+-    std::move(callback).Run(false, std::u16string());
++  void RunBeforeUnloadDialog(content::WebContents*, content::RenderFrameHost* frame,
++      bool reload, DialogClosedCallback callback) override {
++    Start(frame, 3, u"", u"", reload, std::move(callback));
+   }
+-
+-  bool HandleJavaScriptDialog(content::WebContents* web_contents,
+-                              bool accept,
+-                              const std::u16string* prompt_override) override {
+-    CHECK(pthread_main_np());
+-    return false;
++  bool HandleJavaScriptDialog(content::WebContents*, bool accept,
++      const std::u16string* text) override {
++    if (!id_) return false;
++    Finish(accept, text ? *text : base::UTF8ToUTF16(text_));
++    return true;
+   }
+-
+-  void CancelDialogs(content::WebContents* web_contents,
+-                     bool reset_state) override {
+-    CHECK(pthread_main_np());
+-    // Every callback completes synchronously; no active or pending UI exists.
++  void CancelDialogs(content::WebContents*, bool) override { Cancel(); }
++  void DidStartNavigation(content::NavigationHandle* h) override {
++    if (h->IsInPrimaryMainFrame() && !h->IsSameDocument()) Cancel();
++  }
++  void RenderFrameDeleted(content::RenderFrameHost* frame) override {
++    if (id_ && frame->GetGlobalId() == frame_) Cancel();
++  }
++  void WebContentsDestroyed() override { Cancel(); }
++  void Cancel() {
++    if (!id_) return;
++    Publish(1);
++    Finish(false, u"");
++  }
++  void Finish(bool accept, const std::u16string& text) {
++    Pending().erase(id_);
++    id_ = 0;
++    auto callback = std::move(callback_);
++    // Clear identity before Chromium can reenter with the next request.
++    std::move(callback).Run(accept, text);
+   }
+-
+  private:
+-  friend class content::WebContentsUserData<ReArcJavaScriptDialogManager>;
+-  explicit ReArcJavaScriptDialogManager(content::WebContents* contents)
+-      : content::WebContentsUserData<ReArcJavaScriptDialogManager>(*contents) {}
++  friend class content::WebContentsUserData<DialogManager>;
++  explicit DialogManager(content::WebContents* c)
++      : content::WebContentsObserver(c), content::WebContentsUserData<DialogManager>(*c) {}
++  void Start(content::RenderFrameHost* frame, uint32_t kind,
++      const std::u16string& message, const std::u16string& text, bool reload,
++      DialogClosedCallback callback) {
++    CHECK(pthread_main_np());
++    Cancel();
++    TabSession* session = nullptr;
++    for (auto id : TabRegistry::Get().SessionIds()) {
++      auto* candidate = TabRegistry::Get().FindSession(id);
++      if (candidate->web_contents() == web_contents()) { session = candidate; break; }
++    }
++    if (!host || !session) { std::move(callback).Run(false, u""); return; }
++    id_ = next_id++;
++    event_ = {session->profile_id(), session->tab_id(), session->content_generation(),
++              id_, 0, kind, nullptr, nullptr, nullptr, reload};
++    message_ = base::UTF16ToUTF8(message);
++    text_ = base::UTF16ToUTF8(text);
++    origin_ = frame->GetLastCommittedOrigin().Serialize();
++    frame_ = frame->GetGlobalId();
++    callback_ = std::move(callback);
++    Pending().emplace(id_, weak_.GetWeakPtr());
++    Publish(0);
++  }
++  void Publish(uint32_t phase) {
++    auto event = event_; event.phase = phase;
++    ABIPost(base::BindOnce([](uint64_t epoch, ReArcJavaScriptDialogEvent e,
++        std::string message, std::string text, std::string origin) {
++      if (!host || epoch != host_epoch || (!e.phase && !Pending().contains(e.request_id))) return;
++      e.message = message.c_str(); e.default_text = text.c_str(); e.origin = origin.c_str();
++      host(host_context, &e);
++    }, host_epoch, event, message_, text_, origin_));
++  }
++  uint64_t id_ = 0;
++  ReArcJavaScriptDialogEvent event_{};
++  std::string message_, text_, origin_;
++  content::GlobalRenderFrameHostId frame_;
++  DialogClosedCallback callback_;
++  base::WeakPtrFactory<DialogManager> weak_{this};
+   WEB_CONTENTS_USER_DATA_KEY_DECL();
+ };
+-
+-WEB_CONTENTS_USER_DATA_KEY_IMPL(ReArcJavaScriptDialogManager);
+-
++WEB_CONTENTS_USER_DATA_KEY_IMPL(DialogManager);
+ }  // namespace
+-
+-content::JavaScriptDialogManager* GetReArcJavaScriptDialogManager(
+-    content::WebContents* web_contents) {
++content::JavaScriptDialogManager* GetReArcJavaScriptDialogManager(content::WebContents* c) {
+   CHECK(pthread_main_np());
+-  CHECK(web_contents);
+-  return ReArcJavaScriptDialogManager::GetOrCreateForWebContents(web_contents);
++  return DialogManager::GetOrCreateForWebContents(c);
++}
++void ABICancelJavaScriptDialogs(uint64_t tab) {
++  if (auto* s = TabRegistry::Get().FindSession(tab)) {
++    if (auto* m = DialogManager::FromWebContents(s->web_contents())) m->Cancel();
++  }
+ }
+-
+ }  // namespace rearc
++void ReArcEngineSetJavaScriptDialogCallback(ReArcJavaScriptDialogCallback cb, void* ctx) {
++  CHECK(pthread_main_np());
++  // A replacement must not inherit another host's outstanding requests.
++  auto pending = rearc::Pending();
++  for (auto& [id, manager] : pending) if (manager) manager->Cancel();
++  ++rearc::host_epoch;
++  rearc::host = cb; rearc::host_context = ctx;
++}
++ReArcStatus ReArcJavaScriptDialogRespond(uint64_t id, bool accept, const char* text) {
++  CHECK(pthread_main_np());
++  std::string value = text ? text : "";
++  if (value.size() > 65536 || !base::IsStringUTF8(value)) return REARC_INVALID_ARGUMENT;
++  auto it = rearc::Pending().find(id);
++  if (it == rearc::Pending().end() || !it->second) return REARC_NOT_FOUND;
++  it->second->Finish(accept, base::UTF8ToUTF16(value));
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h b/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h
+index a6f31c40ec..b3b12049f2 100644
+--- a/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h
++++ b/chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h
+@@ -12,8 +12,8 @@ class WebContents;
+ 
+ namespace rearc {
+ 
+-// UI-thread, per-WebContents manager. Dismisses ordinary dialogs and vetoes
+-// beforeunload prompts synchronously until native confirmation UI exists.
++// UI-thread, per-WebContents manager. Routes to the registered ABI host;
++// without one, dismisses ordinary dialogs and vetoes beforeunload.
+ content::JavaScriptDialogManager* GetReArcJavaScriptDialogManager(
+     content::WebContents* web_contents);
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index fea308205d..f806a6a341 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -1079,6 +1079,7 @@ void ABIAttachServices(uint64_t id) {
+ }
+ void ABIDetachServices(uint64_t id) {
+   CHECK(pthread_main_np());
++  ABICancelJavaScriptDialogs(id);
+   ABIDetachFind(id);
+   Pages().erase(id);
+ }
+-- 
+2.54.0 (Apple Git-157)
+

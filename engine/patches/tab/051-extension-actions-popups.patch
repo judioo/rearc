@@ -1,0 +1,756 @@
+From c734a32b963558fba51889f0157e7bab6c801b11 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 14:17:34 +0400
+Subject: [PATCH] P-TAB-001 wave 18f: expose extension actions and host action
+ popups
+
+Give the host the toolbar: per-tab snapshots of each enabled extension's action (title, badge text and colors, visibility, popup flag, wants-to-run and the icon at a requested scale through ExtensionActionIconFactory), change events from ExtensionActionDispatcher, ExtensionRegistry and icon loads, and a run call that is a toolbar click (ExtensionActionRunner::RunAction, granting activeTab). A popup is hosted as a new registry tab with view type kExtensionPopup in the extension's profile (spanning extensions use the original profile, as ExtensionViewHostFactory does): the shell attaches it like a tab, the renderer auto-resizes within Chromium's popup bounds and reports the size, and window.close() closes it. Popups record no history and get no tab identity. ABI 1.33 / bridge 0.35.0 (extension_actions); builds p81-p82, native list/badge/2x icon, activeTab onClicked scripting, popup attach/auto-resize/self-close and popup-tab rejection pass with local unpacked fixtures.
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/BUILD.gn                       |   2 +
+ .../rearc_bridge/browserless_tab_helpers.cc   |   7 +-
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  60 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_extension_actions.cc   | 486 ++++++++++++++++++
+ .../rearc_bridge/rearc_extension_actions.h    |  31 ++
+ .../rearc_bridge/rearc_profile_registry.cc    |   3 +
+ chrome/browser/rearc_bridge/tab_delegate.cc   |   6 +
+ chrome/browser/rearc_bridge/tab_delegate.h    |   3 +
+ 10 files changed, 597 insertions(+), 4 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_extension_actions.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_extension_actions.h
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index ea737787af..391707d0d9 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1499,6 +1499,8 @@ source_set("core") {
+       "rearc_bridge/rearc_pip.h",
+       "rearc_bridge/rearc_extension_prompts.cc",
+       "rearc_bridge/rearc_extension_prompts.h",
++      "rearc_bridge/rearc_extension_actions.cc",
++      "rearc_bridge/rearc_extension_actions.h",
+       "rearc_bridge/discard_adapter.cc",
+       "rearc_bridge/rearc_find_abi.cc",
+       "rearc_bridge/rearc_file_chooser.cc",
+diff --git a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+index 995429f95c..41adaa1d56 100644
+--- a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
++++ b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+@@ -84,8 +84,11 @@ void AttachBrowserlessTabHelpers(content::WebContents* contents) {
+     // usage bookkeeping and the store are Chromium's.
+     ChromePasswordManagerClient::CreateForWebContents(contents);
+   }
+-  // Stock policy: no history helper for off-the-record profiles.
+-  if (!profile->IsOffTheRecord()) {
++  // Stock policy: no history helper for off-the-record profiles, nor for
++  // extension popups (ExtensionViewHost contents record no history).
++  if (!profile->IsOffTheRecord() &&
++      extensions::GetViewType(contents) !=
++          extensions::mojom::ViewType::kExtensionPopup) {
+     HistoryTabHelper::GetOrCreateForWebContents(contents);
+   }
+   find_in_page::FindTabHelper::CreateForWebContents(contents);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 30c456d878..95ac64f0f3 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 32, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 33, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -820,6 +820,64 @@ REARC_ENGINE_EXPORT void ReArcEngineSetExtensionPromptCallback(
+ REARC_ENGINE_EXPORT ReArcStatus ReArcExtensionPromptRespond(
+     uint64_t request_id, uint32_t action);
+ 
++// Extension toolbar actions and popups (extension_actions, ABI 1.33). The host
++// draws the toolbar: one entry per enabled extension with an action
++// (browser/page/action key), in ExtensionRegistry order, for one tab (OTR tabs:
++// incognito-enabled extensions only). title/badge/visibility/popup are the
++// tab's values (chrome.action per-tab state). badge_*_color are SkColor ARGB;
++// 0 means unset (Chromium's defaults). visible=false: disabled for this tab.
++// wants_to_run: blocked scripts/requests await a click (site access on click).
++// icon_png: the action icon at `scale` (16 DIP), possibly Chromium's
++// placeholder until the extension's icon loads (a kind 0 event follows).
++typedef struct ReArcExtensionAction {
++  const char* extension_id;
++  const char* name;
++  const char* title;
++  const char* badge_text;
++  uint32_t badge_text_color, badge_background_color;
++  bool visible, has_popup, wants_to_run;
++  const uint8_t* icon_png;
++  size_t icon_png_size;
++} ReArcExtensionAction;
++typedef struct ReArcExtensionActionList {
++  uint64_t profile_id, tab_id, content_generation;
++  const ReArcExtensionAction* actions;
++  size_t count;
++} ReArcExtensionActionList;
++typedef void (*ReArcExtensionActionsCallback)(
++    void* context, ReArcStatus status, const ReArcExtensionActionList* list);
++// Snapshot at call time, delivered deferred and borrowed. scale 1..4.
++// Popup contents and other non-tab views: unsupported.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetExtensionActions(
++    uint64_t tab_id, double scale, ReArcExtensionActionsCallback completion,
++    void* context);
++// kind: 0 changed (tab_id 0: profile-wide default state or icon), 1 added,
++// 2 removed, 3 popup resized (tab_id owner, popup_tab_id, width/height DIP the
++// popup's renderer asks for, within Chromium's 25x25..800x600 popup bounds).
++// Re-query with ReArcTabGetExtensionActions; events carry no state.
++typedef struct ReArcExtensionActionEvent {
++  uint64_t profile_id, tab_id;
++  uint32_t kind;
++  const char* extension_id;
++  uint64_t popup_tab_id;
++  int32_t width, height;
++} ReArcExtensionActionEvent;
++typedef void (*ReArcExtensionActionCallback)(
++    void* context, const ReArcExtensionActionEvent* event);
++REARC_ENGINE_EXPORT void ReArcEngineSetExtensionActionCallback(
++    ReArcExtensionActionCallback callback, void* context);
++// A toolbar click on the action for tab_id. Grants activeTab (and runs
++// blocked actions) as Chromium's toolbar does. result: 0 handled by the
++// extension (action.onClicked, granted run), 1 popup: popup_tab_id is a new
++// registry tab (created event disposition 3 popup, opener tab_id) loading the
++// popup page with view type popup; attach/present/close it like a tab, size
++// it from kind 3 events; window.close() closes it (tab closed reason 1).
++// 2 side panel requested (unsupported; nothing is shown).
++// Not visible for this tab: invalid_state. Unknown/no action: not_found.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabRunExtensionAction(
++    uint64_t tab_id, const char* extension_id, uint32_t* result,
++    uint64_t* popup_tab_id);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index d8a3cabf1b..bda3688fbf 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -546,6 +546,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "picture_in_picture" ||
+          std::string(feature) == "extension_tab_helpers" ||
+          std::string(feature) == "extension_install_prompts" ||
++         std::string(feature) == "extension_actions" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 8450358278..15ba5a58ed 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.34.0";
++  return "0.35.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_actions.cc b/chrome/browser/rearc_bridge/rearc_extension_actions.cc
+new file mode 100644
+index 0000000000..5aa5dd8d74
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_extension_actions.cc
+@@ -0,0 +1,486 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_extension_actions.h"
++
++#include <pthread.h>
++
++#include <map>
++#include <memory>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "chrome/browser/extensions/extension_action_dispatcher.h"  // nogncheck
++#include "chrome/browser/extensions/extension_action_runner.h"  // nogncheck
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/rearc_bridge/ipc_tab_events.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/ui/extensions/extension_popup_types.h"  // nogncheck
++#include "components/crx_file/id_util.h"
++#include "components/sessions/content/session_tab_helper.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/site_instance.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "extensions/browser/extension_action.h"
++#include "extensions/browser/extension_action_icon_factory.h"
++#include "extensions/browser/extension_action_manager.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_registry_observer.h"
++#include "extensions/browser/extension_util.h"
++#include "extensions/browser/view_type_utils.h"
++#include "extensions/common/extension.h"
++#include "extensions/common/manifest_handlers/incognito_info.h"
++#include "extensions/common/mojom/view_type.mojom.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "ui/base/page_transition_types.h"
++#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/geometry/size.h"
++#include "ui/gfx/image/image.h"
++#include "ui/gfx/image/image_skia.h"
++#include "ui/gfx/image/image_skia_rep.h"
++
++namespace rearc {
++namespace {
++
++ReArcExtensionActionCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0;
++
++enum : uint32_t { kChanged = 0, kAdded = 1, kRemoved = 2, kPopupResized = 3 };
++
++void Post(uint32_t kind,
++          content::BrowserContext* context,
++          uint64_t tab_id,
++          const std::string& extension_id,
++          uint64_t popup_tab_id = 0,
++          int32_t width = 0,
++          int32_t height = 0) {
++  const uint64_t profile_id =
++      context ? BridgeProfileId(Profile::FromBrowserContext(context)) : 0;
++  if (!host || !profile_id) {
++    return;
++  }
++  ReArcExtensionActionEvent event{profile_id,   tab_id, kind,  nullptr,
++                                  popup_tab_id, width,  height};
++  ABIPost(base::BindOnce(
++      [](uint64_t expected, ReArcExtensionActionEvent e, std::string id) {
++        if (!host || expected != epoch) {
++          return;
++        }
++        e.extension_id = id.c_str();
++        host(host_context, &e);
++      },
++      epoch, event, extension_id));
++}
++
++TabSession* SessionFor(const content::WebContents* contents) {
++  for (uint64_t id : TabRegistry::Get().SessionIds()) {
++    TabSession* session = TabRegistry::Get().FindSession(id);
++    if (session && session->web_contents() == contents) {
++      return session;
++    }
++  }
++  return nullptr;
++}
++
++// One icon factory per (context, extension); a loaded or changed default icon
++// is a profile-wide change.
++class Icon : public extensions::ExtensionActionIconFactory::Observer {
++ public:
++  Icon(content::BrowserContext* context,
++       const extensions::Extension* extension,
++       extensions::ExtensionAction* action)
++      : context_(context),
++        extension_id_(extension->id()),
++        factory_(extension, action, this) {}
++  void OnIconUpdated() override {
++    Post(kChanged, context_, 0, extension_id_);
++  }
++  extensions::ExtensionActionIconFactory& factory() { return factory_; }
++
++ private:
++  raw_ptr<content::BrowserContext> context_;
++  std::string extension_id_;
++  extensions::ExtensionActionIconFactory factory_;
++};
++
++using IconKey = std::pair<content::BrowserContext*, std::string>;
++std::map<IconKey, std::unique_ptr<Icon>>& Icons() {
++  static base::NoDestructor<std::map<IconKey, std::unique_ptr<Icon>>> icons;
++  return *icons;
++}
++
++class Watcher : public extensions::ExtensionActionDispatcher::Observer,
++                public extensions::ExtensionRegistryObserver {
++ public:
++  static Watcher& Get() {
++    static base::NoDestructor<Watcher> watcher;
++    return *watcher;
++  }
++  void Attach(Profile* profile) {
++    if (auto* registry = extensions::ExtensionRegistry::Get(profile);
++        registry && !registries_[registry]++) {
++      registry->AddObserver(this);
++    }
++    if (auto* dispatcher = extensions::ExtensionActionDispatcher::Get(profile);
++        dispatcher && !dispatchers_[dispatcher]++) {
++      dispatcher->AddObserver(this);
++    }
++  }
++  void Detach(Profile* profile) {
++    if (auto* registry = extensions::ExtensionRegistry::Get(profile)) {
++      if (auto it = registries_.find(registry);
++          it != registries_.end() && !--it->second) {
++        registry->RemoveObserver(this);
++        registries_.erase(it);
++      }
++    }
++    if (auto* dispatcher =
++            extensions::ExtensionActionDispatcher::Get(profile)) {
++      if (auto it = dispatchers_.find(dispatcher);
++          it != dispatchers_.end() && !--it->second) {
++        dispatcher->RemoveObserver(this);
++        dispatchers_.erase(it);
++      }
++    }
++    std::erase_if(Icons(), [profile](const auto& entry) {
++      return entry.first.first == profile;
++    });
++  }
++
++  // ExtensionActionDispatcher::Observer:
++  void OnExtensionActionUpdated(extensions::ExtensionAction* action,
++                                content::WebContents* contents,
++                                content::BrowserContext* context) override {
++    TabSession* session = contents ? SessionFor(contents) : nullptr;
++    if (contents && !session) {
++      return;  // Not a registry tab.
++    }
++    Post(kChanged, context, session ? session->tab_id() : 0,
++         action->extension_id());
++  }
++  void OnShuttingDown() override {
++    for (auto& [dispatcher, count] : dispatchers_) {
++      dispatcher->RemoveObserver(this);
++    }
++    dispatchers_.clear();
++  }
++
++  // ExtensionRegistryObserver:
++  void OnExtensionLoaded(content::BrowserContext* context,
++                         const extensions::Extension* extension) override {
++    if (extensions::ExtensionActionManager::Get(context)->GetExtensionAction(
++            *extension)) {
++      Post(kAdded, context, 0, extension->id());
++    }
++  }
++  void OnExtensionUnloaded(content::BrowserContext* context,
++                           const extensions::Extension* extension,
++                           extensions::UnloadedExtensionReason) override {
++    std::erase_if(Icons(), [&](const auto& entry) {
++      return entry.first.second == extension->id();
++    });
++    Post(kRemoved, context, 0, extension->id());
++  }
++  void OnShutdown(extensions::ExtensionRegistry* registry) override {
++    registry->RemoveObserver(this);
++    registries_.erase(registry);
++    Icons().clear();
++  }
++
++ private:
++  friend class base::NoDestructor<Watcher>;
++  Watcher() = default;
++  std::map<extensions::ExtensionRegistry*, int> registries_;
++  std::map<extensions::ExtensionActionDispatcher*, int> dispatchers_;
++};
++
++// Hosted action popup: the registry contents' renderer sizes itself within
++// Chromium's popup bounds, as ExtensionViewHost popups do.
++class Popup : public content::WebContentsObserver,
++              public content::WebContentsUserData<Popup> {
++ public:
++  uint64_t owner_tab_id() const { return owner_tab_id_; }
++  const std::string& extension_id() const { return extension_id_; }
++
++  void RenderFrameCreated(content::RenderFrameHost* frame) override {
++    EnableAutoResize(frame);
++  }
++  void RenderFrameHostChanged(content::RenderFrameHost*,
++                              content::RenderFrameHost* frame) override {
++    EnableAutoResize(frame);
++  }
++
++ private:
++  friend class content::WebContentsUserData<Popup>;
++  Popup(content::WebContents* contents,
++        uint64_t owner_tab_id,
++        std::string extension_id)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<Popup>(*contents),
++        owner_tab_id_(owner_tab_id),
++        extension_id_(std::move(extension_id)) {}
++  void EnableAutoResize(content::RenderFrameHost* frame) {
++    if (frame && frame->IsInPrimaryMainFrame() && frame->GetView()) {
++      frame->GetView()->EnableAutoResize(extensions::kExtensionPopupMinSize,
++                                         extensions::kExtensionPopupMaxSize);
++    }
++  }
++  uint64_t owner_tab_id_;
++  std::string extension_id_;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(Popup);
++
++// Enabled extension with an action, visible to this (possibly OTR) context.
++const extensions::Extension* ActionExtension(content::BrowserContext* context,
++                                             const std::string& id,
++                                             extensions::ExtensionAction** out) {
++  const extensions::Extension* extension =
++      extensions::ExtensionRegistry::Get(context)->enabled_extensions().GetByID(
++          id);
++  if (!extension || (context->IsOffTheRecord() &&
++                     !extensions::util::IsIncognitoEnabled(id, context))) {
++    return nullptr;
++  }
++  *out = extensions::ExtensionActionManager::Get(context)->GetExtensionAction(
++      *extension);
++  return *out ? extension : nullptr;
++}
++
++std::vector<uint8_t> IconPng(content::BrowserContext* context,
++                             const extensions::Extension* extension,
++                             extensions::ExtensionAction* action,
++                             int tab_id,
++                             float scale) {
++  auto& icon = Icons()[{context, extension->id()}];
++  if (!icon) {
++    icon = std::make_unique<Icon>(context, extension, action);
++  }
++  gfx::Image image = icon->factory().GetIcon(tab_id);
++  if (image.IsEmpty()) {
++    return {};
++  }
++  const gfx::ImageSkiaRep& rep =
++      image.AsImageSkia().GetRepresentation(scale);
++  if (rep.is_null()) {
++    return {};
++  }
++  return gfx::PNGCodec::EncodeBGRASkBitmap(rep.GetBitmap(), false)
++      .value_or(std::vector<uint8_t>());
++}
++
++struct Entry {
++  std::string extension_id, name, title, badge;
++  uint32_t badge_text_color = 0, badge_background_color = 0;
++  bool visible = false, has_popup = false, wants_to_run = false;
++  std::vector<uint8_t> icon;
++};
++
++ReArcStatus CheckActionTab(uint64_t tab_id, TabSession** session) {
++  if (auto status = ABICheckTab(tab_id, session)) {
++    return status;
++  }
++  return extensions::GetViewType((*session)->web_contents()) ==
++                 extensions::mojom::ViewType::kTabContents
++             ? REARC_OK
++             : REARC_UNSUPPORTED;
++}
++
++}  // namespace
++
++void AttachExtensionActions(Profile* profile) {
++  CHECK(pthread_main_np());
++  Watcher::Get().Attach(profile);
++}
++
++void DetachExtensionActions(Profile* profile) {
++  CHECK(pthread_main_np());
++  Watcher::Get().Detach(profile);
++}
++
++void OnExtensionPopupResized(content::WebContents* contents,
++                             const gfx::Size& size) {
++  CHECK(pthread_main_np());
++  Popup* popup = Popup::FromWebContents(contents);
++  TabSession* session = SessionFor(contents);
++  if (!popup || !session) {
++    return;
++  }
++  Post(kPopupResized, contents->GetBrowserContext(), popup->owner_tab_id(),
++       popup->extension_id(), session->tab_id(), size.width(), size.height());
++}
++
++}  // namespace rearc
++
++void ReArcEngineSetExtensionActionCallback(ReArcExtensionActionCallback cb,
++                                           void* ctx) {
++  CHECK(pthread_main_np());
++  ++rearc::epoch;
++  rearc::host = cb;
++  rearc::host_context = ctx;
++}
++
++ReArcStatus ReArcTabGetExtensionActions(uint64_t tab_id,
++                                        double scale,
++                                        ReArcExtensionActionsCallback done,
++                                        void* ctx) {
++  CHECK(pthread_main_np());
++  rearc::TabSession* session;
++  if (auto status = rearc::CheckActionTab(tab_id, &session)) {
++    return status;
++  }
++  if (!done || !(scale >= 1 && scale <= 4)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  content::WebContents* contents = session->web_contents();
++  content::BrowserContext* context = contents->GetBrowserContext();
++  const int action_tab = sessions::SessionTabHelper::IdForTab(contents).id();
++  auto* runner = extensions::ExtensionActionRunner::GetForWebContents(contents);
++  std::vector<rearc::Entry> entries;
++  for (const auto& extension :
++       extensions::ExtensionRegistry::Get(context)->enabled_extensions()) {
++    extensions::ExtensionAction* action = nullptr;
++    if (!rearc::ActionExtension(context, extension->id(), &action)) {
++      continue;
++    }
++    rearc::Entry entry;
++    entry.extension_id = extension->id();
++    entry.name = extension->name();
++    entry.title = action->GetTitle(action_tab);
++    entry.badge = action->GetDisplayBadgeText(action_tab);
++    entry.badge_text_color = action->GetBadgeTextColor(action_tab);
++    entry.badge_background_color = action->GetBadgeBackgroundColor(action_tab);
++    entry.visible = action->GetIsVisible(action_tab);
++    entry.has_popup = action->HasPopup(action_tab);
++    entry.wants_to_run = runner && runner->WantsToRun(extension.get());
++    entry.icon = rearc::IconPng(context, extension.get(), action, action_tab,
++                                static_cast<float>(scale));
++    entries.push_back(std::move(entry));
++  }
++  rearc::ABIPost(base::BindOnce(
++      [](ReArcExtensionActionsCallback done, void* ctx, uint64_t profile_id,
++         uint64_t tab_id, uint64_t generation,
++         std::vector<rearc::Entry> entries) {
++        std::vector<ReArcExtensionAction> actions;
++        for (const auto& e : entries) {
++          actions.push_back({e.extension_id.c_str(), e.name.c_str(),
++                             e.title.c_str(), e.badge.c_str(),
++                             e.badge_text_color, e.badge_background_color,
++                             e.visible, e.has_popup, e.wants_to_run,
++                             e.icon.empty() ? nullptr : e.icon.data(),
++                             e.icon.size()});
++        }
++        ReArcExtensionActionList list{profile_id, tab_id, generation,
++                                      actions.empty() ? nullptr
++                                                      : actions.data(),
++                                      actions.size()};
++        done(ctx, REARC_OK, &list);
++      },
++      done, ctx, session->profile_id(), tab_id, session->content_generation(),
++      std::move(entries)));
++  return REARC_OK;
++}
++
++ReArcStatus ReArcTabRunExtensionAction(uint64_t tab_id,
++                                       const char* extension_id,
++                                       uint32_t* result,
++                                       uint64_t* popup_tab_id) {
++  CHECK(pthread_main_np());
++  if (result) {
++    *result = 0;
++  }
++  if (popup_tab_id) {
++    *popup_tab_id = 0;
++  }
++  rearc::TabSession* session;
++  if (auto status = rearc::CheckActionTab(tab_id, &session)) {
++    return status;
++  }
++  if (!result || !popup_tab_id || !extension_id ||
++      !crx_file::id_util::IdIsValid(extension_id)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  content::WebContents* contents = session->web_contents();
++  content::BrowserContext* context = contents->GetBrowserContext();
++  extensions::ExtensionAction* action = nullptr;
++  const extensions::Extension* extension =
++      rearc::ActionExtension(context, extension_id, &action);
++  if (!extension) {
++    return REARC_NOT_FOUND;
++  }
++  const int action_tab = sessions::SessionTabHelper::IdForTab(contents).id();
++  auto* runner = extensions::ExtensionActionRunner::GetForWebContents(contents);
++  if (!runner) {
++    return REARC_UNSUPPORTED;
++  }
++  if (!action->GetIsVisible(action_tab)) {
++    return REARC_INVALID_STATE;  // Disabled for this tab, as in the toolbar.
++  }
++  // Grants activeTab (and runs blocked actions) as a toolbar click does.
++  switch (runner->RunAction(extension, /*grant_tab_permissions=*/true)) {
++    case extensions::ExtensionAction::ShowAction::kNone:
++      return REARC_OK;
++    case extensions::ExtensionAction::ShowAction::kToggleSidePanel:
++      *result = 2;
++      return REARC_OK;
++    case extensions::ExtensionAction::ShowAction::kShowPopup:
++      break;
++  }
++  const GURL url = action->GetPopupUrl(action_tab);
++  Profile* profile = Profile::FromBrowserContext(context);
++  // Spanning-mode extensions run in the original profile, as
++  // ExtensionViewHostFactory's incognito popups do.
++  Profile* popup_profile =
++      profile->IsOffTheRecord() &&
++              !extensions::IncognitoInfo::IsSplitMode(extension)
++          ? profile->GetOriginalProfile()
++          : profile;
++  if (!url.is_valid() || !rearc::BridgeProfileId(popup_profile)) {
++    return REARC_INVALID_STATE;
++  }
++  content::WebContents::CreateParams params(
++      popup_profile, content::SiteInstance::CreateForURL(popup_profile, url));
++  params.initially_hidden = true;
++  std::unique_ptr<content::WebContents> popup =
++      content::WebContents::Create(params);
++  // Before adoption: helpers attach by view type (no tab identity/history).
++  extensions::SetViewType(popup.get(),
++                          extensions::mojom::ViewType::kExtensionPopup);
++  rearc::Popup::CreateForWebContents(popup.get(), tab_id, extension->id());
++  content::WebContents* raw = popup.get();
++  rearc::TabSession::CreateArgs args;
++  args.browser_context = popup_profile;
++  args.space_id = session->space_id();
++  args.order_index = session->order_index();
++  const uint64_t id = rearc::TabRegistry::Get().AdoptSession(args,
++                                                              std::move(popup));
++  rearc::TabEvent event;
++  event.kind = rearc::TabEventKind::kTabCreated;
++  event.tab_id = id;
++  event.space_id = args.space_id;
++  event.opener_tab_id = tab_id;
++  event.disposition = rearc::TabDisposition::kPopup;
++  event.url = url.spec();
++  rearc::EmitTabEvent(std::move(event));
++  if (!rearc::TabRegistry::Get().FindSession(id)) {
++    return REARC_INTERNAL;
++  }
++  rearc::ABIInitializeTab(id);
++  raw->GetController().LoadURL(url, content::Referrer(),
++                               ui::PAGE_TRANSITION_AUTO_TOPLEVEL,
++                               std::string());
++  *result = 1;
++  *popup_tab_id = id;
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_actions.h b/chrome/browser/rearc_bridge/rearc_extension_actions.h
+new file mode 100644
+index 0000000000..01bf271a83
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_extension_actions.h
+@@ -0,0 +1,31 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_ACTIONS_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_ACTIONS_H_
++
++class Profile;
++
++namespace content {
++class WebContents;
++}  // namespace content
++
++namespace gfx {
++class Size;
++}  // namespace gfx
++
++namespace rearc {
++
++// Wave 18f (extension_actions). Observes extension action state of every
++// registered bridge profile (ExtensionActionDispatcher, ExtensionRegistry,
++// action icon loads) and hosts action popups as registry contents with view
++// type kExtensionPopup. Main thread only.
++void AttachExtensionActions(Profile* profile);
++void DetachExtensionActions(Profile* profile);
++// From the registry tab delegate: a popup's renderer auto-resized.
++void OnExtensionPopupResized(content::WebContents* contents,
++                             const gfx::Size& size);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_ACTIONS_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_profile_registry.cc b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+index 653fb08647..5865002b04 100644
+--- a/chrome/browser/rearc_bridge/rearc_profile_registry.cc
++++ b/chrome/browser/rearc_bridge/rearc_profile_registry.cc
+@@ -14,6 +14,7 @@
+ #include "base/supports_user_data.h"
+ #include "chrome/browser/profiles/profile_destroyer.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_actions.h"
+ #include "base/no_destructor.h"
+ #include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+ #include "chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h"
+@@ -46,6 +47,7 @@ void RegisterBridgeProfile(Profile* profile, bool initial) {
+     default_id = id;
+   }
+   ABIAttachDownloads(profile, id);
++  AttachExtensionActions(profile);
+ }
+ void UnregisterBridgeProfile(Profile* profile) {
+   CHECK(pthread_main_np());
+@@ -53,6 +55,7 @@ void UnregisterBridgeProfile(Profile* profile) {
+   ABICancelHistory(BridgeProfileId(profile));
+   ABICancelSearch(BridgeProfileId(profile));
+   ABICancelExtensionPrompts(0, BridgeProfileId(profile));
++  DetachExtensionActions(profile);
+   ABIDetachDownloads(BridgeProfileId(profile));
+   if (BridgeProfileId(profile) == default_id) {
+     default_id = 0;
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 794ffb7483..8dfa38726f 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -7,6 +7,7 @@
+ #include "chrome/browser/rearc_bridge/rearc_drop_policy.h"
+ #include "chrome/browser/rearc_bridge/rearc_fullscreen.h"
+ #include "chrome/browser/rearc_bridge/rearc_pip.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_actions.h"
+ 
+ #include <utility>
+ 
+@@ -241,4 +242,9 @@ void ReArcTabDelegate::WebContentsCreated(
+   AttachBrowserlessTabHelpers(new_contents);
+ }
+ 
++void ReArcTabDelegate::ResizeDueToAutoResize(content::WebContents* source,
++                                             const gfx::Size& new_size) {
++  OnExtensionPopupResized(source, new_size);
++}
++
+ }  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.h b/chrome/browser/rearc_bridge/tab_delegate.h
+index ddf86c57b9..2cfb40b123 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.h
++++ b/chrome/browser/rearc_bridge/tab_delegate.h
+@@ -99,6 +99,9 @@ class ReArcTabDelegate : public content::WebContentsDelegate {
+   content::PictureInPictureResult EnterPictureInPicture(
+       content::WebContents* web_contents) override;
+   void ExitPictureInPicture() override;
++  // Wave 18f: hosted extension action popups size themselves.
++  void ResizeDueToAutoResize(content::WebContents* source,
++                             const gfx::Size& new_size) override;
+   // Wave 18b: attach browser-less helpers before the new contents navigates.
+   void WebContentsCreated(content::WebContents* source_contents,
+                           const content::GlobalRenderFrameHostId& opener_id,
+-- 
+2.54.0 (Apple Git-157)
+

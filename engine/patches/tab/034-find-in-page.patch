@@ -1,0 +1,450 @@
+From e45a33863de4392826069de8cde503f2473cf802 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Tue, 3 Nov 2026 16:22:23 +0400
+Subject: [PATCH] P-TAB-001 wave 18b: expose find in page over FindTabHelper
+
+Route WebContentsDelegate::FindReply to Chromium's FindTabHelper, as Browser does, and add a thin per-tab adapter that observes its results. ReArcTabFindStart always opens a new numbered session (match-case and forward options), ReArcTabFindNext moves forward or backward with wrap, and ReArcTabFindStop clears, keeps or activates the selection. Result events carry match count, active ordinal and the final flag. Every session ends with exactly one terminal event: navigated on a primary cross-document commit, closed before tab.closed, stopped, or replaced.
+
+Advertise find_in_page in ABI 1.16 / bridge 0.18.0 with additive symbols only and unchanged ABI 1.13/1.14 layouts. Build p52; the new native find host checks counts, ordinals, case, direction, invalid arguments and each terminal reason. All native hosts, G1-G5 and four stress processes / sixteen shutdown tabs pass in gates-tab034.log (a first run hit a load-induced evaluation timeout in the profiles host, kept as gates-tab034-fail1.log; the host passed on isolated reruns and the full rerun).
+
+Last rebased: 2026-11-03 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/browser/BUILD.gn                       |   1 +
+ .../browser/rearc_bridge/rearc_abi_internal.h |   3 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  32 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ chrome/browser/rearc_bridge/rearc_find_abi.cc | 253 ++++++++++++++++++
+ .../rearc_bridge/rearc_services_abi.cc        |   2 +
+ chrome/browser/rearc_bridge/tab_delegate.cc   |  14 +
+ chrome/browser/rearc_bridge/tab_delegate.h    |   7 +
+ 9 files changed, 313 insertions(+), 2 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_find_abi.cc
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index a7725fecbe..bf3536042d 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1486,6 +1486,7 @@ source_set("core") {
+     sources += [
+       "rearc_bridge/browserless_tab_helpers.cc",
+       "rearc_bridge/browserless_tab_helpers.h",
++      "rearc_bridge/rearc_find_abi.cc",
+     ]
+   }
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 203722fea1..1ccbdebe3c 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -20,5 +20,8 @@ void ABITabDestroyed(uint64_t profile_id);
+ void ABIAttachServices(uint64_t tab_id);
+ void ABIDetachServices(uint64_t tab_id);
+ bool ABIHasServiceFeature(const char* feature);
++// Wave 18b find in page (rearc_find_abi.cc), driven by the services hooks.
++void ABIAttachFind(uint64_t tab_id);
++void ABIDetachFind(uint64_t tab_id);
+ }  // namespace rearc
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 9ad91c6fb5..aef8a13de3 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 15, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 16, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -366,6 +366,36 @@ typedef void (*ReArcPageMessageCallback)(void* context,
+ REARC_ENGINE_EXPORT void ReArcEngineSetPageMessageCallback(
+     ReArcPageMessageCallback callback, void* context);
+ 
++// Find in page (find_in_page, ABI 1.16) over Chromium's FindTabHelper.
++// options: forward=1, match_case=2; text is 1..16384 bytes of UTF-8. Start
++// always begins a new session (ending an active one with reason replaced) and
++// returns its nonzero session_id. Next continues it (forward or previous,
++// wrapping). Result events (reason 0) carry match_count, 1-based
++// active_ordinal (0 none) and final_update; ignore non-current sessions.
++// Every session ends with exactly one terminal event: reason 1 navigated
++// (primary cross-document commit), 2 closed (before tab.closed), 3 stopped,
++// 4 replaced; terminal events are final with match_count/active_ordinal -1.
++// stop action: 0 clear selection, 1 keep selection, 2 activate selection.
++enum { REARC_FIND_FORWARD = 1, REARC_FIND_MATCH_CASE = 2 };
++typedef struct ReArcFindEvent {
++  uint64_t profile_id, tab_id, content_generation, session_id;
++  int32_t match_count, active_ordinal;
++  bool final_update;
++  uint32_t reason;
++} ReArcFindEvent;
++typedef void (*ReArcFindCallback)(void* context, const ReArcFindEvent* event);
++// Null disables delivery, including already queued events.
++REARC_ENGINE_EXPORT void ReArcEngineSetFindCallback(ReArcFindCallback callback,
++                                                     void* context);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabFindStart(uint64_t tab_id,
++                                                  const char* text,
++                                                  uint32_t options,
++                                                  uint64_t* session_id);
++// No active session: invalid_state.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabFindNext(uint64_t tab_id, bool forward);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabFindStop(uint64_t tab_id,
++                                                 uint32_t action);
++
+ #ifdef __cplusplus
+ }  // extern "C"
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index bb6bc658a9..b5e0f102b1 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -524,6 +524,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "webui_daily_pages" ||
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "password_autofill" ||
++         std::string(feature) == "find_in_page" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 8537462225..155115ec24 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.17.0";
++  return "0.18.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_find_abi.cc b/chrome/browser/rearc_bridge/rearc_find_abi.cc
+new file mode 100644
+index 0000000000..ba2775e6d8
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_find_abi.cc
+@@ -0,0 +1,253 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++// Wave 18b find in page: a thin adapter over Chromium's FindTabHelper. The
++// helper owns request/session filtering and the renderer protocol; the bridge
++// adds an ABI session ID and exactly one terminal event per session.
++
++#include <pthread.h>
++
++#include <map>
++#include <memory>
++#include <string>
++#include <utility>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/scoped_observation.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_engine_abi.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "components/find_in_page/find_notification_details.h"
++#include "components/find_in_page/find_result_observer.h"
++#include "components/find_in_page/find_tab_helper.h"
++#include "components/find_in_page/find_types.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++
++namespace rearc {
++namespace {
++
++ReArcFindCallback find_callback = nullptr;
++void* find_context = nullptr;
++uint64_t next_session_id = 1;
++constexpr size_t kMaxFindBytes = 16384;
++
++enum Reason : uint32_t {
++  kResult = 0,
++  kNavigated = 1,
++  kClosed = 2,
++  kStopped = 3,
++  kReplaced = 4,
++};
++
++void Publish(ReArcFindEvent event) {
++  ABIPost(base::BindOnce(
++      [](ReArcFindEvent e) {
++        CHECK(pthread_main_np());
++        if (find_callback) {
++          find_callback(find_context, &e);
++        }
++      },
++      event));
++}
++
++class FindSession : public content::WebContentsObserver,
++                    public find_in_page::FindResultObserver {
++ public:
++  explicit FindSession(TabSession& s)
++      : content::WebContentsObserver(s.web_contents()),
++        profile_id_(s.profile_id()),
++        tab_id_(s.tab_id()),
++        generation_(s.content_generation()) {
++    helper_ = find_in_page::FindTabHelper::FromWebContents(s.web_contents());
++    CHECK(helper_);  // Attached with every browser-less tab (wave 18b A).
++    observation_.Observe(helper_);
++  }
++  ~FindSession() override { End(kClosed, find_in_page::SelectionAction::kClear); }
++
++  bool active() const { return session_id_ != 0; }
++  find_in_page::FindTabHelper* helper() const { return helper_; }
++
++  uint64_t Start(std::u16string text, bool forward, bool match_case) {
++    End(kReplaced, find_in_page::SelectionAction::kKeep);
++    session_id_ = next_session_id++;
++    text_ = std::move(text);
++    match_case_ = match_case;
++    // A prior StopFinding marks the helper aborted, so this is a new session.
++    helper_->StartFinding(text_, forward, match_case_, /*find_match=*/true);
++    return session_id_;
++  }
++  void Next(bool forward) {
++    helper_->StartFinding(text_, forward, match_case_, /*find_match=*/true);
++  }
++  void Stop(find_in_page::SelectionAction action) { End(kStopped, action); }
++
++  // find_in_page::FindResultObserver:
++  void OnFindResultAvailable(content::WebContents*) override {
++    if (!active()) {
++      return;
++    }
++    const auto& result = helper_->find_result();
++    Publish(Event(kResult, result.number_of_matches(),
++                  result.active_match_ordinal(), result.final_update()));
++  }
++  void OnFindTabHelperDestroyed(find_in_page::FindTabHelper*) override {
++    observation_.Reset();
++    helper_ = nullptr;
++    if (active()) {
++      Publish(Event(kClosed, -1, -1, true));
++      session_id_ = 0;
++    }
++  }
++
++  // content::WebContentsObserver:
++  void DidFinishNavigation(content::NavigationHandle* handle) override {
++    // Like Chromium's find bar: a new primary document ends the session.
++    if (handle->IsInPrimaryMainFrame() && handle->HasCommitted() &&
++        !handle->IsSameDocument()) {
++      End(kNavigated, find_in_page::SelectionAction::kClear);
++    }
++  }
++
++ private:
++  ReArcFindEvent Event(uint32_t reason, int matches, int ordinal, bool final) {
++    ReArcFindEvent e{};
++    e.profile_id = profile_id_;
++    e.tab_id = tab_id_;
++    e.content_generation = generation_;
++    e.session_id = session_id_;
++    e.match_count = matches;
++    e.active_ordinal = ordinal;
++    e.final_update = final;
++    e.reason = reason;
++    return e;
++  }
++  void End(uint32_t reason, find_in_page::SelectionAction action) {
++    if (!active()) {
++      return;
++    }
++    // Terminal event first: StopFinding resets the helper's last result.
++    Publish(Event(reason, -1, -1, true));
++    session_id_ = 0;
++    if (helper_) {
++      helper_->StopFinding(action);
++    }
++  }
++
++  const uint64_t profile_id_, tab_id_, generation_;
++  raw_ptr<find_in_page::FindTabHelper> helper_ = nullptr;
++  base::ScopedObservation<find_in_page::FindTabHelper,
++                          find_in_page::FindResultObserver>
++      observation_{this};
++  uint64_t session_id_ = 0;
++  std::u16string text_;
++  bool match_case_ = false;
++};
++
++auto& Finds() {
++  static base::NoDestructor<std::map<uint64_t, std::unique_ptr<FindSession>>>
++      finds;
++  return *finds;
++}
++
++ReArcStatus FindTab(uint64_t id, FindSession** find) {
++  TabSession* s;
++  if (auto status = ABICheckTab(id, &s)) {
++    return status;
++  }
++  auto it = Finds().find(id);
++  if (it == Finds().end() || !it->second->helper()) {
++    return REARC_UNSUPPORTED;
++  }
++  *find = it->second.get();
++  return REARC_OK;
++}
++
++}  // namespace
++
++void ABIAttachFind(uint64_t id) {
++  CHECK(pthread_main_np());
++  auto* s = TabRegistry::Get().FindSession(id);
++  if (s && find_in_page::FindTabHelper::FromWebContents(s->web_contents())) {
++    Finds().emplace(id, std::make_unique<FindSession>(*s));
++  }
++}
++void ABIDetachFind(uint64_t id) {
++  CHECK(pthread_main_np());
++  // Destruction delivers a close terminal event for an active session.
++  Finds().erase(id);
++}
++
++}  // namespace rearc
++
++void ReArcEngineSetFindCallback(ReArcFindCallback callback, void* context) {
++  CHECK(pthread_main_np());
++  rearc::find_callback = callback;
++  rearc::find_context = context;
++}
++ReArcStatus ReArcTabFindStart(uint64_t id, const char* text, uint32_t options,
++                              uint64_t* session_id) {
++  if (session_id) {
++    *session_id = 0;
++  }
++  rearc::FindSession* find;
++  if (auto status = rearc::FindTab(id, &find)) {
++    return status;
++  }
++  if (!text || !session_id || (options & ~uint32_t{REARC_FIND_FORWARD | REARC_FIND_MATCH_CASE})) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  const std::string value(text);
++  if (value.empty() || value.size() > rearc::kMaxFindBytes ||
++      !base::IsStringUTF8(value)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  *session_id = find->Start(base::UTF8ToUTF16(value),
++                            options & REARC_FIND_FORWARD,
++                            options & REARC_FIND_MATCH_CASE);
++  return REARC_OK;
++}
++ReArcStatus ReArcTabFindNext(uint64_t id, bool forward) {
++  rearc::FindSession* find;
++  if (auto status = rearc::FindTab(id, &find)) {
++    return status;
++  }
++  if (!find->active()) {
++    return REARC_INVALID_STATE;
++  }
++  find->Next(forward);
++  return REARC_OK;
++}
++ReArcStatus ReArcTabFindStop(uint64_t id, uint32_t action) {
++  rearc::FindSession* find;
++  if (auto status = rearc::FindTab(id, &find)) {
++    return status;
++  }
++  find_in_page::SelectionAction selection;
++  switch (action) {
++    case 0:
++      selection = find_in_page::SelectionAction::kClear;
++      break;
++    case 1:
++      selection = find_in_page::SelectionAction::kKeep;
++      break;
++    case 2:
++      selection = find_in_page::SelectionAction::kActivate;
++      break;
++    default:
++      return REARC_INVALID_ARGUMENT;
++  }
++  if (!find->active()) {
++    return REARC_INVALID_STATE;
++  }
++  find->Stop(selection);
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index bccd791f4c..fea308205d 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -1075,9 +1075,11 @@ void ABIAttachServices(uint64_t id) {
+   AttachMediaAdapter(id);
+   AttachSecurityAdapter(id);
+   Pages().emplace(id, std::make_unique<PageServices>(*s));
++  ABIAttachFind(id);
+ }
+ void ABIDetachServices(uint64_t id) {
+   CHECK(pthread_main_np());
++  ABIDetachFind(id);
+   Pages().erase(id);
+ }
+ bool ABIHasServiceFeature(const char* feature) {
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 13179e5afa..28fbd555b6 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -12,6 +12,7 @@
+ #include "chrome/browser/rearc_bridge/close_controller.h"
+ #include "chrome/browser/rearc_bridge/rearc_javascript_dialog_manager.h"
+ #include "chrome/browser/rearc_bridge/tab_adoption.h"
++#include "components/find_in_page/find_tab_helper.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
+ #include "content/public/browser/web_contents.h"
+@@ -130,6 +131,19 @@ ReArcTabDelegate::GetJavaScriptDialogManager(content::WebContents* source) {
+   return GetReArcJavaScriptDialogManager(source);
+ }
+ 
++void ReArcTabDelegate::FindReply(content::WebContents* web_contents,
++                                 int request_id,
++                                 int number_of_matches,
++                                 const gfx::Rect& selection_rect,
++                                 int active_match_ordinal,
++                                 bool final_update) {
++  if (auto* helper =
++          find_in_page::FindTabHelper::FromWebContents(web_contents)) {
++    helper->HandleFindReply(request_id, number_of_matches, selection_rect,
++                            active_match_ordinal, final_update);
++  }
++}
++
+ void ReArcTabDelegate::WebContentsCreated(
+     content::WebContents* source_contents,
+     const content::GlobalRenderFrameHostId& opener_id,
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.h b/chrome/browser/rearc_bridge/tab_delegate.h
+index c43aa4a8b0..7e96abe959 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.h
++++ b/chrome/browser/rearc_bridge/tab_delegate.h
+@@ -64,6 +64,13 @@ class ReArcTabDelegate : public content::WebContentsDelegate {
+   bool TakeFocus(content::WebContents* source, bool reverse) override;
+   content::JavaScriptDialogManager* GetJavaScriptDialogManager(
+       content::WebContents* source) override;
++  // Wave 18b: Browser::FindReply's routing to Chromium's FindTabHelper.
++  void FindReply(content::WebContents* web_contents,
++                 int request_id,
++                 int number_of_matches,
++                 const gfx::Rect& selection_rect,
++                 int active_match_ordinal,
++                 bool final_update) override;
+   // Wave 18b: attach browser-less helpers before the new contents navigates.
+   void WebContentsCreated(content::WebContents* source_contents,
+                           const content::GlobalRenderFrameHostId& opener_id,

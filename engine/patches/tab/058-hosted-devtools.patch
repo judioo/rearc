@@ -1,0 +1,685 @@
+From a95beb7f315fc024abcf71af294b7a4f676a3c18 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Wed, 4 Nov 2026 16:59:21 +0400
+Subject: [PATCH] P-TAB-001 wave 18h: host DevTools as registry tabs
+
+Own a bundled DevTools frontend in the tab registry, with restricted UI bindings, target attachment, URL admission and independent close semantics. ABI 1.40 / bridge 0.42.0 (devtools).
+
+Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/app/framework.exports                  |   1 +
+ chrome/app/framework.order                    |   1 +
+ chrome/browser/BUILD.gn                       |   2 +
+ .../browser/chrome_content_browser_client.cc  |  10 +
+ .../chrome_devtools_manager_delegate.cc       |   8 +
+ .../browser/devtools/devtools_ui_bindings.cc  |  72 ++++++-
+ .../browser/devtools/devtools_ui_bindings.h   |   9 +-
+ .../rearc_bridge/browserless_tab_helpers.cc   |   4 +-
+ .../browser/rearc_bridge/close_controller.cc  |   3 +-
+ .../browser/rearc_bridge/discard_adapter.cc   |   2 +
+ chrome/browser/rearc_bridge/rearc_devtools.cc | 187 ++++++++++++++++++
+ chrome/browser/rearc_bridge/rearc_devtools.h  |  16 ++
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  10 +-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ chrome/browser/rearc_bridge/tab_delegate.cc   |   6 +
+ .../browser/ui/webui/devtools/devtools_ui.cc  |   7 +
+ 17 files changed, 334 insertions(+), 7 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_devtools.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_devtools.h
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 8ade88261b..1b0004eccf 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -28,6 +28,7 @@ _ReArcEngineABIMinorVersion
+ _ReArcEngineVersion
+ _ReArcEngineHasFeature
+ _ReArcStatusName
++_ReArcTabOpenDevTools
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 0917fa7061..c93b467a5d 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -35,6 +35,7 @@ _ReArcEngineABIMinorVersion
+ _ReArcEngineVersion
+ _ReArcEngineHasFeature
+ _ReArcStatusName
++_ReArcTabOpenDevTools
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 34a2f69277..f4caac3aed 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1506,6 +1506,8 @@ source_set("core") {
+       "rearc_bridge/rearc_password_leak_abi.cc",
+       "rearc_bridge/rearc_extension_windows.cc",
+       "rearc_bridge/rearc_autofill_save.cc",
++      "rearc_bridge/rearc_devtools.cc",
++      "rearc_bridge/rearc_devtools.h",
+       "rearc_bridge/rearc_http_auth.cc",
+       "rearc_bridge/rearc_http_auth.h",
+       "rearc_bridge/rearc_autofill_save.h",
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 25e6ded1e1..ec6ee59395 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -4,6 +4,10 @@
+ 
+ #include "chrome/browser/chrome_content_browser_client.h"
+ 
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/rearc_devtools.h"
++#endif
++
+ #include <algorithm>
+ #include <iterator>
+ #include <map>
+@@ -5690,11 +5694,17 @@ void ChromeContentBrowserClient::RemovePresentationObserver(
+ 
+ void ChromeContentBrowserClient::CreateThrottlesForNavigation(
+     content::NavigationThrottleRegistry& registry) {
++#if BUILDFLAG(IS_MAC)
++  rearc::AddHostedDevToolsNavigationThrottle(registry);
++#endif
+   CreateAndAddChromeThrottlesForNavigation(registry);
+ }
+ 
+ void ChromeContentBrowserClient::CreateThrottlesForCommitWithoutUrlLoader(
+     content::NavigationThrottleRegistry& registry) {
++#if BUILDFLAG(IS_MAC)
++  rearc::AddHostedDevToolsNavigationThrottle(registry);
++#endif
+   CreateAndAddChromeThrottlesForCommitWithoutUrlLoader(registry);
+ }
+ 
+diff --git a/chrome/browser/devtools/chrome_devtools_manager_delegate.cc b/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
+index 37a83372ce..9d221b02c1 100644
+--- a/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
++++ b/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
+@@ -3,6 +3,9 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/devtools/chrome_devtools_manager_delegate.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"  // nogncheck
++#endif
+ 
+ #include <memory>
+ #include <utility>
+@@ -326,6 +329,11 @@ std::string ChromeDevToolsManagerDelegate::GetTargetType(
+     return DevToolsAgentHost::kTypePage;
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsBrowserlessTabContents(web_contents)) {
++    return DevToolsAgentHost::kTypePage;
++  }
++#endif
+   return DevToolsAgentHost::kTypeOther;
+ }
+ 
+diff --git a/chrome/browser/devtools/devtools_ui_bindings.cc b/chrome/browser/devtools/devtools_ui_bindings.cc
+index 15dd8f3328..8deeca40a6 100644
+--- a/chrome/browser/devtools/devtools_ui_bindings.cc
++++ b/chrome/browser/devtools/devtools_ui_bindings.cc
+@@ -19,6 +19,7 @@
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
+ #include "base/json/string_escape.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/metrics/histogram_functions.h"
+@@ -850,7 +851,8 @@ bool IsAnyAidaPoweredFeatureEnabled() {
+ }
+ }  // namespace
+ 
+-DevToolsUIBindings::DevToolsUIBindings(content::WebContents* web_contents)
++DevToolsUIBindings::DevToolsUIBindings(content::WebContents* web_contents,
++                                       bool hosted)
+     : profile_(Profile::FromBrowserContext(web_contents->GetBrowserContext())),
+       web_contents_(web_contents),
+       delegate_(new DefaultBindingsDelegate(web_contents_)),
+@@ -859,7 +861,8 @@ DevToolsUIBindings::DevToolsUIBindings(content::WebContents* web_contents)
+       devices_updates_enabled_(false),
+       frontend_loaded_(false),
+       settings_(profile_),
+-      http_service_registry_(std::make_unique<DevToolsHttpServiceRegistry>()) {
++      http_service_registry_(std::make_unique<DevToolsHttpServiceRegistry>()),
++      hosted_(hosted) {
+   DevToolsUIBindings::GetDevToolsUIBindings().push_back(this);
+   frontend_contents_observer_ =
+       std::make_unique<FrontendWebContentsObserver>(this);
+@@ -933,6 +936,34 @@ void DevToolsUIBindings::HandleMessageFromDevToolsFrontend(
+   if (params) {
+     params_list = std::move(*params).TakeList();
+   }
++  if (hosted_) {
++    VLOG(1) << "ReArc DevTools embedder: " << *method;
++    // An allowlist keeps new Chrome embedder operations unavailable by default.
++    // No workspace/file picker, remote target discovery, AI service, browser
++    // window, restart, extension or preference-controlled capability escalation.
++    if (*method == "requestFileSystems") {
++      CallClientMethod("DevToolsAPI", "fileSystemsLoaded", base::Value(base::ListValue()));
++      SendMessageAck(id, nullptr);
++      return;
++    }
++    static constexpr std::string_view allowed[] = {
++        "dispatchProtocolMessage", "loadCompleted", "getPreferences",
++        "getPreference", "registerPreference", "setPreference",
++        "removePreference", "clearPreferences", "getHostConfig",
++        "reattach", "readyForTest", "connectionReady", "inspectElementCompleted",
++        "inspectedURLChanged", "setInspectedPageBounds", "activateWindow",
++        "closeWindow", "setIsDocked", "loadNetworkResource", "zoomIn",
++        "zoomOut", "resetZoom"};
++    if (!std::ranges::contains(allowed, *method)) {
++      if (*method == "save" && !params_list.empty() && params_list[0].is_string())
++        CallClientMethod("DevToolsAPI", "canceledSaveURL", params_list[0].Clone());
++      if (*method == "addFileSystem")
++        CallClientMethod("DevToolsAPI", "fileSystemAdded", base::Value("unsupported"));
++      base::Value error(base::DictValue().Set("error", "unsupported"));
++      SendMessageAck(id, &error);
++      return;
++    }
++  }
+   embedder_message_dispatcher_->Dispatch(
+       base::BindOnce(&DevToolsUIBindings::SendMessageAck,
+                      weak_factory_.GetWeakPtr(), id),
+@@ -982,7 +1013,16 @@ void DevToolsUIBindings::AgentHostClosed(
+   delegate_->InspectedContentsClosing();
+ }
+ 
++bool DevToolsUIBindings::IsTrusted() {
++  return !hosted_;
++}
++
++bool DevToolsUIBindings::MayReadLocalFiles() {
++  return !hosted_;
++}
++
+ bool DevToolsUIBindings::MayWriteLocalFiles() {
++  if (hosted_) return false;
+   // Do not allow local file system access via the front-end on Chrome OS.
+ #if BUILDFLAG(IS_CHROMEOS)
+   return false;
+@@ -1270,6 +1310,12 @@ void DevToolsUIBindings::LoadNetworkResource(DispatchCallback callback,
+                                              const std::string& headers,
+                                              int stream_id) {
+   GURL gurl(url);
++  if (hosted_ && !gurl.SchemeIsHTTPOrHTTPS()) {
++    base::Value error(base::DictValue().Set("error", "unsupported")
++                          .Set("statusCode", 403).Set("netError", net::ERR_ACCESS_DENIED));
++    std::move(callback).Run(&error);
++    return;
++  }
+   if (!gurl.is_valid()) {
+     base::DictValue response_dict;
+     response_dict.Set("statusCode", 404);
+@@ -2403,6 +2449,27 @@ void DevToolsUIBindings::DispatchProtocolMessageFromDevToolsFrontend(
+   if (!agent_host_) {
+     return;
+   }
++  if (hosted_) {
++    auto command = base::JSONReader::ReadDict(message, base::JSON_PARSE_RFC);
++    const std::string* method = command ? command->FindString("method") : nullptr;
++    VLOG(1) << "ReArc DevTools protocol: " << (method ? *method : "invalid");
++    // Stay on the inspected target and its auto-attached frames/workers. Never
++    // discover/attach arbitrary targets, create windows or control the browser.
++    const auto* params = command ? command->FindDict("params") : nullptr;
++    if (!method || method->starts_with("Browser.") ||
++        (*method == "Target.getTargetInfo" && params && params->contains("targetId")) ||
++        (method->starts_with("Target.") && *method != "Target.setAutoAttach" &&
++         *method != "Target.getTargetInfo") || *method == "Page.setDownloadBehavior") {
++      if (command && command->FindInt("id")) {
++        base::DictValue reply;
++        reply.Set("id", *command->FindInt("id"));
++        if (const auto* session = command->FindString("sessionId")) reply.Set("sessionId", *session);
++        reply.Set("error", base::DictValue().Set("code", -32601).Set("message", "unsupported"));
++        CallClientMethod("DevToolsAPI", "dispatchMessage", base::Value(base::WriteJson(reply).value()));
++      }
++      return;
++    }
++  }
+   agent_host_->DispatchProtocolMessage(this, base::as_byte_span(message));
+ }
+ 
+@@ -2932,6 +2999,7 @@ void DevToolsUIBindings::OnPermissionDialogResult(
+ }
+ 
+ void DevToolsUIBindings::AddDevToolsExtensionsToClient() {
++  if (hosted_) return;
+ #if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+   const extensions::ExtensionRegistry* registry =
+       extensions::ExtensionRegistry::Get(profile_->GetOriginalProfile());
+diff --git a/chrome/browser/devtools/devtools_ui_bindings.h b/chrome/browser/devtools/devtools_ui_bindings.h
+index 0b6b6d3642..98b89e7d02 100644
+--- a/chrome/browser/devtools/devtools_ui_bindings.h
++++ b/chrome/browser/devtools/devtools_ui_bindings.h
+@@ -125,7 +125,9 @@ class DevToolsUIBindings : public DevToolsEmbedderMessageDispatcher::Delegate,
+                                     const std::string& flag_name,
+                                     bool value);
+ 
+-  explicit DevToolsUIBindings(content::WebContents* web_contents);
++  // Hosted frontends expose a deliberately restricted embedder capability set.
++  explicit DevToolsUIBindings(content::WebContents* web_contents,
++                              bool hosted = false);
+ 
+   DevToolsUIBindings(const DevToolsUIBindings&) = delete;
+   DevToolsUIBindings& operator=(const DevToolsUIBindings&) = delete;
+@@ -141,6 +143,8 @@ class DevToolsUIBindings : public DevToolsEmbedderMessageDispatcher::Delegate,
+   // Takes ownership over the |delegate|.
+   void SetDelegate(Delegate* delegate);
+   void TransferDelegate(DevToolsUIBindings& other);
++  // Set once, before exposing this WebUI's bindings to its renderer.
++  void SetHostedMode() { hosted_ = true; }
+   void CallClientMethod(
+       const std::string& object_name,
+       const std::string& method_name,
+@@ -204,6 +208,8 @@ class DevToolsUIBindings : public DevToolsEmbedderMessageDispatcher::Delegate,
+                                base::span<const uint8_t> message) override;
+   void AgentHostClosed(content::DevToolsAgentHost* agent_host) override;
+   bool MayWriteLocalFiles() override;
++  bool MayReadLocalFiles() override;
++  bool IsTrusted() override;
+ 
+   // DevToolsEmbedderMessageDispatcher::Delegate implementation.
+   void ActivateWindow() override;
+@@ -517,6 +523,7 @@ class DevToolsUIBindings : public DevToolsEmbedderMessageDispatcher::Delegate,
+   std::unique_ptr<DevToolsHttpServiceRegistry> http_service_registry_;
+ 
+   base::UnguessableToken session_id_for_logging_;
++  bool hosted_;
+   bool is_local_frontend_ = false;
+   base::WeakPtrFactory<DevToolsUIBindings> weak_factory_{this};
+ };
+diff --git a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+index 41adaa1d56..8799ded462 100644
+--- a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
++++ b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+@@ -88,7 +88,9 @@ void AttachBrowserlessTabHelpers(content::WebContents* contents) {
+   // extension popups (ExtensionViewHost contents record no history).
+   if (!profile->IsOffTheRecord() &&
+       extensions::GetViewType(contents) !=
+-          extensions::mojom::ViewType::kExtensionPopup) {
++          extensions::mojom::ViewType::kExtensionPopup &&
++      extensions::GetViewType(contents) !=
++          extensions::mojom::ViewType::kDeveloperTools) {
+     HistoryTabHelper::GetOrCreateForWebContents(contents);
+   }
+   find_in_page::FindTabHelper::CreateForWebContents(contents);
+diff --git a/chrome/browser/rearc_bridge/close_controller.cc b/chrome/browser/rearc_bridge/close_controller.cc
+index 7a2c3e6209..5b6d2d808e 100644
+--- a/chrome/browser/rearc_bridge/close_controller.cc
++++ b/chrome/browser/rearc_bridge/close_controller.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/rearc_bridge/close_controller.h"
++#include "chrome/browser/rearc_bridge/rearc_devtools.h"
+ 
+ #include <pthread.h>
+ 
+@@ -139,7 +140,7 @@ CloseRequestResult RequestTabClose(uint64_t tab_id,
+   }
+   PendingClose& pending =
+       AddPending(*session, TabClosedReason::kShell, std::move(callback));
+-  if (force) {
++  if (force || IsHostedDevTools(session->web_contents())) {
+     ScheduleDestruction(*session, pending);
+   } else {
+     session->SetCloseState(TabSession::CloseState::kCloseRequested);
+diff --git a/chrome/browser/rearc_bridge/discard_adapter.cc b/chrome/browser/rearc_bridge/discard_adapter.cc
+index fc5d49b8d6..97b758c28c 100644
+--- a/chrome/browser/rearc_bridge/discard_adapter.cc
++++ b/chrome/browser/rearc_bridge/discard_adapter.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include <pthread.h>
++#include "chrome/browser/rearc_bridge/rearc_devtools.h"
+ #include "base/check.h"
+ #include "base/feature_list.h"
+ #include "base/functional/callback_helpers.h"
+@@ -31,6 +32,7 @@ ReArcStatus ReArcTabDiscard(uint64_t tab) {
+   if (!base::FeatureList::IsEnabled(features::kWebContentsDiscard))
+     return REARC_UNSUPPORTED;
+   auto* contents = session->web_contents();
++  if (rearc::IsHostedDevTools(contents)) return REARC_UNSUPPORTED;
+   auto& controller = contents->GetController();
+   if (contents->WasDiscarded() || rearc::ABIHasVisibilityIntent(tab) ||
+       contents->GetVisibility() != content::Visibility::HIDDEN ||
+diff --git a/chrome/browser/rearc_bridge/rearc_devtools.cc b/chrome/browser/rearc_bridge/rearc_devtools.cc
+new file mode 100644
+index 0000000000..99cfb45f72
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_devtools.cc
+@@ -0,0 +1,187 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_devtools.h"
++
++#include <pthread.h>
++#include <memory>
++#include "base/check.h"
++#include "chrome/browser/devtools/devtools_availability_checker.h"
++#include "chrome/browser/devtools/devtools_ui_bindings.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/rearc_bridge/close_controller.h"
++#include "chrome/browser/rearc_bridge/ipc_tab_events.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "content/public/browser/devtools_agent_host.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/navigation_throttle.h"
++#include "content/public/browser/site_instance.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "extensions/browser/view_type_utils.h"
++#include "extensions/common/mojom/view_type.mojom.h"
++#include "ui/base/page_transition_types.h"
++
++namespace rearc {
++namespace {
++constexpr char kFrontend[] =
++    "devtools://devtools/bundled/devtools_app.html?targetType=tab&panel=elements";
++
++// No Browser, DevToolsWindow or native window ownership. IDs are resolved at
++// use, so no target pointer can outlive its registry session.
++class HostedDelegate : public DevToolsUIBindings::Delegate {
++ public:
++  HostedDelegate(uint64_t frontend, uint64_t target)
++      : frontend_(frontend), target_(target) {}
++  content::WebContents* GetInspectedWebContents() override {
++    auto* session = TabRegistry::Get().FindSession(target_);
++    return session ? session->web_contents() : nullptr;
++  }
++  void ActivateWindow() override {}  // Native placement/focus belongs to host.
++  void CloseWindow() override { ForceCloseTab(frontend_); }
++  void InspectedContentsClosing() override { ForceCloseTab(frontend_); }
++  void RenderProcessGone(bool crashed) override { ForceCloseTab(frontend_); }
++  void OnLoadCompleted() override {
++    auto* frontend = TabRegistry::Get().FindSession(frontend_);
++    auto* target = GetInspectedWebContents();
++    if (!frontend || !target) { CloseWindow(); return; }
++    auto* bindings = DevToolsUIBindings::ForWebContents(frontend->web_contents());
++    bindings->CallClientMethod("DevToolsAPI", "setUseSoftMenu", base::Value(true));
++  }
++  // Every auxiliary embedder operation is refused before dispatch by hosted
++  // bindings. Safe delegates remain explicit even for unused operations.
++  void Inspect(scoped_refptr<content::DevToolsAgentHost>) override {}
++  void SetInspectedPageBounds(const gfx::Rect&) override {}
++  void InspectElementCompleted() override {}
++  void SetIsDocked(bool) override {}
++  void OpenInNewTab(const std::string&) override {}
++  void OpenSearchResultsInNewTab(const std::string&) override {}
++  void SetWhitelistedShortcuts(const std::string&) override {}
++  void SetEyeDropperActive(bool) override {}
++  void OpenNodeFrontend() override {}
++  void ReadyForTest() override {}
++  void ConnectionReady() override {}
++  void SetOpenNewWindowForPopups(bool) override {}
++  infobars::ContentInfoBarManager* GetInfoBarManager() override { return nullptr; }
++  void ShowCertificateViewer(const std::string&) override {}
++  int GetDockStateForLogging() override { return 0; }
++  int GetOpenedByForLogging() override { return 0; }
++  int GetClosedByForLogging() override { return 0; }
++ private:
++  const uint64_t frontend_, target_;
++};
++
++class TargetWatch : public content::WebContentsObserver {
++ public:
++  TargetWatch(content::WebContents* target, uint64_t frontend)
++      : WebContentsObserver(target), frontend_(frontend) {}
++  void WebContentsDestroyed() override { ForceCloseTab(frontend_); }
++ private:
++  const uint64_t frontend_;
++};
++
++class HostedFrontend : public content::WebContentsObserver,
++                       public content::WebContentsUserData<HostedFrontend> {
++ public:
++  void Configure(DevToolsUIBindings* bindings) {
++    bindings->SetHostedMode();
++    bindings->SetDelegate(new HostedDelegate(frontend_, target_));
++    auto* target = TabRegistry::Get().FindSession(target_);
++    if (target) bindings->AttachTo(content::DevToolsAgentHost::GetOrCreateForTab(target->web_contents()));
++    else ForceCloseTab(frontend_);
++  }
++ private:
++  friend class content::WebContentsUserData<HostedFrontend>;
++  HostedFrontend(content::WebContents* contents, uint64_t frontend, uint64_t target)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<HostedFrontend>(*contents),
++        frontend_(frontend), target_(target),
++        target_watch_(TabRegistry::Get().FindSession(target)->web_contents(), frontend) {}
++  const uint64_t frontend_, target_;
++  TargetWatch target_watch_;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(HostedFrontend);
++
++class FrontendNavigation : public content::NavigationThrottle {
++ public:
++  explicit FrontendNavigation(content::NavigationThrottleRegistry& registry)
++      : NavigationThrottle(registry) {}
++  const char* GetNameForLogging() override { return "ReArcHostedDevTools"; }
++  ThrottleCheckResult WillStartRequest() override { return Check(); }
++  ThrottleCheckResult WillRedirectRequest() override { return Check(); }
++  ThrottleCheckResult WillCommitWithoutUrlLoader() override { return Check(); }
++ private:
++  ThrottleCheckResult Check() {
++    const auto& url = navigation_handle()->GetURL();
++    if (IsHostedDevTools(navigation_handle()->GetWebContents())) {
++      // No remote/custom frontend; this contents can only reload its bundled
++      // app. Same-document hash changes retain the same origin/bindings.
++      return url.GetWithoutRef() == GURL(kFrontend) ? PROCEED : CANCEL_AND_IGNORE;
++    }
++    return url.SchemeIs("devtools") ||
++                   (url.SchemeIs("chrome") && url.host() == "devtools")
++               ? CANCEL_AND_IGNORE : PROCEED;
++  }
++};
++}  // namespace
++
++void ConfigureHostedDevToolsBindings(DevToolsUIBindings* bindings) {
++  if (auto* hosted = HostedFrontend::FromWebContents(bindings->web_contents())) hosted->Configure(bindings);
++}
++
++bool IsHostedDevTools(const content::WebContents* contents) {
++  return contents && HostedFrontend::FromWebContents(contents);
++}
++
++void AddHostedDevToolsNavigationThrottle(content::NavigationThrottleRegistry& registry) {
++  auto* contents = registry.GetNavigationHandle().GetWebContents();
++  for (uint64_t id : TabRegistry::Get().SessionIds()) {
++    if (TabRegistry::Get().FindSession(id)->web_contents() == contents) {
++      registry.AddThrottle(std::make_unique<FrontendNavigation>(registry));
++      return;
++    }
++  }
++}
++}  // namespace rearc
++
++ReArcStatus ReArcTabOpenDevTools(uint64_t target_tab_id, uint64_t* frontend_tab_id) {
++  CHECK(pthread_main_np());
++  if (frontend_tab_id) *frontend_tab_id = 0;
++  if (!frontend_tab_id) return REARC_INVALID_ARGUMENT;
++  rearc::TabSession* target;
++  if (auto status = rearc::ABICheckTab(target_tab_id, &target)) return status;
++  auto* inspected = target->web_contents();
++  if (rearc::IsHostedDevTools(inspected)) return REARC_UNSUPPORTED;
++  auto* profile = Profile::FromBrowserContext(inspected->GetBrowserContext());
++  if (!IsInspectionAllowed(profile, inspected)) return REARC_UNSUPPORTED;
++  const GURL url(rearc::kFrontend);
++  content::WebContents::CreateParams params(profile,
++      content::SiteInstance::CreateForURL(profile, url));
++  params.initially_hidden = true;
++  auto contents = content::WebContents::Create(params);
++  extensions::SetViewType(contents.get(), extensions::mojom::ViewType::kDeveloperTools);
++  rearc::TabSession::CreateArgs args;
++  args.browser_context = profile;
++  args.space_id = target->space_id();
++  args.order_index = target->order_index();
++  auto* raw = contents.get();
++  const uint64_t id = rearc::TabRegistry::Get().AdoptSession(args, std::move(contents));
++  rearc::HostedFrontend::CreateForWebContents(raw, id, target_tab_id);
++  rearc::TabEvent event;
++  event.kind = rearc::TabEventKind::kTabCreated;
++  event.tab_id = id;
++  event.space_id = args.space_id;
++  event.opener_tab_id = target_tab_id;
++  event.disposition = rearc::TabDisposition::kForegroundTab;
++  event.url = url.spec();
++  rearc::EmitTabEvent(std::move(event));
++  rearc::ABIInitializeTab(id);
++  raw->GetController().LoadURL(url, content::Referrer(),
++                              ui::PAGE_TRANSITION_AUTO_TOPLEVEL, std::string());
++  *frontend_tab_id = id;
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_devtools.h b/chrome/browser/rearc_bridge/rearc_devtools.h
+new file mode 100644
+index 0000000000..d76974b04c
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_devtools.h
+@@ -0,0 +1,16 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_DEVTOOLS_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_DEVTOOLS_H_
++class DevToolsUIBindings;
++namespace content {
++class WebContents;
++class NavigationThrottleRegistry;
++}
++namespace rearc {
++void ConfigureHostedDevToolsBindings(DevToolsUIBindings*);
++bool IsHostedDevTools(const content::WebContents* contents);
++void AddHostedDevToolsNavigationThrottle(content::NavigationThrottleRegistry&);
++}
++#endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 264deacf67..7c5127d81f 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 39, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 40, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -1002,6 +1002,14 @@ REARC_ENGINE_EXPORT void ReArcEngineSetHttpAuthCallback(ReArcHttpAuthCallback, v
+ // each, including empty strings. Repeated/stale request_id => not_found.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcHttpAuthRespond(uint64_t request_id, bool cancel, const char* username, const char* password);
+ 
++// Registry-hosted bundled DevTools (devtools, ABI 1.40). Always creates a NEW
++// frontend tab in the target's exact profile/space, returns its id before
++// tab.created (foreground disposition, opener = target). Attach/close as any
++// registry tab; placement is host-owned. Target destruction force-closes its
++// frontends; frontend close only detaches, never dispatches target beforeunload.
++// No nested DevTools, remote targets, workspace/disk save or new windows.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabOpenDevTools(uint64_t target_tab_id, uint64_t* frontend_tab_id);
++
+ // Modifier/context-menu link opens (link_open_requests, ABI 1.39).
+ // Separate event layout; ABI 1.36 extension requests are unchanged. HTTP(S)
+ // OpenURLFromTab only: 1 foreground, 2 background, 4 window, 5 split view.
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 5002a2881d..882902d32c 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -553,6 +553,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "autofill_save_prompts" ||
+          std::string(feature) == "http_auth" ||
+          std::string(feature) == "link_open_requests" ||
++         std::string(feature) == "devtools" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_directory" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index f82189264a..5410fc4101 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.41.0";
++  return "0.42.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index fa1c9dac07..054055dc97 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/rearc_bridge/tab_delegate.h"
++#include "chrome/browser/rearc_bridge/rearc_devtools.h"
+ #include "chrome/browser/rearc_bridge/rearc_file_chooser.h"
+ #include "chrome/browser/rearc_bridge/rearc_drop_policy.h"
+ #include "chrome/browser/rearc_bridge/rearc_fullscreen.h"
+@@ -43,6 +44,7 @@ content::WebContents* ReArcTabDelegate::OpenURLFromTab(
+     const content::OpenURLParams& params,
+     base::OnceCallback<void(content::NavigationHandle&)>
+         navigation_handle_callback) {
++  if (IsHostedDevTools(source)) return nullptr;
+   switch (params.disposition) {
+     case WindowOpenDisposition::CURRENT_TAB: {
+       // Real same-tab routing from day one, following the minimal-embedder
+@@ -91,6 +93,10 @@ content::WebContents* ReArcTabDelegate::AddNewContents(
+     const blink::mojom::WindowFeatures& window_features,
+     bool user_gesture,
+     bool* was_blocked) {
++  if (IsHostedDevTools(source)) {
++    if (was_blocked) *was_blocked = true;
++    return nullptr;
++  }
+   // Chromium retains navigation/opener policy. Popup bounds are deliberately
+   // not applied: accepted contents stage hidden until explicit shell placement.
+   return AdoptNewTabContents(tab_id_, source, std::move(new_contents),
+diff --git a/chrome/browser/ui/webui/devtools/devtools_ui.cc b/chrome/browser/ui/webui/devtools/devtools_ui.cc
+index 2a4cdad9b2..0b3849a8ff 100644
+--- a/chrome/browser/ui/webui/devtools/devtools_ui.cc
++++ b/chrome/browser/ui/webui/devtools/devtools_ui.cc
+@@ -5,6 +5,10 @@
+ #include "chrome/browser/ui/webui/devtools/devtools_ui.h"
+ 
+ #include "base/command_line.h"
++#include "build/build_config.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/rearc_devtools.h"  // nogncheck
++#endif
+ #include "base/strings/string_util.h"
+ #include "base/strings/stringprintf.h"
+ #include "build/util/chromium_git_revision.h"
+@@ -67,6 +71,9 @@ bool DevToolsUI::IsFrontendResourceURL(const GURL& url) {
+ 
+ DevToolsUI::DevToolsUI(content::WebUI* web_ui)
+     : WebUIController(web_ui), bindings_(web_ui->GetWebContents()) {
++#if BUILDFLAG(IS_MAC)
++  rearc::ConfigureHostedDevToolsBindings(&bindings_);
++#endif
+   web_ui->SetBindings(content::BindingsPolicySet());
+   content::BrowserContext* browser_context =
+       web_ui->GetWebContents()->GetBrowserContext();
+-- 
+2.54.0 (Apple Git-157)
+

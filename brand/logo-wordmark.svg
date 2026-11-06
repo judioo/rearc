@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 180" width="680" height="180" fill="none">
+  <defs>
+    <style>
+      .rearc-text-prefix { fill: #0F172A; }
+      .rearc-text-suffix { fill: #2740FF; }
+      @media (prefers-color-scheme: dark) {
+        .rearc-text-prefix { fill: #F8FAFC; }
+        .rearc-text-suffix { fill: #7C8FFF; }
+        .rearc-navy { stroke: #6A5CF0; } .rearc-deep { stroke: #3B52F0; }
+      }
+    </style>
+  </defs>
+  <g transform="translate(118 92) scale(0.235) translate(-512 -493)"><defs>
+  <clipPath id="w-above"><path d="M 0 0 H 1024 V 1100 H 0 Z M 132 900 a 380 380 0 1 0 760 0 a 380 380 0 1 0 -760 0 Z" clip-rule="evenodd"/></clipPath>
+  <mask id="w-navy" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="2000"><path d="M 212.6 666.0 A 380 380 0 0 1 485.5 520.9" fill="none" stroke="#fff" stroke-width="130" stroke-linecap="round"/></mask>
+</defs>
+<g clip-path="url(#w-above)"><circle class="rearc-sun" cx="512" cy="480" r="225" fill="#FF5B3A"/></g>
+<path class="rearc-navy" fill="none" stroke="#190C99" d="M 212.6 666.0 A 380 380 0 0 1 485.5 520.9" stroke-width="130" stroke-linecap="round"/>
+<path class="rearc-blue" fill="none" stroke="#2740FF" d="M 420.1 531.3 A 380 380 0 0 1 811.4 666.0" stroke-width="130" stroke-linecap="round"/>
+<g mask="url(#w-navy)"><path class="rearc-deep" fill="none" stroke="#1627C8" d="M 420.1 531.3 A 380 380 0 0 1 811.4 666.0" stroke-width="130" stroke-linecap="round"/></g></g>
+  <text x="226" y="118" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', sans-serif" font-size="88" font-weight="700" letter-spacing="-2"><tspan class="rearc-text-prefix">Re</tspan><tspan class="rearc-text-suffix">Arc</tspan></text>
+</svg>

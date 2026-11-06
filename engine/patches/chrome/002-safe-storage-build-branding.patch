@@ -1,0 +1,151 @@
+From 7f633822daaf11210b60dfcc6add3ddfd7c6be93 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Mon, 2 Nov 2026 19:00:29 +0400
+Subject: [PATCH] P-BUILD-001 wave 14: derive Safe Storage and bundle IDs from
+ branding
+
+Select ReArc short branding and a ReArc bundle identifier root while preserving Chromium physical bundle names. Generate unbranded Safe Storage service/account constants from the selected BRANDING input, rather than hardcoding ReArc in os_crypt. Advertise rearc_safe_storage_branding in ABI 1.10; production Team ID, signing and migration remain packaging responsibilities.
+
+Last rebased: 2026-11-02 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/app/theme/chromium/BRANDING                    | 4 ++--
+ chrome/browser/rearc_bridge/rearc_engine_abi.h        | 2 +-
+ chrome/browser/rearc_bridge/rearc_engine_abi.mm       | 1 +
+ chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm | 2 +-
+ components/os_crypt/common/BUILD.gn                   | 9 +++++++++
+ components/os_crypt/common/keychain_branding.h.in     | 9 +++++++++
+ components/os_crypt/common/keychain_password_mac.mm   | 5 +++--
+ 7 files changed, 26 insertions(+), 6 deletions(-)
+ create mode 100644 components/os_crypt/common/keychain_branding.h.in
+
+diff --git a/chrome/app/theme/chromium/BRANDING b/chrome/app/theme/chromium/BRANDING
+index f8363d5b29..d4d6d7baf2 100644
+--- a/chrome/app/theme/chromium/BRANDING
++++ b/chrome/app/theme/chromium/BRANDING
+@@ -1,10 +1,10 @@
+ COMPANY_FULLNAME=The Chromium Authors
+ COMPANY_SHORTNAME=The Chromium Authors
+ PRODUCT_FULLNAME=Chromium
+-PRODUCT_SHORTNAME=Chromium
++PRODUCT_SHORTNAME=ReArc
+ PRODUCT_INSTALLER_FULLNAME=Chromium Installer
+ PRODUCT_INSTALLER_SHORTNAME=Chromium Installer
+ COPYRIGHT=Copyright @LASTCHANGE_YEAR@ The Chromium Authors. All rights reserved.
+-MAC_BUNDLE_ID=org.chromium.Chromium
++MAC_BUNDLE_ID=com.rearc.browser
+ MAC_CREATOR_CODE=Cr24
+ MAC_TEAM_ID=
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 1647efee5d..ead057979c 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 9, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 10, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index b1e24d7b41..4c8bd58e03 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -444,6 +444,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+   return std::string(feature) == "native_view" ||
+          std::string(feature) == "navigation" ||
+          std::string(feature) == "navigation_extended" ||
++         std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+          std::string(feature) == "profile_off_the_record" ||
+          rearc::ABIHasServiceFeature(feature);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 8929e3d694..332cd949ee 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.11.0";
++  return "0.12.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/components/os_crypt/common/BUILD.gn b/components/os_crypt/common/BUILD.gn
+index 10db068710..26ea0c93fe 100644
+--- a/components/os_crypt/common/BUILD.gn
++++ b/components/os_crypt/common/BUILD.gn
+@@ -2,6 +2,9 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ 
++import("//build/config/chrome_build.gni")
++import("//build/util/process_version.gni")
++
+ group("common") {
+   # TODO(crbug.com/547814493): Move to this file.
+   public_deps = [ "//components/os_crypt/async/common" ]
+@@ -17,12 +20,18 @@ group("crypto_lib") {
+ }
+ 
+ if (is_apple) {
++  process_version("keychain_branding") {
++    sources = [ branding_file_path ]
++    template_file = "keychain_branding.h.in"
++    output = "$target_gen_dir/keychain_branding.h"
++  }
+   source_set("keychain_password_mac") {
+     sources = [
+       "keychain_password_mac.h",
+       "keychain_password_mac.mm",
+     ]
+     deps = [
++      ":keychain_branding",
+       "//base",
+       "//build:branding_buildflags",
+       "//crypto",
+diff --git a/components/os_crypt/common/keychain_branding.h.in b/components/os_crypt/common/keychain_branding.h.in
+new file mode 100644
+index 0000000000..c057033cec
+--- /dev/null
++++ b/components/os_crypt/common/keychain_branding.h.in
+@@ -0,0 +1,9 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++// Generated from the selected build-time BRANDING file; never localize.
++#ifndef COMPONENTS_OS_CRYPT_COMMON_KEYCHAIN_BRANDING_H_
++#define COMPONENTS_OS_CRYPT_COMMON_KEYCHAIN_BRANDING_H_
++#define OS_CRYPT_BRANDED_SERVICE_NAME "@PRODUCT_SHORTNAME@ Safe Storage"
++#define OS_CRYPT_BRANDED_ACCOUNT_NAME "@PRODUCT_SHORTNAME@"
++#endif
+diff --git a/components/os_crypt/common/keychain_password_mac.mm b/components/os_crypt/common/keychain_password_mac.mm
+index 212b930952..da56906f5d 100644
+--- a/components/os_crypt/common/keychain_password_mac.mm
++++ b/components/os_crypt/common/keychain_password_mac.mm
+@@ -15,6 +15,7 @@
+ #include "base/rand_util.h"
+ #include "base/strings/string_view_util.h"
+ #include "build/branding_buildflags.h"
++#include "components/os_crypt/common/keychain_branding.h"
+ #include "crypto/apple/keychain_v2.h"
+ #include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
+ 
+@@ -35,8 +36,8 @@
+ const char kDefaultServiceName[] = "Chrome Safe Storage";
+ const char kDefaultAccountName[] = "Chrome";
+ #else
+-const char kDefaultServiceName[] = "Chromium Safe Storage";
+-const char kDefaultAccountName[] = "Chromium";
++const char kDefaultServiceName[] = OS_CRYPT_BRANDED_SERVICE_NAME;
++const char kDefaultAccountName[] = OS_CRYPT_BRANDED_ACCOUNT_NAME;
+ #endif
+ 
+ // These values are persisted to logs. Entries should not be renumbered and
+-- 
+2.54.0 (Apple Git-157)
+

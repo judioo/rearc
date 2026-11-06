@@ -1,0 +1,239 @@
+# ReArc macOS release build
+
+How to produce a release-quality, hardened-runtime ReArc.app and DMG from this tree, what
+was verified, and what only the account holder can do. Packaging background (branding,
+helper IDs, Safe Storage naming) is in PACKAGING-MAC.md; the shell/engine linking contract
+is in C-ABI.md, "Linking and startup".
+
+Today the only missing input is a **Developer ID Application** certificate. Everything else
+(engine, bundle, nested signing, entitlements, launch, self-test, DMG) is built and verified
+with the Apple Development identity, which macOS accepts locally but Gatekeeper rejects for
+distribution.
+
+## Scripts (all in shell/scripts)
+
+| Script | Does |
+|---|---|
+| `build-engine-release.sh` | Optimized non-component engine in `out/ReArc-release-arm64`. Same preflight as `engine/scripts/build.sh`; never touches `out/ReArc-dev-arm64`. `--gen-only` runs just `gn gen`. |
+| `release.sh` | End to end from a built release engine: release shell build from committed HEAD, bundle, version stamp, nested signing, dSYMs, LaunchServices launch check, real-Keychain self-test, optional `--dmg`. Output `shell/dist/release`. |
+| `bundle-chromium.sh` | Unchanged behavior for dev bundles. New: `--engine-out DIR` (same as `REARC_CHROMIUM_OUT`), and a monolithic engine build is accepted, with no dylib closure outside the bundle. Its build guard blocks only on a `siso ninja` of the out dir being bundled, so a release build no longer blocks dev bundles. |
+| `sign-release.sh` | Inside-out signing of an assembled monolithic bundle with hardened runtime, secure timestamps and Chromium's per-role entitlements; verifies. |
+| `make-dmg.sh` | Signed UDZO DMG: app, Applications link, volume icon, branded Finder background. |
+| `notarize.sh` | `notarytool submit --keychain-profile rearc-notary --wait`, then `stapler staple`/`validate`. Refuses anything not Developer ID signed. **Not run yet.** |
+| `release/BRANDING` | Release BRANDING input: the overlay's BRANDING. `build-engine-release.sh` appends `MAC_TEAM_ID` from `REARC_TEAM_ID` (environment or `shell/signing.local.env`) into `shell/.build-release/BRANDING`. |
+| `release/entitlements/` | `app`, `helper-renderer`, `helper-gpu` entitlements, copied from `chrome/app/*-entitlements.plist` at the pin. |
+| `release/VERSION` | ReArc marketing version (see Versioning). |
+| `release/signing-env.sh` | Shared loader for `shell/signing.local.env`. Environment wins, and it never prints a value. |
+| `release/dmg-background.swift` | Draws the DMG background (brand canvas and cobalt arrow). |
+
+## Exact steps
+
+```sh
+# 0. Once: shell/signing.local.env has REARC_SIGN_IDENTITY, REARC_TEAM_ID and, for iCloud,
+#    REARC_ICLOUD_CONTAINER + REARC_PROVISIONING_PROFILE (docs/ICLOUD-SETUP.md).
+#    For distribution also REARC_RELEASE_IDENTITY="Developer ID Application: … (<TEAM_ID>)"
+#    and REARC_RELEASE_PROVISIONING_PROFILE (a Developer ID profile, below).
+# 1. Engine (3-4 h on first build, minutes incrementally). Start it when no other
+#    `siso ninja` is active; it shows up in `pgrep -fl 'siso[ ]ninja'` while it runs.
+shell/scripts/build-engine-release.sh
+# 2. Commit the shell changes you want to ship, then:
+shell/scripts/release.sh --dmg
+# 3. With Developer ID only (never before):
+shell/scripts/notarize.sh shell/dist/release/ReArc.app      # notarize + staple the app
+shell/scripts/make-dmg.sh shell/dist/release/ReArc.app      # DMG from the stapled app
+shell/scripts/notarize.sh shell/dist/release/ReArc-<version>.dmg
+```
+
+`release.sh --worktree` builds the uncommitted working tree for local testing; its
+`ReArcSourceRevision` gets a `-dirty` suffix. Do not distribute such a build.
+
+## Engine build
+
+`out/ReArc-release-arm64` args (`gn args --list --short --overrides-only`):
+
+```
+target_os="mac" target_cpu="arm64" is_chrome_branded=false is_official_build=false
+use_system_xcode=true use_remoteexec=false use_siso=true chrome_pgo_phase=0
+symbol_level=1 treat_warnings_as_errors=false
+is_debug=false is_component_build=false dcheck_always_on=false
+enable_dsyms=true enable_stripping=true
+branding_file_path="<repo>/shell/.build-release/BRANDING"   (generated, carries MAC_TEAM_ID)
+```
+
+- These are the dev args, which set no other branding arguments, with the release
+  changes. `engine/scripts/build.sh --release` cannot be used because its fixed argument
+  set lacks `dcheck_always_on=false` (non-official builds default DCHECKs on,
+  `build/config/dcheck_always_on.gni`) and `branding_file_path`. PACKAGING-MAC.md says a
+  production pipeline must supply its own complete GN configuration.
+- `is_component_build=false` gives a monolithic `Chromium Framework` with no
+  `libchrome_dll.dylib` and no 500+ dylib closure. `Libraries/` keeps only the GL/Vulkan
+  dylibs that Chromium always ships there.
+- `symbol_level=1` with `enable_dsyms` and `enable_stripping`: line tables go into
+  `*.dSYM` (copied to `dist/release/symbols/`), and the shipped binaries are stripped. This
+  is what official builds do for symbols, without the rest of `is_official_build`.
+- **Not `is_official_build`.** PACKAGING-MAC.md does not require it. On Mac it turns on
+  ThinLTO and the official-build optimizations, which would take many hours on this 10-core
+  machine, and expects PGO profiles (`chrome_pgo_phase`). It also selects Google
+  official-build behavior that this unbranded overlay neither needs nor has validated.
+  `is_debug=false` already gives `NDEBUG`, which is what the overlay's test-only code keys on.
+  Revisit for performance tuning, not correctness.
+- `MAC_TEAM_ID=<TEAM_ID>` is compiled into `MAC_TEAM_IDENTIFIER_STRING`, which Chromium
+  uses for keychain access groups (WebAuthn, payments, device trust). The dev BRANDING
+  leaves it empty. Developer ID certificates belong to the same Individual team, so the
+  value does not change when that certificate arrives. The bundle ID stays
+  `com.rearc.browser` (the script refuses a mismatch with the overlay's BRANDING).
+- **Client-certificate test store**: `rearc_client_cert_test_store.cc` is guarded by
+  `#if !defined(NDEBUG) && !defined(OFFICIAL_BUILD)` (WAVE-18H-REPORT.md). The release
+  build defines `NDEBUG`, so it compiles to the empty `InstallTestClientCertStore` stub.
+  Verified in R1: `obj/chrome/browser/core/rearc_client_cert_test_store.o` defines only
+  `rearc::InstallTestClientCertStore(Profile*)`, and the
+  `rearc-test-client-cert-dir` switch string is absent from the release framework.
+- **Release-only defect fixed in overlay patch tab/060**
+  (`tab/060-release-framework-exports.patch`, overlay commit `f511949e6b`). A
+  non-component framework exports only what `chrome/app/framework.exports` lists. Waves
+  after tab/018 added ABI functions to the header without listing most of them, so the
+  first release framework exported 52 of the 110 header functions, and the release shell
+  could not link against it. Component builds export everything from
+  `libchrome_dll.dylib`, which hid the gap. tab/060 adds the 58 missing functions to
+  `framework.exports` and to `framework.order` before `_ChromeMain`, so
+  `verify_chrome_framework_order` still passes. Replay: `REPLAY PASS 61/61` reverse and
+  forward (`engine/replay-r1.log`). `build-engine-release.sh` now fails if any function
+  declared in `rearc_engine_abi.h` or `rearc_engine_entry_mac.h` is missing from
+  `nm -gU` of the framework. **When adding an ABI function, add it to both files.**
+- First build: 12,098 s (3 h 22 min) on 10 cores with other agents active
+  (`engine/build-release-r1.log`). The tab/060 relink took 122 s.
+
+## Signing
+
+`sign-release.sh` mirrors `chrome/installer/mac/signing/parts.py` at the pin, inside-out:
+
+| Code object | Options | Entitlements |
+|---|---|---|
+| `Libraries/*.dylib` | none (library) | none |
+| `Chromium Helper (Renderer).app`, `(Aperitif Renderer)` | `restrict,kill,runtime` | `helper-renderer` (allow-jit) |
+| `Chromium Helper (GPU).app`, `(Aperitif GPU)` | `restrict,kill,runtime` | `helper-gpu` (allow-jit) |
+| `Chromium Helper.app`, `(Aperitif)`, `(Alerts)`, `(Aperitif Alerts)` | `restrict,library,runtime,kill` | none |
+| `chrome_crashpad_handler`, `app_mode_loader`, `web_app_shortcut_copier` | `restrict,library,runtime,kill` | none |
+| `Chromium Framework.framework` | none (framework) | none |
+| `ReArc.app` (identifier `com.rearc.browser`) | `restrict,library,runtime,kill` | `app` + iCloud (below) |
+
+- Each signature gets `--timestamp` (Apple's timestamp server). `REARC_TIMESTAMP=none`
+  is for offline signing only, and notarization rejects it.
+- JIT helpers are signed without `library`: Chromium does the same, because library
+  validation conflicts with the JIT entitlement there. All code is signed by the same team,
+  so library validation in the other processes passes.
+- **Renderer entitlements**: at this pin Chromium's renderer and GPU helpers carry only
+  `com.apple.security.cs.allow-jit`. V8 allocates JIT pages with `MAP_JIT`.
+  `allow-unsigned-executable-memory` was dropped upstream and is **not** added, because it
+  would weaken the hardened runtime for no gain. The self-test loads and runs JavaScript in
+  hardened-runtime renderers with only allow-jit (Verification). Add it only if a renderer
+  is ever killed with a code-signing exception.
+- The app entitlements are Chromium's `app-entitlements.plist` (camera, microphone,
+  Bluetooth, print, USB, location, photos). That is a superset of
+  `scripts/ReArc.entitlements`, and the usage strings stay in Info.plist. With
+  `REARC_ICLOUD_CONTAINER`, `icloud_prepare` (icloud-signing.sh) merges in
+  application-identifier, team-identifier, the iCloud container, CloudKit and, when the
+  profile allows it, `icloud-container-environment`. It also embeds the profile and the
+  `ReArcICloudContainer` marker. `REARC_RELEASE_PROVISIONING_PROFILE` takes precedence over
+  the development `REARC_PROVISIONING_PROFILE`.
+- The script refuses component bundles, ad-hoc identities and any Mach-O it does not sign
+  on purpose. It checks the team, timestamp and runtime flag on every object it signed, and
+  allow-jit on the renderer and GPU helpers. Then it runs `codesign --verify --deep --strict`
+  and prints `spctl -a -vv`.
+- The Safe Storage Keychain item ("ReArc Safe Storage" / "ReArc") trusts the designated
+  requirement: identifier `com.rearc.browser` plus the signing certificate. A release
+  bundle signed with the same Apple Development identity matches the item that the
+  development iCloud bundle created, so it does not prompt. After the switch to Developer
+  ID, the requirement changes, and macOS asks once on first launch ("Always Allow"). Users
+  of a distributed build only ever see the Developer ID requirement.
+
+## Versioning
+
+- `CFBundleShortVersionString` = `shell/scripts/release/VERSION`, semantic
+  `MAJOR.MINOR.PATCH` (starts at 0.1.0). Bump it in a commit before each release.
+- `CFBundleVersion` = `git rev-list --count HEAD` of the outer repo. It increases with
+  every commit on the release branch, which is what LaunchServices and Sparkle compare.
+  Cut releases from one branch (main).
+- `ReArcEngineVersion` = the Chromium version (156.0.8078.74), `ReArcEngineRevision` = the
+  overlay commit, `ReArcSourceRevision` = the outer commit (`-dirty` for `--worktree`).
+- The framework keeps `Versions/156.0.8078.74` and its own plist. Never rename it.
+- Constraint: Chromium's upgrade detector (`updater::CurrentlyInstalledVersion`) compares
+  the outer `CFBundleShortVersionString` with the running Chromium version and reports an
+  update only when the outer one is **higher**. Keep the ReArc version below the Chromium
+  major (156) and this stays inert. Crash reports (crashpad `ver`) carry the ReArc version.
+- DMG name: `ReArc-<CFBundleShortVersionString>.dmg`.
+
+## Verification (this machine, Apple Development identity)
+
+R1 run: shell HEAD `667658d9`, overlay `f511949e6b`, version 0.1.0 (98).
+Logs are in `shell/dist/release/` (`sign-release.log`, `selftest-release*.log`) and
+`shell/dist/release-r{1,2}.log`.
+
+| Check | Result |
+|---|---|
+| `codesign --verify --deep --strict --verbose=2 ReArc.app` | **pass**: valid on disk, satisfies its Designated Requirement. Sixteen code objects, each with team <TEAM_ID> and a secure timestamp. |
+| Flags | app, Helper, Alerts, crashpad: `kill,restrict,library-validation,runtime`. Renderer, GPU: `kill,restrict,runtime` + allow-jit. |
+| App entitlements | Chromium app set + `<TEAM_ID>.com.rearc.browser`, `iCloud.com.rearc.browser`, CloudKit, environment Development (development profile) |
+| `spctl -a -vv -t exec ReArc.app` | `rejected` / `origin=Apple Development: <Your Name> (<CERT_ID>)`, as expected without Developer ID and notarization |
+| `spctl -a -t open --context context:primary-signature -vv ReArc-0.1.0.dmg` | `rejected` / `origin=Apple Development: <Your Name> (<CERT_ID>)`, as expected |
+| `check-launch.sh` (LaunchServices `open`, plain and with a link) | **PASS**: `ready=1 engine=chromium source=infoPlist abi_minor=41`, GetURL link delivered, no crash reports |
+| Self-test, real Keychain (`--rearc-selftest`, no `--use-mock-keychain`) | `keychain: macOS Keychain ('ReArc Safe Storage')`, **no prompt and no stall**. Ninety-seven PASS lines in about 70 s, including page script evaluation in hardened-runtime renderers with only allow-jit. **RESULT FAIL, 1 failure:** `timed out waiting for ⌥⌘I closed the frontend tab`. See below. |
+| `notarize.sh ReArc-0.1.0.dmg` | Refuses before any network call: "not signed with a Developer ID Application certificate" |
+| DMG | UDZO, 160 MB, signed; app inside verifies; Applications link, custom volume icon, Retina background and Finder layout |
+
+**Self-test failure: a shell bug, not a release defect.** A dev bundle (component, debug,
+mock Keychain) built from the same HEAD fails the same step in the same way. No earlier
+wave-28 dev run reached it, because those runs timed out sooner under the release build's
+load. Release runs 2 and 3 failed earlier, at the omnibox step, with a stale row from the
+previous query (`suggestion row nav suggestion one`). That is a race in the shell
+self-test. Probable cause of the DevTools failure:
+`BrowserViewModel.closeDevTools` closes the frontend tab only through
+`ChromiumEngine.deinit` (`devToolsEngines[tabID] = nil`). The self-test, and possibly the
+docked view, still holds a reference (`let frontend`), so the tab never closes. The
+shell's owner should close the frontend explicitly and fix the suggestion race. Then the
+release self-test is expected to pass, since every engine-backed step before it does.
+
+Size and launch, release vs a dev bundle of the same HEAD:
+
+| | Release (`dist/release`) | Dev (component, debug) |
+|---|---|---|
+| ReArc.app | 382 MB, self-contained | 191 MB app + 518 dylibs (6.6 GB) outside the bundle, 7.1 GB total |
+| Chromium Framework binary | 256 MB, stripped | reexport stub + `libchrome_dll.dylib` and closure |
+| Shell executable | 20.7 MB | 30.2 MB |
+| DMG | 160 MB | — |
+| dSYMs (`dist/release/symbols`, not shipped) | 2.0 GB (16, incl. ReArc.dSYM) | — |
+| LaunchServices probe (launch → ready → shutdown), 2 runs | 4.6 s, 4.6 s | 8.2 s, 7.2 s |
+| Self-test to the DevTools step | ~70 s | ~160 s |
+| `release.sh` with a built engine | 125–146 s to a signed bundle | — |
+
+## What the account holder must do
+
+1. **Developer ID Application certificate**: in Xcode → Settings → Accounts → Manage
+   Certificates → "+" → Developer ID Application, or on developer.apple.com →
+   Certificates. Only the Account Holder of team <TEAM_ID> can create it. It then shows up
+   in `security find-identity -v -p codesigning`. Put
+   `REARC_RELEASE_IDENTITY="Developer ID Application: <name> (<TEAM_ID>)"` in
+   `shell/signing.local.env`.
+2. **Notary credentials**, stored in your keychain (never in a file in this repo):
+   `xcrun notarytool store-credentials rearc-notary --apple-id <apple-id> --team-id <TEAM_ID>`,
+   with an app-specific password from appleid.apple.com. `notarize.sh` only names the
+   profile.
+3. **iCloud for distribution**:
+   - In CloudKit Console, deploy the Development schema to **Production** for
+     `iCloud.com.rearc.browser`. Distributed builds use the Production environment, which
+     has no record types until then.
+   - Create a **Developer ID provisioning profile** for App ID `com.rearc.browser` with
+     iCloud/CloudKit and the container. Developer ID profiles list no devices. Set
+     `REARC_RELEASE_PROVISIONING_PROFILE=<path>` and `REARC_ICLOUD_ENVIRONMENT=Production`.
+     The development profile only runs on registered Macs.
+4. Run the exact steps above. `spctl -a -vv` must then report
+   `source=Notarized Developer ID`. Test on a clean Mac or user account: first launch from
+   the DMG, the Keychain prompt for Safe Storage, camera/microphone/location TCC prompts,
+   and iCloud sign-in.
+
+## Known limits
+
+- No auto-update (no Sparkle or Keystone integration) and no universal (x64) build: run
+  `build-engine-release.sh --target-cpu=x64` into its own out dir. Lipo/universal packaging
+  is not scripted.
+- No clean-machine test has been done yet. That needs the notarized build.

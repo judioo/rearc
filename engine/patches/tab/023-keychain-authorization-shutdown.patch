@@ -1,0 +1,63 @@
+# Patch-ID: P-APP-001 / P-TAB-001 (wave 12, Keychain shutdown)
+# Area: tab.
+# Rationale: reproduce missing ABI shutdown completion with UI in ThreadPool
+#   shutdown and OSCryptAsync worker indefinitely awaiting SecurityServer
+#   authorization. A production process-lifetime key read must not join that
+#   worker; retain joining semantics for borrowed injected test keychains.
+# Last-Rebased: 2026-11-02 (Chromium 156.0.8078.74).
+# Frozen-file exceptions: additive ABI minor/bridge version bump; narrow
+#   upstream KeychainKeyProvider task-traits fix. Production keychain and name
+#   storage are NoDestructor singletons. No encryption bypass, key migration,
+#   authorization grant, profile write interruption or engine loop change.
+# Validation: build-p34 and final p36; p35 intentionally restored the old task
+#   behavior to reproduce the blocked-backend watchdog. smoke-tab023 G1-G5;
+#   five native hosts; 30 shutdown processes/120 attached tabs; forced-blocked
+#   normal and force shutdowns complete in 363/297 ms; nm-tab023, C/Swift import.
+
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index b42772b9d2..de143489ca 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 4, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 5, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 9efebda600..109130e017 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.6.0";
++  return "0.7.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/components/os_crypt/async/browser/keychain_key_provider.mm b/components/os_crypt/async/browser/keychain_key_provider.mm
+index 959d6f3664..ef890eec03 100644
+--- a/components/os_crypt/async/browser/keychain_key_provider.mm
++++ b/components/os_crypt/async/browser/keychain_key_provider.mm
+@@ -79,8 +79,15 @@
+   // Apple's documentation [1] recommends accessing the keychain on a worker
+   // thread. [1]
+   // https://developer.apple.com/documentation/security/secitemcopymatching%28_%3A_%3A%29#Performance-considerations
++  // Keychain authorization may wait indefinitely in SecurityServer. The
++  // production keychain and password names have process lifetime; do not let
++  // their read task prevent shutdown. Injected test keychains remain borrowed.
++  const auto shutdown_behavior =
++      keychain_for_testing_ ? base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN
++                            : base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN;
+   base::ThreadPool::PostTaskAndReplyWithResult(
+-      FROM_HERE, {base::TaskPriority::USER_BLOCKING, base::MayBlock()},
++      FROM_HERE,
++      {base::TaskPriority::USER_BLOCKING, base::MayBlock(), shutdown_behavior},
+       base::BindOnce(&GetKeyTask, crypto::SubtlePassKey{},
+                      keychain_for_testing_),
+       base::BindOnce(std::move(callback), kKeyTag));

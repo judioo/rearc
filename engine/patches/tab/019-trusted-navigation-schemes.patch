@@ -1,0 +1,214 @@
+# Patch-ID: P-TAB-001 / P-NAV-001 (wave 12, trusted navigation)
+# Area: tab.
+# Rationale: browser UI needs data/file and upstream settings/version WebUI;
+#   retain an explicit trusted scheme policy and reject unaudited WebUI hosts.
+#   view-source wraps only http(s)/file. Add ABI minor query without changing
+#   Configure major or existing structure layouts.
+# Last-Rebased: 2026-11-02 (Chromium 156.0.8078.74).
+# Frozen-file exceptions: ABI header/adapter/version and export lists extend
+#   the existing surface. SettingsUI assumes a tab AutofillClient; embedded
+#   contents have none, so omit only controls requiring it, using upstream
+#   settings for everything else. No TabFeatures/blanket-helper bypass.
+# Validation: build-p29, build-p30 (attempt 2); smoke-tab019 G1-G5; native
+#   core/services and URLs; nm-tab019 (38 exports). Tests use disposable profiles
+#   and mock Keychain to avoid temporary executable identity authorization.
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 6511140218..e34d4feba7 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -24,6 +24,7 @@ _ReArcEngineSetLifecycleCallbacks
+ 
+ # ReArc C ABI (P-TAB-001 wave 10).
+ _ReArcEngineABIVersion
++_ReArcEngineABIMinorVersion
+ _ReArcEngineVersion
+ _ReArcEngineHasFeature
+ _ReArcStatusName
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index e95c178dc9..68f063d54e 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -31,6 +31,7 @@ _ChromeWebAppShortcutCopierMain
+ 
+ # ReArc C ABI (P-TAB-001 wave 10).
+ _ReArcEngineABIVersion
++_ReArcEngineABIMinorVersion
+ _ReArcEngineVersion
+ _ReArcEngineHasFeature
+ _ReArcStatusName
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index bc63d7e222..015ccb261b 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -40,7 +40,7 @@ enum {
+   REARC_CANCELLED = 15,
+   REARC_INTERNAL = 16
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 1, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -94,6 +94,7 @@ typedef struct ReArcAttachment {
+ } ReArcAttachment;
+ 
+ REARC_ENGINE_EXPORT uint32_t ReArcEngineABIVersion(void);
++REARC_ENGINE_EXPORT uint32_t ReArcEngineABIMinorVersion(void);
+ REARC_ENGINE_EXPORT const char* ReArcEngineVersion(void);
+ REARC_ENGINE_EXPORT bool ReArcEngineHasFeature(const char* feature);
+ REARC_ENGINE_EXPORT const char* ReArcStatusName(ReArcStatus status);
+@@ -112,7 +113,10 @@ REARC_ENGINE_EXPORT uint64_t ReArcEngineDefaultProfile(void);
+ 
+ // v1 admits only the startup profile. IDs are engine allocated, never reused.
+ // space_id is a nonzero shell label. New tabs stage hidden; attach separately.
+-// null URL means about:blank. Allowed navigation: http(s), about:blank.
++// null URL means about:blank. Trusted browser-initiated navigation admits
++// http(s), data, file, chrome://settings, chrome://version, exact about:blank
++// and view-source:http(s)/file. Other chrome hosts require helper audits.
++// Other schemes (including javascript, blob, chrome-untrusted) are rejected.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabCreate(uint64_t profile_id,
+                                                uint64_t space_id,
+                                                const char* url,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index c8bdb88114..4a3cc73f2d 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -262,13 +262,30 @@ ReArcStatus Available() {
+   auto& a = ABI::Get();
+   return a.ready && !a.stopping ? REARC_OK : REARC_ENGINE_NOT_READY;
+ }
++bool AllowedURL(const GURL& url) {
++  if (!url.is_valid()) {
++    return false;
++  }
++  if (url.SchemeIsHTTPOrHTTPS() || url.SchemeIs("data") ||
++      url.SchemeIsFile() ||
++      (url.SchemeIs("chrome") &&
++       (url.host() == "settings" || url.host() == "version")) ||
++      url.spec() == "about:blank") {
++    return true;
++  }
++  if (url.SchemeIs("view-source")) {
++    const GURL inner(url.GetContent());
++    return inner.is_valid() &&
++           (inner.SchemeIsHTTPOrHTTPS() || inner.SchemeIsFile());
++  }
++  return false;
++}
+ ReArcStatus CheckURL(const char* value, GURL* url) {
+   if (!value || !base::IsStringUTF8(value)) {
+     return REARC_INVALID_ARGUMENT;
+   }
+   *url = GURL(value);
+-  if (!url->is_valid() ||
+-      !(url->SchemeIsHTTPOrHTTPS() || url->spec() == "about:blank")) {
++  if (!AllowedURL(*url)) {
+     return REARC_INVALID_URL;
+   }
+   return REARC_OK;
+@@ -333,6 +350,10 @@ void ABITabDestroyed() {
+ 
+ using rearc::ABI;
+ 
++uint32_t ReArcEngineABIMinorVersion(void) {
++  CHECK([NSThread isMainThread]);
++  return REARC_ABI_MINOR_VERSION;
++}
+ uint32_t ReArcEngineABIVersion(void) {
+   CHECK([NSThread isMainThread]);
+   return REARC_ABI_VERSION;
+@@ -348,6 +369,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+   }
+   return std::string(feature) == "native_view" ||
+          std::string(feature) == "navigation" ||
++         std::string(feature) == "navigation_extended" ||
+          rearc::ABIHasServiceFeature(feature);
+ }
+ const char* ReArcStatusName(ReArcStatus status) {
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index e12d8a6bfa..d2f9d3e10b 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.2.0";
++  return "0.3.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/ui/webui/settings/settings_ui.cc b/chrome/browser/ui/webui/settings/settings_ui.cc
+index c1bb5d445e..c1c1f67ecc 100644
+--- a/chrome/browser/ui/webui/settings/settings_ui.cc
++++ b/chrome/browser/ui/webui/settings/settings_ui.cc
+@@ -420,12 +420,13 @@ SettingsUI::SettingsUI(content::WebUI* web_ui)
+   html_source->AddBoolean("downloadBubblePartialViewControlledByPref",
+                           download_bubble_controlled_by_pref);
+ 
++  auto* autofill_client =
++      autofill::ContentAutofillClient::FromWebContents(web_ui->GetWebContents());
+   html_source->AddBoolean(
+       "shouldShowPayOverTimeSettings",
+-      autofill::ContentAutofillClient::FromWebContents(web_ui->GetWebContents())
+-          ->GetPaymentsAutofillClient()
+-          ->GetPaymentsDataManager()
+-          .ShouldShowBnplSettings());
++      autofill_client && autofill_client->GetPaymentsAutofillClient()
++                             ->GetPaymentsDataManager()
++                             .ShouldShowBnplSettings());
+ 
+   html_source->AddBoolean(
+       "shoppingIntegrationEnabled",
+@@ -589,14 +590,12 @@ SettingsUI::SettingsUI(content::WebUI* web_ui)
+   html_source->AddBoolean("showGeicSettings", show_geic_section);
+   html_source->AddBoolean("glicDisallowedByAdmin", glic_disallowed_by_admin);
+ 
+-  const auto& autofill_client =
+-      *autofill::ContentAutofillClient::FromWebContents(
+-          web_ui->GetWebContents());
+   html_source->AddBoolean(
+       "showAutofillAiControl",
+-      autofill::MayPerformAutofillAiAction(
+-          autofill_client,
+-          autofill::AutofillAiAction::kListEntityInstancesInSettings));
++      autofill_client &&
++          autofill::MayPerformAutofillAiAction(
++              *autofill_client,
++              autofill::AutofillAiAction::kListEntityInstancesInSettings));
+   auto* dictation_keyed_service =
+       dictation::DictationKeyedService::Get(profile);
+   bool show_dictation_control =
+@@ -682,19 +681,23 @@ SettingsUI::SettingsUI(content::WebUI* web_ui)
+ 
+   personal_context::PersonalContextEligibilityService* eligibility_service =
+       PersonalContextEligibilityServiceFactory::GetForProfile(profile);
+-  html_source->AddBoolean("showSuggestionsFromGeminiSettings",
+-                          autofill::ShouldShowPersonalContextAutofillSetting(
+-                              autofill_client, eligibility_service));
++  html_source->AddBoolean(
++      "showSuggestionsFromGeminiSettings",
++      autofill_client &&
++          autofill::ShouldShowPersonalContextAutofillSetting(
++              *autofill_client, eligibility_service));
+   html_source->AddBoolean(
+       "isAtMemoryEnabled",
+-      autofill::MayPerformAtMemoryAction(
+-          autofill::AtMemoryAction::kShowAtMemoryInSettings, autofill_client));
++      autofill_client &&
++          autofill::MayPerformAtMemoryAction(
++              autofill::AtMemoryAction::kShowAtMemoryInSettings, *autofill_client));
+ 
+   html_source->AddBoolean(
+       "isAtMemoryTriggerCustomizationAllowed",
+-      autofill::MayPerformAtMemoryAction(
+-          autofill::AtMemoryAction::kAllowCustomizeAtMemoryShortcut,
+-          autofill_client));
++      autofill_client &&
++          autofill::MayPerformAtMemoryAction(
++              autofill::AtMemoryAction::kAllowCustomizeAtMemoryShortcut,
++              *autofill_client));
+ 
+   html_source->AddBoolean("isAtMemoryDoubleCtrlEnabled",
+                           base::FeatureList::IsEnabled(

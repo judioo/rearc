@@ -1,0 +1,538 @@
+Patch-ID: P-APP-001 (slice 1) — host-owned NSApplication singleton and
+lifecycle bridge scaffolding.
+Rationale: first milestone of engine/docs/patches/P-APP-001.md, reference
+approach A (upstream base::RunLoop keeps driving -[NSApp run] on the main
+thread; no external pump adapter). Creates the additive rearc_bridge source
+set and redirects RegisterBrowserCrApp() to instantiate ReArcApplication (a
+BrowserCrApplication subclass), so all upstream pump/class CHECKs pass
+unchanged while Cocoa termination entry points route through the engine
+lifecycle host. Adds the exported C ABI surface (rearc_engine_entry_mac.h:
+ReArcEngineBridgeVersion, ReArcEngineSetLifecycleCallbacks) and the
+ReArcAppDelegate scaffolding (installed only by later slices; unreferenced
+by upstream hooks in this slice). With no lifecycle host installed, behavior
+is stock: terminate falls back to the AppController path and the ReArc
+delegate is never installed.
+Also in this patch: chrome/browser/ui/webui/version/version_ui.cc shows
+"ReArc <version>" on chrome://version (about:version branding; thematically
+part of the P-BUILD-001 warm-up, folded in by concurrent authorship — a
+documented rule-3 scope deviation).
+Build notes from the compile gate:
+- rearc_engine_entry_mac.mm stores the opaque host pointer as raw_ptr<void>;
+  Chromium's raw_ptr clang plugin rejects raw pointer members (first compile
+  attempt failed on this; fixed in-patch).
+- The C ABI symbols carry REARC_ENGINE_EXPORT default visibility: Chromium
+  compiles with -fvisibility=hidden in every configuration, so without the
+  attribute the symbols are not dlsym-able from the framework even in this
+  component dev build. chrome/app/framework.exports is updated as well; it
+  is only consulted for non-component/non-sanitizer links
+  (chrome/BUILD.gn:1365,1418), which remain a later release-packaging gate.
+Drift check @ 156.0.8078.74 (2026-11-01): none. All seams from P-APP-001.md
+verified in-tree — RegisterBrowserCrApp (chrome_browser_application_mac.mm:39),
+BrowserCrApplication +sharedApplication/-terminate:/-cancelTerminate:,
+ChromeMainDelegate::PreBrowserMain -> RegisterBrowserCrApp
+(chrome_main_delegate.cc:1939), ChromeBrowserMainPartsMac::PreCreateThreads
+nil-delegate/AppController/BuildMainMenu block (chrome_browser_main_mac.mm:151),
+DidEndMainMessageLoop AppController call (:185), Attach/Detach iOS-gated in
+base/message_loop/message_pump_apple.mm, content/browser/browser_main_loop_mac.mm
+absent as spec'd.
+Upstream hunks: chrome/browser/chrome_browser_application_mac.mm (import +
+singleton class), chrome/browser/BUILD.gn (rearc_bridge dep),
+chrome/app/framework.exports (C ABI exports),
+chrome/browser/ui/webui/version/version_ui.cc (about:version string).
+Everything else is additive under chrome/browser/rearc_bridge/.
+Last rebased: 2026-11-01 @ 156.0.8078.74.
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 37c881f5d2..c951442f9a 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -19,3 +19,5 @@
+ _ChromeAppModeStart_v8
+ _ChromeMain
+ _ChromeWebAppShortcutCopierMain
++_ReArcEngineBridgeVersion
++_ReArcEngineSetLifecycleCallbacks
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 5aa5b0447d..66fa97ef02 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1550,6 +1550,7 @@ source_set("core") {
+       "//chrome/browser/renderer_host:delegate",
+       "//chrome/browser/renderer_host:delegate_impl",
+       "//chrome/browser/renderer_host:history_swiper",
++      "//chrome/browser/rearc_bridge",
+       "//chrome/browser/shortcuts",
+       "//chrome/browser/ui:browser_mac",
+       "//chrome/browser/ui/browser_window:create_browser_window",
+diff --git a/chrome/browser/chrome_browser_application_mac.mm b/chrome/browser/chrome_browser_application_mac.mm
+index 823b03b27c..0cfd02a5c1 100644
+--- a/chrome/browser/chrome_browser_application_mac.mm
++++ b/chrome/browser/chrome_browser_application_mac.mm
+@@ -17,6 +17,7 @@
+ #include "base/trace_event/trace_event.h"
+ #import "chrome/browser/app_controller_mac.h"
+ #import "chrome/browser/mac/exception_processor.h"
++#import "chrome/browser/rearc_bridge/rearc_application_mac.h"
+ #include "chrome/browser/ui/cocoa/l10n_util.h"
+ #include "chrome/common/chrome_switches.h"
+ #include "components/crash/core/common/crash_key.h"
+@@ -37,7 +38,11 @@
+ namespace chrome_browser_application_mac {
+ 
+ void RegisterBrowserCrApp() {
+-  [BrowserCrApplication sharedApplication];
++  // ReArc (P-APP-001): the application singleton is the host-owned
++  // ReArcApplication subclass, so Cocoa termination entry points route
++  // through the engine lifecycle bridge. It subclasses
++  // BrowserCrApplication, preserving the message-pump and class CHECKs below.
++  [ReArcApplication sharedApplication];
+ 
+   // If there was an invocation to NSApp prior to this method, then the NSApp
+   // will not be a BrowserCrApplication, but will instead be an NSApplication.
+diff --git a/chrome/browser/rearc_bridge/BUILD.gn b/chrome/browser/rearc_bridge/BUILD.gn
+new file mode 100644
+index 0000000000..335a4fcbbf
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/BUILD.gn
+@@ -0,0 +1,26 @@
++# Copyright 2026 The ReArc Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++# P-APP-001 slice 1: host-owned NSApplication singleton and lifecycle bridge.
++# Additive engine code; see engine/docs/patches/P-APP-001.md.
++
++assert(is_mac)
++
++source_set("rearc_bridge") {
++  sources = [
++    "rearc_app_delegate_mac.h",
++    "rearc_app_delegate_mac.mm",
++    "rearc_application_mac.h",
++    "rearc_application_mac.mm",
++    "rearc_engine_entry_mac.h",
++    "rearc_engine_entry_mac.mm",
++    "rearc_engine_lifecycle.cc",
++    "rearc_engine_lifecycle.h",
++  ]
++
++  deps = [
++    "//base",
++    "//chrome/browser:chrome_browser_application_mac",
++  ]
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_app_delegate_mac.h b/chrome/browser/rearc_bridge/rearc_app_delegate_mac.h
+new file mode 100644
+index 0000000000..dfcc9c5493
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_app_delegate_mac.h
+@@ -0,0 +1,40 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_APP_DELEGATE_MAC_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_APP_DELEGATE_MAC_H_
++
++#ifdef __OBJC__
++
++#import <AppKit/AppKit.h>
++
++// The ReArc application delegate, installed in place of AppController when an
++// engine lifecycle host is registered (P-APP-001, slice 1). It deliberately
++// implements only the termination surface; window/menu/open-event behavior is
++// supplied by the host through shell callbacks in later slices and must never
++// fall through to a recreated AppController.
++@interface ReArcAppDelegate : NSObject <NSApplicationDelegate>
++@end
++
++#endif  // __OBJC__
++
++namespace rearc {
++
++// Installs a single retained ReArcAppDelegate as NSApp.delegate plus a
++// placeholder main menu. CHECKs the main thread and a nil delegate, failing
++// early if a plain NSApplication/SwiftUI delegate was created first (P-APP-001
++// acceptance invariant). Called from
++// ChromeBrowserMainPartsMac::PreCreateThreads() only when an engine lifecycle
++// host is registered.
++void InstallReArcAppDelegateAndMenu();
++
++// End-of-main-loop bridge finalization. Slice 1 records the transition only;
++// keepalive release and ordered tab teardown arrive with P-APP-001 later
++// slices and P-TAB-001. Must not touch AppController.sharedController: a
++// teardown-only call would recreate the delegate.
++void FinalizeReArcAppDelegate();
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_APP_DELEGATE_MAC_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_app_delegate_mac.mm b/chrome/browser/rearc_bridge/rearc_app_delegate_mac.mm
+new file mode 100644
+index 0000000000..d2451abc20
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_app_delegate_mac.mm
+@@ -0,0 +1,58 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#import "chrome/browser/rearc_bridge/rearc_app_delegate_mac.h"
++
++#include "base/check_op.h"
++#include "base/logging.h"
++#include "chrome/browser/rearc_bridge/rearc_engine_lifecycle.h"
++
++@implementation ReArcAppDelegate
++
++// The host owns the lifecycle once registered. A consumed terminate request
++// cancels AppKit's own termination because the host drives shutdown through
++// the Chromium quit closure in a later slice; never let AppKit fall into its
++// default exit() path, which would skip BrowserMain teardown.
++- (NSApplicationTerminateReply)applicationShouldTerminate:
++    (NSApplication*)sender {
++  rearc::EngineLifecycleHost* host = rearc::GetEngineLifecycleHost();
++  if (host && host->HandleTerminateRequest()) {
++    return NSTerminateCancel;
++  }
++  // No host (or host declined): refuse to tear down rather than risk an
++  // uncoordinated exit. Standalone runs never install this delegate.
++  LOG(WARNING) << "ReArcAppDelegate: termination request without a consuming "
++                  "host; cancelling.";
++  return NSTerminateCancel;
++}
++
++- (BOOL)applicationSupportsSecureRestorableState:(NSApplication*)app {
++  return YES;
++}
++
++@end
++
++namespace rearc {
++
++void InstallReArcAppDelegateAndMenu() {
++  CHECK([NSThread isMainThread]);
++  // Mirrors the upstream PreCreateThreads invariant: nothing may have
++  // installed a delegate before this point.
++  CHECK_EQ(nil, NSApp.delegate);
++  // Retained for the life of the process; the host outlives registration.
++  static ReArcAppDelegate* delegate = [[ReArcAppDelegate alloc] init];
++  NSApp.delegate = delegate;
++  // Placeholder menu surface. Shell-owned menu construction and callback
++  // forwarding arrive in a later P-APP-001 slice; an empty main menu keeps
++  // AppKit consistent without creating Chrome's menu or AppController.
++  NSApp.mainMenu = [[NSMenu alloc] initWithTitle:@"ReArc"];
++}
++
++void FinalizeReArcAppDelegate() {
++  CHECK([NSThread isMainThread]);
++  VLOG(1) << "ReArcAppDelegate: main message loop ended; bridge finalization "
++             "is a slice-1 no-op.";
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/rearc_application_mac.h b/chrome/browser/rearc_bridge/rearc_application_mac.h
+new file mode 100644
+index 0000000000..dbc0a016f8
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_application_mac.h
+@@ -0,0 +1,23 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_APPLICATION_MAC_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_APPLICATION_MAC_H_
++
++#ifdef __OBJC__
++
++#import "chrome/browser/chrome_browser_application_mac.h"
++
++// The ReArc application singleton. Created at the RegisterBrowserCrApp()
++// seam, this subclass keeps every BrowserCrApplication invariant (CrApp
++// message-pump eligibility, sendEvent:/accessibility behavior and the
++// sharedApplication CHECKs) while routing the Cocoa termination entry points
++// through the engine lifecycle host (P-APP-001, slice 1). Without an
++// installed host, termination falls back to the upstream AppController path.
++@interface ReArcApplication : BrowserCrApplication
++@end
++
++#endif  // __OBJC__
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_APPLICATION_MAC_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_application_mac.mm b/chrome/browser/rearc_bridge/rearc_application_mac.mm
+new file mode 100644
+index 0000000000..fe5599391b
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_application_mac.mm
+@@ -0,0 +1,31 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#import "chrome/browser/rearc_bridge/rearc_application_mac.h"
++
++#include "chrome/browser/rearc_bridge/rearc_engine_lifecycle.h"
++
++@implementation ReArcApplication
++
++// Cocoa's orderly-quit entry point. When a lifecycle host is installed it
++// decides whether the upstream AppController-based quit flow runs; the host
++// path never calls exit() from this callback (P-APP-001 shutdown invariants).
++- (void)terminate:(id)sender {
++  rearc::EngineLifecycleHost* host = rearc::GetEngineLifecycleHost();
++  if (host && host->HandleTerminateRequest()) {
++    // The host consumed the request and owns the shutdown flow from here.
++    return;
++  }
++  [super terminate:sender];
++}
++
++- (void)cancelTerminate:(id)sender {
++  rearc::EngineLifecycleHost* host = rearc::GetEngineLifecycleHost();
++  if (host && host->HandleTerminateCancel()) {
++    return;
++  }
++  [super cancelTerminate:sender];
++}
++
++@end
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.h b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.h
+new file mode 100644
+index 0000000000..37d2d8e498
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.h
+@@ -0,0 +1,51 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_ENGINE_ENTRY_MAC_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_ENGINE_ENTRY_MAC_H_
++
++#include <stdbool.h>
++
++// Public C ABI of the ReArc engine bridge (P-APP-001, slice 1). Exported from
++// the Chromium Framework via chrome/app/framework.exports. Keep this header
++// C-only and free of Chromium C++ types so Swift can consume it without the
++// Chromium C++ ABI.
++//
++// Slice-1 host flow: call ReArcEngineSetLifecycleCallbacks() on the main
++// thread, then invoke the framework's ordinary ChromeMain entry point. The
++// engine's run is blocking until shutdown (reference approach A in
++// engine/docs/patches/P-APP-001.md); there is no second NSApplicationMain and
++// no external pump.
++
++// Chromium compiles with -fvisibility=hidden; the framework's public
++// symbols are opted back in one by one (same convention as ChromeMain in
++// chrome/app/chrome_main.cc). The non-component framework.exports /
++// framework.order lists are a separate release-packaging hunk (P-APP-001
++// build row) and are not yet updated by slice 1.
++#define REARC_ENGINE_EXPORT __attribute__((visibility("default")))
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// Host lifecycle callback. Return true when the host consumed the request and
++// owns the resulting flow; returning false declines it.
++typedef bool (*ReArcEngineLifecycleCallback)(void* user_data);
++
++// Bridge implementation version, e.g. "0.1.0". Static storage; do not free.
++REARC_ENGINE_EXPORT const char* ReArcEngineBridgeVersion(void);
++
++// Installs (or clears, with on_terminate_request == nullptr) the host's
++// lifecycle callbacks. Must be called on the main thread before the engine
++// entry point creates NSApplication; user_data is passed back verbatim.
++REARC_ENGINE_EXPORT void ReArcEngineSetLifecycleCallbacks(
++    ReArcEngineLifecycleCallback on_terminate_request,
++    ReArcEngineLifecycleCallback on_terminate_cancel,
++    void* user_data);
++
++#ifdef __cplusplus
++}  // extern "C"
++#endif
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_ENGINE_ENTRY_MAC_H_
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+new file mode 100644
+index 0000000000..7e0f4c3bae
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -0,0 +1,62 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/rearc_engine_entry_mac.h"
++
++#import <Foundation/Foundation.h>
++
++#include "base/check.h"
++#include "base/memory/raw_ptr.h"
++#include "chrome/browser/rearc_bridge/rearc_engine_lifecycle.h"
++
++namespace {
++
++// Adapts the exported C callback pair onto the C++ EngineLifecycleHost
++// interface. Registered before NSApplication exists and alive for the rest of
++// the process.
++class CallbackLifecycleHost final : public rearc::EngineLifecycleHost {
++ public:
++  void Reset(ReArcEngineLifecycleCallback on_terminate_request,
++             ReArcEngineLifecycleCallback on_terminate_cancel,
++             void* user_data) {
++    on_terminate_request_ = on_terminate_request;
++    on_terminate_cancel_ = on_terminate_cancel;
++    user_data_ = user_data;
++  }
++
++  bool HandleTerminateRequest() override {
++    return on_terminate_request_ && on_terminate_request_(user_data_);
++  }
++
++  bool HandleTerminateCancel() override {
++    return on_terminate_cancel_ && on_terminate_cancel_(user_data_);
++  }
++
++ private:
++  ReArcEngineLifecycleCallback on_terminate_request_ = nullptr;
++  ReArcEngineLifecycleCallback on_terminate_cancel_ = nullptr;
++  raw_ptr<void> user_data_ = nullptr;
++};
++
++CallbackLifecycleHost g_callback_lifecycle_host;
++
++}  // namespace
++
++const char* ReArcEngineBridgeVersion(void) {
++  return "0.1.0";
++}
++
++void ReArcEngineSetLifecycleCallbacks(
++    ReArcEngineLifecycleCallback on_terminate_request,
++    ReArcEngineLifecycleCallback on_terminate_cancel,
++    void* user_data) {
++  CHECK([NSThread isMainThread]);
++  if (!on_terminate_request) {
++    rearc::SetEngineLifecycleHost(nullptr);
++    return;
++  }
++  g_callback_lifecycle_host.Reset(on_terminate_request, on_terminate_cancel,
++                                  user_data);
++  rearc::SetEngineLifecycleHost(&g_callback_lifecycle_host);
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_lifecycle.cc b/chrome/browser/rearc_bridge/rearc_engine_lifecycle.cc
+new file mode 100644
+index 0000000000..0517332639
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_engine_lifecycle.cc
+@@ -0,0 +1,32 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/rearc_engine_lifecycle.h"
++
++#include <pthread.h>
++
++#include "base/check.h"
++
++namespace rearc {
++
++namespace {
++
++// Main-thread only; set before NSApplication finishes launching and read
++// from Cocoa termination entry points on the same thread.
++EngineLifecycleHost* g_engine_lifecycle_host = nullptr;
++
++}  // namespace
++
++void SetEngineLifecycleHost(EngineLifecycleHost* host) {
++  // Registration happens before NSApplication exists; Cocoa termination entry
++  // points read the host on the same thread.
++  CHECK(pthread_main_np());
++  g_engine_lifecycle_host = host;
++}
++
++EngineLifecycleHost* GetEngineLifecycleHost() {
++  return g_engine_lifecycle_host;
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_lifecycle.h b/chrome/browser/rearc_bridge/rearc_engine_lifecycle.h
+new file mode 100644
+index 0000000000..6c949552ea
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_engine_lifecycle.h
+@@ -0,0 +1,46 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_ENGINE_LIFECYCLE_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_ENGINE_LIFECYCLE_H_
++
++namespace rearc {
++
++// Host-side callbacks that let a shell own the NSApplication lifecycle while
++// Chromium's browser loop runs (P-APP-001, reference approach A: the upstream
++// base::RunLoop stays on the stack and its native pump enters -[NSApp run];
++// no external pump adapter is introduced).
++//
++// Slice 1 wires the host-owned application singleton (ReArcApplication) and
++// the termination bridge only. Readiness, keepalive, delegate/menu and
++// profile registration arrive in later slices per
++// engine/docs/patches/P-APP-001.md.
++//
++// All calls happen on the main thread (Chromium BrowserThread::UI).
++class EngineLifecycleHost {
++ public:
++  virtual ~EngineLifecycleHost() = default;
++
++  // Called from -[ReArcApplication terminate:]. Return true if the host
++  // consumed the request and now owns the shutdown flow. Returning false (or
++  // having no host installed) falls back to the upstream AppController quit
++  // path, preserving stock behavior when the engine runs standalone.
++  virtual bool HandleTerminateRequest() = 0;
++
++  // Called from -[ReArcApplication cancelTerminate:]. Same consumption
++  // contract as HandleTerminateRequest().
++  virtual bool HandleTerminateCancel() = 0;
++};
++
++// Installs (or clears, with nullptr) the lifecycle host. Must be called on
++// the main thread before NSApplication finishes launching; the host must
++// outlive its registration.
++void SetEngineLifecycleHost(EngineLifecycleHost* host);
++
++// Returns the installed host, or nullptr when the engine runs standalone.
++EngineLifecycleHost* GetEngineLifecycleHost();
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_ENGINE_LIFECYCLE_H_
+diff --git a/chrome/browser/ui/webui/version/version_ui.cc b/chrome/browser/ui/webui/version/version_ui.cc
+index 4c523d48d8..b87342a89a 100644
+--- a/chrome/browser/ui/webui/version/version_ui.cc
++++ b/chrome/browser/ui/webui/version/version_ui.cc
+@@ -14,6 +14,7 @@
+ #include "base/debug/debugging_buildflags.h"
+ #include "base/i18n/message_formatter.h"
+ #include "base/memory/ref_counted_memory.h"
++#include "base/strings/strcat.h"
+ #include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_util.h"
+ #include "base/strings/utf_string_conversions.h"
+@@ -247,8 +248,9 @@ void VersionUI::AddVersionDetailStrings(content::WebUIDataSource* html_source) {
+                                   VersionProcessorVariation());
+ 
+   // Data strings.
+-  html_source->AddString(version_ui::kVersion,
+-                         version_info::GetVersionNumber());
++  html_source->AddString(
++      version_ui::kVersion,
++      base::StrCat({"ReArc ", version_info::GetVersionNumber()}));
+   html_source->AddString(version_ui::kVersionSuffix,
+                          GetVersionInformationalSuffix());
+ 

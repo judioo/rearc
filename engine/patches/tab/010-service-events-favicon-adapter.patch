@@ -1,0 +1,496 @@
+# Patch-ID: P-TAB-001 (slice S5, adapter 1) — service events + favicon
+# Area: tab.
+# Rationale: provide a typed, generation-checked service-event seam without
+#   editing tab/008's frozen event files; favicon completions carry decoded,
+#   re-encoded PNG refs under IPC-CONTRACT sections 3 and 7.
+# Last-Rebased: 2026-11-02 (Chromium 156.0.8078.74).
+# Helper whitelist: favicon::ContentFaviconDriver via chrome's favicon utils;
+#   audit: WebContentsUserData + Profile FaviconService, no TabInterface,
+#   BrowserWindowInterface, Browser, TabFeatures or Views instantiation.
+#   The existing keyed-service graph owns the helper's database dependency.
+# Lifetime: adapter is WebContentsUserData, unhooks its driver observer in
+#   WebContentsDestroyed before user-data deletion; no deferred-id cleanup.
+#   Captured content generations are checked, never restamped at completion.
+# Cache: immutable random refs scoped to the addressed tab/profile, at most
+#   16 entries of <=64 KiB, encode input <=256x256; clear on primary-page
+#   change/no icon/encode failure/teardown. Refreshes with unchanged icon URLs
+#   are processed. Retrieval respects max_blob_bytes and returns too_large.
+# Drift: bounded cache eviction invalidates old refs (not_found); oversized
+#   observer images clear the presentation instead of emitting an empty ref.
+#   Service events remain typed scaffolding, with no wire transport yet.
+# Additive files + an isolated mac :core sources block; existing bridge files
+#   remain untouched. AttachFaviconAdapter is dormant until integration.
+# Gate: build-p10 green attempt 1; final build-p11 green attempt 2 after
+#   teardown guards/formatting, no compile failures. nm symbols + --version
+#   156.0.8078.74 verified. G1-G5 PASS on final build (G3: grep -qa).
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 1b2c358028..a4901355a0 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1518,6 +1518,14 @@ source_set("core") {
+   }
+ 
+   if (is_mac) {
++    # P-TAB-001 S5 (tab/010): typed service events + favicon adapter.
++    sources += [
++      "rearc_bridge/favicon_adapter.cc",
++      "rearc_bridge/favicon_adapter.h",
++      "rearc_bridge/ipc_service_events.cc",
++      "rearc_bridge/ipc_service_events.h",
++    ]
++
+     sources += [
+       "app_controller_mac.mm",
+       "browser_process_platform_part_mac.mm",
+diff --git a/chrome/browser/rearc_bridge/favicon_adapter.cc b/chrome/browser/rearc_bridge/favicon_adapter.cc
+new file mode 100644
+index 0000000000..531f1adfd0
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/favicon_adapter.cc
+@@ -0,0 +1,199 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/favicon_adapter.h"
++
++#include <pthread.h>
++
++#include <deque>
++#include <utility>
++
++#include "base/check.h"
++#include "base/memory/raw_ptr.h"
++#include "base/unguessable_token.h"
++#include "chrome/browser/favicon/favicon_utils.h"
++#include "chrome/browser/rearc_bridge/ipc_service_events.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "components/favicon/content/content_favicon_driver.h"
++#include "components/favicon/core/favicon_driver_observer.h"
++#include "content/public/browser/favicon_status.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_entry.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/image/image.h"
++#include "url/gurl.h"
++
++namespace rearc {
++namespace {
++
++constexpr size_t kMaxPngBytes = 64 * 1024;
++constexpr size_t kMaxCacheEntries = 16;
++
++class FaviconAdapter : public content::WebContentsObserver,
++                       public content::WebContentsUserData<FaviconAdapter>,
++                       public favicon::FaviconDriverObserver {
++ public:
++  ~FaviconAdapter() override { UnobserveDriver(); }
++
++  void PublishInitial() {
++    auto* entry = web_contents()->GetController().GetLastCommittedEntry();
++    if (entry && driver_->FaviconIsValid()) {
++      Publish(entry->GetFavicon().url, driver_->GetFavicon());
++    } else {
++      Publish(GURL(), gfx::Image());
++    }
++  }
++
++  void OnFaviconUpdated(favicon::FaviconDriver* driver,
++                        NotificationIconType icon_type,
++                        const GURL& icon_url,
++                        bool icon_url_changed,
++                        const gfx::Image& image) override {
++    if (icon_type == NON_TOUCH_16_DIP && driver == driver_) {
++      // Unchanged URLs can carry freshly downloaded pixels. The upstream
++      // driver filters old-page completions before notifying observers.
++      Publish(icon_url, image);
++    }
++  }
++
++  void PrimaryPageChanged(content::Page& page) override {
++    // Runs before the driver's DidFinishNavigation starts the new fetch.
++    cache_.clear();
++    Publish(GURL(), gfx::Image());
++  }
++
++  void WebContentsDestroyed() override {
++    UnobserveDriver();
++    cache_.clear();
++    Observe(nullptr);
++  }
++
++  FaviconGetResult Get(const std::string& ref,
++                       size_t max_blob_bytes,
++                       std::vector<uint8_t>* out_png) const {
++    auto* session = TabRegistry::Get().FindSession(tab_id_);
++    if (!web_contents() || web_contents()->IsBeingDestroyed() || !session ||
++        session->content_generation() != generation_) {
++      return FaviconGetResult::kNotFound;
++    }
++    for (const auto& entry : cache_) {
++      if (entry.first == ref) {
++        if (entry.second.size() > max_blob_bytes) {
++          return FaviconGetResult::kTooLarge;
++        }
++        *out_png = entry.second;
++        return FaviconGetResult::kFound;
++      }
++    }
++    return FaviconGetResult::kNotFound;
++  }
++
++ private:
++  friend class content::WebContentsUserData<FaviconAdapter>;
++  FaviconAdapter(content::WebContents* contents,
++                 uint64_t tab_id,
++                 uint64_t generation)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<FaviconAdapter>(*contents),
++        tab_id_(tab_id),
++        generation_(generation) {
++    favicon::CreateContentFaviconDriverForWebContents(contents);
++    driver_ = favicon::ContentFaviconDriver::FromWebContents(contents);
++    CHECK(driver_);
++    driver_->AddObserver(this);
++  }
++
++  void UnobserveDriver() {
++    if (driver_) {
++      driver_->RemoveObserver(this);
++      driver_ = nullptr;
++    }
++  }
++
++  void Publish(const GURL& icon_url, const gfx::Image& image) {
++    if (!web_contents()) {
++      return;
++    }
++    ServiceEvent event;
++    event.kind = ServiceEventKind::kFaviconChanged;
++    event.tab_id = tab_id_;
++    event.content_generation = generation_;
++    event.favicon_page_url = web_contents()->GetLastCommittedURL().spec();
++    event.favicon_cleared = true;
++    if (icon_url.is_valid() && !image.IsEmpty()) {
++      const SkBitmap bitmap = image.AsBitmap();
++      // Bound synchronous encoding work even if an unexpected driver image
++      // reaches this 16-DIP slot. No original ICO/SVG bytes are exposed.
++      if (bitmap.width() > 0 && bitmap.width() <= 256 && bitmap.height() > 0 &&
++          bitmap.height() <= 256) {
++        auto png = gfx::PNGCodec::EncodeBGRASkBitmap(
++            bitmap, /*discard_transparency=*/false);
++        if (png && !png->empty() && png->size() <= kMaxPngBytes) {
++          event.favicon_icon_ref = base::UnguessableToken::Create().ToString();
++          event.favicon_cleared = false;
++          if (cache_.size() == kMaxCacheEntries) {
++            cache_.pop_front();
++          }
++          cache_.emplace_back(event.favicon_icon_ref, std::move(*png));
++        }
++      }
++    }
++    if (event.favicon_cleared) {
++      cache_.clear();
++    }
++    EmitServiceEvent(std::move(event));
++  }
++
++  const uint64_t tab_id_;
++  const uint64_t generation_;
++  raw_ptr<favicon::ContentFaviconDriver> driver_ = nullptr;
++  std::deque<std::pair<std::string, std::vector<uint8_t>>> cache_;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++
++WEB_CONTENTS_USER_DATA_KEY_IMPL(FaviconAdapter);
++
++}  // namespace
++
++void AttachFaviconAdapter(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  auto* session = TabRegistry::Get().FindSession(tab_id);
++  if (!session || !session->web_contents() ||
++      FaviconAdapter::FromWebContents(session->web_contents())) {
++    return;
++  }
++  FaviconAdapter::CreateForWebContents(session->web_contents(), tab_id,
++                                       session->content_generation());
++  FaviconAdapter::FromWebContents(session->web_contents())->PublishInitial();
++}
++
++void DetachFaviconAdapter(uint64_t tab_id) {
++  CHECK(pthread_main_np());
++  if (auto* session = TabRegistry::Get().FindSession(tab_id)) {
++    session->web_contents()->RemoveUserData(FaviconAdapter::UserDataKey());
++  }
++}
++
++FaviconGetResult FaviconGet(uint64_t tab_id,
++                            const std::string& icon_ref,
++                            size_t max_blob_bytes,
++                            std::vector<uint8_t>* out_png) {
++  CHECK(pthread_main_np());
++  CHECK(out_png);
++  out_png->clear();
++  auto* session = TabRegistry::Get().FindSession(tab_id);
++  if (!session) {
++    return FaviconGetResult::kNotFound;
++  }
++  auto* adapter = FaviconAdapter::FromWebContents(session->web_contents());
++  return adapter ? adapter->Get(icon_ref, max_blob_bytes, out_png)
++                 : FaviconGetResult::kNotFound;
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/favicon_adapter.h b/chrome/browser/rearc_bridge/favicon_adapter.h
+new file mode 100644
+index 0000000000..9d78aff74d
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/favicon_adapter.h
+@@ -0,0 +1,33 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_FAVICON_ADAPTER_H_
++#define CHROME_BROWSER_REARC_BRIDGE_FAVICON_ADAPTER_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <vector>
++
++namespace rearc {
++
++// Dormant S5 seam: no automatic attachment in frozen TabSession. UI thread
++// only, after tab.created. ContentFaviconDriver is the sole admitted helper:
++// profile FaviconService client, no Browser/TabInterface/TabFeatures required.
++void AttachFaviconAdapter(uint64_t tab_id);
++void DetachFaviconAdapter(uint64_t tab_id);
++
++enum class FaviconGetResult { kFound, kNotFound, kTooLarge };
++
++// Immutable, tab/profile-scoped PNG refs; bounded cache eviction, navigation,
++// detach and content teardown invalidate them. Transport maps results to
++// favicon.get.reply / not_found / too_large and supplies max_blob_bytes.
++FaviconGetResult FaviconGet(uint64_t tab_id,
++                            const std::string& icon_ref,
++                            size_t max_blob_bytes,
++                            std::vector<uint8_t>* out_png);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_FAVICON_ADAPTER_H_
+diff --git a/chrome/browser/rearc_bridge/ipc_service_events.cc b/chrome/browser/rearc_bridge/ipc_service_events.cc
+new file mode 100644
+index 0000000000..fdcace3e3d
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/ipc_service_events.cc
+@@ -0,0 +1,93 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/rearc_bridge/ipc_service_events.h"
++
++#include <pthread.h>
++
++#include "base/check.h"
++#include "base/logging.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/rearc_bridge/tab_session.h"
++#include "content/public/browser/web_contents.h"
++
++namespace rearc {
++
++namespace {
++
++ServiceEventSink*& GetServiceEventSinkSlot() {
++  // A plain static: the slot is trivially initialized and never torn down.
++  static ServiceEventSink* sink = nullptr;
++  return sink;
++}
++
++}  // namespace
++
++const char* ServiceEventKindName(ServiceEventKind kind) {
++  switch (kind) {
++    case ServiceEventKind::kFaviconChanged:
++      // Wire carrier: tab.updated changes.favicon (rearc.ipc.v1 §§3,7).
++      return "tab.updated";
++    case ServiceEventKind::kSecurityStateChanged:
++      // Wire carrier: tab.updated changes.security_state (§3).
++      return "tab.updated";
++    case ServiceEventKind::kMediaStateChanged:
++      // Wire carrier: media.state_changed (§7).
++      return "media.state_changed";
++  }
++}
++
++const char* TabSecurityStateName(TabSecurityState state) {
++  switch (state) {
++    case TabSecurityState::kSecure:
++      return "secure";
++    case TabSecurityState::kInsecure:
++      return "insecure";
++    case TabSecurityState::kDangerous:
++      return "dangerous";
++    case TabSecurityState::kNone:
++      return "none";
++    case TabSecurityState::kUnknown:
++      return "unknown";
++  }
++}
++
++const char* MediaPlaybackName(MediaPlayback playback) {
++  switch (playback) {
++    case MediaPlayback::kPlaying:
++      return "playing";
++    case MediaPlayback::kPaused:
++      return "paused";
++    case MediaPlayback::kStopped:
++      return "stopped";
++    case MediaPlayback::kUnknown:
++      return "unknown";
++  }
++}
++
++void SetServiceEventSink(ServiceEventSink* sink) {
++  CHECK(pthread_main_np());
++  GetServiceEventSinkSlot() = sink;
++}
++
++void EmitServiceEvent(ServiceEvent event) {
++  CHECK(pthread_main_np());
++  TabSession* session = TabRegistry::Get().FindSession(event.tab_id);
++  if (!session || session->web_contents()->IsBeingDestroyed() ||
++      session->content_generation() != event.content_generation ||
++      session->close_state() == TabSession::CloseState::kClosed) {
++    VLOG(1) << "rearc: dropping service event " << static_cast<int>(event.kind)
++            << " for unknown tab_id " << event.tab_id;
++    return;
++  }
++  ServiceEventSink* sink = GetServiceEventSinkSlot();
++  if (!sink) {
++    VLOG(1) << "rearc: no ServiceEventSink registered; dropping service event "
++            << static_cast<int>(event.kind) << " for tab_id " << event.tab_id;
++    return;
++  }
++  sink->OnServiceEvent(event);
++}
++
++}  // namespace rearc
+diff --git a/chrome/browser/rearc_bridge/ipc_service_events.h b/chrome/browser/rearc_bridge/ipc_service_events.h
+new file mode 100644
+index 0000000000..dd060bd1dd
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/ipc_service_events.h
+@@ -0,0 +1,103 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_REARC_BRIDGE_IPC_SERVICE_EVENTS_H_
++#define CHROME_BROWSER_REARC_BRIDGE_IPC_SERVICE_EVENTS_H_
++
++#include <cstdint>
++#include <string>
++
++namespace rearc {
++
++// Typed service-event surface (P-TAB-001 slice S5), the S3-style scaffolding
++// for rearc.ipc.v1 §7 (favicons and media) and the §3 tab.updated change
++// fields that S3's frozen TabEvent struct does not carry: favicon,
++// security_state, is_audible / is_muted.
++//
++// Why a parallel surface: ipc_tab_events.{h,cc} is tab/008's frozen file
++// (series-mechanics invariant), so the S5 adapters emit through their own
++// typed surface. Wire mapping is documented per event:
++//   * kFaviconChanged / kSecurityStateChanged serialize into the tab.updated
++//     `changes` table (favicon / security_state entries — §3).
++//   * kMediaStateChanged serializes as media.state_changed (§7).
++// Same scaffolding posture as S3: events are typed C++ structs delivered to
++// a registered ServiceEventSink; with no sink they drop with a VLOG.
++//
++// All calls are main thread (Chromium BrowserThread::UI) only.
++
++enum class ServiceEventKind {
++  kFaviconChanged,
++  kMediaStateChanged,
++  kSecurityStateChanged,
++};
++
++// Wire carrier names: "tab.updated" (favicon/security_state change entries)
++// and "media.state_changed" (§7). Emitted as literals for the strings gate.
++const char* ServiceEventKindName(ServiceEventKind kind);
++
++// rearc.ipc.v1 §3 security_state enum: "secure" | "insecure" | "dangerous" |
++// "none" | "unknown". Never derived from the URL scheme — mapped from
++// chrome_security_state::GetSecurityLevel() only ("report unknown until
++// valid").
++enum class TabSecurityState { kSecure, kInsecure, kDangerous, kNone, kUnknown };
++const char* TabSecurityStateName(TabSecurityState state);
++
++// rearc.ipc.v1 §7 playback enum: "playing" | "paused" | "stopped" |
++// "unknown". `stopped` means no active playback session.
++enum class MediaPlayback { kPlaying, kPaused, kStopped, kUnknown };
++const char* MediaPlaybackName(MediaPlayback playback);
++
++struct ServiceEvent {
++  ServiceEventKind kind;
++  uint64_t tab_id = 0;
++  // Captured at adapter attachment; never restamped at completion.
++  uint64_t content_generation = 0;
++
++  // kFaviconChanged — tab.updated changes.favicon (§7): one of
++  // {page_url,format:"png",data} / {page_url,icon_ref} / {page_url,
++  // cleared:true}. The typed surface carries the ref form day-one; inline
++  // bytes are the transport slice's choice (max_blob_bytes policy).
++  std::string favicon_page_url;
++  // Session-scoped, profile-bound, immutable cache reference; empty when no
++  // icon is available. `favicon_cleared` takes precedence when set.
++  std::string favicon_icon_ref;
++  bool favicon_cleared = false;
++
++  // kMediaStateChanged — media.state_changed (§7).
++  MediaPlayback playback = MediaPlayback::kUnknown;
++  bool audible = false;
++  bool muted = false;
++  // Baseline v1: pip_native is not advertised (IPC-CONTRACT §7), so both are
++  // always false; fields exist so the transport's serializer is stable.
++  bool pip_available = false;
++  bool pip_active = false;
++  bool has_metadata = false;
++  std::u16string media_title;
++  std::u16string media_artist;
++  std::u16string media_album;
++
++  // kSecurityStateChanged — tab.updated changes.security_state (§3).
++  TabSecurityState security_state = TabSecurityState::kUnknown;
++};
++
++// Sink for the typed service-event stream. Main thread only; the sink must
++// outlive its registration.
++class ServiceEventSink {
++ public:
++  virtual ~ServiceEventSink() = default;
++  virtual void OnServiceEvent(const ServiceEvent& event) = 0;
++};
++
++// Registers (or clears, with nullptr) the service-event sink.
++void SetServiceEventSink(ServiceEventSink* sink);
++
++// Generic emission path. Rejects events whose captured content generation is
++// stale; events for unknown/destroyed sessions drop with a VLOG (service events
++// never legitimately race teardown — adapters detach on
++// WebContentsDestroyed, unlike S3's tab.closed).
++void EmitServiceEvent(ServiceEvent event);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_IPC_SERVICE_EVENTS_H_

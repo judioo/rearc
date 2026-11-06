@@ -1,0 +1,92 @@
+# Patch-ID: P-TAB-001 (wave 12, metadata semantics)
+# Area: tab.
+# Rationale: has_metadata=false means unchanged; true replaces all strings,
+#   with empties clearing metadata. Always emit true for media snapshots so
+#   mute/initial/disconnect updates cannot leave stale metadata in old hosts.
+# Last-Rebased: 2026-11-02 (Chromium 156.0.8078.74).
+# Frozen-file exceptions: media adapter only makes disconnect explicit;
+#   existing ABI serialization enforces its full-snapshot guarantee, retaining
+#   the major-1 layout and wave-11 conditional consumer behavior.
+# Validation: build-p32; smoke-tab021 G1-G5; core/services/URLs/eval hosts;
+#   media host asserts authoritative metadata fields; nm-tab021.
+
+diff --git a/chrome/browser/rearc_bridge/media_adapter.cc b/chrome/browser/rearc_bridge/media_adapter.cc
+index 56a54d21dd..7cda59ce1c 100644
+--- a/chrome/browser/rearc_bridge/media_adapter.cc
++++ b/chrome/browser/rearc_bridge/media_adapter.cc
+@@ -74,7 +74,7 @@ class MediaAdapter : public content::WebContentsObserver,
+ 
+   void MediaSessionMetadataChanged(
+       const std::optional<media_session::MediaMetadata>& metadata) override {
+-    // A present empty table explicitly clears metadata on the wire.
++    // Full snapshots always replace metadata; absent metadata clears all strings.
+     event_.has_metadata = true;
+     event_.media_title = metadata ? metadata->title : std::u16string();
+     event_.media_artist = metadata ? metadata->artist : std::u16string();
+@@ -181,6 +181,7 @@ class MediaAdapter : public content::WebContentsObserver,
+     controllable_ = false;
+     actions_.clear();
+     event_.playback = MediaPlayback::kUnknown;
++    event_.has_metadata = true;
+     event_.media_title.clear();
+     event_.media_artist.clear();
+     event_.media_album.clear();
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 8777173e99..888276c323 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 2, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 3, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // changes bits: URL=1, title=2, loading=4, progress=8, crashed=16,
+@@ -168,6 +168,10 @@ REARC_ENGINE_EXPORT void ReArcBufferFree(void* buffer);
+ 
+ // Services callbacks use the same borrowed-for-callback ownership as core.
+ // kind: 0 favicon, 1 media, 2 security, 3 link_peek.
++// For media kind 1, has_metadata=false means unchanged, never cleared.
++// true replaces title/artist/album together; empty strings explicitly clear.
++// This engine emits complete media snapshots with has_metadata=true.
++// Ignore these fields on other kinds.
+ // playback: 0 playing, 1 paused, 2 stopped, 3 unknown.
+ // security: 0 secure, 1 insecure, 2 dangerous, 3 none, 4 unknown.
+ typedef struct ReArcServiceEvent {
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 03ef9cf7f7..a13f70cb90 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.4.0";
++  return "0.5.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 1b0a471933..45fc3b3eba 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -76,7 +76,7 @@ void PublishService(ServiceEvent event, std::string href = {}) {
+         c.muted = e.muted;
+         c.pip_available = e.pip_available;
+         c.pip_active = e.pip_active;
+-        c.has_metadata = e.has_metadata;
++        c.has_metadata = c.kind == 1;
+         c.title = title.c_str();
+         c.artist = artist.c_str();
+         c.album = album.c_str();
+@@ -902,7 +902,7 @@ void ABIDetachServices(uint64_t id) {
+ bool ABIHasServiceFeature(const char* feature) {
+   CHECK(pthread_main_np());
+   const std::string_view name(feature);
+-  return name == "media_session" || name == "favicon" ||
++  return name == "media_session" || name == "media_metadata_snapshot" || name == "favicon" ||
+          name == "security_state" || name == "user_scripts" ||
+          name == "link_peek" || name == "snapshot_viewport" ||
+          name == "snapshot_full_page" || name == "script_evaluation";
