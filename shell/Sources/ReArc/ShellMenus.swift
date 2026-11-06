@@ -208,13 +208,17 @@ enum ShellMenus {
         ]]
     }
 
-    /// File menu: import. Chromium's importer (Import Bookmarks and Settings,
-    /// which also reads passwords and history) where the engine has it; on
-    /// both engines, a bookmarks file exported from any browser.
+    /// File menu: import. ReArc's own window for Arc, Chrome and Brave
+    /// (PROFILE-IMPORT.md); Chromium's importer (Safari and Firefox, with
+    /// passwords and history) where the engine has it; on both engines, a
+    /// bookmarks file exported from any browser.
     static func importing(_ model: BrowserViewModel, chromiumImporter: Bool) -> [[ShellMenuItem]] {
-        var items = [ShellMenuItem("Import Bookmarks from HTML File…") { model.importBookmarksFile() }]
+        var items = [
+            ShellMenuItem("Import from Arc, Chrome or Brave…") { model.showBrowserImport() },
+            ShellMenuItem("Import Bookmarks from HTML File…") { model.importBookmarksFile() },
+        ]
         if chromiumImporter {
-            items.insert(ShellMenuItem("Import from Another Browser…") { model.openBrowserPage(.importData) }, at: 0)
+            items.insert(ShellMenuItem("Import from Safari or Firefox…") { model.openBrowserPage(.importData) }, at: 1)
         }
         return [items]
     }

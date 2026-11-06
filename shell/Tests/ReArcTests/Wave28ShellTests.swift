@@ -264,9 +264,10 @@ final class Wave28ShellTests: XCTestCase {
 
     func testImportMenuOffersChromiumsImporterOnlyWithTheEngine() {
         let model = makeModel()
-        XCTAssertEqual(titles(ShellMenus.importing(model, chromiumImporter: false)), ["Import Bookmarks from HTML File…"])
+        XCTAssertEqual(titles(ShellMenus.importing(model, chromiumImporter: false)),
+                       ["Import from Arc, Chrome or Brave…", "Import Bookmarks from HTML File…"])
         XCTAssertEqual(titles(ShellMenus.importing(model, chromiumImporter: true)),
-                       ["Import from Another Browser…", "Import Bookmarks from HTML File…"])
+                       ["Import from Arc, Chrome or Brave…", "Import from Safari or Firefox…", "Import Bookmarks from HTML File…"])
         XCTAssertEqual(BrowserInternalPage.importData.url.absoluteString, "chrome://settings/importData")
         XCTAssertFalse(BrowserInternalPage.importData.isAvailable(engine: model.engineHost.navigationSchemes), "WebKit has no Chromium WebUI")
         XCTAssertTrue(BrowserInternalPage.importData.isAvailable(engine: .chromium))

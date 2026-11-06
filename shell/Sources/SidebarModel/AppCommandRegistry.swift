@@ -42,6 +42,7 @@ public enum AppCommandAction: Equatable, Hashable {
     case importBoosts
     /// Bookmarks exported from another browser, as a new space.
     case importBookmarksFile
+    case importFromBrowser
     case manageBoosts
     case toggleBoost(UUID)
     case editBoost(UUID)
@@ -236,7 +237,7 @@ public struct AppCommand: Equatable, Identifiable {
         case .newBoostForSite:
             guard let tab = store.selectedTab else { return false }
             return BoostScopeMatcher.urlIsEligibleForBoosts(tab.url)
-        case .manageBoosts, .importBoosts, .importBookmarksFile:
+        case .manageBoosts, .importBoosts, .importBookmarksFile, .importFromBrowser:
             return true
         case .newLegacyBoost:
             guard let tab = store.selectedTab else { return false }
@@ -625,6 +626,13 @@ public enum AppCommandRegistry {
                 action: .newLegacyBoost
             ),
             AppCommand(
+                id: "import-from-browser",
+                title: "Import from Arc, Chrome or Brave…",
+                keywords: ["import", "arc", "chrome", "brave", "spaces", "profile", "bookmarks", "history", "extensions", "switch"],
+                minQueryLength: 3,
+                action: .importFromBrowser
+            ),
+            AppCommand(
                 id: "import-bookmarks-file",
                 title: "Import Bookmarks from HTML File…",
                 keywords: ["import", "bookmarks", "html", "file", "safari", "chrome", "firefox", "export"],
@@ -725,8 +733,8 @@ public enum AppCommandRegistry {
             ),
             AppCommand(
                 id: "import-browser-data",
-                title: "Import from Another Browser…",
-                keywords: ["import", "browser", "safari", "chrome", "firefox", "bookmarks", "passwords", "history"],
+                title: "Import from Safari or Firefox…",
+                keywords: ["import", "browser", "safari", "firefox", "bookmarks", "passwords", "history"],
                 minQueryLength: 3,
                 action: .openBrowserPage(.importData)
             ),

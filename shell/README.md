@@ -1516,12 +1516,25 @@ Both engines unless noted.
   browser exports (Safari, Chrome, Firefox, Edge, Arc) into a new space:
   folders become pinned folders (closed), links pinned tabs, in file
   order; only http and https links, at most 2000, folders at most 6 deep.
-  On Chromium, File > Import from Another Browser… (and the command) opens
+  On Chromium, File > Import from Safari or Firefox… (and the command) opens
   Chromium's own importer, `chrome://settings/importData`, in the settings
   tab. It imports into the engine profile: passwords and history appear in
   Chromium's pages and the command bar's history, and imported bookmarks
   go into Chromium's bookmark model, which ReArc does not show, so use the
   HTML file for bookmarks.
+- **Import from Arc, Chrome or Brave** (File menu and command, both
+  engines; docs/PROFILE-IMPORT.md). Chromium's importer has no source for
+  another Chromium profile on macOS, so ReArc reads the files itself, read
+  only. Arc's `StorableSidebar.json` becomes new spaces with their pinned
+  tabs, folders, splits, renames, icons and themes, each Arc profile's
+  favorites, and Arc profiles as existing or new ReArc profiles. A preview
+  counts spaces, pinned tabs and favorites, with a checkbox per space. A
+  Chrome, Brave or Arc profile's bookmarks become a space, its history
+  (read from a temp copy) feeds the command bar, its search engine is
+  matched by name, and its extensions reinstall one at a time from the
+  Web Store (Chromium). Five Arc settings map onto ReArc's. Passwords,
+  cookies and autofill are designed but not built: they need a Keychain
+  prompt and engine import ABIs.
 
 ## Model rules worth knowing
 
