@@ -176,6 +176,9 @@ plutil -replace NSLocationWhenInUseUsageDescription -string "A website you allow
 # over CFBundleIconFile on macOS, so it is removed; Assets.car itself stays for its other
 # assets. Before signing, so the seal covers the icon and Info.plist.
 cp "$SHELL_DIR/Resources/ReArc.icns" "$APP/Contents/Resources/ReArc.icns"
+# Settings › Icon's alternates (AppIconChoice), sealed with the rest.
+rm -rf "$APP/Contents/Resources/AppIcons"
+cp -R "$SHELL_DIR/Resources/AppIcons" "$APP/Contents/Resources/AppIcons"
 plutil -replace CFBundleIconFile -string ReArc "$PLIST"
 plutil -remove CFBundleIconName "$PLIST" 2>/dev/null || true
 if [[ $DEV_MOCK_KEYCHAIN == 1 ]]; then

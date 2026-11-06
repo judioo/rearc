@@ -209,6 +209,13 @@ public enum ArcShortcuts {
         ArcShortcut("viewLibrary", "View Library", "l", [.shift, .command]),
     ]
 
+    /// Settings › Shortcuts › Learn the Essential Shortcuts (docs/SHORTCUTS.md
+    /// "Essential shortcuts"): the keys Arc's onboarding teaches first.
+    public static let essentialIDs = [
+        "addressBar", "newTab", "archiveTab", "reopenLastClosedTab", "showSidebar", "copyCurrentURL",
+        "pinTab", "addSplitView", "showLittleArc", "cycleNextTab", "goToSpace1", "focusNextSpace",
+    ]
+
     /// The binding a key press triggers, the first in menu-bar order when two
     /// share keys (as AppKit resolves key equivalents).
     public static func binding(for key: ShortcutKey, modifiers: ShortcutModifiers) -> ArcShortcut? {

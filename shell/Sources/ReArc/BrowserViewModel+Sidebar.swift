@@ -518,6 +518,7 @@ extension BrowserViewModel {
     func startAutoArchiveTimer() {
         let timer = Timer(timeInterval: 300, repeats: true) { [weak self] _ in
             self?.runAutoArchive()
+            self?.runLittleArcAutoArchive()
             self?.runAutoUnload()
         }
         RunLoop.main.add(timer, forMode: .common)

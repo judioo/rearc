@@ -224,8 +224,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private let runtime: ChromiumRuntime
     private var model: BrowserViewModel?
     private var windows: [ObjectIdentifier: (window: NSWindow, role: WindowRole)] = [:]
-    /// ReArc > iCloud Sync… (Settings… is Chromium's own WebUI on this path).
-    private var syncSettingsWindow: NSWindow?
+    /// Settings… (⌘,): ReArc's own window; Chromium's pages sit behind its buttons.
+    private var settingsWindow: SettingsWindowController?
+    private let menuKeyEquivalents = MenuKeyEquivalents()
     private var airTrafficControlWindow: NSWindow?
     /// One never-shown window, with no page or user state. Consumed once.
     private var preparedLittleArcWindow: NSWindow?
@@ -316,6 +317,12 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             adopt(model)
         }
         model.presentAirTrafficControl = { [weak self] in self?.presentAirTrafficControl() }
+        model.presentSettings = { [weak self] pane in MainActor.assumeIsolated { self?.presentSettings(pane) } }
+        model.onShortcutOverridesChanged = { [weak self, weak model] in
+            guard let self, let model, let menu = NSApp.mainMenu else { return }
+            self.menuKeyEquivalents.apply(model.shortcutOverrides, to: menu)
+        }
+        if model.appIcon != .standard { model.appIcon.apply() }
         model.onProfileDeleted = { [weak self, runtime] id in
             // EngineHost already dropped the profile's engines. Its private windows
             // close first (their off-the-record children must go before the parent).
@@ -391,7 +398,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             self?.terminating = true
             model?.prepareForQuit()
         }
-        NSApp.mainMenu = makeMainMenu(model: model)
+        let mainMenu = makeMainMenu(model: model)
+        menuKeyEquivalents.apply(model.shortcutOverrides, to: mainMenu)
+        NSApp.mainMenu = mainMenu
         if awaitingReady {
             // The cached window is up; the services it deferred start now.
             awaitingReady = false
@@ -589,24 +598,28 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
-    func presentSyncSettings() {
+    @MainActor
+    func presentSettings(_ pane: SettingsPane?) {
         guard let model, !terminating else { return }
-        if let window = syncSettingsWindow {
-            window.makeKeyAndOrderFront(nil)
-            return
+        if settingsWindow == nil {
+            settingsWindow = SettingsWindowController(model: model) { [weak self] in self?.settingsCapabilities() ?? SettingsCapabilities() }
         }
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 320),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
+        settingsWindow?.show(pane)
+    }
+
+    /// The Settings window (the self-test walks it).
+    var settingsWindowForTesting: NSWindow? { settingsWindow?.window }
+
+    /// Rows the engine backs: automatic PiP and Chrome's password leak check.
+    func settingsCapabilities() -> SettingsCapabilities {
+        let runtime = runtime
+        return SettingsCapabilities(
+            pictureInPicture: runtime.capabilities.pictureInPicture,
+            passwordLeakCheck: runtime.capabilities.passwordLeakDetection ? Binding(
+                get: { runtime.leakDetectionEnabled },
+                set: { runtime.setLeakDetectionForAllProfiles($0) }
+            ) : nil
         )
-        window.isReleasedWhenClosed = false
-        window.title = "iCloud Sync"
-        window.contentView = NSHostingView(rootView: SyncSettingsView(model: model))
-        window.center()
-        syncSettingsWindow = window
-        window.makeKeyAndOrderFront(nil)
     }
 
     func presentDevToolsWindow(for tabID: Tab.ID) {
@@ -743,6 +756,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
                   let legacy = SavedBrowserWindow(appKitFrameString: string) {
             launchSession = WindowSessionSnapshot(windows: [legacy])
         }
+        if model?.restoresWindows == false { launchSession = launchSession?.launchWindowOnly }
         return launchSession
     }
 
@@ -983,9 +997,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let target = menuTarget
 
         let app = NSMenu(title: "ReArc")
-        // Chromium owns settings (chrome://settings WebUI); the shell does not duplicate them.
+        // ReArc's own window; Chromium's settings pages open from its buttons.
+        app.addItem(target.item("Settings…", ",") { model.showSettings() })
         if runtime.capabilities.navigationExtended {
-            app.addItem(target.item("Settings…", ",") { model.openBrowserPage(.settings) })
             app.addItem(target.item("Clear Browsing Data…", "\u{8}", [.command, .shift]) {
                 model.openBrowserPage(.clearBrowsingData)
             })
@@ -993,31 +1007,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             app.addItem(.separator())
         }
         app.addItem(target.item("Set ReArc as Default Browser…", "") { model.setAsDefaultBrowser() })
-        app.addItem(target.item("iCloud Sync…", "") { [weak self] in self?.presentSyncSettings() })
-        if runtime.capabilities.pictureInPicture {
-            app.addItem(target.checkItem("Automatic Picture in Picture", isOn: { model.automaticPictureInPicture }) {
-                model.automaticPictureInPicture.toggle()
-            })
-        }
-        if runtime.capabilities.passwordLeakDetection {
-            // Chrome's "Warn you if passwords are exposed in a data breach" (on by default).
-            let runtime = runtime
-            app.addItem(target.checkItem("Check Passwords for Leaks", isOn: { runtime.leakDetectionEnabled }) {
-                runtime.setLeakDetectionForAllProfiles(!runtime.leakDetectionEnabled)
-            })
-        }
-        let links = NSMenu(title: "External Links")
-        for destination in ExternalLinkDestination.allCases {
-            links.addItem(target.checkItem(destination.menuTitle, isOn: { model.externalLinkDestination == destination }) {
-                model.externalLinkDestination = destination
-            })
-        }
-        app.addSubmenu(links, title: "External Links")
+        // Picture in Picture, password leak checks, external links and the
+        // Little Arc hotkey moved to Settings (wave 35).
         app.addItem(target.item("Air Traffic Control…", "") { [weak self] in self?.presentAirTrafficControl() })
-        app.addItem(target.checkItem("Open Little Arc from Anywhere (\(LittleArcHotkeyPreference.display))",
-                                     isOn: { model.isLittleArcHotkeyEnabled }) {
-            model.isLittleArcHotkeyEnabled.toggle()
-        })
         app.addItem(.separator())
         app.addItem(withTitle: "Hide ReArc", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = app.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
@@ -1025,7 +1017,11 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         app.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         app.addItem(.separator())
         // NSApp.terminate is routed to terminate_requested -> ReArcEngineShutdown.
-        app.addItem(withTitle: "Quit ReArc", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        // Only ⌘Q asks (Warn before quitting); the Dock's Quit and logout do not.
+        app.addItem(target.item("Quit ReArc", "q") { [weak self] in
+            let open = self?.browserWindows.filter(\.isVisible).count ?? 0
+            if MainActor.assumeIsolated({ model.confirmQuit(browserWindows: open) }) { NSApp.terminate(nil) }
+        })
         main.addSubmenu(app, title: "ReArc")
 
         let file = NSMenu(title: "File")
@@ -1128,6 +1124,10 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             // A private or Little Arc window has one page: Cmd+W closes the window.
             if let window = NSApp.keyWindow, let entry = self?.windows[ObjectIdentifier(window)] {
                 if case .browser = entry.role {} else { return self?.closeWindow(window) ?? () }
+            }
+            // Settings and Air Traffic Control: Cmd+W closes them, never a tab behind them.
+            if let window = NSApp.keyWindow, window === self?.settingsWindow?.window || window === self?.airTrafficControlWindow {
+                return window.performClose(nil)
             }
             model.closeSelectedTab()
         })

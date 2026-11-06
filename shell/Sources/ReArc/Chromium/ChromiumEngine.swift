@@ -119,6 +119,10 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     @ObservationIgnored var linkPeekHandler: ((URL) -> Void)? {
         didSet { reconcileLinkPeek() }
     }
+    /// Settings › Links: off stops Shift-click delivery; automatic Peek keeps the handler.
+    @ObservationIgnored var shiftClickPeekEnabled = true {
+        didSet { if shiftClickPeekEnabled != oldValue { reconcileLinkPeek() } }
+    }
     /// Page messages from installed boost worlds (not the editor): untrusted data.
     @ObservationIgnored var onBoostPageMessage: ((ChromiumPageMessage) -> Void)?
     /// Editor-world messages that failed validation (wrong kind, stale document).
@@ -830,7 +834,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     // MARK: Link peek
 
     private func reconcileLinkPeek() {
-        let desired = linkPeekHandler != nil
+        let desired = linkPeekHandler != nil && shiftClickPeekEnabled
         guard tabID != 0, !linkPeekInFlight, desired != linkPeekApplied else { return }
         let tab = tabID
         linkPeekInFlight = true
@@ -1445,5 +1449,7 @@ extension ChromiumEngine: PageElementLocating {
         return PageElementRect(value)
     }
 }
+
+extension ChromiumEngine: ShiftClickPeekConfigurable {}
 
 #endif

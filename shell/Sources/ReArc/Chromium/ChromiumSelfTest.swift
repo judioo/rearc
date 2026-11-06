@@ -3312,10 +3312,11 @@ extension ChromiumSelfTest {
     fileprivate func wave27ShellChecks(model: BrowserViewModel, store: SidebarStore, shell: ChromiumShell, tab: Tab,
                                        engine: ChromiumEngine, base: String, window: NSWindow) async throws {
         if runtime.capabilities.passwordLeakDetection {
-            let items = NSApp.mainMenu?.items.first?.submenu?.items.map(\.title) ?? []
-            try check(items.contains("Check Passwords for Leaks"), "the ReArc menu has no Check Passwords for Leaks (\(items))")
-            try check(!runtime.leakDetectionEnabled, "the toggle does not show the self-test's off value")
-            log("PASS ReArc > Check Passwords for Leaks reads the profile's value (off in the self-test)")
+            // Wave 35: the switch moved from the ReArc menu to Settings › Advanced.
+            let leakCheck = shell.settingsCapabilities().passwordLeakCheck
+            try check(leakCheck != nil, "Settings › Advanced has no password leak switch")
+            try check(leakCheck?.wrappedValue == false, "the switch does not show the self-test's off value")
+            log("PASS Settings › Advanced password leak switch reads the profile's value (off in the self-test)")
         }
         try await extensionChecks(model: model, store: store, shell: shell, tab: tab, engine: engine)
         try await autofillChecks(model: model, store: store, tab: tab, engine: engine, base: base, window: window)
