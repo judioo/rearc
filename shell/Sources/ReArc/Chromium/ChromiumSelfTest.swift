@@ -1926,8 +1926,17 @@ final class ChromiumSelfTest {
         try await wait("Site Control Center zoom reset") { PageZoom.isDefault(engine.zoomFactor) }
         try check((engine as AnyObject) is SiteDataManaging == false && model.sitePermissionsLiveInEngine,
                   "Chromium site data should open Site Settings")
+        // Arc's panel: the ⋯ menu ends with Chromium's pages; the footer has no certificate to show.
+        let menu = model.siteControlsMenu(for: engine, site: site)
+        try check(menu.last == [.cookiesAndSiteData, .siteSettings], "⋯ menu \(menu)")
+        let rows = model.siteControlSettingRows(for: engine, site: site)
+        try check(rows.last?.kind == .autoPictureInPicture
+                  && rows.dropLast().allSatisfy { $0.actions == [.openSiteSettings] }, "settings rows \(rows.map(\.title))")
+        let footer = model.siteControlsFooter(for: engine)
+        try check(footer.action == .openSiteSettings, "footer \(footer)")
         log("PASS Site Control Center for \(site.host): panel zoom in and reset on tab A (zoom events); cookies and site data "
-            + "-> chrome://settings/content/siteDetails")
+            + "-> chrome://settings/content/siteDetails; Arc's panel: \(rows.count) settings rows, ⋯ menu \(menu.count) sections, "
+            + "footer '\(footer.title)'")
     }
 
     /// ⌥⌘-click on a link in tab A: Chromium makes a background tab, which the

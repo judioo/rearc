@@ -929,6 +929,12 @@ extension WKEngine: SiteDataManaging {
     }
 }
 
+/// The site controls' Secure badge shows this certificate.
+@MainActor
+extension WKEngine: ServerCertificateProviding {
+    var serverTrust: SecTrust? { webView.serverTrust }
+}
+
 extension WKEngine: PageElementLocating {
     /// Measured in ReArc's own content world, out of reach of page script.
     @MainActor

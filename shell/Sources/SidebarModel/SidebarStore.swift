@@ -1576,6 +1576,12 @@ public final class SidebarStore {
         onDidMutate?()
     }
 
+    /// Back to the default (allowed), ending a block or a snooze.
+    public func allowAutoPiP(forHost host: String) {
+        guard autoPiPPolicy.perHost.removeValue(forKey: host) != nil else { return }
+        onDidMutate?()
+    }
+
     func locate(_ id: Tab.ID) -> TabLocation? {
         switch indexed(id)?.place {
         case .favorite: return .favorite

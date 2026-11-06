@@ -100,6 +100,7 @@ struct SidebarURLField: View {
     @Environment(\.sidebarWindow) private var window
     @State private var isHovering = false
     @State private var showsSiteControls = false
+    @State private var siteControlsAnchor: NSView?
 
     var body: some View {
         let url = engine?.currentURL ?? tab?.url
@@ -114,10 +115,13 @@ struct SidebarURLField: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .background(AnchorReader { siteControlsAnchor = $0 })
                 .help("Site controls for \(site.host)")
                 .accessibilityLabel("Site controls")
                 .popover(isPresented: $showsSiteControls, arrowEdge: .bottom) {
-                    SiteControlCenterView(model: model, engine: engine, site: site) { showsSiteControls = false }
+                    SiteControlCenterView(model: model, engine: engine, site: site, anchor: siteControlsAnchor) {
+                        showsSiteControls = false
+                    }
                 }
             } else {
                 securityIcon(engine?.securityState ?? .unknown, hasHost: host != nil)
