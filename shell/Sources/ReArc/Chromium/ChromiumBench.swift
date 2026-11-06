@@ -1050,6 +1050,26 @@ final class ChromiumBench {
             }
         }
 
+        // The pointer onto the Library button (a real move: CGEvent), until
+        // the quick view's rows are presented; then off again.
+        if let button = accessibilityFrame(window.contentView, help: "View Library") {
+            let away = window.convertToScreen(NSRect(x: window.frame.width * 0.6, y: window.frame.height * 0.5, width: 1, height: 1)).origin
+            try await iterate("ui.downloads_quickview_hover", count: max(options.iterations / 4, min(10, options.iterations))) { _, warmup, contaminated in
+                movePointer(to: away)
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                let shown = probe.arm("quickview", timeout: 3) { $0 == "shown" }
+                let start = ProcessInfo.processInfo.systemUptime
+                movePointer(to: NSPoint(x: button.midX, y: button.midY))
+                let presented = await shown.value()
+                record("ui.downloads_quickview_hover", ms(start, presented?.target), input: .appKit, contaminated: contaminated(), warmup: warmup)
+                try? await Task.sleep(nanoseconds: 400_000_000)
+            }
+            movePointer(to: away)
+            try? await Task.sleep(nanoseconds: 800_000_000)
+        } else {
+            report.notes.append("ui.downloads_quickview_hover: no Library button in the window's accessibility tree")
+        }
+
         try await iterate("ui.downloads_library_open", count: max(options.iterations / 4, min(10, options.iterations))) { _, warmup, contaminated in
             model.closeLibrary()
             _ = await probe.nextFrame(after: window)
@@ -1132,6 +1152,23 @@ final class ChromiumBench {
         }
         record("downloads.footprint.end", Self.footprintMB(), unit: "MB")
         model.closeLibrary()
+    }
+
+    /// The screen frame of the first accessibility element under `element` whose help starts with `help`.
+    private func accessibilityFrame(_ element: Any?, help: String, depth: Int = 0) -> NSRect? {
+        guard depth < 40, let element = element as? NSAccessibilityProtocol else { return nil }
+        if element.accessibilityHelp()?.hasPrefix(help) == true { return element.accessibilityFrame() }
+        for child in element.accessibilityChildren() ?? [] {
+            if let frame = accessibilityFrame(child, help: help, depth: depth + 1) { return frame }
+        }
+        return nil
+    }
+
+    /// Moves the real pointer to `point` (screen coordinates, origin bottom left).
+    private func movePointer(to point: NSPoint) {
+        let height = NSScreen.screens.first?.frame.height ?? 0
+        CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: CGPoint(x: point.x, y: height - point.y),
+                mouseButton: .left)?.post(tap: .cghidEventTap)
     }
 
     /// This process's phys_footprint, MB.

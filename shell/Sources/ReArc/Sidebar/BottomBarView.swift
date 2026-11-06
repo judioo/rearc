@@ -56,6 +56,12 @@ struct BottomBarView: View {
                 }
         }
         .animation(.linear(duration: showsDownloads ? DownloadsQuickView.openDuration : DownloadsQuickView.closeDuration), value: showsDownloads)
+        .background {
+            // The bench times hover → quick view shown (PresentationProbe).
+            if PresentationProbe.shared.isEnabled {
+                ProbeMarker(name: "quickview", token: showsDownloads ? "shown" : "hidden").frame(width: 0, height: 0)
+            }
+        }
         .onChange(of: libraryOpen) { _, _ in dismissLibraryHover() }
     }
 
