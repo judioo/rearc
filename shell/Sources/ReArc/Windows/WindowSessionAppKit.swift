@@ -217,9 +217,10 @@ extension NSWindow {
     /// Before the first order-in: the placed frame, and the window's desktop.
     @MainActor
     func applySavedPlacement(_ saved: SavedBrowserWindow, displays: [DisplayDescriptor]? = nil) {
-        let placed = WindowPlacement.resolve(saved, displays: displays ?? DisplayDescriptor.current()).frame
+        let placement = WindowPlacement.resolve(saved, displays: displays ?? DisplayDescriptor.current())
+        let placed = placement.frame
         setFrame(placed, display: false)
-        if let state = saved.appKitState {
+        if placement.restoresDesktop, let state = saved.appKitState {
             WindowDesktopState.restore(self, from: state)
             // The archive carries AppKit's frame too, which may be on a display that is gone.
             if frame != placed { setFrame(placed, display: false) }

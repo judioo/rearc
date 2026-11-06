@@ -133,6 +133,11 @@ public enum WindowPlacement {
         public var frame: CGRect
         public var display: DisplayDescriptor?
         public var match: Match
+
+        /// Whether the window goes back to its saved desktop. A window whose
+        /// display is gone opens on the desktop in front instead: macOS moves
+        /// that display's desktops onto another one, where it would be out of sight.
+        public var restoresDesktop: Bool { match != .displayMissing }
     }
 
     /// `displays` must list the primary display (the one with the menu bar

@@ -138,6 +138,8 @@ final class WindowSessionTests: XCTestCase {
         let frame = CGRect(x: 1740, y: 1117, width: 1707, height: 1410)
         let placed = WindowPlacement.resolve(saved(frame, on: lg), displays: [builtIn])
         XCTAssertEqual(placed.match, .displayMissing)
+        XCTAssertFalse(placed.restoresDesktop, "opens on the desktop in front, not the gone display's desktop")
+        XCTAssertTrue(WindowPlacement.resolve(saved(frame, on: lg), displays: [builtIn, lg]).restoresDesktop)
         XCTAssertEqual(placed.display, builtIn)
         assertInside(placed.frame, builtIn.visibleFrame)
         XCTAssertEqual(placed.frame.size, CGSize(width: 1707, height: 1084))
