@@ -4,6 +4,8 @@ import SidebarModel
 extension EnvironmentValues {
     /// The browser window a sidebar or content view belongs to (per-window focused space).
     @Entry var sidebarWindow: SidebarWindowID?
+    /// The window's Library is drawn over its sidebar (`SidebarView`).
+    @Entry var sidebarCoveredByLibrary = false
 }
 
 /// Per-window focused space (wave 19): each browser window shows its own

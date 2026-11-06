@@ -35,8 +35,10 @@ struct BrowserView: View {
             ZStack(alignment: .topLeading) {
                 contentCard
                 if model.isSidebarVisible || model.isSidebarSliding, !isPageFullscreen {
+                    let width = model.sidebarWidth(in: windowID)
                     SidebarView(model: model, draggedItemID: $draggedItemID)
-                        .offset(x: (model.sidebarReveal - 1) * model.sidebarWidth)
+                        .offset(x: (model.sidebarReveal - 1) * width
+                                + CGFloat(model.sidebarGrowth(in: windowID)?.sidebarOffset(width: Double(width)) ?? 0))
                 }
             }
             // The sidebar and card run up under the title bar: the traffic
@@ -142,6 +144,7 @@ struct BrowserView: View {
                     model.pinnedSectionCollapse.forgetWindow(windowID)
                     model.splitMaximize.forgetWindow(windowID)
                     model.library.forgetWindow(windowID)
+                    model.libraryGrowth[windowID] = nil
                 }
             )
             .frame(width: 0, height: 0)
@@ -150,7 +153,7 @@ struct BrowserView: View {
             SidebarEdgeHoverMonitor(
                 isEnabled: !model.isSidebarVisible && !isPageFullscreen,
                 isPeeking: model.isSidebarPeeking,
-                dismissWidth: model.sidebarWidth + 36,
+                dismissWidth: model.sidebarWidth(in: windowID) + 36,
                 onChange: { model.setSidebarPeeking($0) }
             )
             .frame(width: 0, height: 0)
@@ -384,9 +387,12 @@ struct BrowserView: View {
         let radius: CGFloat = fullscreen ? 0 : Self.cardRadius
         let inset: CGFloat = fullscreen ? 0 : Self.cardInset
         let showsToolbar = urlInToolbar && !fullscreen
-            && model.librarySection(in: windowID) == nil && model.selectedEaselRef(in: windowID) == nil
+            && model.librarySection(in: windowID)?.coversPage != true && model.selectedEaselRef(in: windowID) == nil
+        let sidebarWidth = model.sidebarWidth(in: windowID)
+        // The Library widening the sidebar moves the page without laying it out again.
+        let growth = fullscreen ? nil : model.sidebarGrowth(in: windowID)
         let slide = fullscreen ? SidebarSlide() : SidebarSlide(
-            reveal: model.sidebarReveal, width: model.sidebarWidth, inset: inset,
+            reveal: model.sidebarReveal, width: sidebarWidth, inset: inset,
             showing: model.isSidebarVisible, laidOut: model.isSidebarLaidOut
         )
         let shape = CardShape(radius: radius, leadingCut: slide.cut)
@@ -417,8 +423,8 @@ struct BrowserView: View {
         .background(CardShadow(shape: shape).opacity(fullscreen ? 0 : 1))
         .padding(.vertical, inset)
         .padding(.trailing, inset)
-        .padding(.leading, model.isSidebarLaidOut && !fullscreen ? model.sidebarWidth : inset)
-        .offset(x: slide.offset)
+        .padding(.leading, model.isSidebarLaidOut && !fullscreen ? growth.map { CGFloat($0.from) } ?? sidebarWidth : inset)
+        .offset(x: slide.offset + CGFloat(growth?.pageOffset ?? 0))
         .ignoresSafeArea(edges: fullscreen ? .all : [])
     }
 
@@ -436,8 +442,9 @@ struct BrowserView: View {
     private var contentArea: some View {
         if model.startupDeferred {
             Color.clear.accessibilityLabel("Loading page")
-        } else if let section = model.librarySection(in: windowID) {
-            LibraryView(model: model, window: windowID, section: section)
+        } else if model.librarySection(in: windowID)?.coversPage == true {
+            LibrarySpacesPage(model: model, window: windowID)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let ref = model.selectedEaselRef(in: windowID),
            let document = model.easelDocument(forSidebarItem: ref.id) {
             if document.kind == .note {

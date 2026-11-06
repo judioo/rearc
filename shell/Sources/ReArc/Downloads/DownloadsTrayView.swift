@@ -64,6 +64,8 @@ struct DownloadsTrayView: View {
     let downloads: DownloadsController
     /// On the Library's Downloads page: full width and height, no title.
     var embedded = false
+    /// The Library column's search (`LibraryDownloads.matching`).
+    var query = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -94,19 +96,20 @@ struct DownloadsTrayView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             Divider()
-            if downloads.records.isEmpty {
+            let records = LibraryDownloads.matching(downloads.records, query: query)
+            if records.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "arrow.down.circle")
                         .font(.system(size: 26, weight: .light))
                         .foregroundStyle(.tertiary)
-                    Text("No downloads yet").font(.callout).foregroundStyle(.secondary)
+                    Text(downloads.records.isEmpty ? "No downloads yet" : "No matches").font(.callout).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 28)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 2) {
-                        ForEach(downloads.records) { record in
+                        ForEach(records) { record in
                             DownloadRowView(record: record, downloads: downloads)
                         }
                     }

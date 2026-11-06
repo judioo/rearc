@@ -2,83 +2,186 @@ import AppKit
 import SwiftUI
 import SidebarModel
 
-/// Arc's Library (Home button panel, SIDEBAR-SPEC §3.1.6): a page list on
-/// the left (Spaces, Downloads, Media, Easels & Notes, Archive, Boosts) and
-/// the page on the right, over the window's page area. Esc or the close
-/// button brings the page back, as does showing any sidebar item.
+/// Arc's Library in the sidebar (arc-recordings/2026-11-06-library-in-sidebar.md):
+/// a rail of pages, centred, with the ← bar under it, and the page's
+/// column beside it at full height under its search field. The page stays
+/// in the main frame. Spaces has no column: it fills the page area beside
+/// the rail (`LibrarySpacesPage`). ←, Esc or showing any item leaves.
 struct LibraryView: View {
+    let model: BrowserViewModel
+    let window: SidebarWindowID?
+    let section: LibrarySection
+    @Binding var draggedItemID: UUID?
+    @Environment(\.themeChrome) private var chrome
+
+    var body: some View {
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                // The traffic lights' row.
+                Color.clear.frame(height: SidebarToolbarView.rowHeight)
+                // Arc's 100 pt pitch needs 600 pt; a short window packs the rail.
+                ViewThatFits(in: .vertical) {
+                    rail(chipHeight: CGFloat(LibrarySidebarLayout.chipHeight),
+                         spacing: CGFloat(LibrarySidebarLayout.railPitch - LibrarySidebarLayout.chipHeight))
+                    rail(chipHeight: 62, spacing: 2)
+                }
+                .frame(maxHeight: .infinity)
+                BottomBarView(model: model, draggedItemID: $draggedItemID)
+            }
+            .frame(width: LibrarySidebarLayout.railWidth)
+
+            if !section.coversPage {
+                LibraryColumn(model: model, window: window, section: section)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(alignment: .leading) { LibraryColumnEdge(dark: chrome.isWindowDark) }
+            }
+        }
+        .frame(maxHeight: .infinity)
+        // Takes every click, so none reaches the hidden sidebar under it.
+        .contentShape(Rectangle())
+    }
+
+    private func rail(chipHeight: CGFloat, spacing: CGFloat) -> some View {
+        VStack(spacing: spacing) {
+            ForEach(LibrarySection.railOrder, id: \.self) { page in
+                LibraryRailButton(section: page, isSelected: page == section, height: chipHeight) {
+                    model.openLibrary(page, in: window)
+                }
+            }
+        }
+    }
+}
+
+/// A rail page: glyph over an 11 pt label, on a chip while selected.
+private struct LibraryRailButton: View {
+    let section: LibrarySection
+    let isSelected: Bool
+    let height: CGFloat
+    let action: () -> Void
+    @Environment(\.themeChrome) private var chrome
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 7) {
+                Image(systemName: section.systemImage)
+                    .font(.system(size: 18))
+                    .foregroundStyle(chrome.glyph)
+                    .frame(height: 24)
+                Text(section.railTitle)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .frame(width: LibrarySidebarLayout.chipWidth, height: height)
+            .background(fill, in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .accessibilityLabel(section.railTitle)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    /// Black at about 10 % on the light theme (211 on 233), half that on hover.
+    private var fill: Color {
+        let ink = chrome.isWindowDark ? Color.white : Color.black
+        return isSelected ? ink.opacity(0.1) : isHovering ? ink.opacity(0.05) : .clear
+    }
+}
+
+/// The column's leading edge: a 1 pt line (black 10 % on light) and a
+/// shadow that fades out over about 30 pt into the column.
+private struct LibraryColumnEdge: View {
+    let dark: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Color.black.opacity(dark ? 0.35 : 0.1).frame(width: 1)
+            LinearGradient(colors: [.black.opacity(dark ? 0.15 : 0.045), .black.opacity(0)], startPoint: .leading, endPoint: .trailing)
+                .frame(width: 30)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// The page in the sidebar's column. Each page puts its own search field at
+/// the top, centred on the traffic lights' row.
+private struct LibraryColumn: View {
     let model: BrowserViewModel
     let window: SidebarWindowID?
     let section: LibrarySection
 
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Library")
-                    .font(.title3.weight(.semibold))
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 8)
-                ForEach(LibrarySection.allCases, id: \.self) { page in
-                    Button { model.openLibrary(page, in: window) } label: {
-                        Label(page.title, systemImage: page.systemImage)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(page == section ? Color.accentColor.opacity(0.18) : .clear,
-                                        in: RoundedRectangle(cornerRadius: 7))
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(page == section ? .isSelected : [])
-                }
-                Spacer()
-            }
-            .padding(12)
-            .frame(width: 190)
-            .background(.quaternary.opacity(0.5))
-
-            Divider()
-
-            VStack(spacing: 0) {
-                HStack {
-                    Label(section.title, systemImage: section.systemImage)
-                        .font(.title2.weight(.semibold))
-                    Spacer()
-                    Button { model.closeLibrary(in: window) } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 11, weight: .bold))
-                            .frame(width: 22, height: 22)
-                    }
-                    .buttonStyle(.borderless)
-                    .keyboardShortcut(.cancelAction)
-                    .help("Close Library (Esc)")
-                }
-                .padding([.horizontal, .top], 16)
-                .padding(.bottom, 4)
-
-                page
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Group {
+            switch section {
+            case .spaces: EmptyView()
+            case .downloads: LibraryDownloadsPage(model: model)
+            case .media: LibraryMediaPage(model: model)
+            case .easels: LibraryEaselsPage(model: model)
+            case .archive: ArchiveView(model: model)
+            case .boosts: BoostLibraryView(model: model)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .id(section)
     }
+}
 
-    @ViewBuilder
-    private var page: some View {
-        switch section {
-        case .spaces: LibrarySpacesPage(model: model, window: window)
-        case .downloads: LibraryDownloadsPage(model: model)
-        case .media: LibraryMediaPage(model: model)
-        case .easels: LibraryEaselsPage(model: model)
-        case .archive: ArchiveView(model: model)
-        case .boosts: BoostLibraryView(model: model)
+/// Arc's column search field: 36 pt tall, black 6 % with a magnifier.
+struct LibrarySearchField: View {
+    let prompt: String
+    @Binding var text: String
+    @Environment(\.themeChrome) private var chrome
+
+    static let height: CGFloat = 36
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(chrome.secondaryText)
+            TextField(prompt, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 14))
         }
+        .padding(.horizontal, 12)
+        .frame(height: Self.height)
+        .background((chrome.isWindowDark ? Color.white : Color.black).opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
     }
+}
+
+/// The column's top row: the search field and an optional trailing control.
+struct LibraryColumnHeader<Trailing: View>: View {
+    let prompt: String
+    @Binding var text: String
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: 6) {
+            LibrarySearchField(prompt: prompt, text: $text)
+            trailing
+        }
+        .padding(.horizontal, LibraryColumnMetrics.inset)
+        .padding(.top, SidebarToolbarView.rowHeight / 2 - LibrarySearchField.height / 2)
+        .padding(.bottom, 8)
+    }
+}
+
+extension LibraryColumnHeader where Trailing == EmptyView {
+    init(prompt: String, text: Binding<String>) {
+        self.init(prompt: prompt, text: text) { EmptyView() }
+    }
+}
+
+enum LibraryColumnMetrics {
+    /// The search field sits 9 pt in from the column's edges.
+    static let inset: CGFloat = 9
 }
 
 // MARK: - Spaces
 
-private struct LibrarySpacesPage: View {
+/// Every space beside the rail, over the page area.
+struct LibrarySpacesPage: View {
     let model: BrowserViewModel
     let window: SidebarWindowID?
     @Environment(\.colorScheme) private var colorScheme
@@ -150,10 +253,12 @@ private struct LibrarySpacesPage: View {
 
 private struct LibraryDownloadsPage: View {
     let model: BrowserViewModel
+    @State private var query = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            DownloadsTrayView(downloads: model.downloads, embedded: true)
+            LibraryColumnHeader(prompt: LibrarySection.downloads.searchPrompt ?? "", text: $query)
+            DownloadsTrayView(downloads: model.downloads, embedded: true, query: query)
             if BrowserInternalPage.downloads.isAvailable(engine: model.engineHost.navigationSchemes) {
                 Button("Open Chromium’s Downloads Page") {
                     model.openBrowserPage(.downloads)
@@ -176,30 +281,34 @@ struct LibraryMediaPage: View {
     @State private var filter: LibraryMediaFilter = .all
     @State private var query = ""
     @State private var previewRecord: CaptureRecord?
-    private let columns = [GridItem(.adaptive(minimum: 160), spacing: 12)]
+    /// Two tiles across the column, as Arc's.
+    private let columns = [GridItem(.adaptive(minimum: 120), spacing: 10)]
 
     var body: some View {
         let items = model.libraryMediaItems(filter: filter, query: query)
         VStack(spacing: 0) {
+            LibraryColumnHeader(prompt: LibrarySection.media.searchPrompt ?? "", text: $query)
             HStack {
                 Picker("Show", selection: $filter) {
                     ForEach(LibraryMediaFilter.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .fixedSize()
-                TextField("Search media", text: $query)
-                    .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
                 Menu {
                     Button("Capture Visible Area") { captureFromLibrary(.visible) }
                     Button("Capture Full Page") { captureFromLibrary(.fullPage) }
                 } label: {
-                    Label("Capture", systemImage: "camera")
+                    Image(systemName: "camera")
                 }
+                .menuStyle(.borderlessButton)
                 .fixedSize()
+                .help("Capture")
+                .accessibilityLabel("Capture")
                 .disabled(model.store.selectedTab == nil)
             }
-            .padding(16)
+            .padding(.horizontal, LibraryColumnMetrics.inset)
+            .padding(.bottom, 10)
 
             if items.isEmpty {
                 ContentUnavailableView(
@@ -212,10 +321,10 @@ struct LibraryMediaPage: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVGrid(columns: columns, spacing: 14) {
+                    LazyVGrid(columns: columns, spacing: 12) {
                         ForEach(items) { tile($0) }
                     }
-                    .padding([.horizontal, .bottom], 16)
+                    .padding([.horizontal, .bottom], LibraryColumnMetrics.inset)
                 }
             }
         }
@@ -239,7 +348,7 @@ struct LibraryMediaPage: View {
                     Color.secondary.opacity(0.15)
                 }
             }
-            .frame(height: 110)
+            .frame(height: 96)
             .frame(maxWidth: .infinity)
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .contentShape(Rectangle())
@@ -292,19 +401,25 @@ private struct LibraryEaselsPage: View {
     var body: some View {
         let rows = model.libraryDocumentRows(filter: filter, query: query)
         VStack(spacing: 0) {
+            LibraryColumnHeader(prompt: LibrarySection.easels.searchPrompt ?? "", text: $query)
             HStack {
                 Picker("Show", selection: $filter) {
                     ForEach(LibraryDocumentFilter.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .fixedSize()
-                TextField("Search easels and notes", text: $query)
-                    .textFieldStyle(.roundedBorder)
-                Button { open(model.createEasel(title: "Note", note: true)) } label: { Label("New Note", systemImage: "note.text") }
-                Button { open(model.createEasel()) } label: { Label("New Easel", systemImage: "scribble.variable") }
+                .controlSize(.small)
+                Button { open(model.createEasel(title: "Note", note: true)) } label: { Image(systemName: "note.text") }
+                    .buttonStyle(.borderless)
+                    .help("New Note")
+                    .accessibilityLabel("New Note")
+                Button { open(model.createEasel()) } label: { Image(systemName: "scribble.variable") }
+                    .buttonStyle(.borderless)
+                    .help("New Easel")
+                    .accessibilityLabel("New Easel")
             }
-            .padding(16)
+            .padding(.horizontal, LibraryColumnMetrics.inset)
+            .padding(.bottom, 10)
 
             if rows.isEmpty {
                 ContentUnavailableView(
@@ -345,7 +460,8 @@ private struct LibraryEaselsPage: View {
                         Button("Delete…", role: .destructive) { deleting = row }
                     }
                 }
-                .listStyle(.inset)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
             }
         }
         .alert("Rename", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {

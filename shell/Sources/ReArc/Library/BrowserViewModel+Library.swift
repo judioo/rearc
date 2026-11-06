@@ -1,27 +1,80 @@
 import AppKit
+import SwiftUI
 import SidebarModel
 
-/// The Library (Arc's Home button panel, SIDEBAR-SPEC §3.1.6): one page per
-/// window over its page area. View Archive, View Boosts and View Media open
-/// their Library page in the key window.
+/// The Library (Arc's Home button, SIDEBAR-SPEC §3.1.6): one page per
+/// window, in its sidebar, with the page still in the main frame
+/// (arc-recordings/2026-11-06-library-in-sidebar.md). View Archive, View
+/// Boosts and View Media open their Library page in the key window.
 extension BrowserViewModel {
 
     func librarySection(in window: SidebarWindowID?) -> LibrarySection? {
         library.section(in: window, selection: selectedItemID(in: window))
     }
 
-    /// Opens a page (nil: the last one) in `window`, or the key window.
+    /// The sidebar's width in `window`: wider in the Library, the rail alone on Spaces.
+    func sidebarWidth(in window: SidebarWindowID?) -> CGFloat {
+        CGFloat(LibrarySidebarLayout.width(for: librarySection(in: window), sidebarWidth: Double(sidebarWidth)))
+    }
+
+    /// The Library widening `window`'s sidebar, if it is mid-way.
+    func sidebarGrowth(in window: SidebarWindowID?) -> LibrarySidebarGrowth? {
+        librarySection(in: window) == nil ? nil : libraryGrowth[window]
+    }
+
+    /// Opens a page (nil: the last one) in `window`, or the key window. The
+    /// Library lives in the sidebar, so a hidden sidebar comes back for it.
     func openLibrary(_ section: LibrarySection?, in window: SidebarWindowID? = nil) {
         let target = window ?? store.keyWindowID
-        library.open(section ?? library.lastSection, in: target, selection: selectedItemID(in: target))
+        changeLibrary(in: target) {
+            library.open(section ?? library.lastSection, in: target, selection: selectedItemID(in: target))
+        }
+        if !isSidebarVisible, !isSidebarPeeking { toggleSidebar() }
     }
 
     func toggleLibrary(in window: SidebarWindowID?) {
-        library.toggle(in: window, selection: selectedItemID(in: window))
+        changeLibrary(in: window) {
+            library.toggle(in: window, selection: selectedItemID(in: window))
+        }
     }
 
     func closeLibrary(in window: SidebarWindowID? = nil) {
-        library.close(in: window ?? store.keyWindowID)
+        let target = window ?? store.keyWindowID
+        library.close(in: target)
+        libraryGrowth[target] = nil
+    }
+
+    /// Arc widens the sidebar into the Library in about 0.25 s and cuts back
+    /// on leaving (arc-recordings/2026-11-06-library-in-sidebar.md).
+    private func changeLibrary(in window: SidebarWindowID?, _ change: () -> Void) {
+        let before = Double(sidebarWidth(in: window))
+        change()
+        let after = Double(sidebarWidth(in: window))
+        guard isSidebarVisible, !isSidebarSliding, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              let growth = LibrarySidebarGrowth.start(from: before, to: after, current: libraryGrowth[window]) else {
+            libraryGrowth[window] = nil
+            return
+        }
+        libraryGrowth[window] = growth
+        withAnimation(.spring(response: LibrarySidebarLayout.growResponse, dampingFraction: 1)) {
+            libraryGrowth[window]?.shown = after
+        } completion: { [weak self] in
+            // A newer change owns it now.
+            if self?.libraryGrowth[window]?.shown == after { self?.libraryGrowth[window] = nil }
+        }
+    }
+
+    /// Esc leaves the key window's Library, unless the page has keyboard
+    /// focus: the page beside the Library keeps its own Esc. Sheets, panels
+    /// and the command bar keep theirs too.
+    func handleLibraryEscape(_ event: NSEvent, pageHasFocus: Bool) -> Bool {
+        guard event.type == .keyDown, event.keyCode == 53,
+              event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+              !pageHasFocus, !isCommandBarPresented,
+              event.window.map({ !($0 is NSPanel) && $0.attachedSheet == nil }) ?? true,
+              librarySection(in: store.keyWindowID) != nil else { return false }
+        closeLibrary()
+        return true
     }
 
     var isArchivePresented: Bool {

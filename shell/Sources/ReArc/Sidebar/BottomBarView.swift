@@ -36,9 +36,12 @@ struct BottomBarView: View {
         let showsDownloads = libraryReveal.isShown && !recent.isEmpty
         VStack(spacing: 0) {
             // The downloads stack takes the update pill's place while shown.
-            UpdateBannerSlot(update: model.availableUpdate) { model.installUpdate?() }
-                .opacity(showsDownloads ? 0 : 1)
-                .animation(QuickViewMotion.pill(reduceMotion: reduceMotion, showingDownloads: showsDownloads), value: showsDownloads)
+            // The Library's rail has no pill.
+            if !libraryOpen {
+                UpdateBannerSlot(update: model.availableUpdate) { model.installUpdate?() }
+                    .opacity(showsDownloads ? 0 : 1)
+                    .animation(QuickViewMotion.pill(reduceMotion: reduceMotion, showingDownloads: showsDownloads), value: showsDownloads)
+            }
             bar(libraryOpen: libraryOpen)
                 .overlay(alignment: .top) {
                     // The button's chip is the stack's base: it rises from the chip's top edge.

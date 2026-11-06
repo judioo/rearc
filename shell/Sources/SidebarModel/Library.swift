@@ -37,11 +37,97 @@ public enum LibrarySection: String, CaseIterable, Codable, Sendable {
     /// Arc's View menu items (`viewEaselsAndNotes`, `viewScreenshotsAndCaptures`,
     /// `openDownloads`, `viewArchive`, `viewBoosts`).
     public var menuTitle: String { "View \(title)" }
+
+    /// The sidebar rail's order, top to bottom
+    /// (arc-recordings/2026-11-06-library-in-sidebar.md).
+    public static let railOrder: [LibrarySection] = [.media, .downloads, .easels, .spaces, .boosts, .archive]
+
+    /// The rail's label, shorter than the menu's.
+    public var railTitle: String {
+        switch self {
+        case .easels: return "Easels"
+        case .archive: return "Archived Tabs"
+        default: return title
+        }
+    }
+
+    /// The column's search field. Spaces has no column.
+    public var searchPrompt: String? {
+        switch self {
+        case .spaces: return nil
+        case .archive: return "Search Archive…"
+        default: return "Search \(railTitle)…"
+        }
+    }
+
+    /// Spaces lays every space out beside the rail, over the page; every
+    /// other page is a column in the sidebar with the page beside it.
+    public var coversPage: Bool { self == .spaces }
 }
 
-/// Which windows show the Library, and on which page. The Library covers a
-/// window's page area; it closes when that window shows another item, so a
-/// sidebar click, a restored tab or a space switch brings the page back.
+/// The sidebar's geometry in the Library, measured on the recording (1 px =
+/// 1 pt): a 111 pt rail and a 305 pt column, so a 228 pt sidebar grows to
+/// 416. Entering grows it on a critically damped spring; leaving is a cut.
+public enum LibrarySidebarLayout {
+    public static let railWidth: Double = 111
+    public static let columnWidth: Double = 305
+    /// Rail item centres are 100 pt apart; the selected one sits on a 97 × 80 chip.
+    public static let railPitch: Double = 100
+    public static let chipWidth: Double = 97
+    public static let chipHeight: Double = 80
+    /// Fits the column's measured travel: 22 % at 50 ms, 67 % at 117, 91 %
+    /// at 167, settled by about 250 (ω ≈ 20 /s, no overshoot).
+    public static let growResponse: Double = 0.31
+
+    /// The sidebar's width for a page (nil: outside the Library). The column
+    /// is never narrower than Arc's, nor than the sidebar it replaces.
+    public static func width(for section: LibrarySection?, sidebarWidth: Double) -> Double {
+        guard let section else { return sidebarWidth }
+        if section.coversPage { return railWidth }
+        return railWidth + max(columnWidth, sidebarWidth - railWidth)
+    }
+}
+
+/// The sidebar mid-way through the Library's widening. The page is still
+/// laid out beside the old width and moves with the sidebar's edge, so
+/// Chromium resizes once, at the end (as ⌘S does). The sidebar is drawn
+/// at its new width, shifted left: the rail comes in from the window's edge.
+public struct LibrarySidebarGrowth: Equatable, Sendable {
+    public var from: Double
+    /// The sidebar's right edge as drawn, from `from` to the new width.
+    public var shown: Double
+
+    public init(from: Double, shown: Double) {
+        self.from = from
+        self.shown = shown
+    }
+
+    public var pageOffset: Double { shown - from }
+
+    public func sidebarOffset(width: Double) -> Double { shown - width }
+
+    /// Only a wider sidebar grows; a narrower one, or leaving, is a cut. A
+    /// change mid-way carries on from where the sidebar is drawn.
+    public static func start(from old: Double, to new: Double, current: LibrarySidebarGrowth? = nil) -> LibrarySidebarGrowth? {
+        if let current { return new > current.from ? current : nil }
+        return new > old ? LibrarySidebarGrowth(from: old, shown: old) : nil
+    }
+}
+
+public enum LibraryDownloads {
+    /// Downloads whose file name or site holds the query, in their order.
+    public static func matching(_ records: [DownloadRecord], query: String) -> [DownloadRecord] {
+        let needle = LibrarySearch.normalized(query)
+        guard !needle.isEmpty else { return records }
+        return records.filter { record in
+            [record.fileName, URL(string: record.url)?.host() ?? ""].contains { LibrarySearch.normalized($0).contains(needle) }
+        }
+    }
+}
+
+/// Which windows show the Library, and on which page. The Library takes over
+/// a window's sidebar; it closes when that window shows another item, so a
+/// restored tab, a command bar pick or a space switch leaves it.
 public struct LibraryPresentation: Equatable {
     struct Page: Equatable {
         var section: LibrarySection
@@ -50,8 +136,9 @@ public struct LibraryPresentation: Equatable {
     }
 
     private var pages: [SidebarWindowID?: Page] = [:]
-    /// The page the Home button opens next (Arc reopens the last one).
-    public private(set) var lastSection: LibrarySection = .spaces
+    /// The page the Home button opens next (Arc reopens the last one; the
+    /// first time, the rail's top page).
+    public private(set) var lastSection: LibrarySection = LibrarySection.railOrder[0]
 
     public init() {}
 

@@ -1,9 +1,9 @@
 import SwiftUI
 import SidebarModel
 
-/// The Library's Archive page (View Archive): closed and auto-archived tabs
-/// by time bucket, searchable, with restore and Clear Archive
-/// (SIDEBAR-SPEC §2.9, DATA-SCHEMA §3).
+/// The Library's Archived Tabs column (View Archive): closed and
+/// auto-archived tabs by time bucket, searchable, with restore and Clear
+/// Archive (SIDEBAR-SPEC §2.9, DATA-SCHEMA §3).
 struct ArchiveView: View {
     let model: BrowserViewModel
     @State private var query = ""
@@ -13,28 +13,28 @@ struct ArchiveView: View {
         let store = model.store
         let groups = TabArchivePolicy.grouped(store.archivedTabs, matching: query, now: Date())
         VStack(spacing: 0) {
-            HStack {
-                Spacer()
+            LibraryColumnHeader(prompt: LibrarySection.archive.searchPrompt ?? "", text: $query)
+
+            VStack(alignment: .leading, spacing: 2) {
                 Menu("Archive Today Tabs After: \(store.autoArchiveThreshold().title)") {
                     ForEach(AutoArchiveThreshold.allCases, id: \.self) { threshold in
                         Button(threshold.title) { model.setAutoArchiveThreshold(threshold) }
                     }
                 }
-                .fixedSize()
                 .help("Today tabs in \(store.activeProfile.name) not selected for this long move here")
                 Menu("Unload Inactive Tabs: \(model.tabUnloadThreshold.title)") {
                     ForEach(TabUnloadThreshold.allCases, id: \.self) { threshold in
                         Button(threshold.title) { model.tabUnloadThreshold = threshold }
                     }
                 }
-                .fixedSize()
                 .help("Tabs not shown for this long are unloaded: they stay in the sidebar and reload when shown")
             }
-            .padding([.horizontal, .top], 16)
-
-            TextField("Search archived tabs", text: $query)
-                .textFieldStyle(.roundedBorder)
-                .padding(16)
+            .menuStyle(.borderlessButton)
+            .font(.caption)
+            .fixedSize()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, LibraryColumnMetrics.inset + 4)
+            .padding(.bottom, 8)
 
             if groups.isEmpty {
                 VStack(spacing: 8) {
@@ -53,7 +53,8 @@ struct ArchiveView: View {
                         }
                     }
                 }
-                .listStyle(.inset)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
             }
 
             HStack {
@@ -64,7 +65,7 @@ struct ArchiveView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .padding(16)
+            .padding(LibraryColumnMetrics.inset + 4)
         }
         .confirmationDialog("Clear the archive?", isPresented: $confirmingClear) {
             Button("Clear Archive", role: .destructive) { store.clearArchive() }
@@ -91,10 +92,10 @@ struct ArchiveView: View {
             Text(record.archivedAt, style: .time)
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
-            Button("Restore") {
-                model.restoreArchivedTab(record.id)
-            }
-            .controlSize(.small)
+            Button { model.restoreArchivedTab(record.id) } label: { Image(systemName: "arrow.uturn.backward") }
+                .buttonStyle(.borderless)
+                .help("Restore")
+                .accessibilityLabel("Restore")
         }
         .contextMenu {
             Button("Restore") { model.restoreArchivedTab(record.id) }

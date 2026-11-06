@@ -43,7 +43,9 @@ enum ShellInput {
             NSApp.postEvent(down, atStart: false)
             NSApp.postEvent(up, atStart: false)
         case .direct:
-            if model.handleTabSwitcherEvent(down) || model.shortcutRouter.handleKeyDown(down) { return timestamp }
+            if model.handleTabSwitcherEvent(down)
+                || model.handleLibraryEscape(down, pageHasFocus: model.shortcutRouter.pageHasFocus(down))
+                || model.shortcutRouter.handleKeyDown(down) { return timestamp }
             if let view = window.firstResponder as? NSView, ShortcutRouter.isWebContent(view) {
                 let selector = NSSelectorFromString("keyEvent:wasKeyEquivalent:")
                 guard view.responds(to: selector) else {

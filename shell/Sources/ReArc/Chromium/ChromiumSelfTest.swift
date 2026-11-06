@@ -3337,14 +3337,22 @@ extension ChromiumSelfTest {
         model.selectTab(tab.id)
         let key = store.keyWindowID
 
-        // Library: View > View Media opens it over the key window's page; a sidebar click shows the page again.
+        // Library: View > View Media turns the key window's sidebar into the Library, with the
+        // page still beside it; Spaces is the rail alone; showing the tab again leaves.
         let viewTitles = NSApp.mainMenu?.items.first { $0.title == "View" }?.submenu?.items.map(\.title) ?? []
         try check(viewTitles.contains("View Library") && viewTitles.contains("View Easels & Notes"), "View menu: \(viewTitles)")
+        let restingWidth = model.sidebarWidth(in: key)
         ShellMenus.library(model).flatMap { $0 }.first { $0.title == "View Media" }?.action()
         try check(model.librarySection(in: key) == .media, "View Media showed \(String(describing: model.librarySection(in: key)))")
+        try check(model.sidebarWidth(in: key) >= CGFloat(LibrarySidebarLayout.railWidth + LibrarySidebarLayout.columnWidth),
+                  "the Library sidebar is \(model.sidebarWidth(in: key)) pt wide")
+        try check(model.selectedTab(in: key)?.id == tab.id, "the page left the main frame")
+        ShellMenus.library(model).flatMap { $0 }.first { $0.title == "View Spaces" }?.action()
+        try check(model.sidebarWidth(in: key) == CGFloat(LibrarySidebarLayout.railWidth), "Spaces kept the column")
         model.selectTab(tab.id)
         try check(model.librarySection(in: key) == nil, "a sidebar click left the Library open")
-        log("PASS Library: View > View Media opens the Media page over the key window's page; selecting the tab closes it")
+        try check(model.sidebarWidth(in: key) == restingWidth, "the sidebar stayed \(model.sidebarWidth(in: key)) pt wide")
+        log("PASS Library: View > View Media opens the Library in the key window's sidebar beside the page; Spaces is the rail; selecting the tab closes it")
 
         // Gradient theme with Dark appearance: the window turns dark; back to the plain theme, it follows the Mac.
         let space = store.activeSpaceID
