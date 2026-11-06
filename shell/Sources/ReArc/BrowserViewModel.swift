@@ -316,6 +316,8 @@ final class BrowserViewModel {
     @ObservationIgnored let commandBarCatalogCache = ObservedCache<[AppCommand]>()
     @ObservationIgnored let commandBarDomainCache = ObservedCache<[String]>()
     @ObservationIgnored let commandBarInlineCache = ObservedCache<String?>()
+    /// The main menu's commands while the bar is open (`commandBarMenuCommands`).
+    @ObservationIgnored var commandBarMenuSnapshot: [MenuCommand]?
 
     var commandBarResults: [CommandBarSearch.Result] {
         commandBarResultCache.value {
@@ -1460,6 +1462,7 @@ final class BrowserViewModel {
     func dismissCommandBar() {
         commandBarCreatesNewTab = false
         isCommandBarPresented = false
+        commandBarMenuSnapshot = nil
         cancelCommandBarLive()
         commandBarSiteSearch = nil
         commandBarTextBeforeSiteSearch = ""
@@ -1601,6 +1604,7 @@ final class BrowserViewModel {
     }
 
     private func openCommandBar(target: Tab.ID?, text: String) {
+        commandBarMenuSnapshot = nil
         commandBarCreatesNewTab = false
         commandBarSiteSearch = nil
         commandBarSplitAnchorID = nil

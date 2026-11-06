@@ -66,6 +66,9 @@ struct CommandBarOverlay: View {
                 TextField(placeholder, text: $text)
                     .textFieldStyle(.plain)
                     .font(.title3)
+                    // Not a credential: AppKit then skips its password AutoFill
+                    // check as the field takes the keyboard (≈ 3 ms on ⌘T / ⌘L).
+                    .textContentType(.URL)
                     .focused($isFieldFocused)
                     .overlay(alignment: .leading) { inlineCompletion }
                     .onSubmit(onSubmit)
