@@ -1,0 +1,862 @@
+From 7e96e371ab9af6e1545973e4630f881cb50d5e9c Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Fri, 6 Nov 2026 23:25:15 +0400
+Subject: [PATCH] P-TAB-001 extension side panels: chrome.sidePanel as hosted
+ panels for the host
+
+Claude's and ChatGPT's extensions open a side panel next to the page
+(sidePanel.setPanelBehavior({openPanelOnActionClick}), sidePanel.open).
+Chrome shows it in its Views side panel, which needs a Browser window;
+registry tabs and logical shell windows have none, so 1.33 only reported
+run result 2 and sidePanel.open failed with "Tab not found". ABI 1.47
+(extension_side_panels, bridge 0.49.0) gives the host the panel.
+
+Options stay Chromium's SidePanelService (manifest default_path, setOptions
+global or per tab, setPanelBehavior). ReArcTabGetSidePanel reports whether
+an extension has a panel for a tab, whether it is the tab's own
+(contextual) and whether a toolbar click opens it. ReArcTabOpenSidePanel
+creates the panel like an action popup: a registry tab (disposition 3,
+opener the page tab) with view type kExtensionSidePanel loading the
+resolved panel URL (http(s) or extension path, as
+ExtensionSidePanelCoordinator), in the original profile for spanning
+extensions, with no history helper. ReArcSidePanelSetShown dispatches
+sidePanel.onOpened / onClosed with the owner's logical window and, for
+contextual panels, the tab. In the embedded engine sidePanel.open and
+sidePanel.close become host events (ReArcEngineSetSidePanelCallback: kind 0
+open, 1 close, 2 options changed) with Chromium's validation and error
+strings; windowId resolves logical windows, WINDOW_ID_CURRENT the focused
+one. Options changes navigate shown panels whose path changed and report
+disabled ones. framework.exports and framework.order list the four new
+functions. Existing ABI layouts remain unchanged.
+
+Last rebased: 2026-11-06 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/app/framework.exports                  |   4 +
+ chrome/app/framework.order                    |   4 +
+ chrome/browser/BUILD.gn                       |   2 +
+ .../api/side_panel/side_panel_api.cc          |  32 ++
+ .../rearc_bridge/browserless_tab_helpers.cc   |   5 +-
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  60 +-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_extension_side_panels.cc            | 534 ++++++++++++++++++
+ .../rearc_extension_side_panels.h             |  35 ++
+ 10 files changed, 675 insertions(+), 4 deletions(-)
+ create mode 100644 chrome/browser/rearc_bridge/rearc_extension_side_panels.cc
+ create mode 100644 chrome/browser/rearc_bridge/rearc_extension_side_panels.h
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 95c9462ebf..b618dd5433 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -48,6 +48,10 @@ _ReArcTabGetMediaCapture
+ _ReArcTabSetCaptureMuted
+ _ReArcSearchListEngines
+ _ReArcSearchSetDefaultEngine
++_ReArcTabGetSidePanel
++_ReArcTabOpenSidePanel
++_ReArcSidePanelSetShown
++_ReArcEngineSetSidePanelCallback
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index cc9bd71d39..83f8c8174e 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -55,6 +55,10 @@ _ReArcTabGetMediaCapture
+ _ReArcTabSetCaptureMuted
+ _ReArcSearchListEngines
+ _ReArcSearchSetDefaultEngine
++_ReArcTabGetSidePanel
++_ReArcTabOpenSidePanel
++_ReArcSidePanelSetShown
++_ReArcEngineSetSidePanelCallback
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 316ae195e9..ca79954bd7 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1509,6 +1509,8 @@ source_set("core") {
+       "rearc_bridge/rearc_extension_prompts.h",
+       "rearc_bridge/rearc_extension_actions.cc",
+       "rearc_bridge/rearc_extension_actions.h",
++      "rearc_bridge/rearc_extension_side_panels.cc",
++      "rearc_bridge/rearc_extension_side_panels.h",
+       "rearc_bridge/rearc_autofill_popup.cc",
+       "rearc_bridge/rearc_autofill_popup.h",
+       "rearc_bridge/rearc_password_leak_abi.cc",
+diff --git a/chrome/browser/extensions/api/side_panel/side_panel_api.cc b/chrome/browser/extensions/api/side_panel/side_panel_api.cc
+index 99e9cc39ad..42723a5598 100644
+--- a/chrome/browser/extensions/api/side_panel/side_panel_api.cc
++++ b/chrome/browser/extensions/api/side_panel/side_panel_api.cc
+@@ -12,6 +12,12 @@
+ #include "chrome/browser/extensions/chrome_extension_function_details.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
+ #include "chrome/common/extensions/api/side_panel.h"
++#include "build/build_config.h"
++
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/engine_mode.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_side_panels.h"
++#endif
+ 
+ namespace extensions {
+ 
+@@ -88,6 +94,19 @@ ExtensionFunction::ResponseAction SidePanelOpenFunction::RunFunction() {
+         Error("At least one of `tabId` and `windowId` must be provided"));
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  // ReArc: the host shows side panels. Registry tabs and logical shell
++  // windows have no WindowController or BrowserWindowInterface.
++  if (rearc::IsEngineEmbeddedMode()) {
++    base::expected<bool, std::string> result = rearc::RequestHostSidePanel(
++        *extension(), browser_context(), params->options.tab_id,
++        params->options.window_id, include_incognito_information(),
++        /*open=*/true);
++    return RespondNow(result.has_value() ? NoArguments()
++                                         : Error(std::move(result.error())));
++  }
++#endif
++
+   if (params->options.window_id) {
+     // Resolve the window ID. This handles e.g. the `WINDOW_ID_CURRENT` constant
+     // by converting it to the concrete window ID. See crbug.com/466946001.
+@@ -147,6 +166,19 @@ ExtensionFunction::ResponseAction SidePanelCloseFunction::RunFunction() {
+         Error("At least one of `tabId` and `windowId` must be provided"));
+   }
+ 
++#if BUILDFLAG(IS_MAC)
++  // ReArc: the host shows side panels. Registry tabs and logical shell
++  // windows have no WindowController or BrowserWindowInterface.
++  if (rearc::IsEngineEmbeddedMode()) {
++    base::expected<bool, std::string> result = rearc::RequestHostSidePanel(
++        *extension(), browser_context(), params->options.tab_id,
++        params->options.window_id, include_incognito_information(),
++        /*open=*/false);
++    return RespondNow(result.has_value() ? NoArguments()
++                                         : Error(std::move(result.error())));
++  }
++#endif
++
+   SidePanelService* service = GetService();
+   base::expected<bool, std::string> close_panel_result;
+   if (params->options.tab_id) {
+diff --git a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+index 8799ded462..02aede22cf 100644
+--- a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
++++ b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+@@ -85,10 +85,13 @@ void AttachBrowserlessTabHelpers(content::WebContents* contents) {
+     ChromePasswordManagerClient::CreateForWebContents(contents);
+   }
+   // Stock policy: no history helper for off-the-record profiles, nor for
+-  // extension popups (ExtensionViewHost contents record no history).
++  // extension popups and side panels (ExtensionViewHost contents record no
++  // history).
+   if (!profile->IsOffTheRecord() &&
+       extensions::GetViewType(contents) !=
+           extensions::mojom::ViewType::kExtensionPopup &&
++      extensions::GetViewType(contents) !=
++          extensions::mojom::ViewType::kExtensionSidePanel &&
+       extensions::GetViewType(contents) !=
+           extensions::mojom::ViewType::kDeveloperTools) {
+     HistoryTabHelper::GetOrCreateForWebContents(contents);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 812220c6c8..d5e3acf179 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 46, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 47, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -1042,7 +1042,9 @@ REARC_ENGINE_EXPORT void ReArcEngineSetExtensionActionCallback(
+ // registry tab (created event disposition 3 popup, opener tab_id) loading the
+ // popup page with view type popup; attach/present/close it like a tab, size
+ // it from kind 3 events; window.close() closes it (tab closed reason 1).
+-// 2 side panel requested (unsupported; nothing is shown).
++// 2 side panel toggle (setPanelBehavior openPanelOnActionClick): with
++// extension_side_panels (ABI 1.47) the host opens or closes the extension's
++// panel (ReArcTabOpenSidePanel); earlier engines show nothing.
+ // Not visible for this tab: invalid_state. Unknown/no action: not_found.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabRunExtensionAction(
+     uint64_t tab_id, const char* extension_id, uint32_t* result,
+@@ -1137,6 +1139,60 @@ typedef void (*ReArcExtensionTabRequestCallback)(void*, const ReArcExtensionTabR
+ REARC_ENGINE_EXPORT void ReArcEngineSetExtensionTabRequestCallback(ReArcExtensionTabRequestCallback, void* context);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcExtensionTabRequestRespond(uint64_t request_id, uint64_t tab_id);
+ 
++// Extension side panels (extension_side_panels, ABI 1.47). chrome.sidePanel
++// without Chrome's side panel UI: the host shows a panel beside the page as a
++// hosted registry tab. Options are Chromium's SidePanelService: the manifest's
++// side_panel.default_path, sidePanel.setOptions (global, or per tab with tabId)
++// and setPanelBehavior. tab_id arguments are page tabs (popups, panels and
++// other views: unsupported); extension_id must be enabled for the tab's
++// profile (OTR: incognito-enabled), else not_found. UI thread only.
++// available: enabled with a path for the tab (its own options, else the
++// global ones). contextual: the tab has its own enabled options, so its panel
++// belongs to that tab; a global panel may stay shown across the tabs of a
++// window. open_on_action_click: setPanelBehavior; a toolbar click then
++// returns run result 2. No sidePanel permission: all false.
++typedef struct ReArcSidePanelInfo {
++  bool available, contextual, open_on_action_click;
++} ReArcSidePanelInfo;
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetSidePanel(
++    uint64_t tab_id, const char* extension_id, ReArcSidePanelInfo* info);
++// Creates the panel for tab_id's options: panel_tab_id is a new registry tab
++// (created event disposition 3, opener tab_id, as action popups) loading the
++// panel URL with view type side panel, in the extension's profile (spanning
++// extensions: the original profile). Attach, size and close it like a tab;
++// window.close() in the panel closes it (tab closed reason 1). Not available
++// for the tab: invalid_state. contextual reports the scope it was made for.
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabOpenSidePanel(uint64_t tab_id,
++                                                      const char* extension_id,
++                                                      bool* contextual,
++                                                      uint64_t* panel_tab_id);
++// The host showed (shown=true) or hid a panel beside owner_tab_id (the page
++// tab of the window it is shown in; 0 is allowed when hiding). Dispatches
++// sidePanel.onOpened / onClosed once per change, with the owner's logical
++// window (ReArcTabSetExtensionWindow) and, for contextual panels, its tab.
++// Not a panel: invalid_argument.
++REARC_ENGINE_EXPORT ReArcStatus ReArcSidePanelSetShown(uint64_t panel_tab_id,
++                                                       uint64_t owner_tab_id,
++                                                       bool shown);
++// kind: 0 open requested (sidePanel.open with a user gesture; tab_id the
++// bridge tab, 0 for windowId alone; window_id the logical window, 0 if the
++// tab has none), 1 close requested (sidePanel.close for that tab or window,
++// or panel_tab_id was disabled by setOptions; the engine closes nothing), 2
++// options changed (tab_id 0: global): re-check shown panels with
++// ReArcTabGetSidePanel. A shown panel whose path changed has already been
++// navigated. Without a callback sidePanel.open/close fail as if there were no
++// window. Posted on main; extension_id borrowed for the callback.
++typedef struct ReArcSidePanelEvent {
++  uint64_t profile_id, tab_id, panel_tab_id;
++  int32_t window_id;
++  uint32_t kind;
++  const char* extension_id;
++} ReArcSidePanelEvent;
++typedef void (*ReArcSidePanelCallback)(void* context,
++                                       const ReArcSidePanelEvent* event);
++REARC_ENGINE_EXPORT void ReArcEngineSetSidePanelCallback(
++    ReArcSidePanelCallback callback, void* context);
++
+ // Local card/address offers (autofill_save_prompts, ABI 1.37).
+ // phase 0 request, 1 withdrawn; kind 0 local card, 1 address (update supplied).
+ // summary is Chromium data for display: card network/last four/expiration/name,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index add66455f4..36822dda54 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -583,6 +583,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "early_window" ||
+          std::string(feature) == "media_capture" ||
+          std::string(feature) == "search_engines" ||
++         std::string(feature) == "extension_side_panels" ||
+          std::string(feature) == "pip_embedded" ||
+          std::string(feature) == "rearc_safe_storage_branding" ||
+          std::string(feature) == "profiles" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 65fe53d35c..96c7ffb150 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.48.0";
++  return "0.49.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_side_panels.cc b/chrome/browser/rearc_bridge/rearc_extension_side_panels.cc
+new file mode 100644
+index 0000000000..9ec1d1ccf1
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_extension_side_panels.cc
+@@ -0,0 +1,534 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/rearc_bridge/rearc_extension_side_panels.h"
++
++#include <pthread.h>
++
++#include <map>
++#include <memory>
++#include <utility>
++
++#include "base/check.h"
++#include "base/memory/raw_ptr.h"
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "base/scoped_observation.h"
++#include "base/strings/stringprintf.h"
++#include "base/strings/to_string.h"
++#include "chrome/browser/extensions/api/side_panel/side_panel_service.h"  // nogncheck
++#include "chrome/browser/extensions/extension_tab_util.h"  // nogncheck
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/rearc_bridge/browserless_tab_helpers.h"
++#include "chrome/browser/rearc_bridge/ipc_tab_events.h"
++#include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
++#include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
++#include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/common/extensions/api/side_panel.h"
++#include "components/crx_file/id_util.h"
++#include "components/sessions/content/session_tab_helper.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/site_instance.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "content/public/common/referrer.h"
++#include "extensions/browser/api/constants.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_util.h"
++#include "extensions/browser/view_type_utils.h"
++#include "extensions/common/constants.h"
++#include "extensions/common/error_utils.h"
++#include "extensions/common/extension.h"
++#include "extensions/common/manifest_handlers/incognito_info.h"
++#include "extensions/common/mojom/api_permission_id.mojom-shared.h"
++#include "extensions/common/mojom/view_type.mojom.h"
++#include "extensions/common/permissions/permissions_data.h"
++#include "ui/base/page_transition_types.h"
++
++namespace rearc {
++namespace {
++
++using extensions::SidePanelService;
++using PanelOptions = extensions::api::side_panel::PanelOptions;
++
++ReArcSidePanelCallback host = nullptr;
++void* host_context = nullptr;
++uint64_t epoch = 0;
++
++enum : uint32_t { kOpenRequested = 0, kCloseRequested = 1, kOptionsChanged = 2 };
++
++void Post(uint32_t kind,
++          uint64_t profile_id,
++          uint64_t tab_id,
++          int32_t window_id,
++          const std::string& extension_id,
++          uint64_t panel_tab_id = 0) {
++  if (!host || !profile_id) {
++    return;
++  }
++  ReArcSidePanelEvent event{profile_id, tab_id, panel_tab_id,
++                            window_id,  kind,   nullptr};
++  ABIPost(base::BindOnce(
++      [](uint64_t expected, ReArcSidePanelEvent e, std::string id) {
++        if (!host || expected != epoch) {
++          return;
++        }
++        e.extension_id = id.c_str();
++        host(host_context, &e);
++      },
++      epoch, event, extension_id));
++}
++
++bool IsEnabled(const PanelOptions& options) {
++  return options.enabled.value_or(false) && options.path.has_value();
++}
++
++// As ExtensionSidePanelCoordinator: an http(s) URL, or a path in the extension.
++GURL PanelURL(const extensions::Extension& extension,
++              const PanelOptions& options) {
++  GURL absolute(*options.path);
++  return absolute.SchemeIsHTTPOrHTTPS()
++             ? absolute
++             : extension.ResolveExtensionURL(*options.path);
++}
++
++// A hosted panel's contents (view type side panel). contextual_tab is the
++// Chromium tab ID of a tab-specific panel; global panels have none.
++class Panel : public content::WebContentsUserData<Panel> {
++ public:
++  const std::string& extension_id() const { return extension_id_; }
++  std::optional<int> contextual_tab() const { return contextual_tab_; }
++  GURL url;
++  bool shown = false;
++  int window_id = 0;
++
++ private:
++  friend class content::WebContentsUserData<Panel>;
++  Panel(content::WebContents* contents,
++        std::string extension_id,
++        std::optional<int> contextual_tab,
++        GURL panel_url)
++      : content::WebContentsUserData<Panel>(*contents),
++        url(std::move(panel_url)),
++        extension_id_(std::move(extension_id)),
++        contextual_tab_(contextual_tab) {}
++  std::string extension_id_;
++  std::optional<int> contextual_tab_;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(Panel);
++
++// Enabled extension, visible to this (possibly OTR) context.
++const extensions::Extension* PanelExtension(content::BrowserContext* context,
++                                            const std::string& id) {
++  const extensions::Extension* extension =
++      extensions::ExtensionRegistry::Get(context)->enabled_extensions().GetByID(
++          id);
++  if (!extension || (context->IsOffTheRecord() &&
++                     !extensions::util::IsIncognitoEnabled(id, context))) {
++    return nullptr;
++  }
++  return extension;
++}
++
++bool HasSidePanelPermission(const extensions::Extension& extension) {
++  return extension.permissions_data()->HasAPIPermission(
++      extensions::mojom::APIPermissionID::kSidePanel);
++}
++
++ReArcStatus CheckPageTab(uint64_t tab_id, TabSession** session) {
++  if (auto status = ABICheckTab(tab_id, session)) {
++    return status;
++  }
++  return extensions::GetViewType((*session)->web_contents()) ==
++                 extensions::mojom::ViewType::kTabContents
++             ? REARC_OK
++             : REARC_UNSUPPORTED;
++}
++
++int32_t LogicalWindow(uint64_t tab_id) {
++  ReArcExtensionTabState state{};
++  return tab_id && ReArcTabGetExtensionState(tab_id, &state) == REARC_OK
++             ? state.window_id
++             : 0;
++}
++
++TabSession* SessionOf(content::WebContents* contents) {
++  return contents ? ExtensionSession(contents) : nullptr;
++}
++
++// Options changes navigate or retire shown panels, then tell the host.
++class Watcher : public SidePanelService::Observer {
++ public:
++  explicit Watcher(content::BrowserContext* context) : context_(context) {}
++  void Observe(SidePanelService* service) {
++    if (!observation_.IsObserving()) {
++      observation_.Observe(service);
++    }
++  }
++
++  void OnPanelOptionsChanged(const extensions::ExtensionId& extension_id,
++                             const PanelOptions& updated) override {
++    auto* service = SidePanelService::Get(context_);
++    auto& registry = TabRegistry::Get();
++    for (uint64_t id : registry.SessionIds()) {
++      TabSession* session = registry.FindSession(id);
++      Panel* panel = session ? Panel::FromWebContents(session->web_contents())
++                             : nullptr;
++      if (!panel || panel->extension_id() != extension_id ||
++          panel->contextual_tab() != updated.tab_id ||
++          session->close_state() != TabSession::CloseState::kOpen) {
++        continue;
++      }
++      content::WebContents* contents = session->web_contents();
++      const extensions::Extension* extension =
++          PanelExtension(contents->GetBrowserContext(), extension_id);
++      if (!extension || !service) {
++        continue;
++      }
++      PanelOptions options =
++          service->GetOptions(*extension, panel->contextual_tab());
++      if (!IsEnabled(options)) {
++        Post(kCloseRequested, session->profile_id(), 0, panel->window_id,
++             extension_id, id);
++        continue;
++      }
++      GURL url = PanelURL(*extension, options);
++      if (url != panel->url) {
++        panel->url = url;
++        contents->GetController().LoadURL(url, content::Referrer(),
++                                          ui::PAGE_TRANSITION_AUTO_TOPLEVEL,
++                                          std::string());
++      }
++    }
++    Profile* profile = Profile::FromBrowserContext(context_);
++    uint64_t tab = 0;
++    if (updated.tab_id) {
++      TabSession* session = SessionOf(FindBrowserlessExtensionTab(
++          *updated.tab_id, profile, /*include_incognito=*/true));
++      if (!session) {
++        return;  // Not a registry tab.
++      }
++      tab = session->tab_id();
++    }
++    Post(kOptionsChanged, BridgeProfileId(profile), tab, 0, extension_id);
++  }
++  void OnSidePanelServiceShutdown() override { observation_.Reset(); }
++
++ private:
++  raw_ptr<content::BrowserContext> context_;
++  base::ScopedObservation<SidePanelService, SidePanelService::Observer>
++      observation_{this};
++};
++
++// One watcher per service (OTR contexts share their original's service). An
++// entry outlives its service's shutdown, unobserved, and is reused.
++void Watch(content::BrowserContext* context) {
++  SidePanelService* service = SidePanelService::Get(context);
++  if (!service) {
++    return;
++  }
++  static base::NoDestructor<
++      std::map<SidePanelService*, std::unique_ptr<Watcher>>>
++      watchers;
++  auto& watcher = (*watchers)[service];
++  if (!watcher) {
++    Profile* original =
++        Profile::FromBrowserContext(context)->GetOriginalProfile();
++    watcher = std::make_unique<Watcher>(original);
++  }
++  watcher->Observe(service);
++}
++
++// Resolves a page tab and its extension for the info/open calls.
++ReArcStatus Resolve(uint64_t tab_id,
++                    const char* extension_id,
++                    TabSession** session,
++                    const extensions::Extension** extension,
++                    SidePanelService** service,
++                    int* chromium_tab) {
++  if (auto status = CheckPageTab(tab_id, session)) {
++    return status;
++  }
++  if (!extension_id || !crx_file::id_util::IdIsValid(extension_id)) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  content::WebContents* contents = (*session)->web_contents();
++  *extension = PanelExtension(contents->GetBrowserContext(), extension_id);
++  if (!*extension) {
++    return REARC_NOT_FOUND;
++  }
++  *service = SidePanelService::Get(contents->GetBrowserContext());
++  if (!*service) {
++    return REARC_UNSUPPORTED;
++  }
++  *chromium_tab = sessions::SessionTabHelper::IdForTab(contents).id();
++  return REARC_OK;
++}
++
++// The page tabs of a logical window in `profile` (or its OTR profile).
++uint64_t WindowTab(Profile* profile,
++                   bool include_incognito,
++                   int32_t window_id,
++                   bool* found) {
++  *found = false;
++  uint64_t active = 0;
++  auto& registry = TabRegistry::Get();
++  for (uint64_t id : registry.SessionIds()) {
++    TabSession* session = registry.FindSession(id);
++    if (!session || session->close_state() != TabSession::CloseState::kOpen) {
++      continue;
++    }
++    Profile* owner = Profile::FromBrowserContext(
++        session->web_contents()->GetBrowserContext());
++    if (owner != profile &&
++        !(include_incognito && profile->IsSameOrParent(owner))) {
++      continue;
++    }
++    ReArcExtensionTabState state{};
++    if (ReArcTabGetExtensionState(id, &state) != REARC_OK ||
++        state.window_id != window_id) {
++      continue;
++    }
++    *found = true;
++    if (state.active) {
++      active = id;
++    }
++  }
++  return active;
++}
++
++}  // namespace
++
++base::expected<bool, std::string> RequestHostSidePanel(
++    const extensions::Extension& extension,
++    content::BrowserContext* context,
++    std::optional<int> tab_id,
++    std::optional<int> window_id,
++    bool include_incognito,
++    bool open) {
++  CHECK(pthread_main_np());
++  Profile* profile = Profile::FromBrowserContext(context);
++  SidePanelService* service = SidePanelService::Get(context);
++  if (!service) {
++    return base::unexpected("Side panels are unavailable.");
++  }
++  if (tab_id) {
++    TabSession* session = SessionOf(
++        FindBrowserlessExtensionTab(*tab_id, profile, include_incognito));
++    if (!session) {
++      return base::unexpected(extensions::ErrorUtils::FormatErrorMessage(
++          extensions::kTabNotFoundError, base::ToString(*tab_id)));
++    }
++    const int32_t window = LogicalWindow(session->tab_id());
++    if (!host) {
++      return base::unexpected(
++          base::StringPrintf("No browser window for tabId: %d", *tab_id));
++    }
++    if (window_id && *window_id != window) {
++      return base::unexpected(
++          "The specified tab does not belong to the specified window.");
++    }
++    if (open && !IsEnabled(service->GetOptions(extension, *tab_id))) {
++      return base::unexpected(
++          base::StringPrintf("No active side panel for tabId: %d", *tab_id));
++    }
++    if (!open &&
++        !IsEnabled(service->GetSpecificOptionsForTab(extension, *tab_id))) {
++      return base::unexpected(base::StringPrintf(
++          "No active tab-specific side panel for tabId: %d", *tab_id));
++    }
++    Post(open ? kOpenRequested : kCloseRequested, session->profile_id(),
++         session->tab_id(), window, extension.id());
++    return true;
++  }
++  CHECK(window_id);
++  int32_t window = *window_id;
++  if (window == extension_misc::kCurrentWindowId) {
++    // The focused logical window, as tabs.query's currentWindow resolves it.
++    TabSession* current = SessionOf(ActiveExtensionContents(profile));
++    window = current ? LogicalWindow(current->tab_id()) : 0;
++  }
++  bool found = false;
++  const uint64_t active =
++      window > 0 ? WindowTab(profile, include_incognito, window, &found) : 0;
++  if (!found) {
++    return base::unexpected(extensions::ErrorUtils::FormatErrorMessage(
++        extensions::ExtensionTabUtil::kWindowNotFoundError,
++        base::ToString(*window_id)));
++  }
++  if (!host) {
++    return base::unexpected(
++        base::StringPrintf("No browser window for windowId: %d", window));
++  }
++  if (!IsEnabled(service->GetOptions(extension, std::nullopt))) {
++    return base::unexpected(
++        base::StringPrintf("No active side panel for windowId: %d", window));
++  }
++  Post(open ? kOpenRequested : kCloseRequested, BridgeProfileId(profile),
++       active, window, extension.id());
++  return true;
++}
++
++}  // namespace rearc
++
++void ReArcEngineSetSidePanelCallback(ReArcSidePanelCallback cb, void* ctx) {
++  CHECK(pthread_main_np());
++  ++rearc::epoch;
++  rearc::host = cb;
++  rearc::host_context = ctx;
++}
++
++ReArcStatus ReArcTabGetSidePanel(uint64_t tab_id,
++                                 const char* extension_id,
++                                 ReArcSidePanelInfo* info) {
++  CHECK(pthread_main_np());
++  if (info) {
++    *info = {};
++  }
++  rearc::TabSession* session;
++  const extensions::Extension* extension;
++  extensions::SidePanelService* service;
++  int chromium_tab;
++  if (auto status = rearc::Resolve(tab_id, extension_id, &session, &extension,
++                                   &service, &chromium_tab)) {
++    return status;
++  }
++  if (!info) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  if (!rearc::HasSidePanelPermission(*extension)) {
++    return REARC_OK;
++  }
++  info->available =
++      rearc::IsEnabled(service->GetOptions(*extension, chromium_tab));
++  info->contextual = rearc::IsEnabled(
++      service->GetSpecificOptionsForTab(*extension, chromium_tab));
++  info->open_on_action_click = service->OpenSidePanelOnIconClick(extension->id());
++  return REARC_OK;
++}
++
++ReArcStatus ReArcTabOpenSidePanel(uint64_t tab_id,
++                                  const char* extension_id,
++                                  bool* contextual,
++                                  uint64_t* panel_tab_id) {
++  CHECK(pthread_main_np());
++  if (contextual) {
++    *contextual = false;
++  }
++  if (panel_tab_id) {
++    *panel_tab_id = 0;
++  }
++  rearc::TabSession* session;
++  const extensions::Extension* extension;
++  extensions::SidePanelService* service;
++  int chromium_tab;
++  if (auto status = rearc::Resolve(tab_id, extension_id, &session, &extension,
++                                   &service, &chromium_tab)) {
++    return status;
++  }
++  if (!contextual || !panel_tab_id) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  const bool for_tab = rearc::IsEnabled(
++      service->GetSpecificOptionsForTab(*extension, chromium_tab));
++  rearc::PanelOptions options = service->GetOptions(
++      *extension, for_tab ? std::optional<int>(chromium_tab) : std::nullopt);
++  if (!rearc::HasSidePanelPermission(*extension) ||
++      !rearc::IsEnabled(options)) {
++    return REARC_INVALID_STATE;
++  }
++  const GURL url = rearc::PanelURL(*extension, options);
++  Profile* profile =
++      Profile::FromBrowserContext(session->web_contents()->GetBrowserContext());
++  // Spanning-mode extensions run in the original profile, as their popups do.
++  Profile* panel_profile =
++      profile->IsOffTheRecord() &&
++              !extensions::IncognitoInfo::IsSplitMode(extension)
++          ? profile->GetOriginalProfile()
++          : profile;
++  if (!url.is_valid() || !rearc::BridgeProfileId(panel_profile)) {
++    return REARC_INVALID_STATE;
++  }
++  rearc::Watch(panel_profile);
++  content::WebContents::CreateParams params(
++      panel_profile, content::SiteInstance::CreateForURL(panel_profile, url));
++  params.initially_hidden = true;
++  std::unique_ptr<content::WebContents> panel =
++      content::WebContents::Create(params);
++  // Before adoption: helpers attach by view type (no tab identity/history).
++  extensions::SetViewType(panel.get(),
++                          extensions::mojom::ViewType::kExtensionSidePanel);
++  rearc::Panel::CreateForWebContents(
++      panel.get(), extension->id(),
++      for_tab ? std::optional<int>(chromium_tab) : std::nullopt, url);
++  content::WebContents* raw = panel.get();
++  rearc::TabSession::CreateArgs args;
++  args.browser_context = panel_profile;
++  args.space_id = session->space_id();
++  args.order_index = session->order_index();
++  const uint64_t id =
++      rearc::TabRegistry::Get().AdoptSession(args, std::move(panel));
++  rearc::TabEvent event;
++  event.kind = rearc::TabEventKind::kTabCreated;
++  event.tab_id = id;
++  event.space_id = args.space_id;
++  event.opener_tab_id = tab_id;
++  event.disposition = rearc::TabDisposition::kPopup;
++  event.url = url.spec();
++  rearc::EmitTabEvent(std::move(event));
++  if (!rearc::TabRegistry::Get().FindSession(id)) {
++    return REARC_INTERNAL;
++  }
++  rearc::ABIInitializeTab(id);
++  raw->GetController().LoadURL(url, content::Referrer(),
++                               ui::PAGE_TRANSITION_AUTO_TOPLEVEL,
++                               std::string());
++  *contextual = for_tab;
++  *panel_tab_id = id;
++  return REARC_OK;
++}
++
++ReArcStatus ReArcSidePanelSetShown(uint64_t panel_tab_id,
++                                   uint64_t owner_tab_id,
++                                   bool shown) {
++  CHECK(pthread_main_np());
++  rearc::TabSession* session;
++  if (auto status = rearc::ABICheckTab(panel_tab_id, &session)) {
++    return status;
++  }
++  rearc::Panel* panel = rearc::Panel::FromWebContents(session->web_contents());
++  if (!panel) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  rearc::TabSession* owner = nullptr;
++  if (owner_tab_id) {
++    if (auto status = rearc::CheckPageTab(owner_tab_id, &owner)) {
++      return status;
++    }
++  } else if (shown) {
++    return REARC_INVALID_ARGUMENT;
++  }
++  if (shown == panel->shown) {
++    if (shown) {
++      panel->window_id = rearc::LogicalWindow(owner_tab_id);
++    }
++    return REARC_OK;
++  }
++  auto* service =
++      extensions::SidePanelService::Get(session->web_contents()->GetBrowserContext());
++  if (!service) {
++    return REARC_UNSUPPORTED;
++  }
++  panel->shown = shown;
++  if (shown) {
++    panel->window_id = rearc::LogicalWindow(owner_tab_id);
++    service->DispatchOnOpenedEvent(panel->extension_id(), panel->window_id,
++                                   panel->contextual_tab(), panel->url.path());
++  } else {
++    service->DispatchOnClosedEvent(panel->extension_id(), panel->window_id,
++                                   panel->contextual_tab(), panel->url.path());
++  }
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_side_panels.h b/chrome/browser/rearc_bridge/rearc_extension_side_panels.h
+new file mode 100644
+index 0000000000..08e0b431d8
+--- /dev/null
++++ b/chrome/browser/rearc_bridge/rearc_extension_side_panels.h
+@@ -0,0 +1,35 @@
++// Copyright 2026 The ReArc Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_SIDE_PANELS_H_
++#define CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_SIDE_PANELS_H_
++
++#include <optional>
++#include <string>
++
++#include "base/types/expected.h"
++
++namespace content {
++class BrowserContext;
++}
++namespace extensions {
++class Extension;
++}
++
++namespace rearc {
++
++// sidePanel.open (open=true) and sidePanel.close in the embedded engine
++// (side_panel_api.cc): registry tabs and logical shell windows have no
++// BrowserWindowInterface, so the request goes to the host (ABI 1.47
++// extension_side_panels) with Chromium's validation and error strings.
++base::expected<bool, std::string> RequestHostSidePanel(
++    const extensions::Extension& extension,
++    content::BrowserContext* context,
++    std::optional<int> tab_id,
++    std::optional<int> window_id,
++    bool include_incognito,
++    bool open);
++
++}  // namespace rearc
++
++#endif  // CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_SIDE_PANELS_H_
+-- 
+2.54.0 (Apple Git-157)
+

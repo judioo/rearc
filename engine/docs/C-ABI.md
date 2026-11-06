@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.46** (major remains 1 for existing hosts), bridge **0.48.0**, compiled Chromium **156.0.8078.74**. Public header:
+ABI **1.47** (major remains 1 for existing hosts), bridge **0.49.0**, compiled Chromium **156.0.8078.74**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -197,7 +197,8 @@ Advertised features: `native_view`, `navigation`, `navigation_extended`, `media_
 (1.38), `link_open_requests` (1.39), `devtools` (1.40),
 `client_certificates` (1.41), `key_equivalent_events` (1.42),
 `pip_embedded` (1.43), `perf_metrics` (1.44), `early_window` (1.45),
-`media_capture` and `search_engines` (1.46). `pip_control`, `pip_native`
+`media_capture` and `search_engines` (1.46) and `extension_side_panels`
+(1.47). `pip_control`, `pip_native`
 and `script_opener` remain unadvertised names. Unknown optional operations are unsupported.
 
 | Function | Semantics |
@@ -1298,8 +1299,10 @@ changed (tab 0 means the default or icon for all tabs), 1 added, 2 removed,
 ReArcTabRunExtensionAction is a toolbar click:
 ExtensionActionRunner::RunAction grants activeTab and runs blocked actions.
 Result 0 means the extension handled it (action.onClicked dispatched or a
-blocked action ran). Result 2 means a side-panel action, which is
-unsupported and shows nothing. Result 1 means a popup: popup_tab_id is a new
+blocked action ran). Result 2 means a side-panel action
+(setPanelBehavior openPanelOnActionClick): with `extension_side_panels`
+(1.47) the host toggles the extension's panel, before it nothing is shown.
+Result 1 means a popup: popup_tab_id is a new
 registry tab (created event with disposition 3 popup and opener = the clicked
 tab) whose WebContents has view type kExtensionPopup and loads the action's
 popup URL in the extension's profile. Spanning-mode extensions use the
@@ -1908,3 +1911,70 @@ adding one from templates.
 Not run here: no native host exercises these calls yet (the hosts take over
 the screen). Built and checked: the dev engine, `check_c_abi_exports.py`
 (127 symbols, loaded ABI 1.46 / bridge 0.48.0) and `check_abi146_imports.py`.
+
+## Extension side panels (1.47)
+
+Patch `tab/066-extension-side-panels`, bridge 0.49.0, feature
+`extension_side_panels`. No struct from an earlier ABI changed
+(`engine/tests/check_abi147_imports.py` compares every 1.46 layout).
+`framework.exports` and `framework.order` list the four new functions after
+`_ReArcSearchSetDefaultEngine`.
+
+`chrome.sidePanel` without Chrome's side panel UI. Chrome shows a panel in
+its Views side panel (ExtensionSidePanelCoordinator, an ExtensionViewHost in
+a Browser window); registry tabs and logical shell windows have neither, so
+before 1.47 a toolbar click only returned run result 2 and `sidePanel.open`
+failed with "Tab not found". Options are still Chromium's
+`extensions::SidePanelService`: the manifest's `side_panel.default_path`,
+`sidePanel.setOptions` globally or per tab (`tabId`), `setPanelBehavior`.
+Only extensions with the `sidePanel` permission have panels.
+(`rearc_extension_side_panels.cc`.)
+
+| Function | Contract |
+|---|---|
+| `ReArcTabGetSidePanel(tab, extension_id, &info)` | For a page tab (popups, panels, DevTools: `unsupported`): `available` (enabled with a path, the tab's own options first, else the global ones), `contextual` (the tab has its own enabled options), `open_on_action_click`. Unknown or disabled extension, or not incognito-enabled for an OTR tab: `not_found`; no permission: OK, all false. |
+| `ReArcTabOpenSidePanel(tab, extension_id, &contextual, &panel_tab)` | A new registry tab for the tab's options, created like an action popup: created event disposition 3, opener the page tab, view type `kExtensionSidePanel`, loading the resolved URL (an http(s) path as is, else the extension's resource, as ExtensionSidePanelCoordinator does) in the extension's profile (spanning extensions: the original profile). No tab identity, no history helper, `chrome.extension.getViews` and `runtime.getContexts` see a side panel. `contextual` reports the scope. Not available: `invalid_state`. The host attaches, sizes and closes it like a tab; `window.close()` in the panel closes it (tab closed, reason 1). |
+| `ReArcSidePanelSetShown(panel_tab, owner_tab, shown)` | The host showed or hid the panel beside `owner_tab` (the window's page tab; 0 allowed when hiding). One `sidePanel.onOpened` / `onClosed` per change, with the owner's logical window (`ReArcTabSetExtensionWindow`), the tab for contextual panels and the panel's path. Showing an already shown panel beside another tab only updates its window. Not a panel: `invalid_argument`. |
+| `ReArcEngineSetSidePanelCallback(cb, ctx)` | Host requests, posted on main, `extension_id` borrowed: kind 0 open requested, 1 close requested, 2 options changed. Null clears; a replaced registration gets nothing queued for the old one. |
+
+**sidePanel.open / close.** In the embedded engine `side_panel_api.cc`
+hands both to the bridge after Chromium's own argument checks (user gesture,
+one of `tabId` / `windowId`). The bridge keeps Chromium's validation and
+error strings: an unknown tab is "No tab with id", a tab outside the given
+window is "The specified tab does not belong to the specified window.", no
+enabled options "No active side panel for tabId" (close: "No active
+tab-specific side panel for tabId", as Chrome closes only contextual panels
+by tab). `windowId` is a logical window; `WINDOW_ID_CURRENT` is the focused
+one (as `tabs.query` resolves `currentWindow`); a window with no tab is "No
+window with id". Without a callback the call fails with "No browser window
+for tabId/windowId", as Chrome does without a window. On success the event
+carries the bridge `tab_id` (the window's active tab for `windowId` alone,
+or 0) and `window_id`; the engine opens nothing itself.
+
+**Options changes.** The first panel created in a profile observes its
+SidePanelService. A change for a panel's scope (its tab, or global) navigates
+a panel whose resolved URL changed, and posts kind 1 with `panel_tab_id` for
+one that is now disabled. Every change then posts kind 2 (`tab_id` the bridge
+tab for tab-specific options, 0 for global) so the host re-checks what it
+shows: a tab may have gained its own panel, or lost one.
+
+**What the host does.** Show the panel beside the page; on a tab switch ask
+`ReArcTabGetSidePanel` for the new tab and keep a global panel (the same
+contents), show the tab's contextual panel, or close. Toggle on run result 2.
+Close a panel by releasing its tab. Chrome's panel header (the extension's
+name and icon) and its resize handle are host UI.
+
+Not run here: no native host exercises these calls (the hosts take over the
+screen). Built and checked: the dev and release engines,
+`check_abi147_imports.py`. A real extension's panel is a manual check
+(docs/arc-recordings/2026-11-06-side-panel.md §5).
+
+## User-Agent and client hints (chrome/003)
+
+Not an ABI change. Patch `chrome/003-chrome-user-agent-identity` makes the
+engine report itself as Google Chrome, as Arc does: the User-Agent's product
+token is `Chrome/156.0.0.0` (reduced) and the `Sec-CH-UA` /
+`navigator.userAgentData` brands are Chrome 156's, `Google Chrome`,
+`Chromium` and the GREASE brand in Chromium's stable order. It supersedes
+chrome/001's `ReArc/` token and `ReArc` brand, which made the Chrome Web
+Store show "Switch to Chrome to install extensions and themes".

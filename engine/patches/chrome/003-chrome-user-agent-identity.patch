@@ -1,0 +1,75 @@
+From 0cd6de74e68259e65f3732ae1a56dd7f899d7ff3 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Fri, 6 Nov 2026 23:24:48 +0400
+Subject: [PATCH] P-BUILD-001 Web Store: identify as Google Chrome in the
+ User-Agent and client hints
+
+chromewebstore.google.com decides from the browser's identity whether it
+offers installs: it reads the User-Agent and the UA-CH brands
+(navigator.userAgentData.brands, Sec-CH-UA). chrome/001 made both say
+ReArc ("ReArc/156.0.0.0" in place of "Chrome/", brand "ReArc" in place of
+"Chromium"), so the store showed "Switch to Chrome to install extensions
+and themes" and Chrome-only sites saw no Chrome token at all.
+
+ReArc now reports itself as Arc does, exactly as Google Chrome: the reduced
+and full UA product tokens are "Chrome/<version>" again, the base brand is
+"Chromium" again, and in this Chromium-branded build the browser brand is
+"Google Chrome" (GetUserAgentBrandList supplies it where Google-branded
+builds use their product name), so the brand list, its GREASE entry and the
+stable shuffle are the ones Chrome 156 sends. This deliberately supersedes
+chrome/001's two hunks; the bundle, Safe Storage and about branding stay
+ReArc (chrome/002).
+
+Last rebased: 2026-11-06 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ components/embedder_support/user_agent_utils.cc         | 6 +++++-
+ components/version_info/version_info_with_user_agent.cc | 4 ++--
+ 2 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index ff0f3b491c..1c48329ebf 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -165,6 +165,10 @@ const blink::UserAgentBrandList GetUserAgentBrandList(
+   std::optional<std::string> brand;
+ #if !BUILDFLAG(CHROMIUM_BRANDING)
+   brand = version_info::GetProductName();
++#else
++  // ReArc identifies as Google Chrome, as Arc does: the Chrome Web Store and
++  // Chrome-only sites read the browser brand from client hints.
++  brand = "Google Chrome";
+ #endif
+ 
+   std::string brand_version =
+@@ -513,7 +517,7 @@ blink::UserAgentBrandList GenerateBrandVersionList(
+ 
+   blink::UserAgentBrandVersion greasey_bv =
+       GetGreasedUserAgentBrandVersion(seed, output_version_type);
+-  blink::UserAgentBrandVersion chromium_bv = {"ReArc", version};
++  blink::UserAgentBrandVersion chromium_bv = {"Chromium", version};
+ 
+   blink::UserAgentBrandList brand_version_list = {std::move(greasey_bv),
+                                                   std::move(chromium_bv)};
+diff --git a/components/version_info/version_info_with_user_agent.cc b/components/version_info/version_info_with_user_agent.cc
+index d4b2f728ce..49bdf4acbd 100644
+--- a/components/version_info/version_info_with_user_agent.cc
++++ b/components/version_info/version_info_with_user_agent.cc
+@@ -10,11 +10,11 @@
+ namespace version_info {
+ 
+ std::string GetProductNameAndVersionForReducedUserAgent() {
+-  return base::StrCat({"ReArc/", GetMajorVersionNumber(), ".0.0.0"});
++  return base::StrCat({"Chrome/", GetMajorVersionNumber(), ".0.0.0"});
+ }
+ 
+ std::string GetProductNameAndVersionForUserAgent() {
+-  return base::StrCat({"ReArc/", GetVersionNumber()});
++  return base::StrCat({"Chrome/", GetVersionNumber()});
+ }
+ 
+ }  // namespace version_info
+-- 
+2.54.0 (Apple Git-157)
+

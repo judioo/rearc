@@ -3,7 +3,7 @@
 # fetch.sh --apply-overlay applies these in order with `git apply --3way --index`.
 #
 # Applied entries:
-chrome/001-rearc-about-branding.patch        # P-BUILD-001 branding slice 1 (UA brand token)
+chrome/001-rearc-about-branding.patch        # P-BUILD-001 branding slice 1 (UA brand token; superseded by chrome/003)
 app/002-app-host-runloop.patch               # P-APP-001 REQUIRED (slice 1)
 app/003-app-delegate-menu-install.patch      # P-APP-001 REQUIRED (wave-5 slice 1: delegate/menu install)
 app/004-main-loop-end-finalization.patch     # P-APP-001 REQUIRED (wave-5 slice 2: DidEndMainMessageLoop bridge finalization)
@@ -69,6 +69,8 @@ tab/062-embedded-video-overlay.patch # P-TAB-001 wave 32: embedded video PiP ove
 tab/063-host-perf-metrics.patch # P-TAB-001 perf-0: page timing, presentation feedback, histograms, processes
 tab/064-host-early-window.patch # P-TAB-001 launch: early window callback at PreCreateThreads, before ready
 tab/065-host-media-capture-search-engines.patch # P-TAB-001 ABI 1.46: tab media capture state and mute, search engine list
+chrome/003-chrome-user-agent-identity.patch    # P-BUILD-001 Web Store: UA and client-hints brands as Google Chrome (supersedes chrome/001 hunks)
+tab/066-extension-side-panels.patch          # P-TAB-001 ABI 1.47: chrome.sidePanel panels as hosted registry tabs
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:

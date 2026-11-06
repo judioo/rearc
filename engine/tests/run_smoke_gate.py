@@ -24,7 +24,7 @@ with log.open('a' if start_gate>1 else 'w') as out:
   elif gate==2:assert b'<p>rearc</p>' in r.stdout
   elif gate==3:assert (udd/'s.png').read_bytes()[:4]==b'\x89PNG'
   elif gate==4:assert (udd/'p.pdf').read_bytes()[:4]==b'%PDF'
-  else:assert b'HeadlessReArc/156' in r.stdout
+  else:assert b'HeadlessChrome/156' in r.stdout and b'ReArc' not in r.stdout  # chrome/003: Chrome's UA
   connects=outside_connects(udd/'netlog.json');assert (udd/'netlog.json').exists() and not connects,(gate,connects)
   line=f'G{gate} PASS rc=0 wall={time.monotonic()-start:.1f}s no-outside-connect fresh-profile={udd}\n'
   out.write(line);out.flush();print(line,end='',flush=True)
