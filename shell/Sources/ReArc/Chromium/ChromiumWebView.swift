@@ -40,6 +40,7 @@ final class ChromiumHostView: NSView {
     private var reportedScale: CGFloat = 0
     private var keyObserver: NSObjectProtocol?
     private var placeholder: NSTextField?
+    private var historySwipe: ChromiumHistorySwipe?
 
     init(engine: ChromiumEngine) {
         self.engine = engine
@@ -79,6 +80,8 @@ final class ChromiumHostView: NSView {
 
     func bind(_ newEngine: ChromiumEngine) {
         guard newEngine !== engine else { return }
+        historySwipe?.stop()
+        historySwipe = window.map { _ in ChromiumHistorySwipe(host: self) }
         releaseLease(detach: true)
         engine.hostDisappeared(self)
         engine = newEngine
@@ -90,6 +93,8 @@ final class ChromiumHostView: NSView {
     func dismantle() {
         guard !dismantled else { return }
         dismantled = true
+        historySwipe?.stop()
+        historySwipe = nil
         observeKeyWindow(nil)
         releaseLease(detach: true)
         engine.hostDisappeared(self)
@@ -98,6 +103,8 @@ final class ChromiumHostView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         observeKeyWindow(window)
+        historySwipe?.stop()
+        historySwipe = window.map { _ in ChromiumHistorySwipe(host: self) }
         reconcile()
     }
 
