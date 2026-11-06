@@ -1174,12 +1174,17 @@ final class BrowserViewModel {
     func promoteLittleArcWindow(_ id: LittleArcWindow.ID, into spaceID: Space.ID? = nil) {
         let originProfile = store.littleArcWindow(withID: id)?.profileID
             ?? store.archivedLittleArcWindows.first(where: { $0.id == id })?.window.profileID
+        // The last focused browser window: Little Arc never becomes it.
+        let target = store.keyWindowID
         guard store.promoteLittleArcToTab(id: id, into: spaceID) != nil else { return }
         if let originProfile {
             engineHost.removeLittleArc(id, profileID: originProfile)
         }
         if focusedLittleArcID == id { focusedLittleArcID = nil }
         loadSelectedIfNeeded()
+        // Otherwise AppKit keys whichever window is next when the Little Arc
+        // closes, and a browser window on another space would take over.
+        if let target { windowPresenter?.focusBrowserWindow(target) }
     }
 
     func promoteFocusedLittleArcToTab() {

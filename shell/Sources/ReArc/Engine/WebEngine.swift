@@ -149,11 +149,15 @@ protocol BrowserWindowPresenting: AnyObject {
     /// A tab's DevTools in their own window (popped out from the docked pane).
     func presentDevToolsWindow(for tabID: Tab.ID)
     func dismissDevToolsWindow(for tabID: Tab.ID)
+    /// Brings a browser window forward and makes it key (Little Arc's Open in
+    /// <Space> lands in the last focused browser window, not whichever comes next).
+    func focusBrowserWindow(_ id: SidebarWindowID)
 }
 
 extension BrowserWindowPresenting {
     func presentDevToolsWindow(for tabID: Tab.ID) {}
     func dismissDevToolsWindow(for tabID: Tab.ID) {}
+    func focusBrowserWindow(_ id: SidebarWindowID) {}
 }
 
 /// What an unload request did.

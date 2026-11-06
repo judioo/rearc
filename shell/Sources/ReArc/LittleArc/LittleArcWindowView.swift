@@ -89,6 +89,10 @@ struct LittleArcWindowView: View {
                 engine.isLoading ? engine.stopLoading() : engine.reload()
             }
             address(for: record, engine: engine)
+            navButton("link", "Copy Link", enabled: true) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString((engine.currentURL ?? record.url).absoluteString, forType: .string)
+            }
             profileMenu(for: record)
             openInButton(for: record)
             Button {
@@ -103,7 +107,17 @@ struct LittleArcWindowView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(.bar)
+        .background {
+            // Tinted with the space Open in targets, as Arc tints it.
+            let theme = model.store.littleArcTargetSpace(for: windowID)?.theme
+            ZStack {
+                Rectangle().fill(.bar)
+                if let theme {
+                    let color = Color(red: theme.red, green: theme.green, blue: theme.blue)
+                    LinearGradient(colors: [color.opacity(0.22), color.opacity(0.12)], startPoint: .leading, endPoint: .trailing)
+                }
+            }
+        }
     }
 
     /// Arc's "Open in <Space> ⌘O ⌄": the space of the last focused browser
@@ -211,12 +225,16 @@ struct LittleArcWindowView: View {
                     Image(systemName: securityIcon(engine.securityState))
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.secondary)
+                    // Arc centres the host in the field.
+                    Spacer(minLength: 0)
                     let text = LittleArcChrome.addressText(for: engine.currentURL ?? record.url)
                     Text(text.isEmpty ? "Search or enter URL" : text)
                         .foregroundStyle(text.isEmpty ? .secondary : .primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer(minLength: 0)
+                    // Keeps the host centred against the icon on the left.
+                    Color.clear.frame(width: 10, height: 1)
                 }
                 .contentShape(Rectangle())
                 .onTapGesture(perform: beginEditing)
