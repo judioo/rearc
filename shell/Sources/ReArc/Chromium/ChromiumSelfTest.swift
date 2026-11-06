@@ -4616,9 +4616,13 @@ extension ChromiumSelfTest {
         while let view = stack.popLast() {
             if let table = view as? NSTableView, let controller = table.delegate as? SidebarListController,
                !table.visibleRect.isEmpty, let index = controller.rows.firstIndex(of: .newTab) {
-                let rect = table.rect(ofRow: index)
-                guard table.visibleRect.intersects(rect) else { return nil }
-                return window.convertToScreen(table.convert(rect, to: nil))
+                // The cell the table shows for that row, not the row's rect: the rows can be mid-update.
+                guard let cell = table.view(atColumn: 0, row: index, makeIfNecessary: false),
+                      !cell.visibleRect.isEmpty else {
+                    log("NOTE + New Tab is row \(index) of \(controller.rows.count) (table \(table.numberOfRows)) with no cell on screen")
+                    return nil
+                }
+                return window.convertToScreen(cell.convert(cell.bounds, to: nil))
             }
             stack.append(contentsOf: view.subviews)
         }
