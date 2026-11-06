@@ -4569,8 +4569,14 @@ extension ChromiumSelfTest {
         let rowFrame = row.accessibilityFrame()
         try check(rowFrame.maxX <= window.frame.minX + model.sidebarWidth + 2,
                   "the Choose a Theme row \(rowFrame) must be in the sidebar")
-        click(atScreen: NSPoint(x: rowFrame.midX, y: rowFrame.midY), in: window)
-        try await wait("Choose a Theme popover", timeout: 5) { !popoverWindows().isEmpty }
+        // A real click: the row is a SwiftUI button inside the sidebar's space pager.
+        let rowPoint = NSPoint(x: rowFrame.midX, y: rowFrame.midY)
+        let opened = try await systemClick(atScreen: rowPoint) { !self.popoverWindows().isEmpty }
+        if !opened {
+            let hit = sequence(first: window.contentView?.superview?.hitTest(window.convertPoint(fromScreen: rowPoint)), next: { $0?.superview })
+                .prefix(8).compactMap { $0.map { String(describing: Swift.type(of: $0)) } }.joined(separator: " < ")
+            throw Failure(description: "Choose a Theme at \(rowFrame) opened no popover (key \(NSApp.keyWindow?.title ?? "none"), hit \(hit))")
+        }
         let rowPopover = popoverWindows()[0].frame
         let side = rowPopover.maxX <= rowFrame.minX + 2 ? "left" : rowPopover.minX >= rowFrame.maxX - 2 ? "right" : "over"
         try check(side == "right", "the Choose a Theme popover \(rowPopover) must be right of its row \(rowFrame), got \(side)")
