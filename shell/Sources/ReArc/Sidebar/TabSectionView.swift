@@ -95,7 +95,8 @@ struct SidebarEntryRow: View, Equatable {
                 onReset: tab.isAwayFromSavedURL ? { model.resetTabToSavedURL(tab.id) } : nil,
                 subtitle: model.renameHintSubtitle(for: tab.id),
                 closeKind: model.closeKind(of: tab.id),
-                onRename: { model.beginRename(.tab(tab.id)) }
+                onRename: { model.beginRename(.tab(tab.id)) },
+                rename: SidebarRowRename(row: tab.id, model: model)
             ) {
                 TabContextMenu(model: model, tab: tab)
             }
@@ -104,6 +105,7 @@ struct SidebarEntryRow: View, Equatable {
                 folder: folder,
                 isExpanded: model.store.isFolderExpanded(folder.id),
                 isDropTarget: isDropInto,
+                rename: SidebarRowRename(row: folder.id, model: model),
                 onToggle: { model.store.toggleFolderExpanded(folder.id) }
             ) {
                 FolderContextMenu(model: model, folder: folder)

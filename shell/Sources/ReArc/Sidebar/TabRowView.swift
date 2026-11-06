@@ -30,6 +30,8 @@ struct TabRowView<Menu: View>: View {
     var closeKind: TabCloseKind = .archive
     /// Double-click: the rename the context menu's Rename… starts.
     var onRename: (() -> Void)? = nil
+    /// Set while the title is being renamed in place.
+    var rename: SidebarRowRename? = nil
     @ViewBuilder let menu: () -> Menu
 
     @State private var isHovering = false
@@ -55,12 +57,16 @@ struct TabRowView<Menu: View>: View {
             .frame(width: SidebarMetrics.iconSize, height: SidebarMetrics.iconSize)
 
             VStack(alignment: .leading, spacing: 0) {
-                Text(tab.displayTitle)
-                    .font(.system(size: SidebarMetrics.titleSize))
-                    .foregroundStyle(chrome.title)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                if let subtitle {
+                if let rename {
+                    rename.field()
+                } else {
+                    Text(tab.displayTitle)
+                        .font(.system(size: SidebarMetrics.titleSize))
+                        .foregroundStyle(chrome.title)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                if let subtitle, rename == nil {
                     Text(subtitle)
                         .font(.system(size: SidebarMetrics.subtitleSize))
                         .foregroundStyle(chrome.secondaryText)
@@ -116,7 +122,8 @@ struct TabRowView<Menu: View>: View {
                 .help("Back to the pinned URL (\(tab.savedURL?.host() ?? "saved page"))")
             }
 
-            if isHovering {
+            // Arc keeps ✕ up while the row is being renamed, pointer or not.
+            if isHovering || rename != nil {
                 Button {
                     if NSEvent.modifierFlags.contains(.option), let onCloseOption {
                         onCloseOption()
@@ -138,10 +145,10 @@ struct TabRowView<Menu: View>: View {
         .padding(.trailing, 8)
         .frame(height: SidebarMetrics.rowHeight)
         .background {
-            let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+            let shape = RoundedRectangle(cornerRadius: rename == nil ? 8 : SidebarRowRename.cornerRadius, style: .continuous)
             if isDropTarget {
                 shape.fill(Color.accentColor.opacity(0.22))
-            } else if isSelected {
+            } else if isSelected || rename != nil {
                 shape.fill(chrome.rowSelected)
                     .shadow(color: .black.opacity(chrome.isDark ? 0.3 : 0.08), radius: 1.5, y: 0.5)
             } else if isHovering {
@@ -150,16 +157,18 @@ struct TabRowView<Menu: View>: View {
         }
         .contentShape(RoundedRectangle(cornerRadius: 8))
         .padding(.vertical, (SidebarMetrics.rowPitch - SidebarMetrics.rowHeight) / 2)
-        .onTapGesture(perform: onSelect)
+        // Off while renaming, so clicks in the field place the caret.
+        .gesture(TapGesture().onEnded(onSelect), including: rename == nil ? .all : .subviews)
         // Simultaneous, so a single click selects at once rather than
         // waiting to see whether a second follows.
-        .simultaneousGesture(TapGesture(count: 2).onEnded { onRename?() })
+        .simultaneousGesture(TapGesture(count: 2).onEnded { onRename?() }, including: rename == nil ? .all : .subviews)
         .onHover { isHovering = $0 }
         .contextMenu { menu() }
         .help(tooltip)
         // One accessibility element per row: its title and badges read as
-        // one label, the hover buttons become its actions.
-        .accessibilityElement(children: .combine)
+        // one label, the hover buttons become its actions. A rename field
+        // stays its own element.
+        .accessibilityElement(children: rename == nil ? .combine : .contain)
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 }

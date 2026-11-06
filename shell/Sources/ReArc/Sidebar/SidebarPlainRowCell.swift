@@ -428,7 +428,8 @@ struct PlainRowState: Equatable {
     var isUnread = false
     var isExpanded = false
     /// Something only the SwiftUI row draws (a loading ring, a crash glyph,
-    /// an audio or Picture in Picture badge, the rename hint).
+    /// an audio or Picture in Picture badge, the rename hint), or a rename
+    /// field that keeps focus wherever the pointer goes.
     var needsHosting = false
     var chrome = ThemeChromeColors(theme: .default, dark: false)
 
@@ -448,10 +449,12 @@ struct PlainRowState: Equatable {
                 || model.showsAudibleIndicator(for: tab.id)
                 || model.isPictureInPicture(tab.id)
                 || model.renameHint?.tabID == tab.id
+                || model.inlineRename(forRow: tab.id) != nil
         case .folder(let folder):
             state.title = folder.title
             state.customIcon = folder.customIcon
             state.isExpanded = model.store.isFolderExpanded(folder.id)
+            state.needsHosting = model.inlineRename(forRow: folder.id) != nil
         case .split, .easel, nil:
             // Not a row the plain cell draws: the SwiftUI row takes over.
             state.needsHosting = true

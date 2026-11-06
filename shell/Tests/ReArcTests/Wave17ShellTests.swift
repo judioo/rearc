@@ -176,14 +176,22 @@ final class Wave17ShellTests: XCTestCase {
         let model = makeModel()
         let tab = model.store.addTab(kind: .pinned, title: "Page", url: URL(string: "https://p.test")!)
         let folder = try XCTUnwrap(model.newFolder(containing: [tab.id]))
-        XCTAssertEqual(model.pendingRename, .folder(folder.id), "a new folder opens the rename prompt")
-        model.pendingRenameText = "Work"
-        model.commitRename()
+        XCTAssertEqual(model.inlineRename?.target, .folder(folder.id), "a new folder opens the rename in its row")
+        model.updateInlineRename("Work")
+        model.endInlineRename(.commit)
         XCTAssertEqual(model.store.folder(withID: folder.id)?.title, "Work")
         model.beginRename(.tab(tab.id))
-        model.pendingRenameText = "Mine"
-        model.commitRename()
+        model.updateInlineRename("Mine")
+        model.endInlineRename(.commit)
         XCTAssertEqual(model.store.tab(withID: tab.id)?.displayTitle, "Mine")
+        // With the sidebar hidden there is no row to type into: the alert.
+        model.isSidebarVisible = false
+        model.beginRename(.tab(tab.id))
+        XCTAssertEqual(model.pendingRenameText, "Mine")
+        model.pendingRenameText = "Ours"
+        model.commitRename()
+        XCTAssertEqual(model.store.tab(withID: tab.id)?.displayTitle, "Ours")
+        model.isSidebarVisible = true
         model.beginRename(.space(model.store.activeSpaceID))
         XCTAssertEqual(model.pendingRenameText, "Main")
         model.pendingRenameText = "Home"

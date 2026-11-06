@@ -2,7 +2,8 @@ import AppKit
 import SidebarModel
 import SwiftUI
 
-/// What the shared rename alert is renaming.
+/// What a rename is renaming: in its row (`beginInlineRename`) or in the
+/// shared alert.
 enum SidebarRenameRequest: Equatable {
     case tab(Tab.ID)
     case folder(UUID)
@@ -441,6 +442,7 @@ extension BrowserViewModel {
     // MARK: - Rename and delete prompts
 
     func beginRename(_ request: SidebarRenameRequest) {
+        if beginInlineRename(request) { return }
         switch request {
         case .tab(let id):
             guard let tab = store.tab(withID: id) else { return }

@@ -184,6 +184,8 @@ final class BrowserViewModel {
     var lastClearedTabIDs: [Tab.ID] = []
     var pendingRename: SidebarRenameRequest?
     var pendingRenameText = ""
+    /// A tab or folder being renamed in its own row.
+    var inlineRename: SidebarInlineRename?
     /// The just-pinned row showing "Double-click to rename", and since when.
     var renameHint: (tabID: Tab.ID, shownAt: Date)?
     var pendingDeletion: SidebarDeletionRequest?
