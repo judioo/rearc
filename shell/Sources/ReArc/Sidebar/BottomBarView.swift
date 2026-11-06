@@ -38,17 +38,19 @@ struct BottomBarView: View {
             // The downloads stack takes the update pill's place while shown.
             UpdateBannerSlot(update: model.availableUpdate) { model.installUpdate?() }
                 .opacity(showsDownloads ? 0 : 1)
+                .animation(QuickViewMotion.pill(reduceMotion: reduceMotion, showingDownloads: showsDownloads), value: showsDownloads)
             bar(libraryOpen: libraryOpen)
                 .overlay(alignment: .top) {
+                    // The button's chip is the stack's base: it rises from the chip's top edge.
                     if showsDownloads {
                         RecentDownloadsStack(records: recent, downloads: model.downloads)
-                            .alignmentGuide(.top) { $0[.bottom] }
+                            .alignmentGuide(.top) { $0[.bottom] - (Self.height - LibraryButton.chipSize) / 2 }
                             .onHover { setLibraryHover($0, .content) }
-                            .transition(MediaStackMotion.card(reduceMotion: reduceMotion, distance: 8))
+                            .transition(QuickViewMotion.transition(reduceMotion: reduceMotion))
                     }
                 }
         }
-        .animation(SidebarMotion.spring(reduceMotion: reduceMotion), value: showsDownloads)
+        .animation(.linear(duration: showsDownloads ? DownloadsQuickView.openDuration : DownloadsQuickView.closeDuration), value: showsDownloads)
         .onChange(of: libraryOpen) { _, _ in dismissLibraryHover() }
     }
 
@@ -100,18 +102,10 @@ struct BottomBarView: View {
         // Arc's Home button (`SidebarHomeButton`): opens the Library on
         // its last page, or closes it. Resting on it shows the latest
         // downloads above the bar (ARC-RECORDING-2026-11-06.md §5.1).
-        Button {
+        LibraryButton(isRevealed: libraryReveal.isShown) {
             dismissLibraryHover()
             model.toggleLibrary(in: window)
-        } label: {
-            Image(systemName: "archivebox.fill")
-                .font(.system(size: 14))
-                .foregroundStyle(chrome.glyph)
-                .frame(width: 18, height: 24)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { setLibraryHover($0, .trigger) }
+        } onHover: { setLibraryHover($0, .trigger) }
         .help("View Library: Spaces, Downloads, Media, Easels & Notes, Archive and Boosts")
         .accessibilityLabel("Library")
         .popover(isPresented: $showingProfileList, arrowEdge: .top) {
