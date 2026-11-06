@@ -1,13 +1,28 @@
 import Foundation
 
+/// Where a closed tab sat, so ⇧⌘T can put it back among the same neighbours.
+public enum ClosedTabPlacement: Equatable, Codable {
+    case favorite(profileID: Profile.ID, index: Int)
+    case section(ItemContainerKind.SpaceSection, index: Int)
+    case folder(UUID, index: Int)
+    /// A pane of a split; `index` is the split's place in its section.
+    case splitPane(splitID: SplitViewItem.ID, paneIndex: Int, section: ItemContainerKind.SpaceSection, index: Int)
+}
+
 /// Snapshot of a tab at close time, used to reopen it later.
 public struct ClosedTabRecord: Equatable, Codable {
     public var tab: Tab
     public var spaceID: Space.ID
+    /// Nil in records saved before placements were kept (top of Today / end of Pinned).
+    public var placement: ClosedTabPlacement?
+    /// Set when a whole split was closed; reopening brings back every pane.
+    public var split: SplitViewItem?
 
-    public init(tab: Tab, spaceID: Space.ID) {
+    public init(tab: Tab, spaceID: Space.ID, placement: ClosedTabPlacement? = nil, split: SplitViewItem? = nil) {
         self.tab = tab
         self.spaceID = spaceID
+        self.placement = placement
+        self.split = split
     }
 }
 
