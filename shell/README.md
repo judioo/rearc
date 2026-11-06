@@ -800,6 +800,11 @@ views, histogram snapshots and the process list with footprints.
   `bench/budgets.json`, baselines in `bench/baselines/`, and results go to
   `bench/results/` (git-ignored).
 - Results and how to read them: docs/PERF-BASELINE.md.
+- **Arc vs ReArc from outside:** `scripts/arc-vs-rearc.sh` (the
+  `arc-vs-rearc` product, `Sources/ArcBench` and `Sources/ArcBenchCore`)
+  posts the same keys to Arc and to a throwaway ReArc and times each app's
+  window pixels, captured one window at a time. Method, privacy rules and
+  usage: docs/ARC-VS-REARC-BENCH.md.
 
 
 ### Self-test
