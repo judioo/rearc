@@ -180,4 +180,49 @@ final class DownloadsAtScaleTests: XCTestCase {
             }
         }
     }
+
+    // MARK: Row window
+
+    func testRowWindowShowsAPageAndGrowsNearItsEnd() {
+        var window = LibraryDownloads.RowWindow()
+        let page = LibraryDownloads.RowWindow.page
+        XCTAssertEqual(window.shown(of: 39_413), page)
+        XCTAssertEqual(window.shown(of: 12), 12)
+        // Rows well above the end ask for nothing.
+        XCTAssertFalse(window.rowAppeared(0, of: 39_413))
+        XCTAssertFalse(window.rowAppeared(page - LibraryDownloads.RowWindow.lead - 1, of: 39_413))
+        XCTAssertTrue(window.rowAppeared(page - LibraryDownloads.RowWindow.lead, of: 39_413))
+        XCTAssertEqual(window.shown(of: 39_413), 2 * page)
+        // The same row again does not add another page.
+        XCTAssertFalse(window.rowAppeared(page - LibraryDownloads.RowWindow.lead, of: 39_413))
+    }
+
+    func testRowWindowReachesEveryRowAndStopsAtTheEnd() {
+        var window = LibraryDownloads.RowWindow()
+        let count = 1_234
+        var pages = 0
+        while window.shown(of: count) < count {
+            XCTAssertTrue(window.rowAppeared(window.shown(of: count) - 1, of: count))
+            pages += 1
+            XCTAssertLessThan(pages, 20)
+        }
+        XCTAssertEqual(window.shown(of: count), count)
+        XCTAssertFalse(window.rowAppeared(count - 1, of: count))
+        // A list shorter than a page never grows.
+        var short = LibraryDownloads.RowWindow()
+        XCTAssertFalse(short.rowAppeared(40, of: 41))
+        XCTAssertEqual(short, LibraryDownloads.RowWindow())
+    }
+
+    func testRowWindowResetsToTheFirstPage() {
+        var window = LibraryDownloads.RowWindow()
+        window.rowAppeared(LibraryDownloads.RowWindow.page - 1, of: 10_000)
+        window.rowAppeared(2 * LibraryDownloads.RowWindow.page - 1, of: 10_000)
+        XCTAssertEqual(window.shown(of: 10_000), 3 * LibraryDownloads.RowWindow.page)
+        window.reset()
+        XCTAssertEqual(window, LibraryDownloads.RowWindow())
+        // Rows that arrive later are shown once the window reaches them.
+        XCTAssertEqual(window.shown(of: 50), 50)
+        XCTAssertEqual(window.shown(of: 150), LibraryDownloads.RowWindow.page)
+    }
 }
