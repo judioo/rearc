@@ -172,12 +172,15 @@ struct SplitPaneToolbarView: View, Equatable {
         } label: {
             Image(systemName: orientation == .horizontal ? "rectangle.split.2x1" : "rectangle.split.1x2")
                 .font(.system(size: 13))
-                .foregroundStyle(ink.ink)
+                .frame(width: 36, height: CardToolbarView.height)
+                .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
+        // A plain button keeps the glyph in the toolbar's ink (the borderless style dims it).
+        .menuStyle(.button)
+        .buttonStyle(.plain)
         .menuIndicator(.hidden)
+        .foregroundStyle(ink.ink)
         .fixedSize()
-        .frame(width: 36, height: CardToolbarView.height)
         .help("Split View")
         .accessibilityLabel("Split View menu")
     }
