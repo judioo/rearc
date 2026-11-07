@@ -117,6 +117,12 @@ struct Act3ControlsView: View {
     var controls: Act3Controls?
     @FocusState private var focused: Bool
 
+    /// What VoiceOver calls each of `Act3Timeline.icons`: what it shows, so
+    /// it never reads like a space's name ("Work").
+    static let iconNames = ["🏠": "House icon", "💼": "Briefcase icon", "📚": "Books icon", "🎨": "Palette icon",
+                            "🌿": "Leaf icon", "✈️": "Plane icon", "🎵": "Music note icon", "💡": "Light bulb icon",
+                            "🎮": "Game controller icon", "☀️": "Sun icon"]
+
     var body: some View {
         let H = layout.size.height
         let ink = MarkPalette.ink.color
@@ -132,14 +138,13 @@ struct Act3ControlsView: View {
                             .overlay(Circle().stroke(Color.white, lineWidth: chosen ? 2.5 : 0).padding(2))
                             .overlay(Circle().stroke(c.color.opacity(chosen ? 0.6 : 0), lineWidth: 1.5).padding(-3))
                             .contentShape(Circle())
-                            .onTapGesture { controls?.colour(i) }
-                            .accessibilityLabel(ProfilePalette.colours[i].name)
-                            .accessibilityAddTraits(.isButton)
+                            .sunriseButton(ProfilePalette.colours[i].name) { controls?.colour(i) }
+                            .accessibilityAddTraits(chosen ? .isSelected : [])
                     }
                 }
                 .position(x: layout.size.width / 2, y: layout.colours)
                 .opacity(frame.editor)
-                .allowsHitTesting(controls != nil && frame.editor > 0.5)
+                .sunriseControlsActive(controls != nil && frame.editor > 0.5)
 
                 HStack(spacing: H * 0.008) {
                     ForEach(Act3Timeline.icons, id: \.self) { icon in
@@ -151,13 +156,13 @@ struct Act3ControlsView: View {
                             .overlay(RoundedRectangle(cornerRadius: H * 0.01)
                                 .strokeBorder(ink.opacity(icon == editing.icon ? 0.2 : 0.06), lineWidth: 1))
                             .contentShape(Rectangle())
-                            .onTapGesture { controls?.icon(icon) }
-                            .accessibilityAddTraits(.isButton)
+                            .sunriseButton(Self.iconNames[icon] ?? icon) { controls?.icon(icon) }
+                            .accessibilityAddTraits(icon == editing.icon ? .isSelected : [])
                     }
                 }
                 .position(x: layout.size.width / 2, y: layout.icons)
                 .opacity(frame.editor)
-                .allowsHitTesting(controls != nil && frame.editor > 0.5)
+                .sunriseControlsActive(controls != nil && frame.editor > 0.5)
             }
 
             HStack(spacing: H * 0.03) {
@@ -166,8 +171,7 @@ struct Act3ControlsView: View {
                         .font(.system(size: H * 0.017, weight: .medium))
                         .foregroundStyle(ink.opacity(0.55))
                         .contentShape(Rectangle())
-                        .onTapGesture { controls?.remove() }
-                        .accessibilityAddTraits(.isButton)
+                        .sunriseButton("Remove space") { controls?.remove() }
                 }
                 Text("Done")
                     .font(.system(size: H * 0.019, weight: .medium))
@@ -176,12 +180,11 @@ struct Act3ControlsView: View {
                     .background(Capsule().fill(MarkPalette.blue.color))
                     .shadow(color: MarkPalette.blue.color.opacity(0.25), radius: 14, y: 5)
                     .contentShape(Capsule())
-                    .onTapGesture { controls?.done() }
-                    .accessibilityAddTraits(.isButton)
+                    .sunriseButton("Done") { controls?.done() }
             }
             .opacity(frame.done)
             .position(x: layout.size.width / 2, y: layout.bottom)
-            .allowsHitTesting(controls != nil && frame.done > 0.5)
+            .sunriseControlsActive(controls != nil && frame.done > 0.5)
 
             if let controls, frame.done > 0.5 {
                 let r = layout.nodeRadius(slots: frame.slots)
@@ -189,21 +192,16 @@ struct Act3ControlsView: View {
                     Circle().fill(Color.white.opacity(0.001))
                         .frame(width: r * 2.8, height: r * 2.8)
                         .contentShape(Circle())
-                        .onTapGesture { controls.select(sp.id) }
+                        .sunriseButton(sp.name.isEmpty ? "New space" : sp.name) { controls.select(sp.id) }
+                        .accessibilityAddTraits(frame.editor > 0.5 && sp.id == editing?.id ? .isSelected : [])
                         .position(arc.point(sp.angle))
-                        .accessibilityElement()
-                        .accessibilityLabel(sp.name.isEmpty ? "New space" : sp.name)
-                        .accessibilityAddTraits(.isButton)
                 }
                 if frame.plus > 0.5 {
                     Circle().fill(Color.white.opacity(0.001))
                         .frame(width: r * 2.6, height: r * 2.6)
                         .contentShape(Circle())
-                        .onTapGesture { controls.add() }
+                        .sunriseButton("Add a space") { controls.add() }
                         .position(arc.point(frame.plusAngle))
-                        .accessibilityElement()
-                        .accessibilityLabel("Add a space")
-                        .accessibilityAddTraits(.isButton)
                 }
                 if editing != nil, frame.editor > 0.5 {
                     TextField("", text: controls.name)

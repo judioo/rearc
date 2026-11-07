@@ -141,12 +141,8 @@ struct Act1ControlsView: View {
                         .frame(width: layout.swatchRadius * 2.6, height: layout.swatchRadius * 2.6)
                         .contentShape(Circle())
                         .onHover { inside in controls.hover(inside ? i : nil) }
-                        .onTapGesture { controls.pick(i) }
+                        .sunriseButton(ProfilePalette.colours[i].name) { controls.pick(i) }
                         .position(layout.swatch(i))
-                        .accessibilityElement()
-                        .accessibilityLabel(ProfilePalette.colours[i].name)
-                        .accessibilityAddTraits(.isButton)
-                        .accessibilityAction { controls.pick(i) }
                 }
             }
         }

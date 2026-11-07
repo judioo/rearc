@@ -326,12 +326,13 @@ struct SunriseLiveView: View {
                             Text("\(i + 1)  \(v.title)")
                                 .fontWeight(v == player.variant ? .semibold : .regular)
                                 .opacity(v == player.variant ? 1 : 0.6)
-                                .onTapGesture { player.play(v) }
+                                .sunriseButton(v.title) { player.play(v) }
+                                .accessibilityAddTraits(v == player.variant ? .isSelected : [])
                         }
                         Text(player.muted ? "M  Sound off" : "M  Sound on")
                             .opacity(0.6)
-                            .onTapGesture { player.muted.toggle() }
-                        Text("R  Watch again").opacity(0.6).onTapGesture { player.play() }
+                            .sunriseButton(player.muted ? "Sound off" : "Sound on") { player.muted.toggle() }
+                        Text("R  Watch again").opacity(0.6).sunriseButton("Watch again") { player.play() }
                     }
                 }
                 Spacer()
@@ -342,8 +343,10 @@ struct SunriseLiveView: View {
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .overlay(RoundedRectangle(cornerRadius: 4).stroke(ink, lineWidth: 1))
                 }
+                .contentShape(Rectangle())
                 .opacity(skip)
-                .onTapGesture { player.skip() }
+                .sunriseButton("Skip intro") { player.skip() }
+                .sunriseControlsActive(skip > 0.5)
             }
             .font(.system(size: 12))
             .foregroundStyle(ink)
