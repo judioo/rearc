@@ -34,8 +34,9 @@ final class DownloadsTableCell: NSView {
     private let track = CALayer()
     private let bar = CALayer()
     private var buttons: [DownloadsRowButton] = []
-    private let discard = NSButton(title: "Discard", target: nil, action: nil)
-    private let keep = NSButton(title: "Keep…", target: nil, action: nil)
+    /// Discard and Keep…/Review…, made the first time the cell shows a warned
+    /// row: system push buttons are costly to make, and warned rows are rare.
+    private var decision: (discard: NSButton, keep: NSButton)?
     private var iconKey: String?
     private var iconTask: Task<Void, Never>?
 
@@ -71,17 +72,6 @@ final class DownloadsTableCell: NSView {
         bar.cornerRadius = 1.5
         layer?.addSublayer(track)
         layer?.addSublayer(bar)
-
-        for button in [discard, keep] {
-            button.bezelStyle = .push
-            button.controlSize = .small
-            button.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-            button.target = self
-            addSubview(button)
-        }
-        discard.hasDestructiveAction = true
-        discard.action = #selector(discardPressed)
-        keep.action = #selector(keepPressed)
 
         for view in [icon, badge, name, status] as [NSView] { view.setAccessibilityElement(false) }
     }
@@ -122,9 +112,12 @@ final class DownloadsTableCell: NSView {
         badge.isHidden = badge.image == nil
 
         configureButtons(record)
-        discard.isHidden = !warned
-        keep.isHidden = !(canKeep || canReview)
-        keep.title = canKeep ? "Keep…" : "Review…"
+        if warned || decision != nil {
+            let (discard, keep) = decisionButtons()
+            discard.isHidden = !warned
+            keep.isHidden = !(canKeep || canReview)
+            keep.title = canKeep ? "Keep…" : "Review…"
+        }
         updateProgress()
         loadIcon()
         needsLayout = true
@@ -172,8 +165,25 @@ final class DownloadsTableCell: NSView {
         func set(_ view: NSView, _ tip: String?) { if view.toolTip != tip { view.toolTip = tip } }
         set(self, isHovered ? record?.url : nil)
         for button in buttons { set(button, isHovered && !button.isHidden ? button.help : nil) }
-        set(keep, isHovered && !keep.isHidden
-            ? (canKeep ? "Save this file even though it may be harmful" : "Keep or discard it on the Downloads page") : nil)
+        if let keep = decision?.keep {
+            set(keep, isHovered && !keep.isHidden
+                ? (canKeep ? "Save this file even though it may be harmful" : "Keep or discard it on the Downloads page") : nil)
+        }
+    }
+
+    private func decisionButtons() -> (discard: NSButton, keep: NSButton) {
+        if let decision { return decision }
+        let discard = NSButton(title: "Discard", target: self, action: #selector(discardPressed))
+        let keep = NSButton(title: "Keep…", target: self, action: #selector(keepPressed))
+        for button in [discard, keep] {
+            button.bezelStyle = .push
+            button.controlSize = .small
+            button.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            addSubview(button)
+        }
+        discard.hasDestructiveAction = true
+        decision = (discard, keep)
+        return (discard, keep)
     }
 
     private func updateButtonOpacity() {
@@ -272,8 +282,8 @@ final class DownloadsTableCell: NSView {
         badge.frame = NSRect(x: inset + size - 14 + 3, y: midY + size / 2 - 14 + 3, width: 14, height: 14)
 
         var trailing = bounds.width - inset
-        if warned {
-            for button in [keep, discard] where !button.isHidden {
+        if warned, let decision {
+            for button in [decision.keep, decision.discard] where !button.isHidden {
                 button.sizeToFit()
                 let width = button.frame.width
                 trailing -= width
@@ -362,23 +372,27 @@ final class DownloadsTableCell: NSView {
     }
 }
 
-/// A row's round button: a 10 pt bold symbol on a faint circle.
-final class DownloadsRowButton: NSButton {
+/// A row's round button: a 10 pt bold symbol on a faint circle. A plain
+/// view, not an `NSButton`: the system button costs a SwiftUI render in its
+/// layout, paid for every new row.
+final class DownloadsRowButton: NSView {
     private(set) var downloadAction: DownloadAction?
     /// The tooltip, shown while the row is hovered.
     private(set) var help = ""
     private var symbol = ""
+    weak var target: AnyObject?
+    var action: Selector?
+    var isEnabled = true { didSet { if isEnabled != oldValue { updateLook() } } }
+    private var isPressed = false { didSet { if isPressed != oldValue { updateLook() } } }
+    private let glyph = CALayer()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        isBordered = false
-        bezelStyle = .regularSquare
-        imagePosition = .imageOnly
-        imageScaling = .scaleNone
-        contentTintColor = .secondaryLabelColor
         wantsLayer = true
         layer?.cornerRadius = DownloadsTableMetrics.buttonSize / 2
-        updateBackground()
+        glyph.contentsGravity = .center
+        layer?.addSublayer(glyph)
+        updateLook()
     }
 
     @available(*, unavailable)
@@ -386,24 +400,94 @@ final class DownloadsRowButton: NSButton {
 
     func configure(symbol: String, help: String, action: DownloadAction) {
         downloadAction = action
-        if self.help != help {
-            self.help = help
-            setAccessibilityLabel(help)
-        }
+        self.help = help
         guard symbol != self.symbol else { return }
         self.symbol = symbol
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: help)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .bold))
+        updateLook()
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        glyph.frame = bounds
+        CATransaction.commit()
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        updateBackground()
+        updateLook()
     }
 
-    private func updateBackground() {
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        updateLook()
+    }
+
+    /// The symbol drawn once per look in secondary label colour (cached by
+    /// symbol, scale and appearance), on the circle.
+    private func updateLook() {
+        let scale = window?.backingScaleFactor ?? 2
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.08).cgColor
+            layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(isPressed ? 0.18 : 0.08).cgColor
+            glyph.contents = symbol.isEmpty ? nil : Self.glyph(symbol, scale: scale, appearance: effectiveAppearance)
         }
+        glyph.contentsScale = scale
+        glyph.opacity = isEnabled ? 1 : 0.4
+        CATransaction.commit()
+    }
+
+    private static var glyphs: [String: CGImage] = [:]
+
+    private static func glyph(_ symbol: String, scale: CGFloat, appearance: NSAppearance) -> CGImage? {
+        let key = "\(symbol)|\(scale)|\(appearance.name.rawValue)"
+        if let image = glyphs[key] { return image }
+        guard let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+                .applying(NSImage.SymbolConfiguration(paletteColors: [.secondaryLabelColor]))) else { return nil }
+        var rect = NSRect(origin: .zero, size: image.size)
+        let rendered = image.cgImage(forProposedRect: &rect, context: nil, hints: [.ctm: AffineTransform(scale: scale)])
+        glyphs[key] = rendered
+        return rendered
+    }
+
+    // MARK: Pressing
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        isPressed = true
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isEnabled else { return }
+        isPressed = bounds.contains(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isEnabled else { return }
+        let inside = bounds.contains(convert(event.locationInWindow, from: nil))
+        isPressed = false
+        if inside { fire() }
+    }
+
+    private func fire() {
+        guard let action else { return }
+        NSApp.sendAction(action, to: target, from: self)
+    }
+
+    // MARK: Accessibility
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { help }
+    override func isAccessibilityEnabled() -> Bool { isEnabled }
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
+        fire()
+        return true
     }
 }

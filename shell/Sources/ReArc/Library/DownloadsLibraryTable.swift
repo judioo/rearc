@@ -215,8 +215,13 @@ final class DownloadsTableController: NSObject, NSTableViewDataSource, NSTableVi
         let warningsChanged = warnings != drawnWarnings
         drawnWarnings = warnings
         if update.reloadsAll {
-            table.reloadData()
-            if reloadAll { table.scroll(.zero) }
+            // `reloadData` threw the cells away and made new ones; with one
+            // row height the table only needs the new count, and the visible
+            // cells take their new rows in place.
+            table.deselectAll(nil)
+            table.noteNumberOfRowsChanged()
+            if reloadAll { table.scroll(NSPoint(x: 0, y: -(table.enclosingScrollView?.contentInsets.top ?? 0))) }
+            reloadVisible(IndexSet(integersIn: 0 ..< rows.count))
             table.syncHover()
             return
         }

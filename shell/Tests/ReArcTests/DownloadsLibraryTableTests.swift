@@ -88,9 +88,15 @@ final class DownloadsLibraryTableTests: XCTestCase {
         let (controller, state, table) = makeTable(downloads, query: "docs")
         XCTAssertEqual(controller.rows.records.map(\.id), ["report", "other"], "the site matches too")
 
+        let firstCell = cell(table, 0)
+        table.selectRowIndexes([1], byExtendingSelection: false)
         controller.setQuery("photo")
         XCTAssertEqual(table.numberOfRows, 1)
         XCTAssertEqual(controller.rows.records.map(\.id), ["photo"])
+        // A new search reconfigures the cells on screen rather than making new ones.
+        XCTAssertTrue(cell(table, 0) === firstCell)
+        XCTAssertEqual(cell(table, 0)?.record?.id, "photo")
+        XCTAssertTrue(table.selectedRowIndexes.isEmpty, "the old selection's rows are gone")
 
         controller.setQuery("nothing")
         XCTAssertEqual(table.numberOfRows, 0)
