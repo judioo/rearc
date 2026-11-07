@@ -191,7 +191,11 @@ final class DownloadsTableController: NSObject, NSTableViewDataSource, NSTableVi
         return withObservationTracking {
             _ = downloads.warnings
             _ = downloads.canReviewDangerous
-            return downloads.matching(query)
+            let records = downloads.matching(query)
+            let filter = downloads.libraryFilter
+            guard filter.isActive else { return records }
+            let now = Date()
+            return records.filter { filter.includes($0, warning: downloads.warnings[$0.id], now: now) }
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {

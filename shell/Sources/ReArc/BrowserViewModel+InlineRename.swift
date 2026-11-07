@@ -33,32 +33,43 @@ struct SidebarInlineRename: Equatable {
         guard ending == .commit else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed != previousName else { return nil }
-        if trimmed.isEmpty, case .folder = target { return nil }
+        if trimmed.isEmpty {
+            switch target {
+            case .folder, .space: return nil
+            case .tab: break
+            }
+        }
         return trimmed
     }
 }
 
 extension BrowserViewModel {
     /// Starts an in-place rename when the row is on screen to type into: a
-    /// pinned or Today tab, or a folder, in the active space with the sidebar
-    /// showing. Favorites, split panes and spaces keep the rename alert.
+    /// tab, folder, favorite, split pane or space header in the active space
+    /// with the sidebar showing.
     /// A rename already under way on another row is saved first.
     func beginInlineRename(_ request: SidebarRenameRequest) -> Bool {
-        guard isSidebarVisible else { return false }
+        guard isSidebarVisible, librarySection(in: store.keyWindowID) == nil else { return false }
         let name: String
         let rowID: UUID
         switch request {
         case .tab(let id):
-            guard let tab = store.tab(withID: id), store.kind(of: id) == .pinned || store.kind(of: id) == .today,
-                  store.spaceContaining(tabID: id) == store.activeSpaceID else { return false }
+            guard let tab = store.tab(withID: id) else { return false }
+            if store.kind(of: id) == .favorite {
+                guard store.favorites(in: store.activeProfileID).contains(where: { $0.id == id }) else { return false }
+            } else {
+                guard store.spaceContaining(tabID: id) == store.activeSpaceID else { return false }
+            }
             name = tab.displayTitle
             rowID = id
         case .folder(let id):
             guard let folder = store.folder(withID: id), store.spaceContaining(entryID: id) == store.activeSpaceID else { return false }
             name = folder.title
             rowID = id
-        case .space:
-            return false
+        case .space(let id):
+            guard id == store.activeSpaceID, let space = store.space(withID: id) else { return false }
+            name = space.name
+            rowID = id
         }
         if inlineRename != nil, inlineRename?.target != request { endInlineRename(.commit) }
         guard inlineRename?.target != request else { return true }
@@ -89,7 +100,7 @@ extension BrowserViewModel {
         switch rename.target {
         case .tab(let id): store.renameTab(id, to: name)
         case .folder(let id): store.renameFolder(id, to: name)
-        case .space: break
+        case .space(let id): store.renameSpace(id, to: name)
         }
         return true
     }
@@ -98,8 +109,7 @@ extension BrowserViewModel {
     func inlineRename(forRow id: UUID) -> SidebarInlineRename? {
         guard let rename = inlineRename else { return nil }
         switch rename.target {
-        case .tab(let target), .folder(let target): return target == id ? rename : nil
-        case .space: return nil
+        case .tab(let target), .folder(let target), .space(let target): return target == id ? rename : nil
         }
     }
 }

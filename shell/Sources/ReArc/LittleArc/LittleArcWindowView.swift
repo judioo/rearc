@@ -91,6 +91,9 @@ struct LittleArcWindowView: View {
                 engine.isLoading ? engine.stopLoading() : engine.reload()
             }
             address(for: record, engine: engine)
+            navButton("square.split.2x1", "Open in Split View", enabled: model.canSplitLittleArcWindow(windowID)) {
+                if model.splitLittleArcWindow(windowID) { dismiss() }
+            }
             navButton("link", "Copy Link", enabled: true) {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString((engine.currentURL ?? record.url).absoluteString, forType: .string)

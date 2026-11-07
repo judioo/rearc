@@ -31,12 +31,13 @@ private struct ExtensionActionButton: View {
     let engine: (any WebEngine)?
     let action: ExtensionActionItem
     @State private var anchor: NSView?
+    @Environment(\.sidebarWindow) private var window
 
     var body: some View {
         Button { controller.run(action.id, for: engine, anchor: anchor) } label: {
             ExtensionIcon(action: action, size: 16)
                 .frame(width: 24, height: 22)
-                .background(controller.openPopupExtensionID == action.id ? Color.primary.opacity(0.12) : .clear,
+                .background(controller.isActionHighlighted(action.id, in: window) ? Color.primary.opacity(0.12) : .clear,
                             in: RoundedRectangle(cornerRadius: 5))
                 .contentShape(Rectangle())
         }

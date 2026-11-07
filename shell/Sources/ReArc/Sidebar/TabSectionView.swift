@@ -65,6 +65,7 @@ struct SidebarEntryRow: View, Equatable {
             ) {
                 entryRow(entry)
             }
+            .modifier(ItemIconPopover(model: model, itemID: id))
             .padding(.leading, CGFloat(depth) * 14)
         }
     }
@@ -144,7 +145,9 @@ struct SidebarEntryRow: View, Equatable {
                     get: { model.renamingSplitID == split.id },
                     set: { model.renamingSplitID = $0 ? split.id : nil }
                 ),
-                onRename: { model.renameSplit(split.id, to: $0) }
+                onRename: { model.renameSplit(split.id, to: $0) },
+                paneRename: { SidebarRowRename(row: $0, model: model) },
+                onRenamePane: { model.beginRename(.tab($0)) }
             ) { paneID in
                 SectionItemContextMenu(model: model, entry: entry, paneID: paneID)
             }

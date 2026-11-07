@@ -24,6 +24,7 @@ struct FavoritesRowView: View {
                                      count: layout.columns), spacing: FavoritesGridLayout.spacing) {
                 ForEach(favorites) { tab in
                     FavoriteIconView(
+                        model: model,
                         tab: tab,
                         favicon: model.favicon(for: tab),
                         isSelected: tab.id == selectedID,
@@ -33,8 +34,8 @@ struct FavoritesRowView: View {
                         insertion: insertion(for: tab.id),
                         width: layout.tileWidth
                     )
-                    .onTapGesture { model.selectTab(tab.id) }
                     .contextMenu { TabContextMenu(model: model, tab: tab) }
+                    .modifier(ItemIconPopover(model: model, itemID: tab.id))
                     .onDrag {
                         draggedTabID = tab.id
                         SidebarDropHaptics.dragBegan()
@@ -157,6 +158,7 @@ private struct FavoriteDropDelegate: DropDelegate {
 }
 
 private struct FavoriteIconView: View {
+    let model: BrowserViewModel
     let tab: Tab
     let favicon: NSImage?
     let isSelected: Bool
@@ -168,6 +170,17 @@ private struct FavoriteIconView: View {
     @State private var isHovering = false
 
     var body: some View {
+        VStack(spacing: 3) {
+            tile
+                .onTapGesture { model.selectTab(tab.id) }
+                .simultaneousGesture(TapGesture(count: 2).onEnded { model.beginRename(.tab(tab.id)) })
+            if let rename = SidebarRowRename(row: tab.id, model: model) {
+                rename.field().frame(width: width, height: 22)
+            }
+        }
+    }
+
+    private var tile: some View {
         TabActivityIcon(activity: activity) {
             SiteIconView(image: favicon, token: tab.faviconToken, size: favicon == nil ? 22 : 18, customIcon: tab.customIcon)
                 .saturation(isUnloaded ? 0 : 1)

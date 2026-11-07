@@ -21,6 +21,8 @@ struct SplitRowView<Menu: View>: View {
     /// The inline rename is open (from double-click or the menu's Rename…).
     @Binding var isRenaming: Bool
     let onRename: (String) -> Void
+    var paneRename: (Tab.ID) -> SidebarRowRename? = { _ in nil }
+    var onRenamePane: (Tab.ID) -> Void = { _ in }
     /// The split's menu; a chip passes its pane for the pane's own items.
     @ViewBuilder let menu: (Tab.ID?) -> Menu
 
@@ -29,7 +31,7 @@ struct SplitRowView<Menu: View>: View {
 
     var body: some View {
         Group {
-            if split.showsAsNamedRow || isRenaming {
+            if (split.showsAsNamedRow && !split.tabs.contains(where: { paneRename($0.id) != nil })) || isRenaming {
                 namedRow
             } else {
                 chips
@@ -118,7 +120,9 @@ struct SplitRowView<Menu: View>: View {
                     showsAudibleIndicator: showsAudibleIndicator(tab.id),
                     onSelect: { onSelectPane(tab.id) },
                     onClose: { option in onClosePane(option, tab.id) },
-                    onMute: { onMutePane(tab.id) }
+                    onMute: { onMutePane(tab.id) },
+                    rename: paneRename(tab.id),
+                    onRename: { onRenamePane(tab.id) }
                 )
                 .contextMenu { menu(tab.id) }
             }
@@ -154,19 +158,23 @@ private struct SplitPaneChip: View {
     let onSelect: () -> Void
     let onClose: (_ optionClick: Bool) -> Void
     let onMute: () -> Void
+    var rename: SidebarRowRename? = nil
+    var onRename: () -> Void = {}
 
     @State private var isHovering = false
     @Environment(\.themeChrome) private var chrome
 
     /// Arc shows every chip's ✕ while the row is hovered; four favicon-only
     /// chips have no room, so only the hovered one does.
-    private var showsClose: Bool { isHovering || (rowHovered && showsTitle) }
+    private var showsClose: Bool { rename != nil || isHovering || (rowHovered && showsTitle) }
 
     var body: some View {
         HStack(spacing: 6) {
             SiteIconView(image: favicon, token: tab.faviconToken, size: 14, customIcon: tab.customIcon)
                 .frame(width: 16, height: 16)
-            if showsTitle {
+            if let rename {
+                rename.field()
+            } else if showsTitle {
                 Text(tab.displayTitle)
                     .font(.system(size: 13))
                     .foregroundStyle(chrome.title)
@@ -198,13 +206,14 @@ private struct SplitPaneChip: View {
             }
         }
         .padding(.horizontal, 6)
-        .frame(maxWidth: .infinity, minHeight: 26, maxHeight: 26)
+        .frame(minWidth: rename == nil ? nil : 100, maxWidth: .infinity, minHeight: 26, maxHeight: 26)
         .background(
             Color.primary.opacity(isFilled ? (isFocused ? 0.11 : 0.06) : 0),
             in: RoundedRectangle(cornerRadius: 6, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: 6))
-        .onTapGesture(perform: onSelect)
+        .gesture(TapGesture().onEnded { onSelect() }, including: rename == nil ? .all : .subviews)
+        .simultaneousGesture(TapGesture(count: 2).onEnded { if rename == nil { onRename() } })
         .onHover { isHovering = $0 }
         .help("\(tab.displayTitle)\n\(tab.url.absoluteString)")
         .accessibilityElement(children: .combine)
@@ -225,7 +234,7 @@ private struct SplitTitleField: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        TextField("Split View Name", text: $text)
+        TextField(initial, text: $text)
             .textFieldStyle(.plain)
             .font(.system(size: SidebarMetrics.titleSize))
             .focused($focused)

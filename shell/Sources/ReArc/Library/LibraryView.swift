@@ -199,77 +199,6 @@ enum LibraryColumnMetrics {
     static let inset: CGFloat = 9
 }
 
-// MARK: - Spaces
-
-/// Every space beside the rail, over the page area.
-struct LibrarySpacesPage: View {
-    let model: BrowserViewModel
-    let window: SidebarWindowID?
-    @Environment(\.colorScheme) private var colorScheme
-    private let columns = [GridItem(.adaptive(minimum: 170), spacing: 12)]
-
-    var body: some View {
-        let current = model.space(in: window).id
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                ForEach(LibrarySpaces.groups(in: model.store), id: \.profile.id) { group in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 6) {
-                            ProfileAvatarView(profile: group.profile, diameter: 18)
-                            Text(group.profile.name).font(.headline)
-                        }
-                        LazyVGrid(columns: columns, alignment: .leading, spacing: 12) {
-                            ForEach(group.rows) { row in
-                                card(row, isCurrent: row.id == current)
-                            }
-                            Button { model.beginSpaceCreation(profileID: group.profile.id) } label: {
-                                VStack(spacing: 6) {
-                                    Image(systemName: "plus").font(.title2)
-                                    Text("New Space…").font(.callout)
-                                }
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, minHeight: 96)
-                                .background(RoundedRectangle(cornerRadius: 12).strokeBorder(.tertiary, style: StrokeStyle(lineWidth: 1, dash: [4])))
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-            }
-            .padding(16)
-        }
-    }
-
-    private func card(_ row: LibrarySpaceRow, isCurrent: Bool) -> some View {
-        let palette = SpaceThemePalette(
-            theme: row.space.theme,
-            darkAppearance: row.space.theme.appearance.isDark(systemDark: SystemAppearance.isDark(colorScheme))
-        )
-        let foreground: Color = palette.prefersLightForeground ? .white : .black.opacity(0.8)
-        return Button { model.openLibrarySpace(row.id) } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                SpaceIconView(iconName: row.space.iconName, size: 18)
-                    .frame(width: 28, height: 28)
-                Spacer(minLength: 0)
-                Text(row.space.name).font(.headline).lineLimit(1)
-                Text("\(row.pinnedCount) pinned · \(row.todayCount) today")
-                    .font(.caption)
-                    .opacity(0.75)
-            }
-            .foregroundStyle(foreground)
-            .padding(12)
-            .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
-            .background(SpaceThemeFill(palette: palette).clipShape(RoundedRectangle(cornerRadius: 12)))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(isCurrent ? Color(palette.accent) : .clear, lineWidth: 2))
-            .contentShape(RoundedRectangle(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
-        .help(isCurrent ? "\(row.space.name) (shown in this window)" : "Switch to \(row.space.name)")
-        .contextMenu { SpaceContextMenu(model: model, space: row.space) }
-    }
-}
-
 // MARK: - Downloads
 
 /// The search, the tray's folder and Clear row, then every download in an
@@ -283,7 +212,9 @@ private struct LibraryDownloadsPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             LibraryColumnHeader(prompt: LibrarySection.downloads.searchPrompt ?? "", text: $query,
-                                onMoveDown: { table.controller?.focusList() })
+                                onMoveDown: { table.controller?.focusList() }) {
+                DownloadsLibraryFilterMenu(downloads: model.downloads)
+            }
             VStack(alignment: .leading, spacing: 0) {
                 DownloadsTrayHeader(downloads: model.downloads, showsTitle: false)
                 Divider()

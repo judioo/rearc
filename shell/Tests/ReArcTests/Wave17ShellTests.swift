@@ -193,9 +193,10 @@ final class Wave17ShellTests: XCTestCase {
         XCTAssertEqual(model.store.tab(withID: tab.id)?.displayTitle, "Ours")
         model.isSidebarVisible = true
         model.beginRename(.space(model.store.activeSpaceID))
-        XCTAssertEqual(model.pendingRenameText, "Main")
-        model.pendingRenameText = "Home"
-        model.commitRename()
+        XCTAssertNil(model.pendingRename)
+        XCTAssertEqual(model.inlineRename?.previousName, "Main")
+        model.updateInlineRename("Home")
+        model.endInlineRename(.commit)
         XCTAssertEqual(model.store.activeSpace.name, "Home")
     }
 

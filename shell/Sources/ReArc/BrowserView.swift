@@ -46,7 +46,7 @@ struct BrowserView: View {
             }
             .overlay(alignment: .topTrailing) { if !isPageFullscreen { zoomBadge } }
             // An extension's side panel, opposite the sidebar (ABI 1.47).
-            .extensionSidePanel(model.extensions.sidePanels, window: windowID, sidebarSide: placement.side,
+            .extensionSidePanel(model.extensions, window: windowID, sidebarSide: placement.side,
                                 topInset: placement.trafficLightsInSidebar ? Self.cardInset : TrafficLightPositioner.cardClearance,
                                 isHidden: isPageFullscreen)
             // The sidebar and card run up under the title bar: the traffic
@@ -454,6 +454,7 @@ struct BrowserView: View {
         .clipShape(shape)
         .background(shape.fill(cardFill))
         .background(CardShadow(shape: shape).opacity(fullscreen ? 0 : 1))
+        .overlay { LibrarySpacesOverlay(model: model, window: windowID) }
         .padding(.top, topInset)
         .padding(.bottom, inset)
         .padding(placement.side.opposite.edgeSet, inset)
@@ -483,9 +484,6 @@ struct BrowserView: View {
     private var contentArea: some View {
         if model.startupDeferred {
             Color.clear.accessibilityLabel("Loading page")
-        } else if model.librarySection(in: windowID)?.coversPage == true {
-            LibrarySpacesPage(model: model, window: windowID)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let ref = model.selectedEaselRef(in: windowID),
            let document = model.easelDocument(forSidebarItem: ref.id) {
             if document.kind == .note {

@@ -60,6 +60,7 @@ final class DownloadsController {
     /// ring, as Arc's bar does, rather than presenting a popover (~60 ms of
     /// SwiftUI layout in the download's first frame).
     var isTrayPresented = false
+    var libraryFilter = LibraryDownloadFilter()
     /// Bumped when a new download starts (the tray button pulses).
     private(set) var startCount = 0
 

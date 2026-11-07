@@ -236,6 +236,7 @@ final class BrowserViewModel {
     var renamingSplitID: SplitViewItem.ID?
     /// Today tabs archived by the last Clear, for Undo.
     var lastClearedTabIDs: [Tab.ID] = []
+    var archiveFilter = LibraryArchiveFilter()
     var pendingRename: SidebarRenameRequest?
     var pendingRenameText = ""
     /// A tab or folder being renamed in its own row.

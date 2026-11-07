@@ -67,6 +67,10 @@ final class ExtensionsController {
         backend?.runAction(extensionID, for: engine, anchor: anchor)
     }
 
+    func isActionHighlighted(_ extensionID: String, in window: SidebarWindowID?) -> Bool {
+        openPopupExtensionID == extensionID || sidePanels.isOpen(extensionID, in: window)
+    }
+
     func togglePin(_ extensionID: String) {
         pins.toggle(extensionID)
         pins.save(to: defaults)

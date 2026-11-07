@@ -414,3 +414,8 @@ enum LibrarySearch {
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
     }
 }
+
+/// The Spaces panel's unfold and fold, measured in the Library recording.
+public enum LibrarySpacesMotion {
+    public static func duration(opening: Bool) -> Double { opening ? 0.08 : 0.17 }
+}
