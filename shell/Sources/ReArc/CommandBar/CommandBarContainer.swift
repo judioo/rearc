@@ -23,7 +23,8 @@ struct CommandBarContainer: View {
             onDeleteHighlighted: { model.deleteHighlightedCommandBarHistoryRow() },
             onRowAction: { model.performCommandBarRowAction($0, on: $1) },
             onMoveHighlight: { model.moveCommandBarHighlight(by: $0) },
-            onSelectIndex: { index in
+            onSelectResult: { id in
+                guard let index = model.commandBarResults.firstIndex(where: { $0.id == id }) else { return }
                 model.commandBarHighlightedIndex = index
                 model.submitCommandBar()
             },

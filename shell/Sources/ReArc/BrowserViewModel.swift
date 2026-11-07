@@ -319,8 +319,17 @@ final class BrowserViewModel {
     @ObservationIgnored let commandBarCatalogCache = ObservedCache<[AppCommand]>()
     @ObservationIgnored let commandBarDomainCache = ObservedCache<[String]>()
     @ObservationIgnored let commandBarInlineCache = ObservedCache<String?>()
+    /// Open tabs and enabled commands prepared for matching, rebuilt when the
+    /// sidebar or the catalog changes rather than on every keystroke.
+    @ObservationIgnored let commandBarTabIndexCache = ObservedCache<CommandBarSearch.TabIndex>()
+    @ObservationIgnored let commandBarCommandIndexCache = ObservedCache<CommandBarSearch.CommandIndex>()
     /// The main menu's commands while the bar is open (`commandBarMenuCommands`).
     @ObservationIgnored var commandBarMenuSnapshot: [MenuCommand]?
+    /// That snapshot prepared against the catalog (`commandBarMenuIndex`).
+    @ObservationIgnored var commandBarMenuIndexMemo: MenuCommandSearch.Index?
+    /// The engine's history for the current text, prepared once for all of
+    /// the passes its other answers cause.
+    @ObservationIgnored var commandBarLiveHistoryMemo: (records: [VisitRecord], history: VisitHistory)?
 
     var commandBarResults: [CommandBarSearch.Result] {
         commandBarResultCache.value {
@@ -336,6 +345,7 @@ final class BrowserViewModel {
         }
         let (mode, needle) = CommandBarSearch.parseMode(commandBarText)
         if mode == .blended && needle.isEmpty { return [] }
+        let commandIndex = commandBarCommandIndex
         return CommandBarSearch.results(
             for: commandBarText,
             in: store,
@@ -346,15 +356,10 @@ final class BrowserViewModel {
             tabMuteModel: tabMuteModel,
             navigationSchemes: engineHost.navigationSchemes,
             history: visitHistory,
-            commandCatalog: commandBarCatalogCache.value {
-                AppCommandRegistry.all(in: CommandBarContext(
-                    store: store, isSidebarVisible: isSidebarVisible, closedTabStack: store.closedTabStack,
-                    peekURL: peekSession?.url, focusedLittleArcID: focusedLittleArcID,
-                    mediaByTab: mediaStateByTab, tabMuteModel: tabMuteModel,
-                    navigationSchemes: engineHost.navigationSchemes, externalLinkDestination: externalLinkDestination,
-                    pendingExtensionReinstall: pendingExtensionReinstall?.title))
-            },
-            menuCommands: commandBarMenuCommands,
+            liveHistory: commandBarLiveHistory,
+            tabIndex: commandBarTabIndex,
+            commandIndex: commandIndex,
+            menuIndex: commandBarMenuIndex(registered: commandIndex.catalog),
             externalLinkDestination: externalLinkDestination,
             live: commandBarLive,
             searchProvider: searchProvider,
@@ -362,10 +367,51 @@ final class BrowserViewModel {
         )
     }
 
+    /// Every open tab, prepared; rebuilt when the sidebar changes.
+    var commandBarTabIndex: CommandBarSearch.TabIndex {
+        commandBarTabIndexCache.value { CommandBarSearch.TabIndex(store: store) }
+    }
+
+    /// The enabled command catalog, prepared; its enabled checks read the sidebar.
+    var commandBarCommandIndex: CommandBarSearch.CommandIndex {
+        commandBarCommandIndexCache.value {
+            CommandBarSearch.CommandIndex(catalog: commandBarCatalogCache.value {
+                AppCommandRegistry.all(in: CommandBarContext(
+                    store: store, isSidebarVisible: isSidebarVisible, closedTabStack: store.closedTabStack,
+                    peekURL: peekSession?.url, focusedLittleArcID: focusedLittleArcID,
+                    mediaByTab: mediaStateByTab, tabMuteModel: tabMuteModel,
+                    navigationSchemes: engineHost.navigationSchemes, externalLinkDestination: externalLinkDestination,
+                    pendingExtensionReinstall: pendingExtensionReinstall?.title))
+            })
+        }
+    }
+
+    /// The menu snapshot prepared against `registered`, kept while neither changes.
+    func commandBarMenuIndex(registered: [AppCommand]) -> MenuCommandSearch.Index {
+        let menus = commandBarMenuCommands
+        if let memo = commandBarMenuIndexMemo, memo.commands == menus, memo.registered == registered { return memo }
+        let index = MenuCommandSearch.Index(menus, registered: registered)
+        commandBarMenuIndexMemo = index
+        return index
+    }
+
+    /// `commandBarLive`'s history as a prepared store, built once per answer.
+    private var commandBarLiveHistory: VisitHistory? {
+        guard let records = commandBarLive?.history else { return nil }
+        if let memo = commandBarLiveHistoryMemo, memo.records == records { return memo.history }
+        let history = VisitHistory(records: records)
+        commandBarLiveHistoryMemo = (records, history)
+        return history
+    }
+
     /// Engine history, suggestions and URL-vs-search for the typed text
     /// (`CommandBarServices`); nil until a source answers.
     var commandBarLive: CommandBarLiveResults?
     @ObservationIgnored var commandBarGate = CommandBarQueryGate()
+    /// Engine lookups start once the keystroke's frame has been committed.
+    @ObservationIgnored let commandBarAfterCommit = AfterCommit()
+    /// The newest text waiting for that, with its gate generation.
+    @ObservationIgnored var pendingCommandBarQuery: (text: String, generation: UInt64)?
     /// The engine's command-bar sources; the Chromium shell installs its own.
     @ObservationIgnored var commandBarServices: CommandBarServices = WebKitCommandBarServices() {
         didSet { observeSearchProvider() }
@@ -1624,14 +1670,27 @@ final class BrowserViewModel {
         commandBarError = nil
         isCommandBarPresented = true
         commandBarServices.commandBarWillOpen(profileID: store.activeProfileID)
-        refreshCommandBarLive()
+        // ⌘L's URL asks at once: its first frame already waits for the bar.
+        refreshCommandBarLive(immediately: true)
+        // The first keystroke then finds the menu read and the indexes built.
+        commandBarAfterCommit.schedule { [weak self] in self?.prepareCommandBarIndexes() }
+    }
+
+    /// Reads the menu snapshot and builds the tab, command and menu indexes.
+    func prepareCommandBarIndexes() {
+        guard isCommandBarPresented else { return }
+        _ = commandBarTabIndex
+        _ = commandBarMenuIndex(registered: commandBarCommandIndex.catalog)
     }
 
     // MARK: - Command bar live results
 
     /// Every edit starts new lookups and cancels the last; only web input
     /// in an open bar asks (not commands, site-search pills or URL prompts).
-    func refreshCommandBarLive() {
+    /// A keystroke's lookups start after its frame is committed: Chromium
+    /// runs its synchronous omnibox providers inside the calls, on the main
+    /// thread. Keys typed within one frame ask only for the newest text.
+    func refreshCommandBarLive(immediately: Bool = false) {
         let text = commandBarText
         guard isCommandBarPresented, commandBarSiteSearch == nil, commandBarURLIntent == nil, !text.hasPrefix(">"),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -1640,6 +1699,20 @@ final class BrowserViewModel {
         }
         if let live = commandBarLive, !live.applies(to: text) { commandBarLive = nil }
         let generation = commandBarGate.begin(text)
+        let waiting = pendingCommandBarQuery != nil
+        pendingCommandBarQuery = (text, generation)
+        if immediately {
+            startPendingCommandBarQuery()
+        } else if !waiting {
+            commandBarAfterCommit.schedule { [weak self] in self?.startPendingCommandBarQuery() }
+        }
+    }
+
+    /// Starts the engine lookups for the newest text, if it is still current.
+    func startPendingCommandBarQuery() {
+        guard let (text, generation) = pendingCommandBarQuery else { return }
+        pendingCommandBarQuery = nil
+        guard commandBarGate.isCurrent(generation) else { return }
         commandBarServices.query(text, profileID: store.activeProfileID, isPrivate: false) { [weak self] live in
             guard let self, self.commandBarGate.isCurrent(generation) else { return }
             self.commandBarLive = live
@@ -1648,6 +1721,7 @@ final class BrowserViewModel {
 
     func cancelCommandBarLive() {
         commandBarGate.cancel()
+        pendingCommandBarQuery = nil
         commandBarServices.cancel()
         commandBarLive = nil
     }
