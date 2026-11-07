@@ -41,16 +41,17 @@ public enum SidePanelWidth {
 /// One window's extension side panel (Chrome has one panel area per window).
 /// A global panel (the extension's default options) stays on screen across
 /// the window's tab switches with the same page; a contextual panel
-/// (`sidePanel.setOptions({tabId})`) belongs to its tab and comes back when
-/// that tab is shown again. IDs are the engine's panel tab IDs.
+/// (`sidePanel.setOptions({tabId})`) belongs to its tab: it hides when
+/// another tab is shown and comes back, the same page, with its tab. Kept
+/// panels stay alive while hidden. IDs are the engine's panel tab IDs.
 public struct SidePanelWindowState: Equatable, Sendable {
     public var extensionID: String
     public var globalPanel: UInt64?
     /// Owner page tab → its contextual panel.
     public var contextualPanels: [UInt64: UInt64] = [:]
-    /// The panel on screen.
+    /// The panel on screen; nil while the pane is hidden.
     public var shownPanel: UInt64?
-    /// The page tab the panel is shown beside.
+    /// The page tab the panel is shown (or hidden) beside.
     public var ownerTab: UInt64
 
     public init(extensionID: String, ownerTab: UInt64) {
@@ -63,15 +64,30 @@ public struct SidePanelWindowState: Equatable, Sendable {
         case show(UInt64)
         /// Ask the engine for a panel of that scope.
         case create(contextual: Bool)
-        /// The extension has no panel for the tab: the pane closes.
+        /// Nothing for the tab, but the window keeps panels for other tabs:
+        /// the pane hides until one of them is shown again.
+        case hide
+        /// Nothing for the tab and nothing kept: the pane closes.
         case close
     }
 
-    /// What to show beside `tab`, from the engine's `ReArcTabGetSidePanel`.
-    public func decision(for tab: UInt64, available: Bool, contextual: Bool) -> Decision {
-        guard available else { return .close }
-        if contextual { return contextualPanels[tab].map(Decision.show) ?? .create(contextual: true) }
-        return globalPanel.map(Decision.show) ?? .create(contextual: false)
+    /// What to show beside `tab`, from the engine's `ReArcTabGetSidePanel`,
+    /// in Chrome's order on a tab switch (SidePanelUIBase::
+    /// GetNewActiveKeyOnTabChanged): the tab's own panel, else the global
+    /// one. A tab switch makes a panel only while one is on screen (a global
+    /// panel follows the window; a tab's own options get their panel beside a
+    /// shown global one); `explicit` (a toolbar click, sidePanel.open) makes
+    /// it in any case.
+    public func decision(for tab: UInt64, available: Bool, contextual: Bool, explicit: Bool = false) -> Decision {
+        let nothing: Decision = panels.isEmpty ? .close : .hide
+        guard available else { return nothing }
+        if contextual {
+            if let panel = contextualPanels[tab] { return .show(panel) }
+            let besideGlobal = globalPanel != nil && shownPanel == globalPanel
+            return explicit || besideGlobal ? .create(contextual: true) : nothing
+        }
+        if let globalPanel { return .show(globalPanel) }
+        return explicit || shownPanel != nil ? .create(contextual: false) : nothing
     }
 
     /// Records a panel the engine made for `owner`.
@@ -95,9 +111,21 @@ public struct SidePanelWindowState: Equatable, Sendable {
         return true
     }
 
-    /// A page tab closed: its contextual panel goes with it.
+    /// A page tab closed: its contextual panel goes with it (off screen too).
     public mutating func forget(ownerTab tab: UInt64) -> UInt64? {
-        contextualPanels.removeValue(forKey: tab)
+        guard let panel = contextualPanels.removeValue(forKey: tab) else { return nil }
+        if shownPanel == panel { shownPanel = nil }
+        return panel
+    }
+
+    /// The close button, a second toolbar click or the shown page's
+    /// `window.close()`: the shown panel goes, and the global one with it (as
+    /// Chrome resets the window's active entry); other tabs' own panels stay
+    /// for their tabs. Returns the panels to release.
+    public mutating func closeShown() -> [UInt64] {
+        let released = Set([shownPanel, globalPanel].compactMap { $0 }).sorted()
+        for panel in released { forget(panel: panel) }
+        return released
     }
 }
 

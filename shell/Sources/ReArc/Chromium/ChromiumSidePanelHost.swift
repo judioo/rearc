@@ -7,10 +7,11 @@ import SidebarModel
 /// most one, beside its page. A toolbar click on an action with
 /// `openPanelOnActionClick` toggles it (another extension's panel is
 /// replaced), sidePanel.open / close come as engine events, and the panel
-/// follows the window's tab switches: a global panel stays with the same
-/// page, a contextual one shows only beside its tab. The panel's own
-/// `window.close()`, the close button and a tab without a panel close it.
-/// Panels are registry tabs held as engines here; releasing one closes it.
+/// follows the window's tab switches as Chrome's does: a global panel stays
+/// with the same page, a contextual one hides when its tab is not shown and
+/// comes back with it, still loaded. The panel's own `window.close()` and the
+/// close button close it. Panels are registry tabs held as engines here;
+/// releasing one closes it.
 final class ChromiumSidePanelHost: ExtensionSidePanelBackend {
     private let runtime: ChromiumRuntime
     private weak var model: BrowserViewModel?
@@ -39,18 +40,17 @@ final class ChromiumSidePanelHost: ExtensionSidePanelBackend {
     /// A click on `extensionID`'s action in the key window, beside `owner`.
     func toggle(_ extensionID: String, owner: ChromiumEngine) {
         guard let window = window(showing: owner.tabID) else { return }
-        switch SidePanelToggle.resolve(shownExtension: windows[window]?.extensionID, clicked: extensionID) {
+        let shown = windows[window].flatMap { $0.shownPanel == nil ? nil : $0.extensionID }
+        switch SidePanelToggle.resolve(shownExtension: shown, clicked: extensionID) {
         case .close:
-            close(window)
-        case .replace:
-            replace(window, with: extensionID, owner: owner.tabID)
-        case .open:
+            closeShown(window)
+        case .replace, .open:
             open(extensionID, in: window, owner: owner.tabID)
         }
     }
 
     func closeSidePanel(in window: SidebarWindowID) {
-        close(window)
+        closeShown(window)
     }
 
     // MARK: Engine events
@@ -61,9 +61,9 @@ final class ChromiumSidePanelHost: ExtensionSidePanelBackend {
             if event.tabID != 0 {
                 // A tab that is not on screen gets nothing (Chrome would open it when the tab is next shown).
                 guard let window = window(showing: event.tabID) else { return }
-                replace(window, with: event.extensionID, owner: event.tabID)
+                open(event.extensionID, in: window, owner: event.tabID)
             } else if let window = window(forLogicalWindow: event.windowID), let owner = pageTab(in: window) {
-                replace(window, with: event.extensionID, owner: owner)
+                open(event.extensionID, in: window, owner: owner)
             }
         case .closeRequested:
             for (window, state) in windows where state.extensionID == event.extensionID {
@@ -78,7 +78,7 @@ final class ChromiumSidePanelHost: ExtensionSidePanelBackend {
                     release(panel, in: window)
                     reconcile(window, force: true)
                 } else if state.shownPanel == panel {
-                    close(window)
+                    closeShown(window)
                 } else {
                     release(panel, in: window)
                 }
@@ -101,7 +101,8 @@ final class ChromiumSidePanelHost: ExtensionSidePanelBackend {
         engines[event.tabID] = engine
         state.adopt(panel: event.tabID, contextual: wanted.contextual, owner: wanted.owner)
         windows[wanted.window] = state
-        show(event.tabID, in: wanted.window, owner: wanted.owner)
+        // The window may show another tab by now: it gets what it should have.
+        reconcile(wanted.window, force: true, owner: pageTab(in: wanted.window) ?? wanted.owner)
         return true
     }
 
@@ -114,14 +115,17 @@ final class ChromiumSidePanelHost: ExtensionSidePanelBackend {
                 engines[tab] = nil
                 if state.shownPanel == tab {
                     // The shown page closed itself: the window's panel closes, as in Chrome.
-                    close(window)
+                    closeShown(window)
                 } else {
                     state.forget(panel: tab)
                     windows[window] = state
+                    if state.panels.isEmpty, state.shownPanel == nil { close(window) }
                 }
             } else if let panel = state.forget(ownerTab: tab) {
                 engines[panel] = nil
                 windows[window] = state
+                if controller?.panel(in: window)?.panelID == panel { controller?.setShown(nil, in: window) }
+                if state.panels.isEmpty, state.shownPanel == nil { close(window) }
             }
         }
     }
@@ -145,38 +149,48 @@ final class ChromiumSidePanelHost: ExtensionSidePanelBackend {
         }
     }
 
-    /// Opens `extensionID`'s panel; another extension's pane stays on screen
-    /// until the new page replaces it, as in the recording (no close and reopen).
-    private func replace(_ window: SidebarWindowID, with extensionID: String, owner: UInt64) {
-        if let shown = windows[window]?.extensionID, shown != extensionID { close(window, keepingPane: true) }
-        open(extensionID, in: window, owner: owner)
-    }
-
+    /// Opens `extensionID`'s panel beside `owner` (a toolbar click or
+    /// sidePanel.open). Another extension's panels go; its pane stays on
+    /// screen until the new page replaces it, as in the recording (no close
+    /// and reopen).
     private func open(_ extensionID: String, in window: SidebarWindowID, owner: UInt64) {
+        if let state = windows[window], state.extensionID != extensionID {
+            close(window, keepingPane: state.shownPanel != nil)
+        }
         let wasEmpty = windows.isEmpty
         if windows[window] == nil { windows[window] = SidePanelWindowState(extensionID: extensionID, ownerTab: owner) }
-        reconcile(window, force: true, owner: owner)
+        reconcile(window, force: true, owner: owner, explicit: true)
         if wasEmpty, !windows.isEmpty { observe() }
     }
 
-    /// Shows what the window's page tab should have beside it.
-    private func reconcile(_ window: SidebarWindowID, force: Bool, owner: UInt64? = nil) {
+    /// Shows what the window's page tab should have beside it. A tab switch
+    /// (not `force`) only acts when the page tab changed; `explicit` opens a
+    /// panel the tab has none of yet.
+    private func reconcile(_ window: SidebarWindowID, force: Bool, owner: UInt64? = nil, explicit: Bool = false) {
         guard var state = windows[window] else { return }
         // A closed browser window releases its panels.
         guard model?.store.focusedSpaceByWindow[window] != nil else { return close(window) }
         guard let tab = owner ?? pageTab(in: window) else { return }  // An easel or the Library: the panel stays.
-        if !force, tab == state.ownerTab, state.shownPanel != nil { return }
+        if !force, tab == state.ownerTab { return }
         guard let info = runtime.sidePanelInfo(tab: tab, extensionID: state.extensionID) else { return close(window) }
-        switch state.decision(for: tab, available: info.isAvailable, contextual: info.isContextual) {
+        switch state.decision(for: tab, available: info.isAvailable, contextual: info.isContextual, explicit: explicit) {
         case .close:
             close(window)
+        case .hide:
+            hide(window, beside: tab)
         case .show(let panel):
             show(panel, in: window, owner: tab)
         case .create(let contextual):
-            guard !pending.values.contains(where: { $0.window == window && $0.owner == tab }) else { return }
+            guard !pending.values.contains(where: { $0.window == window && $0.contextual == contextual
+                && (!contextual || $0.owner == tab) }) else { return }
+            // Another tab's own page does not stay beside this one while the new one loads.
+            if let shown = state.shownPanel, shown != state.globalPanel {
+                hide(window, beside: tab)
+                state = windows[window] ?? state
+            }
             let (status, made, panel) = runtime.openSidePanel(tab: tab, extensionID: state.extensionID)
             guard status == .rearcOK, panel != 0 else {
-                if state.shownPanel == nil { close(window) }
+                if state.panels.isEmpty { close(window) } else { hide(window, beside: tab) }
                 return
             }
             if made != contextual { ChromiumLog.info("side panel scope changed under the open call: contextual \(made)") }
@@ -204,6 +218,31 @@ final class ChromiumSidePanelHost: ExtensionSidePanelBackend {
             engine: engine, panelID: panel), in: window)
     }
 
+    /// Takes the pane off screen beside `tab`; the window keeps its panels,
+    /// loaded, for the tabs they belong to.
+    private func hide(_ window: SidebarWindowID, beside tab: UInt64) {
+        guard var state = windows[window] else { return }
+        if let shown = state.shownPanel { runtime.setSidePanelShown(panel: shown, owner: 0, shown: false) }
+        state.shownPanel = nil
+        state.ownerTab = tab
+        windows[window] = state
+        controller?.setShown(nil, in: window)
+    }
+
+    /// The close button, a second toolbar click, the shown page's
+    /// `window.close()`: the shown panel and the global one go, as in Chrome;
+    /// other tabs' own panels stay for their tabs.
+    private func closeShown(_ window: SidebarWindowID) {
+        guard var state = windows[window] else { return }
+        if let shown = state.shownPanel { runtime.setSidePanelShown(panel: shown, owner: 0, shown: false) }
+        controller?.setShown(nil, in: window)
+        let released = state.closeShown()
+        windows[window] = state
+        // Releasing an engine force-closes its panel tab.
+        for panel in released { engines[panel] = nil }
+        if state.panels.isEmpty { close(window) }
+    }
+
     /// Hides and releases every panel of the window. `keepingPane` leaves the
     /// pane showing the old page (it holds its engine) until a new one is shown.
     private func close(_ window: SidebarWindowID, keepingPane: Bool = false) {
@@ -224,6 +263,7 @@ final class ChromiumSidePanelHost: ExtensionSidePanelBackend {
         state.forget(panel: panel)
         windows[window] = state
         engines[panel] = nil
+        if state.panels.isEmpty, state.shownPanel == nil { close(window) }
     }
 
     /// The page tab a window shows (nil for an easel, a note or the Library).
