@@ -67,4 +67,39 @@ final class DownloadsReplayTests: XCTestCase {
         XCTAssertTrue(changed)
         XCTAssertNil(controller.warnings["warned"], "a finished row still drops its warning")
     }
+
+    func testClearRemovesEachEnginesRowsInOneBatch() {
+        final class Backend: DownloadBackend {
+            var batches: [[String]] = []
+            var single = 0
+            func perform(_ action: DownloadAction, id: String) -> Bool { single += 1; return true }
+            func directoryChanged(_ directory: URL) {}
+            func removeFinished(_ ids: [String]) { batches.append(ids) }
+        }
+        let backend = Backend()
+        let controller = DownloadsController(fileURL: nil)
+        controller.chromium = backend
+        for index in 0 ..< 3_000 { controller.apply(event(.created, "h\(index)", state: .complete), source: .chromium) }
+        controller.apply(event(.created, "live", state: .inProgress, received: 0), source: .chromium)
+        controller.clearFinished()
+        XCTAssertEqual(backend.batches.count, 1)
+        XCTAssertEqual(backend.batches.first?.count, 3_000)
+        XCTAssertEqual(backend.single, 0, "no call per row")
+        XCTAssertEqual(controller.records.map(\.id), ["live"])
+    }
+
+    func testArchivedRowsJoinTheListUnsaved() throws {
+        let file = temporaryFile()
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        let controller = DownloadsController(fileURL: file)
+        controller.save()
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        controller.appendArchived((0 ..< 1_000).map {
+            DownloadRecord(id: "a\($0)", source: .chromium, url: "https://files.test/\($0)", targetPath: "/tmp/\($0)",
+                           state: .complete, startedAt: date)
+        })
+        XCTAssertEqual(controller.records.count, 1_000)
+        XCTAssertEqual(controller.matching("999").map(\.id), ["a999"], "the Library's search finds archived rows")
+        XCTAssertNil(controller.saveDeadline, "archived rows stay in the engine's database")
+    }
 }

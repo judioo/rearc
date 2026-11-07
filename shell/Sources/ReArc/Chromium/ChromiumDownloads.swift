@@ -13,6 +13,8 @@ final class ChromiumDownloadBackend: DownloadBackend {
     private unowned let runtime: ChromiumRuntime
     private weak var controller: DownloadsController?
     private var handles: [String: (profile: UInt64, id: UInt32)] = [:]
+    /// Archived rows (ABI 1.48): history Chromium keeps in its database only, by GUID.
+    private var archived: [String: UInt64] = [:]
     /// Events delivered, for logs and the self-test.
     private(set) var eventCount = 0
 
@@ -30,6 +32,10 @@ final class ChromiumDownloadBackend: DownloadBackend {
     func install() {
         guard runtime.capabilities.downloads, let controller else { return }
         runtime.onDownloadEvent = { [weak self] in self?.handle($0) }
+        runtime.onDownloadHistoryLoaded = { [weak self] info in
+            guard info.archivedRows > 0 else { return }
+            self?.appendArchived(profile: info.profileID, from: 0)
+        }
         controller.canAskWhereToSave = runtime.capabilities.downloadSavePrompt
         if runtime.capabilities.downloadSavePrompt {
             runtime.onDownloadSaveRequest = { [weak self] in self?.presentSavePanel($0) }
@@ -67,7 +73,14 @@ final class ChromiumDownloadBackend: DownloadBackend {
         } else if !guid.isEmpty {
             handles[guid] = (download.profileID, download.downloadID)
         }
-        controller?.apply(download.event, source: .chromium)
+        var event = download.event
+        // An item restored from history (created, already finished) keeps its own dates (ABI 1.48).
+        if event.kind == .created, event.state != .inProgress,
+           let times = runtime.downloadTimes(profile: download.profileID, id: download.downloadID) {
+            event.startedAt = times.started
+            event.endedAt = times.ended
+        }
+        controller?.apply(event, source: .chromium)
         refreshWarning(download)
     }
 
@@ -98,8 +111,58 @@ final class ChromiumDownloadBackend: DownloadBackend {
 
     func handle(for id: String) -> (profile: UInt64, id: UInt32)? { handles[id] }
 
+    /// Archived rows paged in so far, by profile, until the last page.
+    private var archivedPages: [UInt64: [DownloadRecord]] = [:]
+
+    /// Pages a profile's archived rows in, one page per main-thread turn, and
+    /// hands them to the tray in one append (each append copies its records).
+    private func appendArchived(profile: UInt64, from offset: UInt32) {
+        runtime.queryArchivedDownloads(profile: profile, offset: offset, limit: DownloadHistoryPolicy.archivedPageSize) {
+            [weak self] status, records, total in
+            guard let self else { return }
+            guard status == .rearcOK else {
+                self.archivedPages[profile] = nil
+                return
+            }
+            for record in records { self.archived[record.id] = profile }
+            self.archivedPages[profile, default: []].append(contentsOf: records)
+            let next = offset + UInt32(records.count)
+            if !records.isEmpty, next < total {
+                self.appendArchived(profile: profile, from: next)
+            } else if let pages = self.archivedPages.removeValue(forKey: profile) {
+                self.controller?.appendArchived(pages)
+            }
+        }
+    }
+
+    func loadHistory() {
+        runtime.loadDownloadHistory()
+    }
+
+    /// Live items one by one (Chromium confirms each), archived rows in one call per profile.
+    func removeFinished(_ ids: [String]) {
+        var archivedByProfile: [UInt64: [String]] = [:]
+        for id in ids {
+            if handles[id] != nil {
+                _ = perform(.remove, id: id)
+            } else if let profile = archived.removeValue(forKey: id) {
+                archivedByProfile[profile, default: []].append(id)
+            }
+        }
+        for (profile, guids) in archivedByProfile {
+            _ = runtime.removeArchivedDownloads(profile: profile, guids: guids)
+        }
+    }
+
     func perform(_ action: DownloadAction, id: String) -> Bool {
-        guard let handle = handles[id] else { return false }
+        guard let handle = handles[id] else {
+            // An archived row has no item: open and reveal fall back to Finder;
+            // remove deletes the row from the History DB and the tray drops it.
+            if action == .remove, let profile = archived.removeValue(forKey: id) {
+                _ = runtime.removeArchivedDownloads(profile: profile, guids: [id])
+            }
+            return false
+        }
         let status = runtime.downloadAction(profile: handle.profile, id: handle.id, action: action.rawValue)
         if status == ReArcStatus(REARC_INVALID_STATE) {
             // The item changed state since the last event; that event's successor will show it.

@@ -31,6 +31,53 @@ final class DownloadsAtScaleTests: XCTestCase {
         XCTAssertEqual(list.record(withID: "h250")?.targetPath, "/tmp/h250")
     }
 
+    func testArchivedRowsAppendAfterTheListAndSkipKnownOnes() {
+        var list = DownloadList(records: [record("kept")])
+        list.apply(finished("live"), source: .chromium, now: base)
+        let added = list.appendArchived([record("a0"), record("kept"), record("a1")])
+        XCTAssertEqual(added, 2)
+        XCTAssertEqual(list.records.map(\.id), ["kept", "live", "a0", "a1"], "older rows go last, newest first")
+        XCTAssertEqual(list.record(withID: "a1")?.targetPath, "/tmp/a1.bin")
+        XCTAssertEqual(list.apply(finished("a0"), source: .chromium, now: base), .updated("a0"), "an archived row is found again")
+    }
+
+    func testRemovingIDsInOnePassKeepsTheLookup() {
+        var list = DownloadList(records: (0 ..< 10).map { record("r\($0)") })
+        list.remove(ids: ["r1", "r5", "missing"])
+        XCTAssertEqual(list.records.count, 8)
+        XCTAssertNil(list.record(withID: "r5"))
+        XCTAssertNotNil(list.record(withID: "r6"))
+        XCTAssertEqual(list.apply(finished("r5"), source: .chromium, now: base), .inserted("r5"))
+    }
+
+    func testRestoredRowsKeepTheEngineTimesSoTheQuickViewPicksTheNewest() {
+        var list = DownloadList(records: [record("persisted", updated: 50)])
+        let replayed = base.addingTimeInterval(3_600)
+        func restored(_ guid: String, ended: TimeInterval) -> DownloadEvent {
+            var event = finished(guid)
+            event.startedAt = base.addingTimeInterval(ended - 1)
+            event.endedAt = base.addingTimeInterval(ended)
+            return event
+        }
+        // Newest first, as the engine creates restored items from 1.48.
+        list.apply(restored("newest", ended: 40), source: .chromium, now: replayed)
+        list.apply(restored("persisted", ended: 30), source: .chromium, now: replayed)
+        list.apply(restored("older", ended: 20), source: .chromium, now: replayed)
+        XCTAssertEqual(list.record(withID: "newest")?.startedAt, base.addingTimeInterval(39))
+        XCTAssertEqual(list.record(withID: "persisted")?.updatedAt, base.addingTimeInterval(30), "the engine's end time, not the replay's")
+        XCTAssertEqual(RecentDownloads.latest(list.records, limit: 2).map(\.id), ["newest", "persisted"])
+        // Without engine times (older engines) the arrival time stays the fallback.
+        list.apply(finished("untimed"), source: .chromium, now: replayed)
+        XCTAssertEqual(list.record(withID: "untimed")?.updatedAt, replayed)
+    }
+
+    func testTheLiveLimitKeepsAWholeRealisticHistoryLive() {
+        // The 2,173-row fixture (one record per item of a real Downloads folder) stays on stock Chromium's path.
+        XCTAssertGreaterThan(DownloadHistoryPolicy.liveLimit, 2_173)
+        XCTAssertGreaterThan(DownloadHistoryPolicy.liveLimit, UInt32(DownloadList.defaultLimit))
+        XCTAssertLessThanOrEqual(DownloadHistoryPolicy.archivedPageSize, 5_000, "the engine's page limit")
+    }
+
     func testLookupFollowsRemoveClearAndTrim() {
         var list = DownloadList(records: (0 ..< 60).map { record("r\($0)") })
         XCTAssertTrue(list.remove(id: "r3"))

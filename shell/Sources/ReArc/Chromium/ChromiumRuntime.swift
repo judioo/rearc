@@ -532,6 +532,8 @@ final class ChromiumRuntime {
     var onProfileEvent: ((String) -> Void)?
     /// Download events (ABI 1.17), for the shell's tray.
     var onDownloadEvent: ((ChromiumDownloadEvent) -> Void)?
+    /// A profile's download history finished loading (ABI 1.48), after its live items' events.
+    var onDownloadHistoryLoaded: ((ChromiumDownloadHistoryInfo) -> Void)?
     /// Page fullscreen requests and exits (ABI 1.27); without a handler the engine refuses requests.
     var onFullscreenEvent: ((ChromiumFullscreenEvent) -> Void)?
     /// Page verdicts on Command/Control keys (ABI 1.42), for `ShortcutRouter`.
@@ -753,6 +755,7 @@ final class ChromiumRuntime {
         if capabilities.downloads {
             // Before any tab exists; each profile gets its policy when it opens.
             ReArcEngineSetDownloadCallback(downloadCallback, context)
+            registerDownloadHistoryChannel(context: context)
             applyDownloadPolicy(profile: defaultProfileID)
         }
         onReady?()
@@ -1295,16 +1298,22 @@ final class ChromiumRuntime {
         } else {
             ChromiumLog.trace("download policy: profile \(profile) saves to \(directory.path) \(prompt == 1 ? "asking where" : "without asking")")
         }
+        applyDownloadHistoryPolicy(profile: profile)
         return status
     }
 
-    private func applyDownloadPolicyToOpenProfiles() {
-        guard capabilities.downloads, isReady else { return }
+    /// The default profile and every open one.
+    var openEngineProfileIDs: Set<UInt64> {
         var profiles: Set<UInt64> = [defaultProfileID]
         for state in profileStates.values {
             if case .open(let id) = state { profiles.insert(id) }
         }
-        profiles.forEach { applyDownloadPolicy(profile: $0) }
+        return profiles
+    }
+
+    private func applyDownloadPolicyToOpenProfiles() {
+        guard capabilities.downloads, isReady else { return }
+        openEngineProfileIDs.forEach { applyDownloadPolicy(profile: $0) }
     }
 
     /// `ReArcDownloadAction`: 0 pause, 1 resume, 2 cancel, 3 open, 4 reveal, 5 remove.

@@ -51,6 +51,8 @@ enum BenchPages {
         case "/bench/spa": return (spa, html)
         case "/bench/spa.js": return (spaScript, "text/javascript; charset=utf-8")
         case "/bench/list": return (list, html)
+        // Not renderable: Chromium downloads it (the downloads suite's first download).
+        case "/bench/download": return (Data(count: 65536), "application/octet-stream")
         default: return nil
         }
     }

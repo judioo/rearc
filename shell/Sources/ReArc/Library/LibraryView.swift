@@ -272,6 +272,7 @@ private struct LibraryDownloadsPage: View {
         VStack(alignment: .leading, spacing: 8) {
             LibraryColumnHeader(prompt: LibrarySection.downloads.searchPrompt ?? "", text: $query)
             DownloadsTrayView(downloads: model.downloads, embedded: true, query: query)
+                .onAppear { model.downloads.loadEngineHistory() }
             if BrowserInternalPage.downloads.isAvailable(engine: model.engineHost.navigationSchemes) {
                 Button("Open Chromium’s Downloads Page") {
                     model.openBrowserPage(.downloads)

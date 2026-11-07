@@ -73,6 +73,22 @@ public struct DownloadWarning: Equatable, Sendable {
     }
 }
 
+/// Downloads at scale (docs/DOWNLOADS-AT-SCALE.md): how the shell asks
+/// Chromium to load a long download history. Chromium counts its history rows
+/// when it loads them; up to `liveLimit` finished rows it makes every row a
+/// live download item, as stock Chromium does. Past it only the newest
+/// `liveLimit` (and every unfinished row) become items; older rows stay in
+/// the History DB as archived rows, which the tray pages in from a worker
+/// (`archivedPageSize` per main-thread turn) and keeps as plain records.
+/// A live item costs ~6.4 KB of engine memory and ~12 µs of main thread to
+/// create; an archived row ~0.3 KB and nothing on the main thread.
+public enum DownloadHistoryPolicy {
+    /// Finished rows Chromium keeps as live items (ABI 1.48 live_limit).
+    public static let liveLimit: UInt32 = 5_000
+    /// Archived rows per `ReArcDownloadQueryArchived` page.
+    public static let archivedPageSize: UInt32 = 1_000
+}
+
 /// Keep or Discard for a download Chromium warned about (`ReArcDownloadResolveDanger`).
 public enum DownloadDangerDecision: UInt32, Sendable {
     case keep = 0, discard = 1
@@ -206,6 +222,11 @@ public struct DownloadEvent: Equatable, Sendable {
     public var interruptReason: UInt32
     public var isPaused: Bool
     public var canResume: Bool
+    /// The engine's own times, when it reported them (ABI 1.48
+    /// `ReArcDownloadGetTimes`): an item restored from history keeps its
+    /// dates instead of taking the time its event arrived.
+    public var startedAt: Date?
+    public var endedAt: Date?
 
     public init(
         kind: Kind,
@@ -219,7 +240,9 @@ public struct DownloadEvent: Equatable, Sendable {
         dangerType: UInt32 = 0,
         interruptReason: UInt32 = 0,
         isPaused: Bool = false,
-        canResume: Bool = false
+        canResume: Bool = false,
+        startedAt: Date? = nil,
+        endedAt: Date? = nil
     ) {
         self.kind = kind
         self.guid = guid
@@ -233,6 +256,8 @@ public struct DownloadEvent: Equatable, Sendable {
         self.interruptReason = interruptReason
         self.isPaused = isPaused
         self.canResume = canResume
+        self.startedAt = startedAt
+        self.endedAt = endedAt
     }
 }
 
@@ -343,7 +368,11 @@ public struct DownloadList: Codable, Equatable, Sendable {
             record.interruptReason = event.interruptReason
             record.isPaused = event.isPaused
             record.canResume = event.canResume
-            if elapsed > 0.05 || event.state != .inProgress { record.updatedAt = now }
+            if let endedAt = event.endedAt, event.state != .inProgress {
+                record.updatedAt = endedAt
+            } else if elapsed > 0.05 || event.state != .inProgress {
+                record.updatedAt = now
+            }
             records[index] = record
             return .updated(event.guid)
         }
@@ -360,7 +389,8 @@ public struct DownloadList: Codable, Equatable, Sendable {
             interruptReason: event.interruptReason,
             isPaused: event.isPaused,
             canResume: event.canResume,
-            startedAt: now
+            startedAt: event.startedAt ?? now,
+            updatedAt: event.state != .inProgress ? event.endedAt : nil
         )
         if event.kind == .created, event.state != .inProgress {
             records.append(record)
@@ -369,6 +399,27 @@ public struct DownloadList: Codable, Equatable, Sendable {
         }
         idCounts[record.id, default: 0] += 1
         return .inserted(event.guid)
+    }
+
+    /// Appends history rows the engine keeps in its database only (archived
+    /// rows, ABI 1.48) as older entries, newest first; a row the list already
+    /// holds (a persisted one) keeps its place. Returns how many were added.
+    @discardableResult
+    public mutating func appendArchived(_ archived: [DownloadRecord]) -> Int {
+        var added = 0
+        records.reserveCapacity(records.count + archived.count)
+        for record in archived where idCounts[record.id] == nil {
+            records.append(record)
+            idCounts[record.id] = 1
+            added += 1
+        }
+        return added
+    }
+
+    /// Removes every row whose id is in `ids` in one pass.
+    public mutating func remove(ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        replaceRecords(records.filter { !ids.contains($0.id) })
     }
 
     @discardableResult

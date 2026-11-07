@@ -9,6 +9,8 @@ import UniformTypeIdentifiers
 struct DownloadsButton: View {
     let downloads: DownloadsController
     let isPresented: Binding<Bool>
+    /// Opens Library › Downloads (the popover lists only the newest rows).
+    var showAll: (() -> Void)?
     @State private var pulse = false
 
     var body: some View {
@@ -48,7 +50,7 @@ struct DownloadsButton: View {
             }
         }
         .popover(isPresented: isPresented, arrowEdge: .top) {
-            DownloadsTrayView(downloads: downloads)
+            DownloadsTrayView(downloads: downloads, showAll: showAll)
         }
     }
 
@@ -61,11 +63,18 @@ struct DownloadsButton: View {
 /// The tray popover: recent downloads newest first, with progress and
 /// per-row actions; the folder downloads are saved to; Clear.
 struct DownloadsTrayView: View {
+    /// Rows the popover lists. It is open while a download starts, which is
+    /// when Chromium replays its history: every update copied and diffed a
+    /// `ForEach` over the whole list. The Library lists every row.
+    static let popoverLimit = DownloadList.defaultLimit
+
     let downloads: DownloadsController
     /// On the Library's Downloads page: full width and height, no title.
     var embedded = false
     /// The Library column's search (`LibraryDownloads.matching`).
     var query = ""
+    /// The popover's "Show All" (Library › Downloads); nil hides it.
+    var showAll: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -96,7 +105,8 @@ struct DownloadsTrayView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             Divider()
-            let records = downloads.matching(query)
+            let matching = downloads.matching(query)
+            let records = embedded ? matching[...] : matching.prefix(Self.popoverLimit)
             if records.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "arrow.down.circle")
@@ -116,6 +126,14 @@ struct DownloadsTrayView: View {
                     .padding(6)
                 }
                 .frame(maxHeight: embedded ? .infinity : 360)
+                if !embedded, matching.count > records.count, let showAll {
+                    Divider()
+                    Button("Show All \(matching.count) Downloads", action: showAll)
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                }
             }
         }
         .frame(width: embedded ? nil : 340)

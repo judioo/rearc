@@ -18,11 +18,17 @@ protocol DownloadBackend: AnyObject {
     func askWhereToSaveChanged(_ ask: Bool)
     /// Keep or Discard a download the engine warned about; false when it cannot.
     func resolveDanger(_ decision: DownloadDangerDecision, id: String) -> Bool
+    /// Removes finished items in one batch (Clear); the controller drops the rows.
+    func removeFinished(_ ids: [String])
+    /// The Library wants the whole history: start the engine's history load.
+    func loadHistory()
 }
 
 extension DownloadBackend {
     func askWhereToSaveChanged(_ ask: Bool) {}
     func resolveDanger(_ decision: DownloadDangerDecision, id: String) -> Bool { false }
+    func removeFinished(_ ids: [String]) { ids.forEach { _ = perform(.remove, id: $0) } }
+    func loadHistory() {}
 }
 
 /// The downloads tray's model, shared by every window: the recent list
@@ -176,12 +182,25 @@ final class DownloadsController {
     }
 
     func clearFinished() {
-        for record in list.records where !record.isActive {
-            perform(.remove, on: record.id)
-        }
+        // One batch per engine: with a long history a call per row was quadratic.
+        let finished = list.records.filter { !$0.isActive }
+        chromium?.removeFinished(finished.filter { $0.source == .chromium }.map(\.id))
+        webKit.removeFinished(finished.filter { $0.source == .webKit }.map(\.id))
         // Rows no engine still knows (an earlier session's WebKit items) go too.
         _ = list.clearFinished()
         scheduleSave(immediately: true)
+    }
+
+    /// Library › Downloads opened: the engine loads its whole history now
+    /// rather than at the session's first download.
+    func loadEngineHistory() {
+        chromium?.loadHistory()
+    }
+
+    /// History rows the engine keeps in its database only (ABI 1.48), a page
+    /// at a time, as older rows. Not saved: `Downloads.json` keeps the newest.
+    func appendArchived(_ records: [DownloadRecord]) {
+        list.appendArchived(records)
     }
 
     func setDirectory(_ url: URL) {

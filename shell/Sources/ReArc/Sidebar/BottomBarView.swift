@@ -157,7 +157,10 @@ struct BottomBarView: View {
             DownloadsButton(downloads: model.downloads, isPresented: Binding(
                 get: { model.downloads.isTrayPresented && model.isKeyBrowserWindow(window) },
                 set: { model.downloads.isTrayPresented = $0 }
-            ))
+            ), showAll: {
+                model.downloads.isTrayPresented = false
+                model.openLibrary(.downloads, in: window)
+            })
             .padding(.trailing, 8)
         }
 

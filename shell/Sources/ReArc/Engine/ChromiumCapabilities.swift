@@ -55,6 +55,7 @@ struct ChromiumCapabilities: Equatable {
     static let mediaCaptureFeature = "media_capture"
     static let searchEnginesFeature = "search_engines"
     static let extensionSidePanelsFeature = "extension_side_panels"
+    static let downloadHistoryFeature = "download_history"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -106,6 +107,7 @@ struct ChromiumCapabilities: Equatable {
         mediaCaptureFeature: 46,
         searchEnginesFeature: 46,
         extensionSidePanelsFeature: 47,
+        downloadHistoryFeature: 48,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -215,6 +217,9 @@ struct ChromiumCapabilities: Equatable {
     /// chrome.sidePanel panels as hosted tabs beside the page (`ReArcTabOpenSidePanel`,
     /// `ReArcEngineSetSidePanelCallback`); requires `extensionActions` (toolbar clicks).
     var extensionSidePanels: Bool
+    /// Sliced history loads with a live-item limit, archived rows paged off the
+    /// main thread (`ReArcDownloadSetHistoryPolicy`, `ReArcDownloadQueryArchived`); requires `downloads`.
+    var downloadHistory: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -272,6 +277,7 @@ struct ChromiumCapabilities: Equatable {
         mediaCapture = adopted(Self.mediaCaptureFeature)
         searchEngines = adopted(Self.searchEnginesFeature)
         extensionSidePanels = extensionActions && adopted(Self.extensionSidePanelsFeature)
+        downloadHistory = downloads && adopted(Self.downloadHistoryFeature)
     }
 
     /// Inspect in the page menu: the shell opens a hosted frontend itself
@@ -348,6 +354,7 @@ struct ChromiumCapabilities: Equatable {
             (Self.mediaCaptureFeature, mediaCapture),
             (Self.searchEnginesFeature, searchEngines),
             (Self.extensionSidePanelsFeature, extensionSidePanels),
+            (Self.downloadHistoryFeature, downloadHistory),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

@@ -31,6 +31,8 @@ final class ChromiumBench {
     private struct Failure: Error, CustomStringConvertible { let description: String }
 
     nonisolated static let watchdogSeconds = 2400.0
+    /// Scenarios that time no frame: they may run with the display asleep (screen locked, no `caffeinate -u`).
+    static let frameFreeScenarios: Set<String> = ["downloads.engine_first_download"]
     static let exitConditions: Int32 = 75
 
     private let runtime: ChromiumRuntime
@@ -114,7 +116,10 @@ final class ChromiumBench {
         let conditions = BenchConditions.current()
         report.conditions = conditions
         if conditions.displayAsleep {
-            throw Refusal(reason: "the display is asleep (no display-link frames); hold `caffeinate -u` (bench.sh does)")
+            guard !options.only.isEmpty, options.only.allSatisfy(Self.frameFreeScenarios.contains) else {
+                throw Refusal(reason: "the display is asleep (no display-link frames); hold `caffeinate -u` (bench.sh does)")
+            }
+            report.notes.append("display asleep: only frame-free scenarios ran")
         }
         if conditions.screenLocked && !options.allowLocked {
             throw Refusal(reason: "the screen is locked; unlock it, or pass --rearc-bench-allow-locked (results are marked)")
@@ -995,6 +1000,7 @@ final class ChromiumBench {
         let full = file.map { DownloadListFile.load(from: $0) }?.list.records ?? []
         report.notes.append("downloads: \(full.count) records")
         record("downloads.footprint.start", Self.footprintMB(), unit: "MB")
+        try await engineFirstDownload()
 
         try await iterate("downloads.load", count: 5) { _, warmup, contaminated in
             let before = Self.footprintMB()
@@ -1152,6 +1158,57 @@ final class ChromiumBench {
         }
         record("downloads.footprint.end", Self.footprintMB(), unit: "MB")
         model.closeLibrary()
+    }
+
+    /// The session's first Chromium download, on the profile's own download
+    /// history (a `--user-data-dir` seeded by `seed-downloads.py --history`):
+    /// only the first download makes Chromium load its history and report
+    /// every row to the tray, so this runs once, before the suite's synthetic
+    /// replay. The page is navigated directly (no input); the file lands in
+    /// the run's folder. Stalls are main-thread gaps over 16 ms, timed by a
+    /// 2 ms run-loop timer, from the navigation until 2.5 s after the row.
+    private func engineFirstDownload() async throws {
+        let name = "downloads.engine_first_download"
+        guard options.runsScenario(name) else { return }
+        scenario = name
+        let folder = dataDirectory.appendingPathComponent("downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        model.downloads.setDirectory(folder)
+        let engine = try selectedEngine()
+        await quiet()
+        let url = "\(base)/bench/download"
+        let rowsBefore = model.downloads.records.count
+        let footprintBefore = Self.footprintMB()
+        var last = 0.0, stalls: [Double] = [], offsets: [Double] = []
+        var start = 0.0
+        let timer = Timer(timeInterval: 0.002, repeats: true) { _ in
+            let now = ProcessInfo.processInfo.systemUptime
+            if last > 0, now - last > 0.016 {
+                stalls.append((now - last) * 1000)
+                offsets.append((last - start) * 1000)
+            }
+            last = now
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        start = ProcessInfo.processInfo.systemUptime
+        engine.load(URL(string: url)!)
+        var row: TimeInterval?
+        let deadline = start + 60
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if row == nil, model.downloads.records.contains(where: { $0.url == url }) { row = ProcessInfo.processInfo.systemUptime }
+            if model.downloads.records.contains(where: { $0.url == url && $0.state == .complete }) { break }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        timer.invalidate()
+        record("\(name).row", ms(start, row))
+        record("\(name).stall_total", stalls.reduce(0, +))
+        record("\(name).stall_max", stalls.max() ?? 0)
+        record("\(name).stalls", Double(stalls.count), unit: "count")
+        record("\(name).footprint_growth", Self.footprintMB() - footprintBefore, unit: "MB")
+        report.notes.append("\(name): \(model.downloads.records.count - rowsBefore) rows added to the tray")
+        report.notes.append("\(name) stalls (ms at +ms): " + zip(stalls, offsets).map { String(format: "%.0f@%.0f", $0, $1) }.joined(separator: " "))
+        writeReport()
     }
 
     /// The screen frame of the first accessibility element under `element` whose help starts with `help`.
