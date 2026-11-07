@@ -1129,6 +1129,8 @@ final class ChromiumSelfTest {
         try checkOneLease(companion, "split companion")
         log("PASS Split View: tab \(engineA.tabID) lease \(engineA.attachmentID ?? 0) and companion tab \(companion.tabID) "
             + "lease \(companion.attachmentID ?? 0) attached side by side in window 1")
+        try await splitPaneRowChecks(model: model, store: store, splitID: split.id, focused: engineA, other: companion,
+                                     otherTab: companionTab.id, window: first)
         // Wave 26: flip the split, then Expand Current Split keeps the sibling open behind the focused pane.
         model.flipSplitOrientation()
         try await wait("split flipped, both panes attached", timeout: 20) {
@@ -4914,6 +4916,47 @@ extension ChromiumSelfTest {
             homeEngine.attachmentID != nil && homeEngine.leaseHolder?.window === window
         }
         log("PASS pinned lifecycle: " + results.joined(separator: "; "))
+    }
+}
+
+// MARK: Split pane toolbar rows (SPLIT-VIEW §3.1)
+
+extension ChromiumSelfTest {
+    /// Each pane has its own row; only the focused one has the site controls,
+    /// and a click in the other pane's page moves them there.
+    @MainActor
+    func splitPaneRowChecks(model: BrowserViewModel, store: SidebarStore, splitID: SplitViewItem.ID, focused: ChromiumEngine,
+                            other: ChromiumEngine, otherTab: Tab.ID, window: NSWindow) async throws {
+        guard UserDefaults.standard.object(forKey: ToolbarURLPreference.key) as? Bool ?? ToolbarURLPreference.defaultValue else {
+            log("SKIP split pane rows: URL in toolbar is off, so panes have no rows")
+            return
+        }
+        func labelled(_ label: String) -> [TestAccessibilityElement] {
+            guard let root = window.contentView else { return [] }
+            return accessibilityElements(under: root).filter { $0.accessibilityLabel() == label }
+        }
+        func screenRect(_ engine: ChromiumEngine) -> NSRect? {
+            guard let host = engine.leaseHolder, let hostWindow = host.window else { return nil }
+            return hostWindow.convertToScreen(host.convert(host.bounds, to: nil))
+        }
+        func controlsAbove(_ engine: ChromiumEngine) -> Bool {
+            let controls = labelled("Site controls")
+            guard controls.count == 1, let pane = screenRect(engine) else { return false }
+            let midX = controls[0].accessibilityFrame().midX
+            return midX > pane.minX && midX < pane.maxX
+        }
+        try await wait("a toolbar row per split pane, site controls in the focused one", timeout: 10) {
+            labelled("Close Pane").count == 2 && controlsAbove(focused)
+        }
+        guard let target = screenRect(other) else { throw Failure(description: "the companion pane has no host view") }
+        click(atScreen: NSPoint(x: target.midX, y: target.midY), in: window)
+        try await wait("a click in the companion pane focuses it", timeout: 10) {
+            store.split(withID: splitID)?.focusTabID == otherTab
+        }
+        try await wait("site controls moved to the companion pane's row", timeout: 10) {
+            labelled("Close Pane").count == 2 && controlsAbove(other)
+        }
+        log("PASS split pane rows: 2 rows, site controls in the focused pane's row, moved by a click in the other pane")
     }
 }
 #endif

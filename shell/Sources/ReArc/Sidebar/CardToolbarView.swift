@@ -19,10 +19,8 @@ struct CardToolbarView: View {
 
     static let height: CGFloat = 32
 
-    /// Measured greys (§4.4): enabled glyphs and the address, disabled glyphs, right icons.
-    private var ink: Color { chrome.isDark ? Color(white: 0.78) : Color(.sRGB, red: 0.384, green: 0.384, blue: 0.392) }
-    private var disabledInk: Color { chrome.isDark ? Color(white: 0.42) : Color(.sRGB, red: 0.714, green: 0.714, blue: 0.737) }
-    private var quietInk: Color { chrome.isDark ? Color(white: 0.55) : Color(.sRGB, red: 0.733, green: 0.725, blue: 0.733) }
+    private var ink: Color { CardToolbarInk(isDark: chrome.isDark).ink }
+    private var quietInk: Color { CardToolbarInk(isDark: chrome.isDark).quiet }
 
     var body: some View {
         let engine = model.focusedEngine(in: window)
@@ -120,17 +118,7 @@ struct CardToolbarView: View {
     }
 
     private func navButton(_ symbol: String, help: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 13))
-                .frame(width: 37, height: Self.height)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(enabled ? ink : disabledInk)
-        .disabled(!enabled)
-        .help(help)
-        .accessibilityLabel(help)
+        CardToolbarButton(symbol: symbol, help: help, enabled: enabled, action: action)
     }
 
     /// The full address without its scheme or `www.` (Arc's
@@ -143,6 +131,41 @@ struct CardToolbarView: View {
         if rest == "/" { rest = "" }
         if let query = url.query(percentEncoded: false), !query.isEmpty { rest += "?" + query }
         return bareHost + rest
+    }
+}
+
+/// Measured greys (§4.4): enabled glyphs and the address, disabled glyphs,
+/// right icons. The split panes' rows use the same.
+struct CardToolbarInk {
+    let isDark: Bool
+
+    var ink: Color { isDark ? Color(white: 0.78) : Color(.sRGB, red: 0.384, green: 0.384, blue: 0.392) }
+    var disabled: Color { isDark ? Color(white: 0.42) : Color(.sRGB, red: 0.714, green: 0.714, blue: 0.737) }
+    var quiet: Color { isDark ? Color(white: 0.55) : Color(.sRGB, red: 0.733, green: 0.725, blue: 0.733) }
+}
+
+/// A navigation glyph on the card toolbar's 37 pt pitch.
+struct CardToolbarButton: View {
+    let symbol: String
+    let help: String
+    var enabled = true
+    var width: CGFloat = 37
+    let action: () -> Void
+    @Environment(\.themeChrome) private var chrome
+
+    var body: some View {
+        let ink = CardToolbarInk(isDark: chrome.isDark)
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 13))
+                .frame(width: width, height: CardToolbarView.height)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(enabled ? ink.ink : ink.disabled)
+        .disabled(!enabled)
+        .help(help)
+        .accessibilityLabel(help)
     }
 }
 

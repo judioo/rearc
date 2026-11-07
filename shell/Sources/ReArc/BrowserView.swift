@@ -431,10 +431,11 @@ struct BrowserView: View {
         let lead = fullscreen ? 0 : SidePanelLayout.lead(sidebarLaidOut: model.isSidebarLaidOut,
                                                           sidebarWidth: growth.map(\.from) ?? Double(sidebarWidth),
                                                           inset: Double(inset))
+        // A split's panes are cards of their own, each with its own row (SPLIT-VIEW §3.1).
+        let splitCards = !fullscreen && shownSplit != nil
         return VStack(spacing: 0) {
-            if showsToolbar {
-                CardToolbarView(model: model, trafficLightsClearance: placement.trafficLightsInSidebar || !showsTrafficLights
-                                ? 0 : TrafficLightPositioner.titlebarWidth - Self.cardInset)
+            if showsToolbar, shownSplit == nil {
+                CardToolbarView(model: model, trafficLightsClearance: cardToolbarTrafficLightsClearance)
                     .zIndex(1)
             }
             contentArea
@@ -457,7 +458,7 @@ struct BrowserView: View {
             if start { model.startPendingExtensionReinstall() } else { model.postponePendingExtensionReinstall() }
         }
         .clipShape(shape)
-        .background(shape.fill(cardFill))
+        .background(shape.fill(splitCards ? .clear : cardFill))
         .background(CardShadow(shape: shape).opacity(fullscreen ? 0 : 1))
         .overlay { LibrarySpacesOverlay(model: model, window: windowID) }
         .overlay(alignment: .topTrailing) { if !fullscreen { zoomBadge } }
@@ -470,6 +471,18 @@ struct BrowserView: View {
         .padding(placement.side.edgeSet, CGFloat(lead))
         .offset(x: CGFloat(placement.pageOffset(slide: Double(slide.offset), growth: growth)))
         .ignoresSafeArea(edges: fullscreen ? .all : [])
+    }
+
+    /// With the sidebar on the right the toolbar's first glyph starts after the traffic lights.
+    private var cardToolbarTrafficLightsClearance: CGFloat {
+        placement.trafficLightsInSidebar || !showsTrafficLights ? 0 : TrafficLightPositioner.titlebarWidth - Self.cardInset
+    }
+
+    /// The split the content area shows, if it shows one (`contentArea`'s order).
+    private var shownSplit: SplitViewItem? {
+        guard !model.startupDeferred, model.librarySection(in: windowID)?.coversPage != true,
+              model.selectedEaselRef(in: windowID) == nil else { return nil }
+        return model.activeSplit(in: windowID)
     }
 
     /// The traffic lights show with the sidebar, as in Arc (ARC-RECORDING-ANALYSIS.md §3).
@@ -504,8 +517,13 @@ struct BrowserView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         } else if let split = model.activeSplit(in: windowID) {
-            SplitContentView(split: split, model: model, accent: model.themeColor(in: windowID))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            SplitContentView(
+                split: split, model: model, accent: model.themeColor(in: windowID),
+                showsRows: SplitPaneToolbarLayout.showsRows(urlInToolbar: showsCardToolbar, pageFullscreen: isPageFullscreen),
+                showsCards: !isPageFullscreen, cardFill: cardFill,
+                trafficLightsClearance: cardToolbarTrafficLightsClearance
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let tab = model.selectedTab(in: windowID) {
             let engine = model.engineHost.engine(for: tab, profileID: model.profileID(for: tab))
             if let frontend = model.dockedDevTools(for: tab.id) {
