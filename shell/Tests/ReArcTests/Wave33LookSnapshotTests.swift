@@ -102,7 +102,7 @@ final class Wave33LookSnapshotTests: XCTestCase {
             .init(id: "5", kind: .command, title: "Contact the Team"),
         ]
         let bar = CommandBarOverlay(text: .constant(""), results: results, highlightedIndex: 0, onMoveHighlight: { _ in },
-                                    onSelectIndex: { _ in }, onSubmit: {}, onCancel: {}, spaceName: { _ in "Demo" })
+                                    onSelectResult: { _ in }, onSubmit: {}, onCancel: {}, spaceName: { _ in "Demo" })
             .environment(\.themeChrome, ThemeChromeColors(theme: .arcDefault, dark: false))
             .padding(40)
             .background(Color.black)

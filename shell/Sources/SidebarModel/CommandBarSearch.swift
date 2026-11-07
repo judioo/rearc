@@ -77,6 +77,9 @@ public enum CommandBarSearch {
     /// ahead of history, so Enter goes where the user typed. `live` results
     /// for this exact text replace the shell's history and URL-vs-search
     /// guess (Chromium) and add suggestions; for other text they are ignored.
+    /// The prepared indexes (`tabIndex`, `commandIndex`, `menuIndex`) and
+    /// `liveHistory` (`live`'s history as a store) are built here when not
+    /// given; the shell keeps them across keystrokes.
     public static func results(
         for query: String,
         in store: SidebarStore,
@@ -88,8 +91,12 @@ public enum CommandBarSearch {
         navigationSchemes: NavigationURLPolicy.EngineSchemes = [],
         history: VisitHistory = VisitHistory(),
         historyIndex: VisitHistorySearchIndex? = nil,
+        liveHistory: VisitHistory? = nil,
         commandCatalog: [AppCommand]? = nil,
         menuCommands: [MenuCommand] = [],
+        tabIndex: TabIndex? = nil,
+        commandIndex: CommandIndex? = nil,
+        menuIndex: MenuCommandSearch.Index? = nil,
         externalLinkDestination: ExternalLinkDestination = .littleArc,
         live: CommandBarLiveResults? = nil,
         searchProvider: SearchProvider = .duckDuckGo,
@@ -97,7 +104,7 @@ public enum CommandBarSearch {
         now: Date = Date()
     ) -> [Result] {
         let (mode, needle) = parseMode(query)
-        let context = CommandBarContext(
+        let commands = commandIndex ?? CommandIndex(catalog: commandCatalog ?? AppCommandRegistry.all(in: CommandBarContext(
             store: store,
             isSidebarVisible: isSidebarVisible,
             closedTabStack: store.closedTabStack,
@@ -107,19 +114,19 @@ public enum CommandBarSearch {
             tabMuteModel: tabMuteModel,
             navigationSchemes: navigationSchemes,
             externalLinkDestination: externalLinkDestination
-        )
-
-        let catalog = commandCatalog ?? AppCommandRegistry.all(in: context)
-        let menus = MenuCommandSearch.matches(menuCommands, query: needle, registered: catalog).map {
+        )))
+        let menuMatches = (menuIndex ?? MenuCommandSearch.Index(menuCommands, registered: commands.catalog)).matches(query: needle)
+        let menus = menuMatches.map {
             Result(id: "menu-\($0.id)", kind: .command, title: $0.title, subtitle: $0.path,
                    menuCommandID: $0.id, keyEquivalent: $0.keyEquivalent)
         }
         switch mode {
         case .commandsOnly:
-            return commandResults(matching: needle, catalog: catalog, store: store, allowEmpty: true) + menus
+            return commandResults(matching: needle, index: commands, store: store, allowEmpty: true) + menus
         case .blended:
             guard !needle.isEmpty else { return [] }
-            let tabs = tabResults(for: needle, in: store)
+            let matchedTabs = (tabIndex ?? TabIndex(store: store)).matching(needle)
+            let tabs = TabIndex.rows(matchedTabs)
             var output: [Result] = []
             // The inline-completed domain is the first row, so Return goes where the field shows.
             let completed = inlineCompletion.flatMap { URL(string: "https://\($0)/") }
@@ -157,16 +164,16 @@ public enum CommandBarSearch {
                 ))
             }
             // Pages already open as tabs (or typed exactly) are not repeated as history.
-            var shown = Set(tabs.compactMap { $0.destinationURL.flatMap(VisitHistory.key(for:)) })
+            var shown = Set(matchedTabs.compactMap(\.historyKey))
             if let completed, let key = VisitHistory.key(for: completed) { shown.insert(key) }
             if let url = direct, let key = VisitHistory.key(for: url) { shown.insert(key) }
-            let historySource = current?.history.map { VisitHistory(records: $0) } ?? history
+            let historySource = current?.history.map { liveHistory ?? VisitHistory(records: $0) } ?? history
             let historyRows = historyResults(for: needle, in: historySource,
                                              index: current?.history == nil ? historyIndex : nil, now: now, excluding: shown)
             output.append(contentsOf: historyRows)
             historyRows.compactMap { $0.destinationURL.flatMap(VisitHistory.key(for:)) }.forEach { shown.insert($0) }
             output.append(contentsOf: suggestionResults(current?.suggestions ?? [], query: query, excluding: shown, fallback: resolved))
-            output.append(contentsOf: commandResults(matching: needle, catalog: catalog, store: store, allowEmpty: false))
+            output.append(contentsOf: commandResults(matching: needle, index: commands, store: store, allowEmpty: false))
             output.append(contentsOf: menus)
             if direct == nil, let searchURL = resolved {
                 output.append(Result(
@@ -178,70 +185,6 @@ public enum CommandBarSearch {
                 ))
             }
             return output
-        }
-    }
-
-    // MARK: - Tabs
-
-    private struct RankedTab {
-        var tab: Tab
-        var spaceID: Space.ID?
-        var spaceName: String?
-        var tier: Int
-        var recency: Int
-    }
-
-    private static func tabResults(for needle: String, in store: SidebarStore) -> [Result] {
-        var ranked: [RankedTab] = []
-
-        for (index, tab) in store.favorites.enumerated() {
-            guard matches(tab: tab, needle: needle) else { continue }
-            ranked.append(RankedTab(tab: tab, spaceID: nil, spaceName: nil, tier: 0, recency: index))
-        }
-
-        for space in store.spaces {
-            let content = store.content(for: space.id)
-            for (index, entry) in content.pinned.enumerated() {
-                for tab in tabs(in: entry) {
-                    guard matches(tab: tab, needle: needle) else { continue }
-                    ranked.append(RankedTab(
-                        tab: tab,
-                        spaceID: space.id,
-                        spaceName: space.name,
-                        tier: 1,
-                        recency: index
-                    ))
-                }
-            }
-            for (index, entry) in content.today.enumerated() {
-                for tab in tabs(in: entry) {
-                    guard matches(tab: tab, needle: needle) else { continue }
-                    ranked.append(RankedTab(
-                        tab: tab,
-                        spaceID: space.id,
-                        spaceName: space.name,
-                        tier: 2,
-                        recency: -index
-                    ))
-                }
-            }
-        }
-
-        ranked.sort { lhs, rhs in
-            if lhs.tier != rhs.tier { return lhs.tier < rhs.tier }
-            return lhs.recency > rhs.recency
-        }
-
-        return ranked.map { item in
-            Result(
-                id: "tab-\(item.tab.id.uuidString)",
-                kind: .openTab,
-                title: item.tab.displayTitle,
-                subtitle: item.spaceName,
-                tabID: item.tab.id,
-                spaceID: item.spaceID,
-                destinationURL: item.tab.url
-            )
         }
     }
 
@@ -306,25 +249,24 @@ public enum CommandBarSearch {
 
     private static func commandResults(
         matching needle: String,
-        catalog: [AppCommand],
+        index: CommandIndex,
         store: SidebarStore,
         allowEmpty: Bool
     ) -> [Result] {
         var ranked: [RankedCommand] = []
+        let prepared = TypeTravelFuzzyMatch.Needle(needle)
+        let needleLength = needle.count
 
-        for command in catalog {
+        for entry in index.entries {
+            let command = entry.command
             if needle.isEmpty {
                 guard allowEmpty else { continue }
                 let bump = store.commandBarUsageBumps[command.id, default: 0]
                 ranked.append(RankedCommand(command: command, score: bump * 100, titleLength: command.title.count))
                 continue
             }
-            guard needle.count >= command.minQueryLength else { continue }
-            guard let match = TypeTravelFuzzyMatch.bestScore(
-                query: needle,
-                title: command.title,
-                keywords: command.keywords
-            ) else { continue }
+            guard needleLength >= command.minQueryLength else { continue }
+            guard let match = TypeTravelFuzzyMatch.bestScore(prepared, title: entry.title, keywords: entry.keywords) else { continue }
             let bump = store.commandBarUsageBumps[command.id, default: 0]
             let score = match.score + bump * 25
             ranked.append(RankedCommand(command: command, score: score, titleLength: match.haystackLength))
@@ -347,21 +289,13 @@ public enum CommandBarSearch {
         }
     }
 
-    private static func tabs(in entry: SidebarEntry) -> [Tab] {
+    static func tabs(in entry: SidebarEntry) -> [Tab] {
         switch entry {
         case .tab(let tab): return [tab]
         case .split(let split): return split.tabs
         case .easel: return []
         case .folder(let folder): return SidebarTree.tabs(folder.children)
         }
-    }
-
-    private static func matches(tab: Tab, needle: String) -> Bool {
-        if tab.displayTitle.lowercased().contains(needle) { return true }
-        if tab.title.lowercased().contains(needle) { return true }
-        if tab.url.absoluteString.lowercased().contains(needle) { return true }
-        if let host = tab.url.host()?.lowercased(), host.contains(needle) { return true }
-        return false
     }
 
     private static func looksLikeDirectNavigation(_ query: String) -> Bool {

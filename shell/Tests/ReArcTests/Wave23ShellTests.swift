@@ -179,8 +179,13 @@ final class Wave23ShellTests: XCTestCase {
         model.commandBarServices = services
         model.newTab()
         XCTAssertEqual(services.opens, 1, "opening the bar re-reads the default search")
+        model.commandBarText = "pa"
         model.commandBarText = "pan"
+        XCTAssertTrue(services.queries.isEmpty, "a keystroke's lookups wait for its frame to be committed")
+        model.commandBarAfterCommit.flush()
+        XCTAssertEqual(services.queries.map(\.text), ["pan"], "keys typed within one frame ask once, for the newest text")
         model.commandBarText = "panda"
+        model.commandBarAfterCommit.flush()
         XCTAssertEqual(services.queries.map(\.text), ["pan", "panda"])
         services.queries[0].deliver(CommandBarLiveResults(query: "pan", suggestions: [
             SearchSuggestion(text: "pancakes", destinationURL: URL(string: "https://www.google.com/search?q=pancakes")!),
@@ -208,6 +213,7 @@ final class Wave23ShellTests: XCTestCase {
         model.visitHistory.recordVisit(url: url, title: "Panda facts", at: Date())
         model.newTab()
         model.commandBarText = "panda"
+        model.commandBarAfterCommit.flush()
         services.queries[0].deliver(CommandBarLiveResults(query: "panda", history: [
             VisitRecord(url: url, title: "Panda facts", firstVisit: Date()),
         ]))
@@ -218,6 +224,7 @@ final class Wave23ShellTests: XCTestCase {
         XCTAssertEqual(services.deleted, [url], "and from the engine's history")
         XCTAssertFalse(model.commandBarResults.contains { $0.kind == .history }, "the row goes at once")
         services.deleteCompletions[0](true)
+        model.commandBarAfterCommit.flush()
         XCTAssertEqual(services.queries.last?.text, "panda", "the bar asks again after the deletion")
 
         model.commandBarHighlightedIndex = 0
