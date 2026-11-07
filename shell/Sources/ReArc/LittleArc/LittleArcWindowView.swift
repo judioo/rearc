@@ -172,6 +172,8 @@ struct LittleArcWindowView: View {
         }
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.1)))
+        // The address field gives way: at the default 520 pt the label read "Open… Pers…".
+        .fixedSize()
     }
 
     private func open(into spaceID: Space.ID?) {

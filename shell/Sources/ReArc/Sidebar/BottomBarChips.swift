@@ -96,11 +96,16 @@ struct BarButtonChip: ViewModifier {
         content
             .onHover { hoverChip($timing, $task, hovering: $0, id: true) }
             .overlay(alignment: placement == .trailing ? .trailing : .topTrailing) {
+                // A zero-size anchor on the button's edge carries the chip: an
+                // overlay ignores edge guides moved off the chip's own edge, which
+                // left the chip over its button (and the Library's off the window).
                 if isEnabled, timing.shown != nil {
-                    BarChip.neutral(label, dark: chrome.isWindowDark)
-                        .fixedSize()
-                        .alignmentGuide(.trailing) { placement == .trailing ? $0[.leading] - BarChip.gap : $0[.trailing] }
-                        .alignmentGuide(.top) { $0[.bottom] + BarChip.gap }
+                    Color.clear.frame(width: 0, height: 0)
+                        .overlay(alignment: placement == .trailing ? .leading : .bottomTrailing) {
+                            BarChip.neutral(label, dark: chrome.isWindowDark)
+                                .fixedSize()
+                                .padding(placement == .trailing ? .leading : .bottom, BarChip.gap)
+                        }
                         .transition(.opacity)
                 }
             }

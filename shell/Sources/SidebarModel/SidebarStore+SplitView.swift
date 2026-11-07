@@ -71,8 +71,14 @@ extension SidebarStore {
             split.memberPlacements[tabID] = placement(for: tabLocation, index: index)
         }
         removeStandaloneTab(tabID, spaceID: location.spaceID, section: location.section)
+        // The new pane takes an equal share and the others keep their
+        // proportions; with no factor of its own it would get none at all.
+        let share = 1 / Double(split.tabs.count + 1)
+        var factors = SplitViewItem.normalizedFactors(split.widthFactors, tabIDs: split.tabs.map(\.id))
+            .mapValues { $0 * (1 - share) }
+        factors[tab.id] = share
         split.tabs.append(tab)
-        split.widthFactors = SplitViewItem.normalizedFactors(split.widthFactors, tabIDs: split.tabs.map(\.id))
+        split.widthFactors = factors
         replaceSplit(split)
         notifyMutation()
         return true

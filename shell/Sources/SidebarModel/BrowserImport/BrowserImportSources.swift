@@ -148,7 +148,7 @@ public enum BrowserImportDiscovery {
         }
         return directories.compactMap { directory in
             let url = root.appendingPathComponent(directory, isDirectory: true)
-            guard isProfileDirectory(directory),
+            guard isProfileDirectory(directory), !names.internal.contains(directory),
                   fileManager.fileExists(atPath: url.appendingPathComponent("Preferences").path) else { return nil }
             let name = names.names[directory].flatMap { $0.isEmpty ? nil : $0 } ?? directory
             return ImportSourceProfile(browser: browser, directory: directory, name: name, url: url)
@@ -186,6 +186,9 @@ public enum BrowserImportDiscovery {
     struct LocalState {
         var names: [String: String] = [:]
         var order: [String] = []
+        /// Profile folders the browser keeps for itself.
+        var `internal`: Set<String> = []
+        static let arcInternalPrefix = "__ARC_"
 
         static func read(_ url: URL) -> LocalState {
             guard let data = try? Data(contentsOf: url),
@@ -193,7 +196,13 @@ public enum BrowserImportDiscovery {
                   let profile = root["profile"] as? [String: Any] else { return LocalState() }
             var state = LocalState()
             for (directory, value) in profile["info_cache"] as? [String: Any] ?? [:] {
-                state.names[directory] = (value as? [String: Any])?["name"] as? String
+                let name = (value as? [String: Any])?["name"] as? String
+                // Arc's own internal profile ("__ARC_SYSTEM_PROFILE") is nobody's to import.
+                if name?.hasPrefix(Self.arcInternalPrefix) == true {
+                    state.internal.insert(directory)
+                    continue
+                }
+                state.names[directory] = name
             }
             state.order = (profile["profiles_order"] as? [String] ?? []).filter { state.names[$0] != nil }
             return state

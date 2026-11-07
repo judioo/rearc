@@ -565,7 +565,11 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
 
     private func cascade(_ window: NSWindow, offset: CGFloat) {
         if let key = NSApp.keyWindow {
-            window.setFrameTopLeftPoint(key.cascadeTopLeft(from: NSPoint(x: key.frame.minX + offset, y: key.frame.maxY - offset)))
+            // The new window's own cascade, not the key window's: cascadeTopLeft
+            // moves its receiver, so `key.cascadeTopLeft` shifted the browser
+            // window under every new Little Arc.
+            let from = NSPoint(x: key.frame.minX + offset, y: key.frame.maxY - offset)
+            window.setFrameTopLeftPoint(window.cascadeTopLeft(from: from))
         } else {
             window.center()
         }
