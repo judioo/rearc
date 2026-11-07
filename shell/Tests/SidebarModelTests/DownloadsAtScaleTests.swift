@@ -197,6 +197,21 @@ final class DownloadsAtScaleTests: XCTestCase {
         XCTAssertFalse(window.rowAppeared(page - LibraryDownloads.RowWindow.lead, of: 39_413))
     }
 
+    func testRowWindowSaysWhenAPageWouldJoinWithoutChanging() {
+        var window = LibraryDownloads.RowWindow()
+        XCTAssertTrue(window.isFirstPage)
+        for count in [0, 1, 99, 100, 101, 5_000] {
+            for index in [0, 50, 74, 75, 99, 150] where index < max(count, 1) {
+                var copy = window
+                XCTAssertEqual(window.needsNextPage(after: index, of: count), copy.rowAppeared(index, of: count), "row \(index) of \(count)")
+            }
+        }
+        window.rowAppeared(99, of: 5_000)
+        XCTAssertFalse(window.isFirstPage)
+        XCTAssertFalse(window.needsNextPage(after: 99, of: 5_000))
+        XCTAssertTrue(window.needsNextPage(after: 175, of: 5_000))
+    }
+
     func testRowWindowReachesEveryRowAndStopsAtTheEnd() {
         var window = LibraryDownloads.RowWindow()
         let count = 1_234

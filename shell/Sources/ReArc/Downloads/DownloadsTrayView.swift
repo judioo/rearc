@@ -113,7 +113,9 @@ struct DownloadsTrayView: View {
                         // A page at a time (RowWindow): never the whole history.
                         ForEach(Array(records.prefix(window.shown(of: records.count)).enumerated()), id: \.element.id) { index, record in
                             DownloadRowView(record: record, downloads: downloads)
-                                .onAppear { window.rowAppeared(index, of: records.count) }
+                                .onAppear {
+                                    if window.needsNextPage(after: index, of: records.count) { window.rowAppeared(index, of: records.count) }
+                                }
                         }
                     }
                     .padding(6)
@@ -122,7 +124,7 @@ struct DownloadsTrayView: View {
             }
         }
         .frame(width: embedded ? nil : 340)
-        .onChange(of: query) { window.reset() }
+        .onChange(of: query) { if !window.isFirstPage { window.reset() } }
     }
 }
 

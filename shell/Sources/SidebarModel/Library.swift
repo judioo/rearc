@@ -143,13 +143,22 @@ public enum LibraryDownloads {
         /// The rows shown of `count` matching rows.
         public func shown(of count: Int) -> Int { min(count, limit) }
 
+        /// Row `index` of `count` is near the end of what is shown, and more
+        /// rows wait. Views ask this first: writing a `@State` window back,
+        /// even unchanged, costs the page another update.
+        public func needsNextPage(after index: Int, of count: Int) -> Bool {
+            limit < count && index >= limit - Self.lead
+        }
+
         /// Row `index` of `count` appeared: near the end, the next page joins.
         @discardableResult
         public mutating func rowAppeared(_ index: Int, of count: Int) -> Bool {
-            guard limit < count, index >= limit - Self.lead else { return false }
+            guard needsNextPage(after: index, of: count) else { return false }
             limit += Self.page
             return true
         }
+
+        public var isFirstPage: Bool { limit == Self.page }
 
         /// A new search starts again from the first page.
         public mutating func reset() {
