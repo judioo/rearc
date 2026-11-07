@@ -45,10 +45,31 @@ public struct ImportSource: Equatable, Identifiable, Sendable {
     public var stats: ImportStats
     /// Arc's spaces, with their names, icons and colours.
     public var spaces: [SpaceSeed]
+    /// The extensions `stats.extensions` counts, by id, so one installed in
+    /// two profiles counts once; empty when only the count is known.
+    public var extensionIDs: [String]
 
-    public init(browser: String, directory: String, profile: String, colour: RGBA, stats: ImportStats, spaces: [SpaceSeed] = []) {
+    public init(browser: String, directory: String, profile: String, colour: RGBA, stats: ImportStats, spaces: [SpaceSeed] = [],
+                extensionIDs: [String] = []) {
         self.browser = browser; self.directory = directory; self.profile = profile; self.colour = colour; self.stats = stats
-        self.spaces = spaces
+        self.spaces = spaces; self.extensionIDs = extensionIDs
+    }
+
+    /// What `sources` bring in `categories`: Act 2's line, and the host's
+    /// rehearsal, from the same sum. Passwords never come over.
+    public static func totals(_ sources: [ImportSource], categories: [ImportCategory]) -> ImportStats {
+        var sum = sources.map(\.stats).reduce(ImportStats(), +)
+        if !categories.contains(.spaces) { sum.spaces = 0; sum.tabs = 0 }
+        if !categories.contains(.bookmarks) { sum.bookmarks = 0 }
+        if !categories.contains(.history) { sum.pages = 0 }
+        sum.passwords = 0
+        if categories.contains(.extensions) {
+            let unknown = sources.filter(\.extensionIDs.isEmpty).reduce(0) { $0 + $1.stats.extensions }
+            sum.extensions = Set(sources.flatMap(\.extensionIDs)).count + unknown
+        } else {
+            sum.extensions = 0
+        }
+        return sum
     }
 
     /// For previews: someone with Arc and two Chrome profiles.
@@ -74,8 +95,9 @@ public struct ImportSource: Equatable, Identifiable, Sendable {
 }
 
 /// Finds Arc, Chrome and Brave profiles on this Mac and counts what each holds.
-/// Read-only: SQLite files are opened immutable, nothing is decrypted, and
-/// nothing leaves the machine. Counting logins does not read passwords.
+/// Read-only: SQLite files are counted from a private temporary copy (the
+/// browser may hold them open), nothing is decrypted, and nothing leaves the
+/// machine. Counting logins reads no row of them, let alone a password.
 public enum BrowserScanner {
     struct Browser { let name: String; let path: String; let colour: RGBA }
     static let browsers = [
@@ -100,7 +122,8 @@ public enum BrowserScanner {
                 stats.bookmarks = bookmarks(profileDir.appendingPathComponent("Bookmarks"))
                 stats.pages = count(profileDir.appendingPathComponent("History"), "SELECT COUNT(*) FROM urls")
                 stats.passwords = count(profileDir.appendingPathComponent("Login Data"), "SELECT COUNT(*) FROM logins WHERE blacklisted_by_user = 0")
-                stats.extensions = extensions(profileDir.appendingPathComponent("Extensions"))
+                let extensionIDs = extensions(profileDir.appendingPathComponent("Extensions"))
+                stats.extensions = extensionIDs.count
                 var seeds: [SpaceSeed] = []
                 if let a = arc[dir] {
                     stats.spaces = a.spaces.count; stats.tabs = a.tabs
@@ -111,7 +134,7 @@ public enum BrowserScanner {
                 guard stats != ImportStats() else { continue }
                 let colour = (info["profile_highlight_color"] as? Int).map { RGBA(hex: UInt32(truncatingIfNeeded: $0) & 0xFFFFFF) } ?? b.colour
                 found.append(ImportSource(browser: b.name, directory: dir, profile: info["name"] as? String ?? dir,
-                                          colour: colour, stats: stats, spaces: seeds))
+                                          colour: colour, stats: stats, spaces: seeds, extensionIDs: extensionIDs))
             }
         }
         return found
@@ -132,11 +155,24 @@ public enum BrowserScanner {
         return roots.values.reduce(0) { $0 + walk($1) }
     }
 
+    /// One number from a copy of `url` (and its journal) in a private
+    /// temporary folder: the browser's own file is never opened, so nothing
+    /// locks it and a write in progress cannot be half-read.
     static func count(_ url: URL, _ sql: String) -> Int {
-        guard FileManager.default.fileExists(atPath: url.path) else { return 0 }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return 0 }
+        let folder = fm.temporaryDirectory.appendingPathComponent("ReArcScan-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: folder) }
+        let copy = folder.appendingPathComponent(url.lastPathComponent)
+        do {
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            try fm.copyItem(at: url, to: copy)
+        } catch { return 0 }
+        for suffix in ["-wal", "-journal"] where fm.fileExists(atPath: url.path + suffix) {
+            try? fm.copyItem(atPath: url.path + suffix, toPath: copy.path + suffix)
+        }
         var db: OpaquePointer?
-        let uri = "file:\(url.path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? url.path)?immutable=1"
-        guard sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else { sqlite3_close(db); return 0 }
+        guard sqlite3_open_v2(copy.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { sqlite3_close(db); return 0 }
         defer { sqlite3_close(db) }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
@@ -144,9 +180,10 @@ public enum BrowserScanner {
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
     }
 
-    static func extensions(_ url: URL) -> Int {
+    /// Extension folders, by id (32 letters a–p).
+    static func extensions(_ url: URL) -> [String] {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
-        return names.filter { $0.count == 32 }.count
+        return names.filter { $0.count == 32 && $0.allSatisfy { ("a" ... "p").contains($0) } }.sorted()
     }
 
     /// Arc keeps spaces and tabs in its sidebar file, each space tagged with

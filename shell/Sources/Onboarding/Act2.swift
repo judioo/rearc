@@ -6,15 +6,18 @@ import Foundation
 /// past. What you choose to bring flows along the trail into you as points of
 /// light. Then "ReStored." (or "ReFocused." for a clean start), and the blue
 /// sweeps ahead: where you're going, which is Act 3.
+///
+/// Passwords are not a category: reading them needs a Keychain prompt per
+/// browser and an engine import that do not exist yet (PROFILE-IMPORT §2.3),
+/// so Act 2 says so in a line under the chips instead of offering them.
 public enum ImportCategory: Int, CaseIterable, Sendable {
-    case spaces, bookmarks, history, passwords, extensions
+    case spaces, bookmarks, history, extensions
 
     public var title: String {
         switch self {
         case .spaces: "Spaces & tabs"
         case .bookmarks: "Bookmarks"
         case .history: "History"
-        case .passwords: "Passwords"
         case .extensions: "Extensions"
         }
     }
@@ -59,17 +62,19 @@ public struct Act2Log: Equatable, Sendable {
     /// done, what really did.
     public func totals(at t: Double) -> ImportStats {
         if let outcome, let c = choice, t >= c.time { return outcome }
-        var sum = ImportStats()
-        for (i, s) in sources.enumerated() where isOn(source: i, at: t) {
-            var st = s.stats
-            if !isOn(.spaces, at: t) { st.spaces = 0; st.tabs = 0 }
-            if !isOn(.bookmarks, at: t) { st.bookmarks = 0 }
-            if !isOn(.history, at: t) { st.pages = 0 }
-            if !isOn(.passwords, at: t) { st.passwords = 0 }
-            if !isOn(.extensions, at: t) { st.extensions = 0 }
-            sum = sum + st
+        return ImportSource.totals(sources.indices.filter { isOn(source: $0, at: t) }.map { sources[$0] },
+                                   categories: offered.filter { isOn($0, at: t) })
+    }
+
+    /// "Arc and Chrome": the chosen sources that keep passwords, which stay
+    /// behind; nil when none do.
+    public func passwordsLeftBehind(at t: Double) -> String? {
+        var names: [String] = []
+        for (i, s) in sources.enumerated() where isOn(source: i, at: t) && s.stats.passwords > 0 && !names.contains(s.browser) {
+            names.append(s.browser)
         }
-        return sum
+        guard let last = names.popLast() else { return nil }
+        return names.isEmpty ? last : names.joined(separator: ", ") + " and " + last
     }
 
     public var bringing: Bool { choice?.bring == true && sources.indices.contains { isOn(source: $0, at: choice!.time) } }
@@ -112,6 +117,8 @@ public struct Act2Frame: Equatable {
     public var chips: Double
     public var chipOn: [Double]
     public var buttons: Double
+    /// The browsers whose passwords stay behind, under the chips.
+    public var passwordsLeftBehind: String?
     public var bringingLine: Double
     public var flow: Double
     public var totals: ImportStats
@@ -185,6 +192,7 @@ public enum Act2Timeline {
             chips: ease(s + 2.6, s + 3.2) * out(c, c + 0.5),
             chipOn: chipOn,
             buttons: ease(s + 2.9, s + ready) * out(c, c + 0.4),
+            passwordsLeftBehind: log.passwordsLeftBehind(at: t),
             bringingLine: log.bringing ? ease(c + 0.5, c + 1.2) * out(done - 0.2, done + 0.3) : 0,
             flow: p,
             totals: totals,

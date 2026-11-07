@@ -1,5 +1,6 @@
 import CoreGraphics
 @testable import Onboarding
+import SQLite3
 import XCTest
 
 final class Act2Tests: XCTestCase {
@@ -7,7 +8,8 @@ final class Act2Tests: XCTestCase {
 
     func testChoicesShapeWhatComesOver() {
         let log = Act2Log.demo(start: 0)
-        let all = ImportSource.demo.map(\.stats).reduce(ImportStats(), +)
+        var all = ImportSource.demo.map(\.stats).reduce(ImportStats(), +)
+        all.passwords = 0
         XCTAssertEqual(log.totals(at: 0), all)
         let chosen = log.totals(at: log.choice!.time)
         XCTAssertEqual(chosen.extensions, 0, "extensions were switched off")
@@ -53,6 +55,62 @@ final class Act2Tests: XCTestCase {
         log.choice = (4, true)
         XCTAssertFalse(log.bringing)
         XCTAssertEqual(Act2Timeline.frame(log, log.done! + 1, A).refocused, 1, accuracy: 1e-9)
+    }
+
+    func testPasswordsAreNeverBroughtButSaidToStayBehind() {
+        XCTAssertFalse(ImportCategory.allCases.map(\.title).contains("Passwords"), "no chip that does nothing")
+        var log = Act2Log.demo(start: 0)
+        XCTAssertEqual(log.totals(at: 0).passwords, 0)
+        XCTAssertEqual(log.passwordsLeftBehind(at: 0), "Arc, Chrome and Brave")
+        XCTAssertEqual(Act2Timeline.frame(log, 0, A).passwordsLeftBehind, "Arc, Chrome and Brave")
+        log.toggles = [(1, 3)]
+        XCTAssertEqual(log.passwordsLeftBehind(at: 1), "Arc and Chrome", "Brave was left behind, and its passwords with it")
+        var none = ImportSource.demo
+        for i in none.indices { none[i].stats.passwords = 0 }
+        XCTAssertNil(Act2Log(start: 0, sources: none).passwordsLeftBehind(at: 0))
+    }
+
+    func testAnExtensionInTwoProfilesIsCountedOnce() {
+        let shared = "abcdefghijklmnopabcdefghijklmnop", own = "ponmlkjihgfedcbaponmlkjihgfedcba"
+        let arc = ImportSource(browser: "Arc", directory: "Default", profile: "Personal", colour: RGBA(hex: 0xEC4F99),
+                               stats: ImportStats(extensions: 1), extensionIDs: [shared])
+        let chrome = ImportSource(browser: "Chrome", directory: "Default", profile: "Kai", colour: RGBA(hex: 0x3B8AF6),
+                                  stats: ImportStats(extensions: 2), extensionIDs: [shared, own])
+        let counted = ImportSource(browser: "Brave", directory: "Default", profile: "Default", colour: RGBA(hex: 0xF5A524),
+                                   stats: ImportStats(extensions: 4))
+        XCTAssertEqual(ImportSource.totals([arc, chrome], categories: [.extensions]).extensions, 2)
+        XCTAssertEqual(ImportSource.totals([arc, chrome, counted], categories: [.extensions]).extensions, 6, "a count without ids adds as it is")
+        XCTAssertEqual(ImportSource.totals([arc, chrome], categories: [.spaces]).extensions, 0)
+        var log = Act2Log(start: 0, sources: [arc, chrome], offered: [.spaces, .extensions])
+        XCTAssertEqual(log.totals(at: 0), ImportSource.totals([arc, chrome], categories: [.spaces, .extensions]),
+                       "Act 2's line and the host's rehearsal are one sum")
+        log.categories = [(1, .extensions)]
+        XCTAssertEqual(log.totals(at: 1).extensions, 0)
+    }
+
+    /// Chrome keeps Login Data and History open, often with new rows still in
+    /// the write-ahead log: the scanner counts a copy, so it sees them, and
+    /// leaves nothing behind.
+    func testTheScannerCountsACopyOfALiveDatabase() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("Login Data")
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, """
+            PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE logins(origin_url VARCHAR NOT NULL, blacklisted_by_user INTEGER NOT NULL);
+            INSERT INTO logins VALUES ('https://a.example.com/', 0), ('https://b.example.com/', 0), ('https://c.example.com/', 1);
+            """, nil, nil, nil), SQLITE_OK)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path + "-wal"), "the rows are still in the log")
+        let leftovers = { (try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path))?
+            .filter { $0.hasPrefix("ReArcScan-") }.count ?? 0 }
+        let before = leftovers()
+        XCTAssertEqual(BrowserScanner.count(url, "SELECT COUNT(*) FROM logins WHERE blacklisted_by_user = 0"), 2)
+        XCTAssertEqual(leftovers(), before, "the copy is removed")
+        XCTAssertEqual(BrowserScanner.count(folder.appendingPathComponent("Missing"), "SELECT 1"), 0)
     }
 
     /// The scanner reads Chromium-style profiles and Arc's sidebar, read-only.
