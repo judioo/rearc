@@ -58,12 +58,13 @@ final class FirstRunOnboardingTests: XCTestCase {
 
     func testTheImportPlanFollowsAct2() {
         let sources = ImportSource.demo
-        let plan = OnboardingImportPlan(sources: [sources[0], sources[2]], categories: [.spaces, .history])
+        let plan = OnboardingImportPlan(sources: [sources[0], sources[2]], categories: [.spaces, .history, .extensions])
         XCTAssertEqual(plan.arcDirectories, ["Default"])
         XCTAssertEqual(plan.chromium.map(\.browser), [.arc, .chrome])
         XCTAssertTrue(plan.spaces)
         XCTAssertFalse(plan.bookmarks)
         XCTAssertTrue(plan.history)
+        XCTAssertTrue(plan.extensions)
     }
 
     func testTheWelcomePageGreetsYouSafely() {

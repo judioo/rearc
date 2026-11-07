@@ -445,7 +445,9 @@ struct BrowserView: View {
                     }
                 }
         }
-        .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil)
+        .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil) { start in
+            if start { model.startPendingExtensionReinstall() } else { model.postponePendingExtensionReinstall() }
+        }
         .clipShape(shape)
         .background(shape.fill(cardFill))
         .background(CardShadow(shape: shape).opacity(fullscreen ? 0 : 1))

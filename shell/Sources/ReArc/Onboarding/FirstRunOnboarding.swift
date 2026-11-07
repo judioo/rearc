@@ -81,36 +81,37 @@ final class FirstRunOnboarding: OnboardingHost {
     // MARK: OnboardingHost
 
     /// ReArc's importer reads Arc's sidebar (spaces, pinned tabs, folders,
-    /// favorites) and Chromium profiles' bookmarks and history. Passwords and
-    /// extensions are not offered until it can bring them too.
-    var importCategories: [ImportCategory] { [.spaces, .bookmarks, .history] }
+    /// favorites) and Chromium profiles' bookmarks and history, and queues
+    /// extensions to reinstall from the Web Store, which needs the Chromium
+    /// engine. Passwords are never offered (Act 2 says why).
+    var importCategories: [ImportCategory] {
+        [.spaces, .bookmarks, .history] + (canReinstallExtensions ? [.extensions] : [])
+    }
+
+    private var canReinstallExtensions: Bool { model?.canOpenBrowserPage(.extensions) ?? false }
 
     func discoverSources(_ done: @escaping ([ImportSource]) -> Void) {
+        let extensions = canReinstallExtensions
         DispatchQueue.global(qos: .userInitiated).async {
-            let found = BrowserScanner.scan()
+            let found = OnboardingImportPlan.counted(BrowserScanner.scan(), applicationSupport: BrowserImportDiscovery.applicationSupport,
+                                                     extensions: extensions)
             DispatchQueue.main.async { done(found) }
         }
     }
 
     func bring(_ sources: [ImportSource], categories: [ImportCategory], done: @escaping (OnboardingImportOutcome) -> Void) {
-        guard applies, let model else {
-            // A rehearsal shows what would come over and changes nothing.
-            var totals = ImportStats()
-            for s in sources { totals = totals + s.stats }
-            if !categories.contains(.spaces) { totals.spaces = 0; totals.tabs = 0 }
-            if !categories.contains(.bookmarks) { totals.bookmarks = 0 }
-            if !categories.contains(.history) { totals.pages = 0 }
-            totals.passwords = 0; totals.extensions = 0
+        guard applies, model != nil else {
+            // A rehearsal shows what would come over (Act 2's own sum) and changes nothing.
             let seeds = categories.contains(.spaces) ? sources.flatMap(\.spaces) : []
-            done(OnboardingImportOutcome(totals: totals, spaces: seeds))
+            done(OnboardingImportOutcome(totals: ImportSource.totals(sources, categories: categories), spaces: seeds))
             return
         }
         let plan = OnboardingImportPlan(sources: sources, categories: categories)
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let read = plan.read(applicationSupport: BrowserImportDiscovery.applicationSupport)
-            DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async {
                 guard let self, let model = self.model else { return }
-                let result = OnboardingImportPlan.apply(read, model: model)
+                let result = OnboardingImportPlan.apply(read, model: model, replacingFavorites: self.sampleFavoriteIDs)
                 self.outcome = result
                 done(result)
             }
@@ -152,17 +153,22 @@ final class FirstRunOnboarding: OnboardingHost {
         // the takeover here clears; without this the clear overlay stays on top.
         takeover?.dismiss()
         takeover = nil
+        // No store page opened over the sunrise; now the browser is here.
+        if applies { model?.offerPendingExtensionReinstall() }
         onDone?()
     }
 }
 
-/// What Act 2 asked for, read off the main thread and applied on it.
+/// What Act 2 asked for, read off the main thread and applied on it. Act 2's
+/// counts come from the same readers (`counted`), so its line, the
+/// rehearsal's totals and the real outcome agree category by category.
 struct OnboardingImportPlan: Sendable {
     var arcDirectories: Set<String>
     var chromium: [(browser: ImportBrowser, directory: String)]
     var spaces: Bool
     var bookmarks: Bool
     var history: Bool
+    var extensions: Bool
 
     init(sources: [ImportSource], categories: [ImportCategory]) {
         arcDirectories = Set(sources.filter { $0.browser == "Arc" }.map(\.directory))
@@ -172,63 +178,122 @@ struct OnboardingImportPlan: Sendable {
         spaces = categories.contains(.spaces)
         bookmarks = categories.contains(.bookmarks)
         history = categories.contains(.history)
+        extensions = categories.contains(.extensions)
     }
 
     struct Read: @unchecked Sendable {
+        /// Only the chosen Arc profiles' spaces and favorites.
         var arc: ArcSidebarImport?
-        var arcDirectories: Set<String>
         var arcSettings: ArcSettingsImport?
         var profiles: [(profile: ImportSourceProfile, bookmarks: [BookmarkNode]?, history: [VisitRecord]?)]
+        /// In source order; the queue keeps the reinstallable ones, each once.
+        var extensions: [(browser: ImportBrowser, extension: SourceExtension)] = []
     }
 
-    func read(applicationSupport root: URL) -> Read {
+    /// `arcDefaults`: Arc's preferences, read-only (a dictionary in tests).
+    func read(applicationSupport root: URL, arcDefaults: () -> [String: Any] = {
+        UserDefaults(suiteName: ImportBrowser.arc.defaultsDomain)?.dictionaryRepresentation() ?? [:]
+    }) -> Read {
         let found = BrowserImportDiscovery.discover(in: root)
         var arc: ArcSidebarImport?
         var settings: ArcSettingsImport?
         if spaces, !arcDirectories.isEmpty {
-            arc = try? ArcSidebarImport.load(from: root)
-            settings = ArcSettingsImport.read(UserDefaults(suiteName: ImportBrowser.arc.defaultsDomain)?.dictionaryRepresentation() ?? [:])
+            arc = (try? ArcSidebarImport.load(from: root))?.only(directories: arcDirectories)
+            settings = ArcSettingsImport.read(arcDefaults())
         }
         var profiles: [(ImportSourceProfile, [BookmarkNode]?, [VisitRecord]?)] = []
-        if bookmarks || history {
-            for browser in found {
-                for profile in browser.profiles where chromium.contains(where: { $0.browser == profile.browser && $0.directory == profile.directory }) {
-                    let marks = bookmarks ? (try? ChromiumBookmarksReader.read(profile.url.appendingPathComponent(ChromiumBookmarksReader.fileName))) : nil
-                    let visits = history ? (try? ChromiumHistoryReader.read(profile.url.appendingPathComponent(ChromiumHistoryReader.fileName))) : nil
-                    profiles.append((profile, marks, visits))
+        var extensions: [(ImportBrowser, SourceExtension)] = []
+        for browser in found {
+            for profile in browser.profiles where chromium.contains(where: { $0.browser == profile.browser && $0.directory == profile.directory }) {
+                if bookmarks || history {
+                    profiles.append((profile, bookmarks ? Self.bookmarks(profile) : nil, history ? Self.history(profile) : nil))
+                }
+                if self.extensions {
+                    extensions += ExtensionInventoryReader.read(profile: profile.url).map { (profile.browser, $0) }
                 }
             }
         }
-        return Read(arc: arc, arcDirectories: arcDirectories, arcSettings: settings, profiles: profiles)
+        return Read(arc: arc, arcSettings: settings, profiles: profiles, extensions: extensions)
+    }
+
+    static func bookmarks(_ profile: ImportSourceProfile) -> [BookmarkNode]? {
+        try? ChromiumBookmarksReader.read(profile.url.appendingPathComponent(ChromiumBookmarksReader.fileName))
+    }
+
+    static func history(_ profile: ImportSourceProfile) -> [VisitRecord]? {
+        try? ChromiumHistoryReader.read(profile.url.appendingPathComponent(ChromiumHistoryReader.fileName))
+    }
+
+    /// The scanner's sources, each counted as the import would bring it:
+    /// Arc's spaces, pinned tabs and favorites from its sidebar reader,
+    /// bookmarks and pages from the readers `read` uses, and extensions as
+    /// the reinstall queue would take them, by id. The scanner's password
+    /// count stays, only to say they stay behind. A source with nothing to
+    /// bring is left out.
+    static func counted(_ sources: [ImportSource], applicationSupport root: URL, extensions: Bool) -> [ImportSource] {
+        let profiles = BrowserImportDiscovery.discover(in: root).flatMap(\.profiles)
+        let arc = sources.contains { $0.browser == "Arc" } ? try? ArcSidebarImport.load(from: root) : nil
+        return sources.compactMap { source in
+            var stats = ImportStats()
+            var counted = source
+            counted.extensionIDs = []
+            if source.browser == "Arc", let arc = arc?.only(directories: [source.directory]) {
+                stats.spaces = arc.export.spaces.count
+                stats.tabs = arc.export.spaces.reduce(0) { $0 + $1.pinnedTabCount } + arc.favoritesToImport()
+            }
+            if let browser = ImportBrowser(rawValue: source.browser.lowercased()),
+               let profile = profiles.first(where: { $0.browser == browser && $0.directory == source.directory }) {
+                stats.bookmarks = bookmarks(profile)?.reduce(0) { $0 + $1.linkCount } ?? 0
+                stats.pages = history(profile)?.count ?? 0
+                if extensions {
+                    counted.extensionIDs = ExtensionReinstallQueue(ExtensionInventoryReader.read(profile: profile.url), into: UUID()).items.map(\.id)
+                    stats.extensions = counted.extensionIDs.count
+                }
+            }
+            guard stats != ImportStats() else { return nil }
+            stats.passwords = source.stats.passwords
+            counted.stats = stats
+            return counted
+        }
     }
 
     /// Into the store, quietly (no toasts: the onboarding is the feedback).
+    /// Extensions are only queued: their store pages wait for the browser.
+    /// `replacingFavorites` (the sample's) go before Arc's favorites come
+    /// in, so none of Arc's is skipped as already there and then cleared.
     @MainActor
-    static func apply(_ read: Read, model: BrowserViewModel) -> OnboardingImportOutcome {
+    static func apply(_ read: Read, model: BrowserViewModel, replacingFavorites sample: [Tab.ID] = []) -> OnboardingImportOutcome {
         let store = model.store
         let before = Set(store.spaces.map(\.id))
         let main = store.activeProfileID
         var totals = ImportStats()
         if let arc = read.arc {
-            var choices = arc.defaultChoices(for: store)
-            choices.spaceIDs = choices.spaceIDs.filter { id in
-                arc.export.spaces.first { $0.id == id }.map { read.arcDirectories.contains($0.profile.directory) } ?? false
+            if arc.favoritesToImport() > 0 {
+                for id in sample where store.tab(withID: id) != nil { store.closeTab(id) }
             }
-            let summary = store.importArcSidebar(arc, choices: choices)
+            let summary = store.importArcSidebar(arc, choices: arc.defaultChoices(for: store))
             if let settings = read.arcSettings { model.applyArcSettings(settings) }
-            totals.tabs += summary.pinnedTabs + summary.todayTabs + summary.favorites
+            totals.spaces = summary.spaces
+            totals.tabs = summary.pinnedTabs + summary.todayTabs + summary.favorites
         }
         for (profile, bookmarks, history) in read.profiles {
             if let bookmarks, let result = store.importBookmarks(bookmarks, spaceName: "\(profile.browser.name) – \(profile.name)", profileID: main) {
                 totals.bookmarks += result.tabs
             }
             if let history, !history.isEmpty {
-                totals.pages += model.visitHistory.merge(history)
+                model.visitHistory.merge(history)
                 model.scheduleVisitHistorySave()
+                totals.pages += history.count
             }
         }
+        let queue = ExtensionReinstallQueue(read.extensions.map(\.extension), into: main)
+        if !queue.isFinished {
+            var from: [String] = []
+            for (browser, item) in read.extensions where item.canReinstall && !from.contains(browser.name) { from.append(browser.name) }
+            model.queueExtensionReinstall(queue, from: ListFormatter.localizedString(byJoining: from))
+            totals.extensions = queue.items.count
+        }
         let created = store.spaces.filter { !before.contains($0.id) }
-        totals.spaces = created.count
         model.loadSelectedIfNeeded()
         let seeds = created.map { space in
             SpaceSeed(name: space.name, icon: space.iconName,

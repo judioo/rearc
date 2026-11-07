@@ -58,10 +58,10 @@ extension View {
 
     /// A transient confirmation just inside the card's top-right corner,
     /// over the toolbar strip (ARC-RECORDING-ANALYSIS.md §6).
-    func shellToast(_ toast: ShellToast?) -> some View {
+    func shellToast(_ toast: ShellToast?, choose: @escaping (Bool) -> Void = { _ in }) -> some View {
         overlay(alignment: .topTrailing) {
             if let toast {
-                ShellToastView(toast: toast)
+                ShellToastView(toast: toast, choose: choose)
                     .padding(.top, 5)
                     .padding(.trailing, 6)
                     .transition(.scale(scale: 0.5, anchor: .topTrailing).combined(with: .opacity))
@@ -81,6 +81,8 @@ extension ShellToast {
 /// a thin border and a soft shadow; keycaps as chips, then the action.
 struct ShellToastView: View {
     let toast: ShellToast
+    /// A choice toast's Start (true) or Later (false).
+    var choose: (Bool) -> Void = { _ in }
     @Environment(\.themeChrome) private var chrome
     @State private var shareAnchor: NSView?
 
@@ -128,6 +130,10 @@ struct ShellToastView: View {
                 .help("Share")
                 .accessibilityLabel("Share copied link")
             }
+            if toast.action == .reinstallExtensions {
+                toastButton("Later") { choose(false) }
+                toastButton("Start", prominent: true) { choose(true) }
+            }
         }
         .padding(.leading, 10)
         .padding(.trailing, toast.action == nil ? 12 : 6)
@@ -136,6 +142,18 @@ struct ShellToastView: View {
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(chrome.title.opacity(0.1)))
         .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
         .accessibilityElement(children: .contain)
+    }
+
+    private func toastButton(_ title: String, prominent: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.horizontal, 8)
+                .frame(height: 20)
+                .background(chrome.title.opacity(prominent ? 0.16 : 0.06), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(chrome.title)
     }
 }
 

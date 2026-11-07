@@ -43,6 +43,8 @@ public enum AppCommandAction: Equatable, Hashable {
     /// Bookmarks exported from another browser, as a new space.
     case importBookmarksFile
     case importFromBrowser
+    /// The onboarding's extensions, still waiting to be reinstalled.
+    case reinstallExtensions
     case manageBoosts
     case toggleBoost(UUID)
     case editBoost(UUID)
@@ -119,6 +121,8 @@ public struct CommandBarContext {
     public var navigationSchemes: NavigationURLPolicy.EngineSchemes
     /// Where links from other apps open now (its own command is hidden).
     public var externalLinkDestination: ExternalLinkDestination
+    /// "Reinstall 9 extensions from Arc" while the onboarding's queue waits.
+    public var pendingExtensionReinstall: String?
 
     public init(
         store: SidebarStore,
@@ -129,9 +133,11 @@ public struct CommandBarContext {
         mediaByTab: [Tab.ID: WebMediaState] = [:],
         tabMuteModel: TabMediaMuteModel = TabMediaMuteModel(),
         navigationSchemes: NavigationURLPolicy.EngineSchemes = [],
-        externalLinkDestination: ExternalLinkDestination = .littleArc
+        externalLinkDestination: ExternalLinkDestination = .littleArc,
+        pendingExtensionReinstall: String? = nil
     ) {
         self.externalLinkDestination = externalLinkDestination
+        self.pendingExtensionReinstall = pendingExtensionReinstall
         self.store = store
         self.isSidebarVisible = isSidebarVisible
         self.closedTabStack = closedTabStack
@@ -239,6 +245,8 @@ public struct AppCommand: Equatable, Identifiable {
             return BoostScopeMatcher.urlIsEligibleForBoosts(tab.url)
         case .manageBoosts, .importBoosts, .importBookmarksFile, .importFromBrowser:
             return true
+        case .reinstallExtensions:
+            return context.pendingExtensionReinstall != nil
         case .newLegacyBoost:
             guard let tab = store.selectedTab else { return false }
             return BoostScopeMatcher.urlIsEligibleForBoosts(tab.url)
@@ -299,6 +307,15 @@ public enum AppCommandRegistry {
 
     public static func all(in context: CommandBarContext) -> [AppCommand] {
         var commands = staticCommands(in: context)
+        if let title = context.pendingExtensionReinstall {
+            commands.append(AppCommand(
+                id: "reinstall-extensions",
+                title: title + "…",
+                keywords: ["reinstall", "extensions", "import", "web store", "arc", "chrome", "brave"],
+                minQueryLength: 3,
+                action: .reinstallExtensions
+            ))
+        }
         for space in context.store.spacesInActiveProfile {
             commands.append(AppCommand(
                 id: "switch-space-\(space.id.uuidString)",

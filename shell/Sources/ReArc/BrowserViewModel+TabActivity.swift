@@ -16,10 +16,14 @@ struct ShellToast: Equatable, Identifiable {
     enum Action: Equatable {
         /// Copied Current URL's trailing share button.
         case share(URL)
+        /// Start and Later for the onboarding's extension reinstall queue.
+        case reinstallExtensions
     }
 
     /// Arc's toasts stayed 4.6 s and 5.0 s.
     static let defaultDuration: TimeInterval = 5
+    /// Long enough to read and choose; going unanswered is Later.
+    static let choiceDuration: TimeInterval = 20
 
     struct Segment: Equatable {
         var text: String
