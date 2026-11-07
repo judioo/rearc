@@ -227,12 +227,14 @@ final class DownloadsController {
         workspace.activateFileViewerSelecting([directory])
     }
 
+    /// The file in Finder, or its folder when it is gone. The check runs off
+    /// the main thread; when it cannot answer in time, Finder gets the file.
     private func reveal(_ record: DownloadRecord) {
         let url = URL(fileURLWithPath: record.targetPath)
-        if FileManager.default.fileExists(atPath: url.path) {
-            workspace.activateFileViewerSelecting([url])
-        } else {
-            workspace.activateFileViewerSelecting([url.deletingLastPathComponent()])
+        let workspace = workspace
+        Task { @MainActor in
+            let state = await DownloadFileService.shared.state(atPath: url.path)
+            workspace.activateFileViewerSelecting([state?.exists == false ? url.deletingLastPathComponent() : url])
         }
     }
 
