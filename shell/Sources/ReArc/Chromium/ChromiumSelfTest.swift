@@ -4486,6 +4486,17 @@ extension ChromiumSelfTest {
         }
     }
 
+    /// Whether this process may post input through the window server. A run
+    /// started from a terminal inherits the terminal's Accessibility grant; a
+    /// LaunchServices launch (`open`) is its own responsible process, and
+    /// without a grant of its own macOS drops its posted clicks silently.
+    private var canPostSystemInput: Bool { CGPreflightPostEventAccess() }
+
+    private func systemInputNote(_ checks: String) -> String {
+        "NOTE \(checks) skipped: this process may not post window-server input "
+            + "(no Accessibility grant; run the self-test from a terminal, as bundle-chromium.sh and release.sh do)"
+    }
+
     /// A left click through the window server at a screen point, as a mouse
     /// gives it: SwiftUI buttons ignore clicks posted to the app's queue.
     /// The pointer is moved there first and given time to settle: the first
@@ -4576,64 +4587,74 @@ extension ChromiumSelfTest {
         try check(rowFrame.maxX <= window.frame.minX + model.sidebarWidth + 2,
                   "the Choose a Theme row \(rowFrame) must be in the sidebar")
         // A real click: the row is a SwiftUI button inside the sidebar's space pager.
-        let rowPoint = NSPoint(x: rowFrame.midX, y: rowFrame.midY)
-        let themeOpened = try await systemClick(atScreen: rowPoint) { !self.popoverWindows().isEmpty }
-        if !themeOpened {
-            let hit = sequence(first: window.contentView?.superview?.hitTest(window.convertPoint(fromScreen: rowPoint)), next: { $0?.superview })
-                .prefix(8).compactMap { $0.map { String(describing: Swift.type(of: $0)) } }.joined(separator: " < ")
-            throw Failure(description: "Choose a Theme at \(rowFrame) opened no popover (key \(NSApp.keyWindow?.title ?? "none"), hit \(hit))")
+        var themePlace = "its theme popover was not clicked (no window-server input)"
+        if canPostSystemInput {
+            let rowPoint = NSPoint(x: rowFrame.midX, y: rowFrame.midY)
+            let themeOpened = try await systemClick(atScreen: rowPoint) { !self.popoverWindows().isEmpty }
+            if !themeOpened {
+                let hit = sequence(first: window.contentView?.superview?.hitTest(window.convertPoint(fromScreen: rowPoint)), next: { $0?.superview })
+                    .prefix(8).compactMap { $0.map { String(describing: Swift.type(of: $0)) } }.joined(separator: " < ")
+                throw Failure(description: "Choose a Theme at \(rowFrame) opened no popover (key \(NSApp.keyWindow?.title ?? "none"), hit \(hit))")
+            }
+            let rowPopover = popoverWindows()[0].frame
+            // The popover's window includes its arrow, whose tip reaches back over the row's edge.
+            let side = rowPopover.maxX <= rowFrame.minX + 16 ? "left" : rowPopover.minX >= rowFrame.maxX - 16 ? "right" : "over"
+            try check(side == "right", "the Choose a Theme popover \(rowPopover) must be right of its row \(rowFrame), got \(side)")
+            popoverWindows().forEach { $0.close() }
+            themePlace = "its theme popover opens \(side) of the Choose a Theme row"
+        } else {
+            log(systemInputNote("the Choose a Theme click"))
         }
-        let rowPopover = popoverWindows()[0].frame
-        // The popover's window includes its arrow, whose tip reaches back over the row's edge.
-        let side = rowPopover.maxX <= rowFrame.minX + 16 ? "left" : rowPopover.minX >= rowFrame.maxX - 16 ? "right" : "over"
-        try check(side == "right", "the Choose a Theme popover \(rowPopover) must be right of its row \(rowFrame), got \(side)")
-        popoverWindows().forEach { $0.close() }
         model.cancelSpaceCreation()
         try await wait("Create a Space page closed", timeout: 5) {
             self.accessibilityElement(in: window, labelled: "Choose a Theme") == nil && popoverWindows().isEmpty
         }
-        results.append("(3) Edit Theme Color's popover opens under the header (\(headerPlace)); Create a Space opens in the sidebar and its theme popover opens \(side) of the Choose a Theme row")
+        results.append("(3) Edit Theme Color's popover opens under the header (\(headerPlace)); Create a Space opens in the sidebar and \(themePlace)")
 
         // (4) The copy toast's share button opens the share menu.
         model.selectTab(tab.id)
         try await wait("tab A on screen for the toast", timeout: 10) { engine.leaseHolder?.window === window }
-        var menuOpened = false
-        let observer = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { note in
-            menuOpened = true
-            (note.object as? NSMenu)?.cancelTracking()
-        }
-        defer { NotificationCenter.default.removeObserver(observer) }
-        let windowsBefore = Set(NSApp.windows.map(ObjectIdentifier.init))
-        let pickersBefore = ToastSharePicker.shownCount
-        model.copyURL(of: tab.id, format: .plain)
-        try await wait("copy toast", timeout: 5) { model.toast != nil }
-        try await Task.sleep(nanoseconds: 400_000_000)
-        // Aim at the button's own view: SwiftUI's accessibility frame for
-        // the overlay need not match where the control is drawn.
-        try await wait("the toast's share button", timeout: 3) { ToastSharePicker.anchor?.window === window }
-        let anchor = try XCTUnwrapSelfTest(ToastSharePicker.anchor, "the toast's share button")
-        let toastFrame = window.convertToScreen(anchor.convert(anchor.bounds, to: nil))
-        let center = NSPoint(x: toastFrame.midX, y: toastFrame.midY)
-        // A SwiftUI button ignores the click that only makes its window key.
-        window.makeKeyAndOrderFront(nil)
-        try await wait("the window key for the share click", timeout: 3) { window.isKeyWindow }
-        func pickerOpened() -> Bool {
-            menuOpened || ToastSharePicker.shownCount > pickersBefore
-                || NSApp.windows.contains { !windowsBefore.contains(ObjectIdentifier($0)) && $0.isVisible && $0 !== window }
-        }
-        // The first window-server click after the pointer jumps here is
-        // dropped before it reaches the app (no hover, no tap), so a second
-        // one is allowed and reported.
-        try await systemClick(atScreen: center)
-        var opened = await eventually(timeout: 1.5) { pickerOpened() }
-        let clicks = opened ? 1 : 2
-        if !opened {
+        if canPostSystemInput {
+            var menuOpened = false
+            let observer = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main) { note in
+                menuOpened = true
+                (note.object as? NSMenu)?.cancelTracking()
+            }
+            defer { NotificationCenter.default.removeObserver(observer) }
+            let windowsBefore = Set(NSApp.windows.map(ObjectIdentifier.init))
+            let pickersBefore = ToastSharePicker.shownCount
+            model.copyURL(of: tab.id, format: .plain)
+            try await wait("copy toast", timeout: 5) { model.toast != nil }
+            try await Task.sleep(nanoseconds: 400_000_000)
+            // Aim at the button's own view: SwiftUI's accessibility frame for
+            // the overlay need not match where the control is drawn.
+            try await wait("the toast's share button", timeout: 3) { ToastSharePicker.anchor?.window === window }
+            let anchor = try XCTUnwrapSelfTest(ToastSharePicker.anchor, "the toast's share button")
+            let toastFrame = window.convertToScreen(anchor.convert(anchor.bounds, to: nil))
+            let center = NSPoint(x: toastFrame.midX, y: toastFrame.midY)
+            // A SwiftUI button ignores the click that only makes its window key.
+            window.makeKeyAndOrderFront(nil)
+            try await wait("the window key for the share click", timeout: 3) { window.isKeyWindow }
+            func pickerOpened() -> Bool {
+                menuOpened || ToastSharePicker.shownCount > pickersBefore
+                    || NSApp.windows.contains { !windowsBefore.contains(ObjectIdentifier($0)) && $0.isVisible && $0 !== window }
+            }
+            // The first window-server click after the pointer jumps here is
+            // dropped before it reaches the app (no hover, no tap), so a second
+            // one is allowed and reported.
             try await systemClick(atScreen: center)
-            opened = await eventually(timeout: 4) { pickerOpened() }
+            var opened = await eventually(timeout: 1.5) { pickerOpened() }
+            let clicks = opened ? 1 : 2
+            if !opened {
+                try await systemClick(atScreen: center)
+                opened = await eventually(timeout: 4) { pickerOpened() }
+            }
+            for extra in NSApp.windows where !windowsBefore.contains(ObjectIdentifier(extra)) && extra.isVisible && extra !== window { extra.close() }
+            try check(opened, "the toast's share button at \(toastFrame) opened no share menu")
+            results.append("(4) the copy toast's share button opens the share \(menuOpened ? "menu" : "picker") (\(clicks == 1 ? "first click" : "second click; the first was dropped"))")
+        } else {
+            log(systemInputNote("the toast's share click"))
         }
-        for extra in NSApp.windows where !windowsBefore.contains(ObjectIdentifier(extra)) && extra.isVisible && extra !== window { extra.close() }
-        try check(opened, "the toast's share button at \(toastFrame) opened no share menu")
-        results.append("(4) the copy toast's share button opens the share \(menuOpened ? "menu" : "picker") (\(clicks == 1 ? "first click" : "second click; the first was dropped"))")
 
         // (5) Picture in Picture hides the hidden tab's media strip; closing it brings the strip back.
         let embeds = model.embedsVideoInSidebar, automatic = model.automaticPictureInPicture
@@ -4763,6 +4784,10 @@ extension ChromiumSelfTest {
                                window: NSWindow) async throws {
         guard await bringToFront(window, for: "pinned lifecycle checks") else {
             log("NOTE pinned lifecycle checks skipped: they need the window on an unlocked screen")
+            return
+        }
+        guard canPostSystemInput else {
+            log(systemInputNote("pinned lifecycle checks"))
             return
         }
         if !model.isSidebarVisible {
