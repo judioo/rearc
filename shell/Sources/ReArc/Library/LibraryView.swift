@@ -144,6 +144,8 @@ private struct LibraryColumn: View {
 struct LibrarySearchField: View {
     let prompt: String
     @Binding var text: String
+    /// ↓ in the field: the page's list takes the keyboard.
+    var onMoveDown: (() -> Void)?
     @Environment(\.themeChrome) private var chrome
 
     static let height: CGFloat = 36
@@ -156,6 +158,11 @@ struct LibrarySearchField: View {
             TextField(prompt, text: $text)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
+                .onKeyPress(.downArrow) {
+                    guard let onMoveDown else { return .ignored }
+                    onMoveDown()
+                    return .handled
+                }
         }
         .padding(.horizontal, 12)
         .frame(height: Self.height)
@@ -167,11 +174,12 @@ struct LibrarySearchField: View {
 struct LibraryColumnHeader<Trailing: View>: View {
     let prompt: String
     @Binding var text: String
+    var onMoveDown: (() -> Void)?
     @ViewBuilder var trailing: Trailing
 
     var body: some View {
         HStack(spacing: 6) {
-            LibrarySearchField(prompt: prompt, text: $text)
+            LibrarySearchField(prompt: prompt, text: $text, onMoveDown: onMoveDown)
             trailing
         }
         .padding(.horizontal, LibraryColumnMetrics.inset)
@@ -181,8 +189,8 @@ struct LibraryColumnHeader<Trailing: View>: View {
 }
 
 extension LibraryColumnHeader where Trailing == EmptyView {
-    init(prompt: String, text: Binding<String>) {
-        self.init(prompt: prompt, text: text) { EmptyView() }
+    init(prompt: String, text: Binding<String>, onMoveDown: (() -> Void)? = nil) {
+        self.init(prompt: prompt, text: text, onMoveDown: onMoveDown) { EmptyView() }
     }
 }
 
@@ -264,15 +272,37 @@ struct LibrarySpacesPage: View {
 
 // MARK: - Downloads
 
+/// The search, the tray's folder and Clear row, then every download in an
+/// AppKit table (`DownloadsLibraryTable`, perf-8). The page reads only the
+/// table's emptiness, so a transfer's progress redraws one cell, not the page.
 private struct LibraryDownloadsPage: View {
     let model: BrowserViewModel
     @State private var query = ""
+    @State private var table = DownloadsTableState()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            LibraryColumnHeader(prompt: LibrarySection.downloads.searchPrompt ?? "", text: $query)
-            DownloadsTrayView(downloads: model.downloads, embedded: true, query: query)
-                .onAppear { model.downloads.loadEngineHistory() }
+            LibraryColumnHeader(prompt: LibrarySection.downloads.searchPrompt ?? "", text: $query,
+                                onMoveDown: { table.controller?.focusList() })
+            VStack(alignment: .leading, spacing: 0) {
+                DownloadsTrayHeader(downloads: model.downloads, showsTitle: false)
+                Divider()
+                DownloadsLibraryTable(downloads: model.downloads, query: query, state: table)
+                    .overlay(alignment: .top) {
+                        if table.isEmpty {
+                            VStack(spacing: 6) {
+                                Image(systemName: "arrow.down.circle")
+                                    .font(.system(size: 26, weight: .light))
+                                    .foregroundStyle(.tertiary)
+                                Text(table.hasNoDownloads ? "No downloads yet" : "No matches").font(.callout).foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 28)
+                            .allowsHitTesting(false)
+                        }
+                    }
+            }
+            .onAppear { model.downloads.loadEngineHistory() }
             if BrowserInternalPage.downloads.isAvailable(engine: model.engineHost.navigationSchemes) {
                 Button("Open Chromium’s Downloads Page") {
                     model.openBrowserPage(.downloads)

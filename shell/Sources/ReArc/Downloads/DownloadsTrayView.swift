@@ -61,59 +61,67 @@ struct DownloadsButton: View {
     }
 }
 
+/// The tray's top row, also above Library › Downloads' list: the folder
+/// downloads are saved to, with its menu, and Clear.
+struct DownloadsTrayHeader: View {
+    let downloads: DownloadsController
+    /// The popover's "Downloads" title; the Library has its own search instead.
+    var showsTitle = true
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if showsTitle { Text("Downloads").font(.headline) }
+            Spacer()
+            Menu {
+                Button("Show Download Folder") { downloads.revealDirectory() }
+                Button("Change Download Folder…") { downloads.chooseDirectory() }
+                Divider()
+                Toggle("Ask Where to Save Each File", isOn: Binding(
+                    get: { downloads.askWhereToSave },
+                    set: { downloads.askWhereToSave = $0 }
+                ))
+                .disabled(!downloads.canAskWhereToSave)
+            } label: {
+                Label(downloads.directory.lastPathComponent, systemImage: "folder")
+                    .font(.caption)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Saved to \(downloads.directory.path)")
+            Button("Clear") { downloads.clearFinished() }
+                .buttonStyle(.borderless)
+                .font(.caption)
+                .disabled(!downloads.hasFinished)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+}
+
 /// The tray popover: recent downloads newest first, with progress and
-/// per-row actions; the folder downloads are saved to; Clear.
+/// per-row actions; the folder downloads are saved to; Clear. Library ›
+/// Downloads lists every row in its own table (`DownloadsLibraryTable`).
 struct DownloadsTrayView: View {
     /// Rows the popover lists. It is open while a download starts, which is
     /// when Chromium replays its history: every update copied and diffed a
-    /// `ForEach` over the whole list. The Library lists every row.
+    /// `ForEach` over the whole list.
     static let popoverLimit = DownloadList.defaultLimit
 
     let downloads: DownloadsController
-    /// On the Library's Downloads page: full width and height, no title.
-    var embedded = false
-    /// The Library column's search (`LibraryDownloads.matching`).
-    var query = ""
     /// The popover's "Show All" (Library › Downloads); nil hides it.
     var showAll: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                if !embedded { Text("Downloads").font(.headline) }
-                Spacer()
-                Menu {
-                    Button("Show Download Folder") { downloads.revealDirectory() }
-                    Button("Change Download Folder…") { downloads.chooseDirectory() }
-                    Divider()
-                    Toggle("Ask Where to Save Each File", isOn: Binding(
-                        get: { downloads.askWhereToSave },
-                        set: { downloads.askWhereToSave = $0 }
-                    ))
-                    .disabled(!downloads.canAskWhereToSave)
-                } label: {
-                    Label(downloads.directory.lastPathComponent, systemImage: "folder")
-                        .font(.caption)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("Saved to \(downloads.directory.path)")
-                Button("Clear") { downloads.clearFinished() }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
-                    .disabled(!downloads.hasFinished)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            DownloadsTrayHeader(downloads: downloads)
             Divider()
-            let matching = downloads.matching(query)
-            let records = embedded ? matching[...] : matching.prefix(Self.popoverLimit)
+            let records = downloads.records.prefix(Self.popoverLimit)
             if records.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "arrow.down.circle")
                         .font(.system(size: 26, weight: .light))
                         .foregroundStyle(.tertiary)
-                    Text(downloads.records.isEmpty ? "No downloads yet" : "No matches").font(.callout).foregroundStyle(.secondary)
+                    Text("No downloads yet").font(.callout).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 28)
@@ -126,8 +134,8 @@ struct DownloadsTrayView: View {
                     }
                     .padding(6)
                 }
-                .frame(maxHeight: embedded ? .infinity : 360)
-                if !embedded, let showAll, let title = Self.showAllTitle(total: downloads.historyCount, shown: records.count) {
+                .frame(maxHeight: 360)
+                if let showAll, let title = Self.showAllTitle(total: downloads.historyCount, shown: records.count) {
                     Divider()
                     Button(title, action: showAll)
                         .buttonStyle(.borderless)
@@ -137,10 +145,10 @@ struct DownloadsTrayView: View {
                 }
             }
         }
-        .frame(width: embedded ? nil : 340)
+        .frame(width: 340)
         // Show All counts the engine's whole history, which loads on the
         // session's first download or here (a no-op once it has).
-        .onAppear { if !embedded { downloads.loadEngineHistory() } }
+        .onAppear { downloads.loadEngineHistory() }
     }
 
     /// The footer's title: every download in the history, archived rows
