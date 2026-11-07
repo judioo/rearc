@@ -2,12 +2,17 @@
 """Seeds a throwaway ReArc data dir with a large Downloads.json (downloads at scale).
 
 Usage: scripts/seed-downloads.py --out DIR [--source ~/Downloads] [--mode top|files] [--limit N]
+       scripts/seed-downloads.py --out DIR --source NEW_DIR --synthetic N
        scripts/seed-downloads.py --history HISTORY_DB --from DIR/Downloads.json
 
   --mode top    one completed record per top-level item of SOURCE (folders get the
                 total size of the files under them)
   --mode files  one record per regular file under SOURCE, recursively
   --limit N     keep the newest N records only
+  --synthetic N first create N sparse files of common types in SOURCE (a new or empty
+                folder outside ~/Downloads, ~/Desktop and ~/Documents), 100 per subfolder,
+                with sizes and modification dates spread over three years, then seed one
+                record per file: a fixture that reads no real file
 
 Records are newest first (the order ReArc keeps), each with url
 https://example.com/<n>, targetPath at the real item, its size, and startedAt and
@@ -64,6 +69,33 @@ def entries(source, mode):
                     yield path, info.st_size, info.st_mtime
 
 
+SYNTHETIC_TYPES = ["pdf", "jpg", "png", "zip", "dmg", "txt", "mp4", "docx", "csv", "json", "html",
+                   "mov", "heic", "pkg", "gz", "pptx", "xlsx", "mp3", "svg", "epub", ""]
+
+
+def make_synthetic(source, count):
+    """N sparse files (no data written) with spread sizes and dates; refuses protected folders."""
+    home = os.path.expanduser("~")
+    real = os.path.realpath(source)
+    for name in ("Downloads", "Desktop", "Documents"):
+        protected = os.path.realpath(os.path.join(home, name))
+        if real == protected or real.startswith(protected + os.sep):
+            sys.exit(f"seed-downloads: refusing to create synthetic files under ~/{name}")
+    if os.path.exists(source) and os.listdir(source):
+        sys.exit("seed-downloads: --synthetic needs a new or empty --source folder")
+    now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+    span = 3 * 365 * 86400
+    for n in range(count):
+        folder = os.path.join(source, f"batch-{n // 100:04d}")
+        os.makedirs(folder, exist_ok=True)
+        ext = SYNTHETIC_TYPES[n % len(SYNTHETIC_TYPES)]
+        path = os.path.join(folder, f"file-{n:06d}" + (f".{ext}" if ext else ""))
+        with open(path, "wb") as handle:
+            handle.truncate((n * 7919) % 50_000_000 + 1)
+        stamp = now - span * n / max(count, 1)
+        os.utime(path, (stamp, stamp))
+
+
 def iso(seconds):
     return datetime.datetime.fromtimestamp(int(seconds), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -116,6 +148,7 @@ def main():
     parser.add_argument("--source", default=os.path.expanduser("~/Downloads"))
     parser.add_argument("--mode", choices=["top", "files"], default="top")
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--synthetic", type=int)
     args = parser.parse_args()
     if args.history:
         if not args.source_file:
@@ -128,6 +161,9 @@ def main():
     real = os.path.expanduser("~/Library/Application Support/ReArc")
     if os.path.realpath(out) == os.path.realpath(real):
         sys.exit("seed-downloads: refusing to write into the real ReArc data dir")
+    if args.synthetic is not None:
+        make_synthetic(os.path.expanduser(args.source), args.synthetic)
+        args.mode = "files"
     items = sorted(entries(os.path.expanduser(args.source), args.mode), key=lambda item: item[2], reverse=True)
     if args.limit is not None:
         items = items[: args.limit]
