@@ -296,6 +296,32 @@ final class Wave20ShellTests: XCTestCase {
         XCTAssertTrue(model.visitHistory.isEmpty)
     }
 
+    /// Break check 426: a favorite double-clicked as it first loaded offered
+    /// "about:blank" as its old name, and a tab archived mid-load kept it.
+    /// A new Chromium engine commits an empty about:blank (no title, then
+    /// "about:blank" at its load stop), then the tab's page with that title.
+    func testANewEnginesBlankDocumentLeavesTheTabsURLAndTitle() {
+        var tab: Tab!
+        var blankTab: Tab!
+        let (model, _) = makeModel { store in
+            tab = store.addTab(kind: .pinned, title: "Swift Package Index", url: URL(string: "https://swiftpackageindex.com/")!)
+            blankTab = store.addTab(kind: .today, title: "New Tab", url: URL(string: "about:blank")!)
+        }
+        let url = URL(string: "https://swiftpackageindex.com/")!
+        let blank = URL(string: "about:blank")!
+        model.handleTabNavigationCommit(tabID: tab.id, url: blank, title: "")
+        model.handleTabNavigationCommit(tabID: tab.id, url: blank, title: "about:blank")
+        XCTAssertEqual(model.store.tab(withID: tab.id)?.url, url)
+        XCTAssertEqual(model.store.tab(withID: tab.id)?.title, "Swift Package Index")
+        model.handleTabNavigationCommit(tabID: tab.id, url: url, title: "about:blank")
+        XCTAssertEqual(model.store.tab(withID: tab.id)?.title, "Swift Package Index")
+        XCTAssertNotEqual(model.visitHistory.record(for: url)?.title, "about:blank")
+        model.handleTabNavigationCommit(tabID: tab.id, url: url, title: "Swift Package Index – Home")
+        XCTAssertEqual(model.store.tab(withID: tab.id)?.title, "Swift Package Index – Home")
+        model.handleTabNavigationCommit(tabID: blankTab.id, url: blank, title: "about:blank")
+        XCTAssertEqual(model.store.tab(withID: blankTab.id)?.title, "about:blank", "a tab on about:blank keeps that title")
+    }
+
     func testChoosingAHistoryRowNavigatesTheTargetTab() {
         var tab: Tab!
         let (model, _) = makeModel { store in

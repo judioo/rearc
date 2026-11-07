@@ -20,7 +20,8 @@ struct FavoritesRowView: View {
         let layout = FavoritesGridLayout(itemCount: favorites.count,
                                          availableWidth: Double(model.sidebarWidth - 2 * SidebarMetrics.rowInset))
         VStack(spacing: 0) {
-            LazyVGrid(columns: Array(repeating: GridItem(.fixed(layout.tileWidth), spacing: FavoritesGridLayout.spacing),
+            // Top-aligned: a tile renaming with its field under it doesn't push its neighbours down.
+            LazyVGrid(columns: Array(repeating: GridItem(.fixed(layout.tileWidth), spacing: FavoritesGridLayout.spacing, alignment: .top),
                                      count: layout.columns), spacing: FavoritesGridLayout.spacing) {
                 ForEach(favorites) { tab in
                     FavoriteIconView(
@@ -173,7 +174,10 @@ private struct FavoriteIconView: View {
         VStack(spacing: 3) {
             tile
                 .onTapGesture { model.selectTab(tab.id) }
-                .simultaneousGesture(TapGesture(count: 2).onEnded { model.beginRename(.tab(tab.id)) })
+                // A double-tap gesture never fired on a favorite that wasn't
+                // selected: the first click loads its page, and SwiftUI drops
+                // the second while the tile redraws. The click count still says 2.
+                .background(DoubleClickMonitor { model.beginRename(.tab(tab.id)) })
             if let rename = SidebarRowRename(row: tab.id, model: model) {
                 rename.field().frame(width: width, height: 22)
             }
@@ -220,5 +224,54 @@ private struct FavoriteIconView: View {
             }
             .help(tab.displayTitle)
             .onHover { isHovering = $0 }
+    }
+}
+
+/// Reports a double-click in its frame from the window's events, which
+/// pass on untouched, so the tile's tap, drag and menu keep working.
+private struct DoubleClickMonitor: NSViewRepresentable {
+    var onDoubleClick: () -> Void
+
+    func makeNSView(context: Context) -> MonitorView {
+        let view = MonitorView(frame: .zero)
+        view.onDoubleClick = onDoubleClick
+        return view
+    }
+
+    func updateNSView(_ nsView: MonitorView, context: Context) {
+        nsView.onDoubleClick = onDoubleClick
+    }
+
+    static func dismantleNSView(_ nsView: MonitorView, coordinator: ()) {
+        nsView.stopMonitoring()
+    }
+
+    final class MonitorView: NSView {
+        var onDoubleClick: (() -> Void)?
+        private var monitor: Any?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            stopMonitoring()
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+                self?.handle(event)
+                return event
+            }
+        }
+
+        func stopMonitoring() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
+
+        private func handle(_ event: NSEvent) {
+            guard event.clickCount == 2, let window, event.window === window, !isHiddenOrHasHiddenAncestor,
+                  bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+            // After the event, so the rename field comes up once the click is done with.
+            DispatchQueue.main.async { [weak self] in self?.onDoubleClick?() }
+        }
     }
 }

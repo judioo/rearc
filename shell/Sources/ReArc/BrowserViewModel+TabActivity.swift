@@ -223,7 +223,7 @@ extension BrowserViewModel {
         ), !tab.isUnread {
             store.setUnread(true, for: tabID)
         }
-        if !engine.isLoading, let title, !title.isEmpty, title != tab.title,
+        if !engine.isLoading, let title, !title.isEmpty, title != tab.title, !Self.isBlankDocumentTitle(title, for: tab.url),
            engine.currentURL.map({ $0.absoluteString == tab.url.absoluteString }) ?? false {
             store.updateTab(tabID, title: title)
         }

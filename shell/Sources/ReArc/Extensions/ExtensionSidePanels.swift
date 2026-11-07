@@ -176,14 +176,18 @@ struct ExtensionSidePanelPane: View {
                     .font(.system(size: 11, weight: .semibold)).frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
+            // Plain, in the label colour: a borderless button takes the theme's
+            // tint, which on a light theme all but vanished (#D7D9F3 on #EFE7EE).
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
             .help(extensions.pins.pinnedIDs.contains(panel.extensionID) ? "Unpin from toolbar" : "Pin to toolbar")
             .accessibilityLabel(extensions.pins.pinnedIDs.contains(panel.extensionID) ? "Unpin \(panel.title) from toolbar" : "Pin \(panel.title) to toolbar")
             Button { controller.close(in: window) } label: {
                 Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)).frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
             .help("Close side panel")
             .accessibilityLabel("Close \(panel.title) side panel")
         }

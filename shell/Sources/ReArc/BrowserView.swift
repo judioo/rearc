@@ -374,6 +374,10 @@ struct BrowserView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(.ultraThinMaterial, in: Capsule())
+                // Over the page's top right, under the card's toolbar row (or a
+                // split pane's) so it covers neither the split nor site controls.
+                .padding(10)
+                .padding(.top, showsCardToolbar ? CardToolbarView.height : 0)
                 .help("Page zoom — click to reset to 100% (⌘0)")
         }
     }

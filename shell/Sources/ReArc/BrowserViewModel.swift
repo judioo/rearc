@@ -1054,10 +1054,23 @@ final class BrowserViewModel {
         }
     }
 
+    /// A new engine's first document is an empty about:blank, and its title
+    /// ("about:blank") is still the page title when the tab's own page commits.
+    /// The tab (its row, a rename's old name, the archive) keeps its own title
+    /// until the page's arrives.
+    static func isBlankDocumentTitle(_ title: String?, for url: URL) -> Bool {
+        title == "about:blank" && url.absoluteString != "about:blank"
+    }
+
     func handleTabNavigationCommit(tabID: Tab.ID, url: URL?, title: String?) {
         boostSessionApplyByTab[tabID] = BoostSessionApplyMap()
         lastNavigationAt[tabID] = Date()
         guard let url else { return }
+        // That empty document commits before the tab's page: not the tab going
+        // to about:blank, so its URL and title stay (break check 426).
+        if url.absoluteString == "about:blank", let tab = store.tab(withID: tabID), tab.url.absoluteString != "about:blank",
+           engineHost.engine(forTabID: tabID, profileID: profileID(for: tab))?.canGoBack != true { return }
+        let title = Self.isBlankDocumentTitle(title, for: url) ? nil : title
         recordVisit(tabID: tabID, url: url, title: title)
         let resolvedTitle = (title?.isEmpty == false) ? title : nil
         let fallback = store.tab(withID: tabID)?.title ?? url.host() ?? "Page"
