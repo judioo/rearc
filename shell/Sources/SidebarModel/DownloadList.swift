@@ -467,8 +467,13 @@ public struct DownloadList: Codable, Equatable, Sendable {
     @discardableResult
     public mutating func appendArchived(_ archived: [DownloadRecord]) -> Int {
         var added = 0
-        records.reserveCapacity(records.count + archived.count)
-        orders.reserveCapacity(records.count + archived.count)
+        // Doubling: reserving exactly count + chunk reallocated, and copied
+        // every row, for each chunk.
+        let needed = records.count + archived.count
+        if records.capacity < needed { records.reserveCapacity(max(needed, records.capacity * 2)) }
+        if orders.capacity < needed { orders.reserveCapacity(max(needed, orders.capacity * 2)) }
+        // The ids' table rehashed as it grew, several times per chunk.
+        if idCounts.capacity < needed { idCounts.reserveCapacity(max(needed, idCounts.capacity * 2)) }
         for record in archived where idCounts[record.id] == nil {
             insertRecord(record, atFront: false)
             added += 1
@@ -630,8 +635,21 @@ public enum DownloadFormat {
     /// Chromium `DOWNLOAD_INTERRUPT_REASON_USER_SHUTDOWN`.
     public static let shutdownInterruptReason: UInt32 = 41
 
+    /// Formatters are thread-safe; this one is made once.
+    private static let byteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+
     public static func bytes(_ count: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: max(count, 0), countStyle: .file)
+        byteFormatter.string(fromByteCount: max(count, 0))
+    }
+
+    /// The first format loads the system ICU's number data (~10 ms): do it
+    /// on a worker at launch, not in the first tray row's `body`.
+    public static func prepare() {
+        DispatchQueue.global(qos: .utility).async { _ = bytes(1) }
     }
 
     public static func remaining(seconds: Double) -> String {

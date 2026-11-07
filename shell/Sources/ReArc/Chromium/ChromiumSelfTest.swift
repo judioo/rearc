@@ -824,7 +824,10 @@ final class ChromiumSelfTest {
         controller.setDirectory(directory)
         let backend = ChromiumDownloadBackend(runtime: runtime, controller: controller)
         backend.install()
-        defer { runtime.onDownloadEvent = nil }
+        defer {
+            runtime.onDownloadEvent = nil
+            runtime.onDownloadEvents = nil
+        }
         try check(runtime.downloadDirectory == directory.standardizedFileURL, "policy directory \(runtime.downloadDirectory?.path ?? "nil")")
         let rejected = "relative/dir".withCString { ReArcDownloadSetPolicy(engine.engineProfileID, $0, 0) }
         try check(rejected == ReArcStatus(REARC_INVALID_ARGUMENT), "relative policy directory returned \(rejected.rearcName)")
@@ -844,7 +847,8 @@ final class ChromiumSelfTest {
         let size = (try? FileManager.default.attributesOfItem(atPath: small.targetPath))?[.size] as? Int ?? -1
         try check(small.targetPath.hasPrefix(directory.standardizedFileURL.path), "saved to \(small.targetPath), not the policy directory")
         try check(size == LoopbackFixtureServer.smallDownloadSize, "saved file has \(size) bytes")
-        try check(controller.isTrayPresented && controller.startCount >= 1, "a new download did not open the tray")
+        try check(controller.startCount >= 1, "a new download did not pulse the downloads button")
+        try check(!controller.isTrayPresented, "a new download opened the tray popover")
         // The pending entry's URL may show while the navigation turns into a download; it must not stick.
         try await wait("tab still on page A after the attachment", timeout: 5) { engine.currentURL?.path == "/a" }
         controller.perform(.remove, on: small.id)

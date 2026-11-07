@@ -56,6 +56,7 @@ struct ChromiumCapabilities: Equatable {
     static let searchEnginesFeature = "search_engines"
     static let extensionSidePanelsFeature = "extension_side_panels"
     static let downloadHistoryFeature = "download_history"
+    static let downloadEventBatchesFeature = "download_event_batches"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -108,6 +109,7 @@ struct ChromiumCapabilities: Equatable {
         searchEnginesFeature: 46,
         extensionSidePanelsFeature: 47,
         downloadHistoryFeature: 48,
+        downloadEventBatchesFeature: 49,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -220,6 +222,9 @@ struct ChromiumCapabilities: Equatable {
     /// Sliced history loads with a live-item limit, archived rows paged off the
     /// main thread (`ReArcDownloadSetHistoryPolicy`, `ReArcDownloadQueryArchived`); requires `downloads`.
     var downloadHistory: Bool
+    /// Download events in batches with their items' times
+    /// (`ReArcEngineSetDownloadBatchCallback`); requires `downloads`.
+    var downloadEventBatches: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -278,6 +283,7 @@ struct ChromiumCapabilities: Equatable {
         searchEngines = adopted(Self.searchEnginesFeature)
         extensionSidePanels = extensionActions && adopted(Self.extensionSidePanelsFeature)
         downloadHistory = downloads && adopted(Self.downloadHistoryFeature)
+        downloadEventBatches = downloads && adopted(Self.downloadEventBatchesFeature)
     }
 
     /// Inspect in the page menu: the shell opens a hosted frontend itself
@@ -355,6 +361,7 @@ struct ChromiumCapabilities: Equatable {
             (Self.searchEnginesFeature, searchEngines),
             (Self.extensionSidePanelsFeature, extensionSidePanels),
             (Self.downloadHistoryFeature, downloadHistory),
+            (Self.downloadEventBatchesFeature, downloadEventBatches),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

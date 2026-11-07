@@ -9,6 +9,9 @@ import SidebarModel
 /// at the window's leading edge floats it over the page until the pointer
 /// leaves (Arc `SidebarHovering`).
 struct BrowserView: View {
+    /// The browser window's smallest content size (the Chromium shell sets it on the window).
+    static let minimumSize = CGSize(width: 760, height: 520)
+
     @Bindable var model: BrowserViewModel
     @Environment(\.openWindow) private var openWindow
     /// This window's identity for its own focused space (Arc `focusedSpaceID`).
@@ -128,7 +131,7 @@ struct BrowserView: View {
         // Arc's bar is complete in its first frame: it opens without a
         // transition and only fades out (docs/PERF-BASELINE.md, "Arc vs ReArc").
         .animation(model.isCommandBarPresented ? nil : .easeInOut(duration: 0.15), value: model.isCommandBarPresented)
-        .frame(minWidth: 760, minHeight: 520)
+        .frame(minWidth: Self.minimumSize.width, minHeight: Self.minimumSize.height)
         .background(
             DragSessionEndMonitor(isActive: draggedItemID != nil) { draggedItemID = nil }
                 .frame(width: 0, height: 0)

@@ -216,7 +216,7 @@ final class Wave20ShellTests: XCTestCase {
         XCTAssertEqual(backend.directories, [DownloadsController.defaultDirectory], "the engine learns the directory on install")
 
         controller.apply(download(.created, "a"), source: .chromium)
-        XCTAssertTrue(controller.isTrayPresented, "a new download opens the tray")
+        XCTAssertFalse(controller.isTrayPresented, "a new download pulses the button; only a click opens the tray")
         XCTAssertEqual(controller.startCount, 1)
         controller.apply(download(.created, "old", state: .complete), source: .chromium)
         XCTAssertEqual(controller.startCount, 1, "restored history does not count as a start")

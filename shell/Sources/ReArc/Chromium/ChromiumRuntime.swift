@@ -464,8 +464,10 @@ struct ChromiumDownloadEvent {
     var downloadID: UInt32
     var tabID: UInt64
     var event: DownloadEvent
+    /// The item's own start and end (ABI 1.49 batches carry them); nil: ask `downloadTimes`.
+    var times: (started: Date, ended: Date?)?
 
-    init?(_ pointer: UnsafePointer<ReArcDownloadEvent>?) {
+    init?(_ pointer: UnsafePointer<ReArcDownloadEvent>?, times: ReArcDownloadTimes? = nil) {
         guard let e = pointer?.pointee, let kind = DownloadEvent.Kind(rawValue: e.kind) else { return nil }
         profileID = e.profile_id
         downloadID = e.download_id
@@ -484,12 +486,27 @@ struct ChromiumDownloadEvent {
             isPaused: e.paused,
             canResume: e.can_resume
         )
+        if let times, times.start_time_us > 0 {
+            func date(_ micros: Int64) -> Date { Date(timeIntervalSince1970: Double(micros) / 1_000_000) }
+            self.times = (date(times.start_time_us), times.end_time_us > 0 ? date(times.end_time_us) : nil)
+        }
     }
 }
 
 private let downloadCallback: ReArcDownloadCallback = { context, event in
     guard let copied = ChromiumDownloadEvent(event) else { return }
     MainActor.assumeIsolated { runtime(from: context).handleDownload(copied) }
+}
+
+/// ABI 1.49: a history slice's created events in one call, with their times.
+private let downloadBatchCallback: ReArcDownloadBatchCallback = { context, events, times, count in
+    guard let events, count > 0 else { return }
+    var copied: [ChromiumDownloadEvent] = []
+    copied.reserveCapacity(Int(count))
+    for i in 0 ..< Int(count) {
+        if let event = ChromiumDownloadEvent(events + i, times: times?[i]) { copied.append(event) }
+    }
+    MainActor.assumeIsolated { runtime(from: context).handleDownloads(copied) }
 }
 
 /// Process-wide host side of the engine C ABI. Immortal: callback contexts must
@@ -532,6 +549,8 @@ final class ChromiumRuntime {
     var onProfileEvent: ((String) -> Void)?
     /// Download events (ABI 1.17), for the shell's tray.
     var onDownloadEvent: ((ChromiumDownloadEvent) -> Void)?
+    /// A batch of download events (ABI 1.49), in order; without it each goes to `onDownloadEvent`.
+    var onDownloadEvents: (([ChromiumDownloadEvent]) -> Void)?
     /// A profile's download history finished loading (ABI 1.48), after its live items' events.
     var onDownloadHistoryLoaded: ((ChromiumDownloadHistoryInfo) -> Void)?
     /// Page fullscreen requests and exits (ABI 1.27); without a handler the engine refuses requests.
@@ -755,6 +774,7 @@ final class ChromiumRuntime {
         if capabilities.downloads {
             // Before any tab exists; each profile gets its policy when it opens.
             ReArcEngineSetDownloadCallback(downloadCallback, context)
+            if capabilities.downloadEventBatches { ReArcEngineSetDownloadBatchCallback(downloadBatchCallback, context) }
             registerDownloadHistoryChannel(context: context)
             applyDownloadPolicy(profile: defaultProfileID)
         }
@@ -1273,13 +1293,23 @@ final class ChromiumRuntime {
     }
 
     fileprivate func handleDownload(_ download: ChromiumDownloadEvent) {
+        traceDownload(download)
+        onDownloadEvent?(download)
+    }
+
+    fileprivate func handleDownloads(_ downloads: [ChromiumDownloadEvent]) {
+        guard let onDownloadEvents else { return downloads.forEach(handleDownload) }
+        if ChromiumLog.traceEnabled { downloads.forEach(traceDownload) }
+        onDownloadEvents(downloads)
+    }
+
+    private func traceDownload(_ download: ChromiumDownloadEvent) {
         let e = download.event
         ChromiumLog.trace(
             "download_event \(e.kind) profile \(download.profileID) id \(download.downloadID) tab \(download.tabID) "
                 + "state \(e.state) \(e.receivedBytes)/\(e.totalBytes) paused \(e.isPaused) resumable \(e.canResume) "
                 + "danger \(e.dangerType) interrupt \(e.interruptReason) path \(e.targetPath.isEmpty ? "-" : e.targetPath)"
         )
-        onDownloadEvent?(download)
     }
 
     // MARK: Downloads (ABI 1.17)

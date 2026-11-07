@@ -499,11 +499,13 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let spaceID = saved.flatMap { model.store.restoredSpaceID(saved: $0.spaceID, profileID: $0.profileID) }
         // Registered before the view exists, so its first frame shows its own space.
         if let spaceID { model.store.registerWindow(windowID, spaceID: spaceID) }
-        let window = makeWindow(
-            size: NSSize(width: 1280, height: 820),
-            title: "ReArc",
-            content: NSHostingView(rootView: BrowserView(model: model, windowID: windowID, initialSpaceID: spaceID))
-        )
+        let hosting = NSHostingView(rootView: BrowserView(model: model, windowID: windowID, initialSpaceID: spaceID))
+        // The window's limits are fixed: with the default sizing options every
+        // SwiftUI update measured the whole tree for its minimum size, the
+        // Library's rows included (~40 ms per update at 39,413 downloads).
+        hosting.sizingOptions = []
+        let window = makeWindow(size: NSSize(width: 1280, height: 820), title: "ReArc", content: hosting)
+        window.contentMinSize = BrowserView.minimumSize
         if let saved {
             // Placed before the first order-in: the early window goes up where it was, with no jump.
             window.applySavedPlacement(saved)

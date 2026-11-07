@@ -24,33 +24,70 @@ private let downloadHistoryCallback: ReArcDownloadHistoryCallback = { context, i
 }
 
 /// One `ReArcDownloadQueryArchived` completion, retained across the call.
-private final class ArchivedPageBox {
+/// Only the main thread calls `body`.
+private final class ArchivedPageBox: @unchecked Sendable {
     let body: (ReArcStatus, [DownloadRecord], UInt32) -> Void
     init(_ body: @escaping (ReArcStatus, [DownloadRecord], UInt32) -> Void) { self.body = body }
 }
 
+/// Making 1,000 records' strings took ~12 ms of the main thread per page:
+/// the callback copies the borrowed rows' bytes, a worker makes the records,
+/// and `body` gets them on main.
 private let archivedPageCallback: ReArcDownloadRowsCallback = { context, status, rows, count, total in
     guard let context else { return }
     let box = Unmanaged<ArchivedPageBox>.fromOpaque(context).takeRetainedValue()
-    var records: [DownloadRecord] = []
-    if status == .rearcOK, let rows {
-        records.reserveCapacity(Int(count))
-        for row in UnsafeBufferPointer(start: rows, count: Int(count)) {
-            records.append(ChromiumDownloadHistory.record(row))
-        }
+    guard status == .rearcOK, let rows, count > 0 else {
+        return MainActor.assumeIsolated { box.body(status, [], total) }
     }
-    MainActor.assumeIsolated { box.body(status, records, total) }
+    let page = ArchivedPage(UnsafeBufferPointer(start: rows, count: Int(count)))
+    DispatchQueue.global(qos: .userInitiated).async {
+        let records = page.records()
+        DispatchQueue.main.async { box.body(status, records, total) }
+    }
 }
 
-enum ChromiumDownloadHistory {
-    /// An archived row as a finished tray record (its own start and end times).
-    static func record(_ row: ReArcDownloadRow) -> DownloadRecord {
-        func string(_ pointer: UnsafePointer<CChar>?) -> String { pointer.map { String(cString: $0) } ?? "" }
+/// Archived rows' strings as bytes in one buffer, owned past the callback.
+private struct ArchivedPage: Sendable {
+    private struct Row: Sendable {
+        var strings: (Range<Int>, Range<Int>, Range<Int>, Range<Int>)  // guid, url, target path, MIME type
+        var receivedBytes, totalBytes, startTime, endTime: Int64
+        var dangerType: UInt32
+    }
+
+    private var bytes: [UInt8] = []
+    private var rows: [Row] = []
+
+    init(_ borrowed: UnsafeBufferPointer<ReArcDownloadRow>) {
+        rows.reserveCapacity(borrowed.count)
+        bytes.reserveCapacity(borrowed.count * 160)
+        func copy(_ pointer: UnsafePointer<CChar>?) -> Range<Int> {
+            let start = bytes.count
+            if let pointer {
+                let count = strlen(pointer)
+                pointer.withMemoryRebound(to: UInt8.self, capacity: count) {
+                    bytes.append(contentsOf: UnsafeBufferPointer(start: $0, count: count))
+                }
+            }
+            return start ..< bytes.count
+        }
+        for row in borrowed {
+            rows.append(Row(strings: (copy(row.guid), copy(row.url), copy(row.target_path), copy(row.mime_type)),
+                            receivedBytes: row.received_bytes, totalBytes: row.total_bytes,
+                            startTime: row.start_time_us, endTime: row.end_time_us, dangerType: row.danger_type))
+        }
+    }
+
+    /// Finished tray records with their own start and end times.
+    func records() -> [DownloadRecord] {
+        func string(_ range: Range<Int>) -> String { String(decoding: bytes[range], as: UTF8.self) }
         func date(_ micros: Int64) -> Date { Date(timeIntervalSince1970: Double(micros) / 1_000_000) }
-        return DownloadRecord(id: string(row.guid), source: .chromium, url: string(row.url), targetPath: string(row.target_path),
-                              mimeType: string(row.mime_type), receivedBytes: row.received_bytes, totalBytes: row.total_bytes,
-                              state: .complete, dangerType: row.danger_type, startedAt: date(row.start_time_us),
-                              updatedAt: row.end_time_us > 0 ? date(row.end_time_us) : nil)
+        return rows.map { row in
+            DownloadRecord(id: string(row.strings.0), source: .chromium, url: string(row.strings.1),
+                           targetPath: string(row.strings.2), mimeType: string(row.strings.3),
+                           receivedBytes: row.receivedBytes, totalBytes: row.totalBytes, state: .complete,
+                           dangerType: row.dangerType, startedAt: date(row.startTime),
+                           updatedAt: row.endTime > 0 ? date(row.endTime) : nil)
+        }
     }
 }
 

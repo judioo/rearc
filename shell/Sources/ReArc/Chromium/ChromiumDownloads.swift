@@ -32,6 +32,7 @@ final class ChromiumDownloadBackend: DownloadBackend {
     func install() {
         guard runtime.capabilities.downloads, let controller else { return }
         runtime.onDownloadEvent = { [weak self] in self?.handle($0) }
+        runtime.onDownloadEvents = { [weak self] in self?.handle($0) }
         runtime.onDownloadHistoryLoaded = { [weak self] info in
             guard info.archivedRows > 0 else { return }
             self?.appendArchived(profile: info.profileID, from: 0)
@@ -66,6 +67,19 @@ final class ChromiumDownloadBackend: DownloadBackend {
     }
 
     func handle(_ download: ChromiumDownloadEvent) {
+        controller?.apply(prepare(download), source: .chromium)
+        refreshWarning(download)
+    }
+
+    /// ABI 1.49: a batch (a history slice's created events) goes to the
+    /// tray in one list change.
+    func handle(_ downloads: [ChromiumDownloadEvent]) {
+        controller?.apply(downloads.map(prepare), source: .chromium)
+        downloads.forEach(refreshWarning)
+    }
+
+    /// Keeps the item's handle and gives a restored item its own dates.
+    private func prepare(_ download: ChromiumDownloadEvent) -> DownloadEvent {
         eventCount += 1
         let guid = download.event.guid
         if download.event.kind == .removed {
@@ -78,12 +92,11 @@ final class ChromiumDownloadBackend: DownloadBackend {
         var event = download.event
         // An item restored from history (created, already finished) keeps its own dates (ABI 1.48).
         if event.kind == .created, event.state != .inProgress,
-           let times = runtime.downloadTimes(profile: download.profileID, id: download.downloadID) {
+           let times = download.times ?? runtime.downloadTimes(profile: download.profileID, id: download.downloadID) {
             event.startedAt = times.started
             event.endedAt = times.ended
         }
-        controller?.apply(event, source: .chromium)
-        refreshWarning(download)
+        return event
     }
 
     /// ABI 1.24: the warning booleans, not the danger code, say whether Keep
@@ -127,6 +140,7 @@ final class ChromiumDownloadBackend: DownloadBackend {
                 return
             }
             for record in records where self.handles[record.id] == nil { self.archived[record.id] = profile }
+            self.archivedPages[profile, default: []].reserveCapacity(Int(total))
             self.archivedPages[profile, default: []].append(contentsOf: records)
             let next = offset + UInt32(records.count)
             if !records.isEmpty, next < total {

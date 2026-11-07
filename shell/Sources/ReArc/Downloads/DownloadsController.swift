@@ -51,7 +51,10 @@ final class DownloadsController {
     }
     /// False when the running engine cannot ask (Chromium before ABI 1.19).
     var canAskWhereToSave = true
-    /// Shown in the key browser window's sidebar.
+    /// Shown in the key browser window's sidebar. Only the button opens it:
+    /// a new download shows the bar's button, which pulses and fills its
+    /// ring, as Arc's bar does, rather than presenting a popover (~60 ms of
+    /// SwiftUI layout in the download's first frame).
     var isTrayPresented = false
     /// Bumped when a new download starts (the tray button pulses).
     private(set) var startCount = 0
@@ -107,8 +110,9 @@ final class DownloadsController {
     /// ~8 ms of engine work each, and the shell's share of a turn should
     /// leave room for SwiftUI's update in the same frame.
     static let appTurnBudget: TimeInterval = 0.004
-    /// Archived rows go in this many at a time.
-    static let archivedChunk = 2_000
+    /// Archived rows go in this many at a time: one chunk is one apply, so
+    /// it should fit in a turn's budget (2,000 took ~15 ms of one turn).
+    static let archivedChunk = 500
 
     static var defaultDirectory: URL {
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
@@ -130,6 +134,7 @@ final class DownloadsController {
         askWhereToSave = contents.askWhereToSave ?? false
         webKit.controller = self
         refreshSummary()
+        DownloadFormat.prepare()
     }
 
     var records: [DownloadRecord] { list.records }
@@ -203,6 +208,16 @@ final class DownloadsController {
         scheduleDrain()
     }
 
+    /// Events in order (ABI 1.49 batches), as `apply(_:source:now:)` each, in one list change.
+    func apply(_ events: [DownloadEvent], source: DownloadSource, now: Date = Date()) {
+        guard !events.isEmpty else { return }
+        guard let budget = turnBudget, !pending.isEmpty || turnSpent(budget) else {
+            return applyNow(events.map { (event: $0, source: source, now: now) })
+        }
+        for event in events { pending.append(.event(event, source, now)) }
+        scheduleDrain()
+    }
+
     /// Work still waiting for a later turn (the bench waits until there is none).
     var hasPendingWork: Bool { !pending.isEmpty }
 
@@ -213,10 +228,7 @@ final class DownloadsController {
         for (change, (event, _, _)) in zip(changes, events) {
             // Chromium replays its whole history at launch: only a row that has a warning writes the observed map.
             if event.kind == .removed || event.state != .inProgress, warnings[event.guid] != nil { warnings[event.guid] = nil }
-            if case .inserted = change, event.state == .inProgress {
-                startCount += 1
-                isTrayPresented = true
-            }
+            if case .inserted = change, event.state == .inProgress { startCount += 1 }
             if event.kind != .updated { immediately = true }
         }
         refreshSummary()
@@ -240,7 +252,7 @@ final class DownloadsController {
     private func scheduleDrain() {
         guard !drainScheduled else { return }
         drainScheduled = true
-        Self.nextTurn { [weak self] in self?.drainPending() }
+        Self.afterYield { [weak self] in self?.drainPending() }
     }
 
     /// One turn's share of the waiting work: runs of events in one change to
@@ -283,6 +295,14 @@ final class DownloadsController {
     private static func nextTurn(_ block: @escaping () -> Void) {
         CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue, block)
         CFRunLoopWakeUp(CFRunLoopGetMain())
+    }
+
+    /// Runs `block` from a 1 ms timer: the run loop fires a timer at most once
+    /// a pass, so each budgeted turn gets its own pass, with input and the
+    /// display link in between. A performed block can run several times in
+    /// one pass, and a 2,000-row drain ran ~15 ms without a break.
+    private static func afterYield(_ block: @escaping () -> Void) {
+        RunLoop.main.add(Timer(timeInterval: 0.001, repeats: false) { _ in block() }, forMode: .common)
     }
 
     // MARK: Tray actions
