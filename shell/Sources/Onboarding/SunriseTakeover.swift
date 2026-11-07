@@ -9,19 +9,19 @@ public final class SunrisePlayer: ObservableObject {
     @Published public private(set) var exitStart: Date?
     @Published public var muted = false { didSet { audio?.muted = muted } }
     /// Act 1, from Begin on.
-    @Published public private(set) var act1: Act1Log?
+    @Published public private(set) var act1: Act1Log? { didSet { rescore() } }
     @Published public var name = "" { didSet { edited(oldValue) } }
     /// Swatch under the keyboard's arrows.
     var keyboardSwatch: Int?
     /// Act 2, from the colour pick on.
-    @Published public private(set) var act2: Act2Log?
+    @Published public private(set) var act2: Act2Log? { didSet { rescore() } }
     /// Other browsers' profiles; scanned (read-only) while Act 1 plays.
     public var sources: [ImportSource]?
     public var usesDemoSources = false
     /// Act 3, after the blue sweep.
-    @Published public private(set) var act3: Act3Log?
+    @Published public private(set) var act3: Act3Log? { didSet { rescore() } }
     /// Act 4: the motto, then the window.
-    @Published public private(set) var act4: Act4Log?
+    @Published public private(set) var act4: Act4Log? { didSet { rescore() } }
     public let reduced: Bool
     public var line = "Good morning."
     public enum Mode: Sendable { case firstRun, replay }
@@ -44,6 +44,12 @@ public final class SunrisePlayer: ObservableObject {
     }
 
     var cues: SunriseCues { reduced ? .reduced : .of(variant) }
+
+    /// Every act's sounds follow from its log: re-scored on each change, so
+    /// what you do is heard the moment it is drawn.
+    func rescore() {
+        audio?.update(SunriseScore.build(act1: act1, act2: act2, act3: act3, act4: act4), sceneTime: time(at: Date()))
+    }
 
     public func time(at date: Date) -> Double { date.timeIntervalSince(startDate) }
 
@@ -78,7 +84,6 @@ public final class SunrisePlayer: ObservableObject {
         if mode == .replay { finish(); return }
         guard act1 == nil, exitStart == nil else { return }
         act1 = Act1Log(start: time(at: Date()))
-        audio?.cue(.begin)
         if sources == nil {
             if let host {
                 host.discoverSources { [weak self] found in self?.sources = found }
@@ -96,7 +101,6 @@ public final class SunrisePlayer: ObservableObject {
         if name.count > 40 { name = String(name.prefix(40)); return }
         log.edits.append((time(at: Date()), name))
         act1 = log
-        if name.count > old.count { audio?.cue(.key(name.count)) }
     }
 
     public func submit() {
@@ -104,7 +108,6 @@ public final class SunrisePlayer: ObservableObject {
         guard var log = act1, log.submitted == nil, !trimmed.isEmpty else { return }
         log.submitted = (time(at: Date()), trimmed)
         act1 = log
-        audio?.cue(.submit)
     }
 
     var choosing: Bool {
@@ -116,14 +119,12 @@ public final class SunrisePlayer: ObservableObject {
         guard choosing, var log = act1, log.hovers.last?.index != index else { return }
         log.hovers.append((time(at: Date()), index))
         act1 = log
-        if let index { audio?.cue(.hover(index)) }
     }
 
     public func pick(_ index: Int) {
         guard choosing, var log = act1 else { return }
         log.picked = (time(at: Date()), index)
         act1 = log
-        audio?.cue(.pick(index))
         DispatchQueue.main.asyncAfter(deadline: .now() + Act1Timeline.confirmHold) { [weak self] in
             guard self?.act1?.picked != nil else { return }
             self?.startAct2()
@@ -161,14 +162,12 @@ public final class SunrisePlayer: ObservableObject {
         guard act2Ready, var log = act2 else { return }
         log.toggles.append((time(at: Date()), i))
         act2 = log
-        audio?.cue(.toggle)
     }
 
     public func toggleCategory(_ c: ImportCategory) {
         guard act2Ready, var log = act2 else { return }
         log.categories.append((time(at: Date()), c))
         act2 = log
-        audio?.cue(.toggle)
     }
 
     public func choose(_ bring: Bool) {
@@ -176,7 +175,7 @@ public final class SunrisePlayer: ObservableObject {
         let now = time(at: Date())
         log.choice = (now, bring)
         act2 = log
-        guard let done = log.done, let handOff = log.handOff else { return }
+        guard let handOff = log.handOff else { return }
         if log.bringing, let host {
             let kept = log.sources.indices.filter { log.isOn(source: $0, at: now) }.map { log.sources[$0] }
             let categories = log.offered.filter { log.isOn($0, at: now) }
@@ -187,14 +186,6 @@ public final class SunrisePlayer: ObservableObject {
                 self.importedSpaces = outcome.spaces
             }
         }
-        if log.bringing {
-            audio?.cue(.bring)
-            for (t, n) in Act2Timeline.arrivalTimes(log) { audio?.cue(.arrival(n), at: t - now + (audio?.synth.time ?? 0)) }
-            audio?.cue(.restored, at: done - now + (audio?.synth.time ?? 0))
-        } else {
-            audio?.cue(.refocused, at: done - now + (audio?.synth.time ?? 0))
-        }
-        audio?.cue(.sweep, at: done + 1.4 - now + (audio?.synth.time ?? 0))
         DispatchQueue.main.asyncAfter(deadline: .now() + handOff - now) { [weak self] in
             guard self?.act2?.choice != nil else { return }
             self?.startAct3()
@@ -240,21 +231,18 @@ public final class SunrisePlayer: ObservableObject {
     public func selectSpace(_ id: Int?) {
         guard id != selectedSpace else { return }
         record(.select(id))
-        if let id { audio?.cue(.space(id)) }
     }
 
-    public func addSpace() { record(.add); audio?.cue(.addSpace) }
+    public func addSpace() { record(.add) }
 
     public func removeSelectedSpace() {
         guard let id = selectedSpace else { return }
-        record(.remove(id)); audio?.cue(.removeSpace)
+        record(.remove(id))
     }
 
     public func spacesDone() {
-        guard act3Ready, let log = act3 else { return }
-        let count = log.state(at: time(at: Date())).spaces.filter { $0.removed == nil }.count
+        guard act3Ready else { return }
         record(.done)
-        audio?.cue(.finale(count))
         DispatchQueue.main.asyncAfter(deadline: .now() + Act3Timeline.finale) { [weak self] in self?.startAct4() }
     }
 
@@ -263,7 +251,6 @@ public final class SunrisePlayer: ObservableObject {
         let now = time(at: Date())
         let log = Act4Log.after(act1: act1, act2: act2, act3: act3, start: now)
         act4 = log
-        audio?.schedule(log, now: now)
         host?.apply(OnboardingResult.from(act1: act1, act3: act3, at: now))
         // The real window goes in under the drawn one once that is complete.
         DispatchQueue.main.asyncAfter(deadline: .now() + Act4Timeline.flight + 2.7) { [weak self] in self?.onReveal?() }
@@ -276,8 +263,8 @@ public final class SunrisePlayer: ObservableObject {
                 get: { self.act3.flatMap { log in log.state(at: self.time(at: Date())).spaces.first { $0.id == self.selectedSpace }?.name } ?? "" },
                 set: { name in if let id = self.selectedSpace { self.record(.rename(id, String(name.prefix(32)))) } }),
             select: { self.selectSpace($0) },
-            colour: { c in if let id = self.selectedSpace { self.record(.colour(id, c)); self.audio?.cue(.toggle) } },
-            icon: { i in if let id = self.selectedSpace { self.record(.icon(id, i)); self.audio?.cue(.toggle) } },
+            colour: { c in if let id = self.selectedSpace { self.record(.colour(id, c)) } },
+            icon: { i in if let id = self.selectedSpace { self.record(.icon(id, i)) } },
             add: { self.addSpace() },
             remove: { self.removeSelectedSpace() },
             done: { self.spacesDone() })
@@ -371,6 +358,12 @@ final class TakeoverWindow: NSWindow {
     override var canBecomeMain: Bool { true }
 }
 
+/// The first click on the sunrise counts even while ReArc is not yet the active
+/// app (launched from Terminal, say): it activates the app and presses Begin.
+final class TakeoverHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// Act 0 over the whole screen: the desktop dims under the night sky, the menu
 /// bar and Dock step aside, and everything comes back when it hands over.
 @MainActor
@@ -379,6 +372,7 @@ public final class SunriseTakeover {
     let windowed: Bool
     var window: NSWindow?
     var monitor: Any?
+    var activation: NSObjectProtocol?
 
     let isPrototype: Bool
 
@@ -399,7 +393,7 @@ public final class SunriseTakeover {
         window.hasShadow = windowed
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.fullScreenAuxiliary, .moveToActiveSpace]
-        window.contentView = NSHostingView(rootView: SunriseLiveView(player: player, showsVariantPicker: showsVariantPicker))
+        window.contentView = TakeoverHostingView(rootView: SunriseLiveView(player: player, showsVariantPicker: showsVariantPicker))
         self.window = window
         player.onReveal = { [weak self] in self?.reveal() }
     }
@@ -410,8 +404,19 @@ public final class SunriseTakeover {
             onFinished()
         }
         if !windowed { NSApp.presentationOptions = [.hideDock, .hideMenuBar] }
-        NSApp.activate(ignoringOtherApps: true)
+        // macOS only lets an app take the keyboard from the frontmost one when
+        // it was launched to the front (Finder, the Dock, `open`); from a bare
+        // `swift run` it asks and may be refused. The sunrise is on top either
+        // way, and whenever ReArc becomes active it takes the keyboard back.
+        NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
+        activation = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let window = self?.window, window.isVisible else { return }
+                window.makeKeyAndOrderFront(nil)
+            }
+        }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handle(event) == true ? nil : event
         }
@@ -484,6 +489,8 @@ public final class SunriseTakeover {
     public func dismiss() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
+        if let activation { NotificationCenter.default.removeObserver(activation) }
+        activation = nil
         window?.orderOut(nil)
         NSApp.presentationOptions = []
     }
