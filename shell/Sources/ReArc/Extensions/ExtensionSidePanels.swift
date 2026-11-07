@@ -65,9 +65,9 @@ final class ExtensionSidePanelController {
 extension View {
     /// The window's content with its extension side panel beside it
     /// (`ExtensionSidePanelSplit`).
-    func extensionSidePanel(_ controller: ExtensionSidePanelController, window: SidebarWindowID,
+    func extensionSidePanel(_ extensions: ExtensionsController, window: SidebarWindowID,
                             sidebarSide: SidebarSide = .left, topInset: CGFloat = 10, isHidden: Bool) -> some View {
-        ExtensionSidePanelSplit(controller: controller, window: window, sidebarSide: sidebarSide, topInset: topInset,
+        ExtensionSidePanelSplit(extensions: extensions, window: window, sidebarSide: sidebarSide, topInset: topInset,
                                 isHidden: isHidden) { self }
     }
 }
@@ -77,7 +77,8 @@ extension View {
 /// width: opening, closing and resizing never evaluate the sidebar or the
 /// page card again, they are only laid out narrower.
 struct ExtensionSidePanelSplit<Content: View>: View {
-    let controller: ExtensionSidePanelController
+    let extensions: ExtensionsController
+    private var controller: ExtensionSidePanelController { extensions.sidePanels }
     let window: SidebarWindowID
     /// `SidePanelPlacement` puts the pane on the other side.
     var sidebarSide: SidebarSide = .left
@@ -103,7 +104,7 @@ struct ExtensionSidePanelSplit<Content: View>: View {
     }
 
     private func pane(_ panel: ExtensionSidePanelController.Shown, side: SidebarSide) -> some View {
-        ExtensionSidePanelPane(controller: controller, window: window, panel: panel, side: side, topInset: topInset,
+        ExtensionSidePanelPane(extensions: extensions, window: window, panel: panel, side: side, topInset: topInset,
                                available: available)
             .id(panel.panelID)
             .transition(.move(edge: side == .right ? .trailing : .leading))
@@ -114,7 +115,8 @@ struct ExtensionSidePanelSplit<Content: View>: View {
 /// chrome, its page in a card below, and a resize edge facing the page. A
 /// drag resizes only this view; the width is saved when it ends.
 struct ExtensionSidePanelPane: View {
-    let controller: ExtensionSidePanelController
+    let extensions: ExtensionsController
+    private var controller: ExtensionSidePanelController { extensions.sidePanels }
     let window: SidebarWindowID
     let panel: ExtensionSidePanelController.Shown
     let side: SidebarSide
@@ -157,6 +159,14 @@ struct ExtensionSidePanelPane: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 4)
+            Button { extensions.togglePin(panel.extensionID) } label: {
+                Image(systemName: extensions.pins.pinnedIDs.contains(panel.extensionID) ? "pin.fill" : "pin")
+                    .font(.system(size: 11, weight: .semibold)).frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .help(extensions.pins.pinnedIDs.contains(panel.extensionID) ? "Unpin from toolbar" : "Pin to toolbar")
+            .accessibilityLabel(extensions.pins.pinnedIDs.contains(panel.extensionID) ? "Unpin \(panel.title) from toolbar" : "Pin \(panel.title) to toolbar")
             Button { controller.close(in: window) } label: {
                 Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)).frame(width: 22, height: 22)
                     .contentShape(Rectangle())

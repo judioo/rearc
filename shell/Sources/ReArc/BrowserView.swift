@@ -46,7 +46,7 @@ struct BrowserView: View {
             }
             .overlay(alignment: .topTrailing) { if !isPageFullscreen { zoomBadge } }
             // An extension's side panel, opposite the sidebar (ABI 1.47).
-            .extensionSidePanel(model.extensions.sidePanels, window: windowID, sidebarSide: placement.side,
+            .extensionSidePanel(model.extensions, window: windowID, sidebarSide: placement.side,
                                 topInset: placement.trafficLightsInSidebar ? Self.cardInset : TrafficLightPositioner.cardClearance,
                                 isHidden: isPageFullscreen)
             // The sidebar and card run up under the title bar: the traffic
