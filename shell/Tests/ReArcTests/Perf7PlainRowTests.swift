@@ -93,6 +93,30 @@ final class Perf7PlainRowTests: XCTestCase {
         XCTAssertFalse(hosted(after))
     }
 
+    /// A row hosted for the pointer whose exit never arrives reads where the
+    /// pointer is and goes back to plain (Break check 2026-11-08). The window
+    /// is far off screen and never ordered in, so the pointer is never over it.
+    func testRowWithALostExitGoesBackToPlain() throws {
+        let (store, _, controller, table) = makeController()
+        let t = store.addTab(kind: .today, title: "T", url: url("t"))
+        let window = NSWindow(contentRect: NSRect(x: -30000, y: -30000, width: 228, height: 600),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        window.contentView = table.enclosingScrollView
+        drain()
+        table.layoutSubtreeIfNeeded()
+        let index = try XCTUnwrap(controller.rows.firstIndex { $0.id == .item(t.id) })
+        let row = try XCTUnwrap(table.view(atColumn: 0, row: index, makeIfNecessary: true) as? SidebarPlainRowCell)
+        XCTAssertNotNil(row.window)
+        let enter = try XCTUnwrap(NSEvent.enterExitEvent(
+            with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, trackingNumber: 0, userData: nil))
+        row.mouseEntered(with: enter)
+        XCTAssertTrue(hosted(row))
+        let deadline = Date().addingTimeInterval(2)
+        while hosted(row), Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        XCTAssertFalse(hosted(row))
+    }
+
     func testOnlyTabAndFolderRowsArePlain() {
         let tab = SidebarOutlineRow(node: SidebarOutlineNode(id: UUID(), kind: .tab), depth: 0)
         let split = SidebarOutlineRow(node: SidebarOutlineNode(id: UUID(), kind: .split), depth: 0)

@@ -296,13 +296,16 @@ final class SidebarPlainRowCell: NSView {
         setAccessibilityElement(true)
     }
 
-    /// While a held button or an open menu keeps the row live, check again
-    /// until neither does.
+    /// While the pointer, a held button or an open menu keeps the row live,
+    /// check again until none does. The pointer is read, not only waited
+    /// for: a move that leaves within a few milliseconds of the one that
+    /// entered can lose its exit, and the row stayed hosted and hovered with
+    /// the pointer gone (Break check 2026-11-08).
     private func updateKeepAlive() {
-        let needed = hosting != nil && !pointerInside && controller?.hostsAllRows != true && !state.needsHosting
+        let needed = hosting != nil && controller?.hostsAllRows != true && !state.needsHosting
         if needed, keepAliveTimer == nil {
             keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.updateHosting() }
+                MainActor.assumeIsolated { self?.recheckPointer() }
             }
         } else if !needed {
             keepAliveTimer?.invalidate()
@@ -372,6 +375,13 @@ final class SidebarPlainRowCell: NSView {
             updateFill()
         }
         updateHosting()
+    }
+
+    /// `syncPointer`, and an exit it finds ends the row's hover preview too.
+    private func recheckPointer() {
+        let wasInside = pointerInside
+        syncPointer()
+        if wasInside, !pointerInside, let rowID { controller?.hoverPreview.pointerExited(rowID) }
     }
 
     /// A press that reaches the plain row (the pointer arrived without an
