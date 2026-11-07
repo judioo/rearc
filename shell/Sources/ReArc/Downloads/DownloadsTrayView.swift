@@ -64,12 +64,8 @@ struct DownloadsButton: View {
 struct DownloadsTrayView: View {
     /// Rows the popover lists. It is open while a download starts, which is
     /// when Chromium replays its history: every update copied and diffed a
-    /// `ForEach` over the whole list. The Library pages through every row.
+    /// `ForEach` over the whole list. The Library lists every row.
     static let popoverLimit = DownloadList.defaultLimit
-    /// The Library lists this many rows more each time its end scrolls into
-    /// view: SwiftUI walked a `ForEach` over every row (39,413) on each update
-    /// while the history arrived, lazy stack or not.
-    static let libraryPage = 300
 
     let downloads: DownloadsController
     /// On the Library's Downloads page: full width and height, no title.
@@ -78,8 +74,6 @@ struct DownloadsTrayView: View {
     var query = ""
     /// The popover's "Show All" (Library › Downloads); nil hides it.
     var showAll: (() -> Void)?
-    /// Rows the Library lists so far.
-    @State private var libraryLimit = Self.libraryPage
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -111,7 +105,7 @@ struct DownloadsTrayView: View {
             .padding(.vertical, 10)
             Divider()
             let matching = downloads.matching(query)
-            let records = matching.prefix(embedded ? libraryLimit : Self.popoverLimit)
+            let records = embedded ? matching[...] : matching.prefix(Self.popoverLimit)
             if records.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "arrow.down.circle")
@@ -126,12 +120,6 @@ struct DownloadsTrayView: View {
                     LazyVStack(spacing: 2) {
                         ForEach(records) { record in
                             DownloadRowView(record: record, downloads: downloads)
-                        }
-                        if embedded, matching.count > records.count {
-                            ProgressView()
-                                .controlSize(.small)
-                                .frame(maxWidth: .infinity, minHeight: 32)
-                                .onAppear { libraryLimit = records.count + Self.libraryPage }
                         }
                     }
                     .padding(6)
@@ -148,7 +136,6 @@ struct DownloadsTrayView: View {
             }
         }
         .frame(width: embedded ? nil : 340)
-        .onChange(of: query) { _, _ in libraryLimit = Self.libraryPage }
     }
 }
 
