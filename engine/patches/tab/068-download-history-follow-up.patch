@@ -1,0 +1,654 @@
+From c9c8372ce5d32763b97b0bed253b7b0b7eb47ed4 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Sat, 7 Nov 2026 12:45:00 +0400
+Subject: [PATCH] P-TAB-001 download history follow-up: archived rows on
+ demand, a drain budget and a cheaper download start
+
+Archived rows (tab/067) were invisible to Chromium's own surfaces:
+chrome://downloads and the downloads extension API saw only live items, so
+downloads.search's documented startedAfter paging, limit 0, erase and an ID
+from an earlier session missed every row past the newest 5,000.
+DownloadHistory::RestoreArchivedRows reads the rows again from the History
+DB (archived rows keep a summary only), keeps those still archived and
+creates them as items newest first, in the initial load's 8 ms slices; the
+live limit is then lifted for the session and on_loaded runs again. Rows
+removed while it runs are not restored; one already made an item is removed
+as an item. DownloadsUI::CreatePageHandler and every downloads extension
+function but download() restore first; a function waits (RespondLater) and
+fails as a queued function does if the history goes away.
+DownloadsListTracker::InsertItem walks only as far as the rows the page
+holds: a full std::distance per created item made a restore under an open
+page quadratic (~9 s at 39,413 rows).
+
+Every download's start drew Chromium's Dock tile in the download's own task
+(the app icon's lookup and image, and an NSNumberFormatter per draw that
+loaded the system ICU's locale data). The tile is now drawn one DockIcon
+period (5 Hz) later, coalesced, and its count uses base::FormatNumber.
+CancelAllEphemeralWarnings, run when the history load completes, skips
+complete items (Cancel is a no-op for them) before building a
+DownloadItemModel for each.
+
+The bridge delivers host callbacks for at most 8 ms per task; a longer burst
+continues in the next task, in order. The flush after ChromeMain returns is
+not budgeted.
+
+Bridge 0.51.0. No ABI change: ABI 1.48 layouts and functions are unchanged.
+
+Last rebased: 2026-11-07 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../chrome_download_manager_delegate.cc       |   6 +
+ chrome/browser/download/download_history.cc   | 172 +++++++++++++++++-
+ chrome/browser/download/download_history.h    |  27 +++
+ .../download/download_status_updater_mac.mm   |  21 ++-
+ .../extensions/api/downloads/downloads_api.cc |  45 +++++
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  12 +-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |  20 +-
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ chrome/browser/ui/cocoa/dock_icon.mm          |   9 +-
+ .../webui/downloads/downloads_list_tracker.cc |  11 +-
+ .../ui/webui/downloads/downloads_ui.cc        |   7 +
+ 11 files changed, 313 insertions(+), 19 deletions(-)
+
+diff --git a/chrome/browser/download/chrome_download_manager_delegate.cc b/chrome/browser/download/chrome_download_manager_delegate.cc
+index e02fd70ae8..6481af8b30 100644
+--- a/chrome/browser/download/chrome_download_manager_delegate.cc
++++ b/chrome/browser/download/chrome_download_manager_delegate.cc
+@@ -2761,6 +2761,12 @@ void ChromeDownloadManagerDelegate::CancelAllEphemeralWarnings() {
+   content::DownloadManager::DownloadVector downloads;
+   download_manager_->GetAllDownloads(&downloads);
+   for (download::DownloadItem* download : downloads) {
++    // ReArc: Cancel() leaves a complete download as it is, so skip complete
++    // history items before building a model for each (an O(N) pass of tens
++    // of milliseconds when the history load completes).
++    if (download->GetState() == download::DownloadItem::COMPLETE) {
++      continue;
++    }
+     auto model = std::make_unique<DownloadItemModel>(download);
+     if (model->IsEphemeralWarning() &&
+         model->GetState() != download::DownloadItem::CANCELLED) {
+diff --git a/chrome/browser/download/download_history.cc b/chrome/browser/download/download_history.cc
+index b283283c81..303392a286 100644
+--- a/chrome/browser/download/download_history.cc
++++ b/chrome/browser/download/download_history.cc
+@@ -43,6 +43,8 @@
+ #include "base/supports_user_data.h"
+ #include "base/task/thread_pool.h"
+ #include "build/build_config.h"
++#include "chrome/browser/download/download_core_service.h"
++#include "chrome/browser/download/download_core_service_factory.h"
+ #include "chrome/browser/download/download_crx_util.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "components/download/public/common/download_features.h"
+@@ -302,6 +304,11 @@ struct DownloadHistory::PreparedLoad {
+   size_t created = 0;
+ };
+ 
++struct DownloadHistory::RestoreLoad {
++  std::vector<history::DownloadRow> rows;  // still archived, newest first
++  size_t next = 0;
++};
++
+ // static
+ void DownloadHistory::SetLoadPolicy(content::BrowserContext* context,
+                                     size_t live_limit,
+@@ -711,17 +718,38 @@ size_t DownloadHistory::RemoveArchivedRows(
+     return 0;
+   }
+   // Published rows are immutable: a removal publishes a new vector.
++  scoped_refptr<const ArchivedRows> archived = archived_rows_;
+   std::vector<ArchivedRow> kept;
+   IdSet removed;
+-  for (const ArchivedRow& row : archived_rows_->data) {
+-    if (guids.contains(row.guid)) {
+-      removed.insert(row.id);
+-    } else {
++  size_t removed_items = 0;
++  for (const ArchivedRow& row : archived->data) {
++    if (!guids.contains(row.guid)) {
+       kept.push_back(row);
++      continue;
++    }
++    if (restoring_) {
++      // A row the restore already made an item goes as an item; the rest
++      // must not become items.
++      restore_removed_.insert(row.guid);
++      download::DownloadItem* item =
++          notifier_.GetManager()
++              ? notifier_.GetManager()->GetDownloadByGuid(row.guid)
++              : nullptr;
++      if (item) {
++        item->Remove();
++        ++removed_items;
++        continue;
++      }
+     }
++    removed.insert(row.id);
+   }
+   if (removed.empty()) {
+-    return 0;
++    if (removed_items) {
++      archived_rows_ =
++          kept.empty() ? nullptr
++                       : base::MakeRefCounted<ArchivedRows>(std::move(kept));
++    }
++    return removed_items;
+   }
+   archived_rows_ = kept.empty()
+                        ? nullptr
+@@ -730,7 +758,7 @@ size_t DownloadHistory::RemoveArchivedRows(
+   for (Observer& observer : observers_) {
+     observer.OnDownloadsRemoved(removed);
+   }
+-  return removed.size();
++  return removed.size() + removed_items;
+ }
+ 
+ void DownloadHistory::RemoveArchivedRowsByURLAndTime(
+@@ -759,6 +787,138 @@ void DownloadHistory::RemoveArchivedRowsByURLAndTime(
+   RemoveArchivedRows(guids);
+ }
+ 
++// static
++DownloadHistory* DownloadHistory::ForContext(content::BrowserContext* context) {
++  DownloadCoreService* service =
++      context ? DownloadCoreServiceFactory::GetForBrowserContext(context)
++              : nullptr;
++  return service ? service->GetDownloadHistory() : nullptr;
++}
++
++void DownloadHistory::RestoreArchivedRows(base::OnceClosure done) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  if (!initial_history_query_complete_) {
++    after_load_.push_back(base::BindOnce(&DownloadHistory::RestoreArchivedRows,
++                                         weak_ptr_factory_.GetWeakPtr(),
++                                         std::move(done)));
++    return;
++  }
++  if (!has_archived_rows()) {
++    std::move(done).Run();
++    return;
++  }
++  after_restore_.push_back(std::move(done));
++  if (restoring_) {
++    return;
++  }
++  restoring_ = true;
++  // Archived rows keep a summary only: items need the database's full rows.
++  history_->QueryDownloads(base::BindOnce(
++      &DownloadHistory::RestoreQueryCallback, weak_ptr_factory_.GetWeakPtr()));
++}
++
++// static
++std::unique_ptr<DownloadHistory::RestoreLoad>
++DownloadHistory::PrepareRestoreRows(std::vector<history::DownloadRow> rows,
++                                    scoped_refptr<const ArchivedRows> archived) {
++  std::set<std::string> guids;
++  for (const ArchivedRow& row : archived->data) {
++    guids.insert(row.guid);
++  }
++  auto load = std::make_unique<RestoreLoad>();
++  for (history::DownloadRow& row : rows) {
++    if (guids.contains(row.guid)) {
++      load->rows.push_back(std::move(row));
++    }
++  }
++  std::sort(load->rows.begin(), load->rows.end(),
++            [](const history::DownloadRow& a, const history::DownloadRow& b) {
++              if (a.start_time != b.start_time) {
++                return a.start_time > b.start_time;
++              }
++              return a.id > b.id;
++            });
++  return load;
++}
++
++void DownloadHistory::RestoreQueryCallback(
++    std::vector<history::DownloadRow> rows) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  if (!notifier_.GetManager()) {
++    return;
++  }
++  if (!archived_rows_) {
++    FinishRestore();
++    return;
++  }
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE,
++      {base::TaskPriority::USER_VISIBLE,
++       base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
++      base::BindOnce(&DownloadHistory::PrepareRestoreRows, std::move(rows),
++                     scoped_refptr<const ArchivedRows>(archived_rows_)),
++      base::BindOnce(&DownloadHistory::RestorePrepared,
++                     weak_ptr_factory_.GetWeakPtr()));
++}
++
++void DownloadHistory::RestorePrepared(std::unique_ptr<RestoreLoad> load) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  if (!notifier_.GetManager()) {
++    return;
++  }
++  restore_load_ = std::move(load);
++  RestoreSlice();
++}
++
++void DownloadHistory::RestoreSlice() {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  content::DownloadManager* manager = notifier_.GetManager();
++  if (!manager || !restore_load_) {
++    return;
++  }
++  const base::TimeTicks deadline =
++      base::TimeTicks::Now() + kHistoryLoadSliceBudget;
++  RestoreLoad& load = *restore_load_;
++  while (load.next < load.rows.size()) {
++    const history::DownloadRow& row = load.rows[load.next++];
++    // Removed meanwhile (the host, clearing browsing data), or an item now.
++    if (!restore_removed_.contains(row.guid) &&
++        !manager->GetDownloadByGuid(row.guid) &&
++        LoadHistoryRow(row, base::FilePath())) {
++      ++live_row_count_;
++    }
++    manager = notifier_.GetManager();
++    if (!manager) {
++      return;
++    }
++    if (load.next < load.rows.size() && base::TimeTicks::Now() >= deadline) {
++      content::GetUIThreadTaskRunner({})->PostTask(
++          FROM_HERE, base::BindOnce(&DownloadHistory::RestoreSlice,
++                                    weak_ptr_factory_.GetWeakPtr()));
++      return;
++    }
++  }
++  base::ThreadPool::PostTask(
++      FROM_HERE, {base::TaskPriority::BEST_EFFORT},
++      base::DoNothingWithBoundArgs(std::move(restore_load_)));
++  FinishRestore();
++}
++
++void DownloadHistory::FinishRestore() {
++  // Every archived row is an item now, or was removed.
++  archived_rows_ = nullptr;
++  restoring_ = false;
++  restore_removed_.clear();
++  for (base::OnceClosure& closure : std::exchange(after_restore_, {})) {
++    std::move(closure).Run();
++  }
++  const LoadPolicyData* policy =
++      GetLoadPolicy(notifier_.GetManager()->GetBrowserContext());
++  if (policy && policy->on_loaded) {
++    policy->on_loaded.Run();
++  }
++}
++
+ void DownloadHistory::MaybeAddToHistory(download::DownloadItem* item) {
+   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+ 
+diff --git a/chrome/browser/download/download_history.h b/chrome/browser/download/download_history.h
+index 4d66154ee2..648a7466b1 100644
+--- a/chrome/browser/download/download_history.h
++++ b/chrome/browser/download/download_history.h
+@@ -156,8 +156,21 @@ class DownloadHistory : public download::AllDownloadItemNotifier::Observer {
+       base::Time remove_begin,
+       base::Time remove_end);
+ 
++  // ReArc: Chromium's own surfaces see archived rows as items. Before the
++  // downloads extension API or chrome://downloads use the history, every
++  // archived row is restored as an item (read again from the database, in
++  // slices like the initial load, newest first); the live limit is then lifted
++  // for the session. |done| runs once no row is archived: at once when none
++  // is, else after the initial load and the restore. on_loaded runs again.
++  void RestoreArchivedRows(base::OnceClosure done);
++  // Rows are archived, or being restored.
++  bool has_archived_rows() const { return archived_rows_ || restoring_; }
++  // |context|'s download history, if it was created (null for OTR profiles).
++  static DownloadHistory* ForContext(content::BrowserContext* context);
++
+  private:
+   struct PreparedLoad;
++  struct RestoreLoad;
+   // Callback from |history_| containing all entries in the downloads database
+   // table.
+   void QueryCallback(std::vector<history::DownloadRow> rows);
+@@ -179,6 +192,14 @@ class DownloadHistory : public download::AllDownloadItemNotifier::Observer {
+   // Creates items for the prepared rows until the slice's budget is spent.
+   void LoadHistorySlice();
+ #endif
++  // ReArc: RestoreArchivedRows' steps.
++  static std::unique_ptr<RestoreLoad> PrepareRestoreRows(
++      std::vector<history::DownloadRow> rows,
++      scoped_refptr<const ArchivedRows> archived);
++  void RestoreQueryCallback(std::vector<history::DownloadRow> rows);
++  void RestorePrepared(std::unique_ptr<RestoreLoad> load);
++  void RestoreSlice();
++  void FinishRestore();
+   // Creates the item for one row; false when the row was dropped instead.
+   bool LoadHistoryRow(const history::DownloadRow& row,
+                       const base::FilePath& display_name);
+@@ -242,6 +263,12 @@ class DownloadHistory : public download::AllDownloadItemNotifier::Observer {
+   size_t live_row_count_ = 0;
+   scoped_refptr<ArchivedRows> archived_rows_;
+   std::vector<base::OnceClosure> after_load_;
++  // ReArc: the restore in progress, the archived rows removed meanwhile and
++  // the callbacks waiting for it.
++  bool restoring_ = false;
++  std::unique_ptr<RestoreLoad> restore_load_;
++  std::set<std::string> restore_removed_;
++  std::vector<base::OnceClosure> after_restore_;
+ 
+   const base::TimeTicks load_start_time_{base::TimeTicks::Now()};
+ 
+diff --git a/chrome/browser/download/download_status_updater_mac.mm b/chrome/browser/download/download_status_updater_mac.mm
+index 6153a5f418..34e1a07f08 100644
+--- a/chrome/browser/download/download_status_updater_mac.mm
++++ b/chrome/browser/download/download_status_updater_mac.mm
+@@ -7,11 +7,14 @@
+ #import <Foundation/Foundation.h>
+ 
+ #include "base/apple/foundation_util.h"
++#include "base/functional/bind.h"
+ #include "base/memory/raw_ptr_exclusion.h"
+ #include "base/supports_user_data.h"
+ #include "base/time/time.h"
+ #import "chrome/browser/ui/cocoa/dock_icon.h"
+ #include "components/download/public/common/download_item.h"
++#include "content/public/browser/browser_task_traits.h"
++#include "content/public/browser/browser_thread.h"
+ #import "net/base/apple/url_conversions.h"
+ 
+ @interface CrDownloadCanceller : NSObject
+@@ -79,6 +82,13 @@ - (void)invalidate {
+   base::FilePath target_;
+ };
+ 
++// ReArc: the tile is drawn one DockIcon period (5 Hz) later, coalesced.
++// Drawn in the download's first task, its first draw (the app icon's lookup
++// and image, ~15 ms) lengthened the download's start, and the host's
++// downloads UI updates right after it.
++bool g_dock_icon_update_pending = false;
++constexpr base::TimeDelta kDockIconUpdateDelay = base::Hertz(5);
++
+ void UpdateAppDockIcon(int download_count,
+                        bool progress_known,
+                        float progress) {
+@@ -86,7 +96,16 @@ void UpdateAppDockIcon(int download_count,
+   [dock_icon setDownloads:download_count];
+   [dock_icon setIndeterminate:!progress_known];
+   [dock_icon setProgress:progress];
+-  [dock_icon updateIcon];
++  if (g_dock_icon_update_pending) {
++    return;
++  }
++  g_dock_icon_update_pending = true;
++  content::GetUIThreadTaskRunner({base::TaskPriority::USER_VISIBLE})
++      ->PostDelayedTask(FROM_HERE, base::BindOnce([] {
++                          g_dock_icon_update_pending = false;
++                          [[DockIcon sharedDockIcon] updateIcon];
++                        }),
++                        kDockIconUpdateDelay);
+ }
+ 
+ CrNSProgressUserData* CreateOrGetNSProgress(download::DownloadItem* download) {
+diff --git a/chrome/browser/extensions/api/downloads/downloads_api.cc b/chrome/browser/extensions/api/downloads/downloads_api.cc
+index 778884804c..eaa0ae2bac 100644
+--- a/chrome/browser/extensions/api/downloads/downloads_api.cc
++++ b/chrome/browser/extensions/api/downloads/downloads_api.cc
+@@ -39,6 +39,7 @@
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/download/download_core_service.h"
+ #include "chrome/browser/download/download_core_service_factory.h"
++#include "chrome/browser/download/download_history.h"
+ #include "chrome/browser/download/download_danger_prompt.h"
+ #include "chrome/browser/download/download_file_icon_extractor.h"
+ #include "chrome/browser/download/download_prefs.h"
+@@ -570,6 +571,44 @@ void MaybeSetUiEnabled(DownloadCoreService* service,
+   }
+ }
+ 
++// ReArc: a downloads function waiting for archived history rows to become
++// items. Dropped unrun (the history goes away), it fails as a function queued
++// for initialization does when the manager goes down.
++class PendingArchivedRestore {
++ public:
++  explicit PendingArchivedRestore(scoped_refptr<DownloadsFunction> function)
++      : function_(std::move(function)) {}
++  ~PendingArchivedRestore() {
++    if (function_) {
++      function_->OnManagerGoingDown();
++    }
++  }
++  void Run() { std::exchange(function_, nullptr)->ExecuteFromQueue(); }
++
++ private:
++  scoped_refptr<DownloadsFunction> function_;
++};
++
++// ReArc (download history at scale): any downloads function but download()
++// may address an archived history row (search, erase, an ID from an earlier
++// session), so archived rows become items first; true when |function| waits.
++bool RestoreArchivedRowsFirst(DownloadsFunction* function,
++                              content::BrowserContext* context) {
++  if (!context || std::string_view(function->name()) == "downloads.download") {
++    return false;
++  }
++  DownloadHistory* history = DownloadHistory::ForContext(
++      Profile::FromBrowserContext(context)->GetOriginalProfile());
++  if (!history || !history->has_archived_rows()) {
++    return false;
++  }
++  history->RestoreArchivedRows(base::BindOnce(
++      &PendingArchivedRestore::Run,
++      base::Owned(std::make_unique<PendingArchivedRestore>(
++          base::WrapRefCounted(function)))));
++  return true;
++}
++
+ void InitializeDownloadHistory(content::BrowserContext* context) {
+   DownloadCoreService* service =
+       DownloadCoreServiceFactory::GetForBrowserContext(context);
+@@ -1136,11 +1175,17 @@ ExtensionFunction::ResponseAction DownloadsFunction::Run() {
+       return RespondLater();
+     }
+   }
++  if (RestoreArchivedRowsFirst(this, manager->GetBrowserContext())) {
++    return RespondLater();
++  }
+ 
+   return RunInternal();
+ }
+ 
+ void DownloadsFunction::ExecuteFromQueue() {
++  if (RestoreArchivedRowsFirst(this, browser_context())) {
++    return;
++  }
+   ResponseAction action = RunInternal();
+   action.Execute();
+ }
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 9420e7e648..93548e5d9d 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -1203,9 +1203,12 @@ REARC_ENGINE_EXPORT void ReArcEngineSetSidePanelCallback(
+ // item. Otherwise only the newest live_limit complete rows (by start time)
+ // become items, with every unfinished, cancelled or interrupted row and every
+ // row the in-progress DB holds; older complete rows stay in the History DB as
+-// archived rows: no item, no event, not in chrome://downloads or the downloads
+-// extension API. Clearing download history (BrowsingDataRemover) deletes
+-// matching archived rows too. Set before the profile's history load starts,
++// archived rows: no item, no event. Clearing download history
++// (BrowsingDataRemover) deletes matching archived rows too. Before
++// chrome://downloads or a downloads extension function other than download()
++// use the history, every archived row becomes an item (bridge 0.51.0: read
++// again from the database, in slices, with created events), and the limit is
++// lifted for the session. Set before the profile's history load starts,
+ // else invalid_state. OTR profiles have no history: unsupported.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadSetHistoryPolicy(
+     uint64_t profile_id, uint32_t live_limit);
+@@ -1218,7 +1221,8 @@ typedef struct ReArcDownloadHistoryInfo {
+   uint64_t profile_id;
+   uint32_t rows, live_rows, archived_rows;
+ } ReArcDownloadHistoryInfo;
+-// Posted on main once per load, after every live item's created event.
++// Posted on main once per load, after every live item's created event, and
++// again after archived rows were restored as items (archived_rows 0).
+ typedef void (*ReArcDownloadHistoryCallback)(
+     void* context, const ReArcDownloadHistoryInfo* info);
+ REARC_ENGINE_EXPORT void ReArcEngineSetDownloadHistoryCallback(
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index cdd7abecf7..e2505a4041 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -25,6 +25,7 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/strings/string_util.h"
+ #include "base/strings/string_number_conversions.h"
++#include "base/time/time.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -53,6 +54,9 @@
+ namespace rearc {
+ namespace {
+ 
++// Main-thread time one drain of host callbacks may take before it yields.
++constexpr base::TimeDelta kDrainBudget = base::Milliseconds(8);
++
+ struct Window {
+   NSWindow* __strong native = nil;
+   id __strong observer = nil;
+@@ -104,7 +108,10 @@
+     return *state;
+   }
+ 
+-  void Drain() {
++  // A budgeted drain yields after kDrainBudget and continues in a new task,
++  // so a burst (a history slice's created events) never blocks input and
++  // paint for longer than that; order is unchanged.
++  void Drain(bool budgeted = true) {
+     CHECK([NSThread isMainThread]);
+     scheduled = false;
+     // Callbacks may enter a nested native loop; never interleave deliveries.
+@@ -112,7 +119,16 @@ void Drain() {
+       return;
+     }
+     draining = true;
++    const base::TimeTicks deadline = base::TimeTicks::Now() + kDrainBudget;
++    bool delivered = false;
+     while (!deliveries.empty()) {
++      if (budgeted && delivered && base::TimeTicks::Now() >= deadline) {
++        scheduled = true;
++        base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++            FROM_HERE, base::BindOnce([] { Get().Drain(); }));
++        break;
++      }
++      delivered = true;
+       auto callback = std::move(deliveries.front());
+       deliveries.pop_front();
+       // perf-0: one interval per event or completion, dispatch to return.
+@@ -692,7 +708,7 @@ int ReArcEngineRun(int argc, const char* const* argv) {
+   // The scheduler no longer exists. Flush any already captured deliveries
+   // directly, then deliver the terminal lifecycle result from this host frame.
+   a.ready = false;
+-  a.Drain();
++  a.Drain(/*budgeted=*/false);
+   for (auto& [id, window] : a.windows) {
+     [[NSNotificationCenter defaultCenter] removeObserver:window.observer];
+   }
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 131cbaeb42..a7f4283323 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.50.0";
++  return "0.51.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/ui/cocoa/dock_icon.mm b/chrome/browser/ui/cocoa/dock_icon.mm
+index 3cb3285ab0..5027157aad 100644
+--- a/chrome/browser/ui/cocoa/dock_icon.mm
++++ b/chrome/browser/ui/cocoa/dock_icon.mm
+@@ -9,6 +9,8 @@
+ #include "base/apple/bundle_locations.h"
+ #include "base/apple/foundation_util.h"
+ #include "base/check_op.h"
++#include "base/i18n/number_formatting.h"
++#include "base/strings/sys_string_conversions.h"
+ #include "base/time/time.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "ui/gfx/scoped_ns_graphics_context_save_gstate_mac.h"
+@@ -135,9 +137,10 @@ - (void)drawRect:(NSRect)dirtyRect {
+     [strokePath stroke];
+   }
+ 
+-  // Download count
+-  NSNumberFormatter* formatter = [[NSNumberFormatter alloc] init];
+-  NSString* countString = [formatter stringFromNumber:@(_downloads)];
++  // Download count. ReArc: base::FormatNumber's cached ICU formatter; an
++  // NSNumberFormatter per draw loaded the system ICU's locale data (~9 ms).
++  NSString* countString =
++      base::SysUTF16ToNSString(base::FormatNumber(_downloads));
+ 
+   CGFloat countFontSize = 24;
+   NSSize countSize = NSZeroSize;
+diff --git a/chrome/browser/ui/webui/downloads/downloads_list_tracker.cc b/chrome/browser/ui/webui/downloads/downloads_list_tracker.cc
+index 3db0daa4c7..6e753d6b93 100644
+--- a/chrome/browser/ui/webui/downloads/downloads_list_tracker.cc
++++ b/chrome/browser/ui/webui/downloads/downloads_list_tracker.cc
+@@ -591,8 +591,15 @@ void DownloadsListTracker::InsertItem(const SortedSet::iterator& insert) {
+     return;
+   }
+ 
+-  size_t index = GetIndex(insert);
+-  if (index >= chunk_size_ && index >= sent_to_page_) {
++  // ReArc: walk at most as far as the rows the page has. Archived history
++  // rows restored while the page is open arrive past them, and a full
++  // GetIndex per insertion made the restore quadratic (seconds at 40k rows).
++  const size_t limit = std::max(chunk_size_, sent_to_page_);
++  size_t index = 0;
++  for (auto it = sorted_items_.begin(); index < limit && it != insert; ++it) {
++    ++index;
++  }
++  if (index >= limit) {
+     return;
+   }
+ 
+diff --git a/chrome/browser/ui/webui/downloads/downloads_ui.cc b/chrome/browser/ui/webui/downloads/downloads_ui.cc
+index 8955c4bf86..5023b2cd06 100644
+--- a/chrome/browser/ui/webui/downloads/downloads_ui.cc
++++ b/chrome/browser/ui/webui/downloads/downloads_ui.cc
+@@ -8,6 +8,7 @@
+ #include <utility>
+ 
+ #include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
+ #include "base/memory/singleton.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/threading/thread.h"
+@@ -17,6 +18,7 @@
+ #include "chrome/browser/defaults.h"
+ #include "chrome/browser/download/download_core_service.h"
+ #include "chrome/browser/download/download_core_service_factory.h"
++#include "chrome/browser/download/download_history.h"
+ #include "chrome/browser/enterprise/connectors/connectors_service.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/safe_browsing/advanced_protection_status_manager.h"
+@@ -306,6 +308,11 @@ void DownloadsUI::CreatePageHandler(
+     service->InitializeHistory(
+         DownloadCoreService::DownloadHistoryLoadTrigger::kDownloadsPage);
+   }
++  // ReArc: the page lists the whole history; archived rows become items.
++  if (DownloadHistory* history =
++          DownloadHistory::ForContext(profile->GetOriginalProfile())) {
++    history->RestoreArchivedRows(base::DoNothing());
++  }
+   DownloadManager* dlm = profile->GetDownloadManager();
+ 
+   page_handler_ = std::make_unique<DownloadsDOMHandler>(
+-- 
+2.54.0 (Apple Git-157)
+

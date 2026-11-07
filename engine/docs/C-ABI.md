@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.48** (major remains 1 for existing hosts), bridge **0.50.0**, compiled Chromium **156.0.8078.74**. Public header:
+ABI **1.48** (major remains 1 for existing hosts), bridge **0.51.0**, compiled Chromium **156.0.8078.74**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -11,6 +11,9 @@ the contract's serialized order. No C++ or ObjC types cross this interface.
 Every call, including queries and frees, must run on the process main thread;
 entry points CHECK this. Chromium's UI scheduler delivers callbacks on main,
 after mutation/delegate stacks unwind. No main-queue polling pump is involved.
+From bridge 0.51.0 one task delivers callbacks for at most about 8 ms; a longer
+burst (a history slice's created events) continues in the next task, in the
+same order. The final flush after ChromeMain returns is not budgeted.
 Inputs are borrowed for the call and copied if needed afterward. Callback
 structs and UTF-8 strings are borrowed until the callback returns: Swift must
 copy them immediately. Registered callback contexts remain host-owned and must
@@ -2031,3 +2034,36 @@ History DB). Exercised by a scratch host on the release engine at 0, 2,173 and
 39,413 rows and by the shell's `downloads.engine_first_download` bench
 scenario; built and checked: the dev and release engines,
 `check_abi148_imports.py`, `check_c_abi_exports.py`.
+
+### Follow-up (bridge 0.51.0, patch `tab/068-download-history-follow-up`)
+
+No ABI addition: the 1.48 layouts and functions are unchanged. Behaviour:
+
+- **Archived rows reach Chromium's own surfaces on demand.** Before
+  chrome://downloads (`DownloadsUI::CreatePageHandler`) or any downloads
+  extension function except `downloads.download` uses the history, every
+  archived row becomes an item: `DownloadHistory::RestoreArchivedRows` reads the
+  rows again from the History DB (archived rows keep a summary only), keeps
+  those still archived, and creates them newest first in the same ~8 ms slices,
+  each with a created event (kind 0). The extension function waits
+  (`RespondLater`) and then runs on the full history, so `search`, `erase`,
+  `open`/`show` by an old ID and the documented `startedAfter` paging see every
+  row; if the history goes away first it fails as a queued function does when
+  the manager goes down. The live limit is lifted for the rest of the session.
+  The history callback is posted again afterwards, with `archived_rows` 0.
+  Archived rows the host removes while a restore runs are not restored; one
+  already made an item is removed as an item.
+  chrome://downloads' `DownloadsListTracker::InsertItem` now walks only as
+  far as the rows the page holds: its full `std::distance` per created item
+  made a restore under an open page quadratic (~9 s at 39,413 rows).
+- **Callbacks are drained under a time budget** (see the top of this file).
+- **The Dock tile** (`DownloadStatusUpdater`, `DockIcon`) is drawn one 5 Hz
+  period after the change that needs it, coalesced, instead of inside the
+  download's first task, and its count no longer builds an `NSNumberFormatter`
+  per draw.
+- **`CancelAllEphemeralWarnings`** (when the history load completes) skips
+  complete items, for which `Cancel` is a no-op, before building a
+  `DownloadItemModel` for each.
+
+Measurements and the decision are in `docs/DOWNLOADS-AT-SCALE.md`
+("Follow-up").

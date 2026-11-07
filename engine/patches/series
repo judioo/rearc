@@ -72,6 +72,7 @@ tab/065-host-media-capture-search-engines.patch # P-TAB-001 ABI 1.46: tab media 
 chrome/003-chrome-user-agent-identity.patch    # P-BUILD-001 Web Store: UA and client-hints brands as Google Chrome (supersedes chrome/001 hunks)
 tab/066-extension-side-panels.patch          # P-TAB-001 ABI 1.47: chrome.sidePanel panels as hosted registry tabs
 tab/067-download-history-at-scale.patch      # P-TAB-001 ABI 1.48: sliced download history loads, live-item limit, archived rows
+tab/068-download-history-follow-up.patch     # P-TAB-001 bridge 0.51.0: archived rows restored on demand, drain budget, Dock tile off the download's start
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:
