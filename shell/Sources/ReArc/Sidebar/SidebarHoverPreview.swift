@@ -118,10 +118,20 @@ final class SidebarHoverPreview: NSObject, NSPopoverDelegate {
             return
         }
         let popover = self.popover ?? makePopover()
-        popover.contentViewController = NSHostingController(rootView: root)
+        Self.setContent(root, of: popover)
         // On an open popover this moves it to the new row.
         popover.show(relativeTo: cell.bounds, of: cell, preferredEdge: model.sidebarPlacement.hoverPreviewEdge.rectEdge)
         self.popover = popover
+    }
+
+    /// Sized before it's shown. A new popover is 320 × 320 until its
+    /// hosting controller reports a size, after the popover is placed: it
+    /// was centred on the row at that size, then shrank to the card from the
+    /// bottom up, so the card hung about 170 pt above its row.
+    static func setContent(_ root: AnyView, of popover: NSPopover) {
+        let hosting = NSHostingController(rootView: root)
+        popover.contentViewController = hosting
+        popover.contentSize = hosting.view.fittingSize
     }
 
     private func makePopover() -> NSPopover {
