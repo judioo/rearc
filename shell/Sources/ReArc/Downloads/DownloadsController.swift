@@ -68,6 +68,8 @@ final class DownloadsController {
     @ObservationIgnored private var searchIndex = LibraryDownloads.SearchIndex()
     @ObservationIgnored private let fileURL: URL?
     @ObservationIgnored private var saveWorkItem: DispatchWorkItem?
+    /// When the pending save runs; a change due no sooner rides on it.
+    @ObservationIgnored private(set) var saveDeadline: DispatchTime?
     @ObservationIgnored private let workspace: NSWorkspace
 
     static var defaultDirectory: URL {
@@ -133,7 +135,8 @@ final class DownloadsController {
 
     func apply(_ event: DownloadEvent, source: DownloadSource, now: Date = Date()) {
         let change = list.apply(event, source: source, now: now)
-        if event.kind == .removed || event.state != .inProgress { warnings[event.guid] = nil }
+        // Chromium replays its whole history at launch: only a row that has a warning writes the observed map.
+        if event.kind == .removed || event.state != .inProgress, warnings[event.guid] != nil { warnings[event.guid] = nil }
         if case .inserted = change, event.state == .inProgress {
             startCount += 1
             isTrayPresented = true
@@ -223,17 +226,24 @@ final class DownloadsController {
 
     // MARK: Persistence
 
+    /// State changes save within 50 ms, progress within 2 s. A save already
+    /// due by then writes this change too, so a burst of events (a replayed
+    /// history, a transfer's progress) arms one timer, not one per event.
     private func scheduleSave(immediately: Bool) {
         guard fileURL != nil else { return }
+        let deadline = DispatchTime.now() + (immediately ? 0.05 : 2)
+        if saveWorkItem != nil, let due = saveDeadline, due <= deadline { return }
         saveWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.save() }
         saveWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + (immediately ? 0.05 : 2), execute: work)
+        saveDeadline = deadline
+        DispatchQueue.main.asyncAfter(deadline: deadline, execute: work)
     }
 
     func save() {
         saveWorkItem?.cancel()
         saveWorkItem = nil
+        saveDeadline = nil
         guard let fileURL else { return }
         var trimmed = list
         trimmed.trim()
