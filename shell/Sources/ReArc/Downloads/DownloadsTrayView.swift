@@ -1,7 +1,6 @@
 import AppKit
 import SidebarModel
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// The sidebar's downloads button: an arrow that fills a progress ring while
 /// files transfer, pulses when one starts, and shows an orange dot when a
@@ -16,7 +15,7 @@ struct DownloadsButton: View {
     var body: some View {
         Button { isPresented.wrappedValue.toggle() } label: {
             ZStack {
-                if let fraction = downloads.list.activeFraction {
+                if let fraction = downloads.activeFraction {
                     Circle()
                         .stroke(Color.primary.opacity(0.12), lineWidth: 2)
                     Circle()
@@ -100,7 +99,7 @@ struct DownloadsTrayView: View {
                 Button("Clear") { downloads.clearFinished() }
                     .buttonStyle(.borderless)
                     .font(.caption)
-                    .disabled(!downloads.records.contains { !$0.isActive })
+                    .disabled(!downloads.hasFinished)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -191,9 +190,7 @@ struct DownloadRowView: View {
 
     private var icon: some View {
         ZStack(alignment: .bottomTrailing) {
-            Image(nsImage: fileIcon)
-                .resizable()
-                .frame(width: 30, height: 30)
+            DownloadFileIcon(fileName: record.fileName, path: record.hasFileOnDisk ? record.targetPath : "", size: 30)
                 .opacity(record.state == .complete || record.isActive ? 1 : 0.5)
             if isWarned {
                 badge("exclamationmark.triangle.fill", .orange)
@@ -208,17 +205,6 @@ struct DownloadRowView: View {
             .font(.system(size: 11))
             .foregroundStyle(.white, color)
             .offset(x: 3, y: 3)
-    }
-
-    private var fileIcon: NSImage {
-        if record.hasFileOnDisk, FileManager.default.fileExists(atPath: record.targetPath) {
-            return NSWorkspace.shared.icon(forFile: record.targetPath)
-        }
-        let ext = (record.fileName as NSString).pathExtension
-        if !ext.isEmpty, let type = UTType(filenameExtension: ext) {
-            return NSWorkspace.shared.icon(for: type)
-        }
-        return NSWorkspace.shared.icon(for: .data)
     }
 
     private var statusStyle: AnyShapeStyle {
@@ -307,5 +293,41 @@ struct DownloadRowView: View {
             NSPasteboard.general.setString(record.url, forType: .string)
         }
         Button("Remove from List") { downloads.perform(.remove, on: record.id) }
+    }
+}
+
+/// A download's icon: its type's at once, then the file's own (or a
+/// QuickLook thumbnail) once `DownloadFileService` has read it off the main
+/// thread. An empty `path` (no file yet, or not finished) keeps the type's.
+/// Scrolling the row away cancels its read.
+struct DownloadFileIcon: View {
+    let fileName: String
+    let path: String
+    let size: CGFloat
+    var kind: DownloadFileService.ImageKind = .icon
+    @State private var loaded: NSImage?
+    @State private var loadedKey: String?
+    @Environment(\.displayScale) private var scale
+
+    private var pixels: Int { Int((size * scale).rounded(.up)) }
+    private var key: String { "\(path)|\(pixels)|\(kind)" }
+
+    var body: some View {
+        let service = DownloadFileService.shared
+        let image = (loadedKey == key ? loaded : nil)
+            ?? (path.isEmpty ? nil : service.cachedImage(atPath: path, pixels: pixels, kind: kind))
+            ?? service.placeholder(forFileName: fileName)
+        Image(nsImage: image)
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(width: size, height: size)
+            .task(id: key) {
+                guard !path.isEmpty else { return }
+                let key = key
+                let image = await service.image(atPath: path, pixels: pixels, kind: kind)
+                guard !Task.isCancelled, let image else { return }
+                loaded = image
+                loadedKey = key
+            }
     }
 }

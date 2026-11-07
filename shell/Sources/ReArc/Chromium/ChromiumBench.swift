@@ -32,7 +32,7 @@ final class ChromiumBench {
 
     nonisolated static let watchdogSeconds = 2400.0
     /// Scenarios that time no frame: they may run with the display asleep (screen locked, no `caffeinate -u`).
-    static let frameFreeScenarios: Set<String> = ["downloads.engine_first_download"]
+    static let frameFreeScenarios: Set<String> = ["downloads.engine_first_download", "downloads.engine_library_history"]
     static let exitConditions: Int32 = 75
 
     private let runtime: ChromiumRuntime
@@ -1001,6 +1001,7 @@ final class ChromiumBench {
         report.notes.append("downloads: \(full.count) records")
         record("downloads.footprint.start", Self.footprintMB(), unit: "MB")
         try await engineFirstDownload()
+        try await engineLibraryHistory()
 
         try await iterate("downloads.load", count: 5) { _, warmup, contaminated in
             let before = Self.footprintMB()
@@ -1030,7 +1031,9 @@ final class ChromiumBench {
         await quiet()
         let replaying = ProcessInfo.processInfo.systemUptime
         for event in events { model.downloads.apply(event, source: .chromium) }
-        let replayed = await probe.nextFrame(after: window)
+        var replayed = await probe.nextFrame(after: window)
+        // The tray applies a burst a turn's budget at a time: time until it holds every row.
+        while model.downloads.hasPendingWork { replayed = await probe.nextFrame(after: window) }
         record("downloads.history_replay.shell", ms(replaying, replayed?.target))
         try? await Task.sleep(nanoseconds: 2_500_000_000)
         record("downloads.footprint.replayed", Self.footprintMB(), unit: "MB")
@@ -1038,7 +1041,8 @@ final class ChromiumBench {
 
         try await iterate("downloads.recent_latest", count: 10) { _, warmup, contaminated in
             let start = ProcessInfo.processInfo.systemUptime
-            let latest = RecentDownloads.latest(model.downloads.records)
+            // The bar's pick, from the list's kept index (a pass over every row before).
+            let latest = model.downloads.list.latest()
             record("downloads.recent_latest", ms(start, ProcessInfo.processInfo.systemUptime), contaminated: contaminated(), warmup: warmup)
             withExtendedLifetime(latest) {}
         }
@@ -1208,6 +1212,60 @@ final class ChromiumBench {
         record("\(name).footprint_growth", Self.footprintMB() - footprintBefore, unit: "MB")
         report.notes.append("\(name): \(model.downloads.records.count - rowsBefore) rows added to the tray")
         report.notes.append("\(name) stalls (ms at +ms): " + zip(stalls, offsets).map { String(format: "%.0f@%.0f", $0, $1) }.joined(separator: " "))
+        writeReport()
+    }
+
+    /// Library › Downloads opened on the profile's own download history
+    /// (as `engineFirstDownload`): opening it starts Chromium's history load,
+    /// so the rows arrive while the Library lists them. Run it in a launch of
+    /// its own (`--rearc-bench-only`): a first download loads the history
+    /// too. Stalls as in `engineFirstDownload`, from the open until 2.5 s
+    /// after the rows stopped arriving (1 s without a new row).
+    private func engineLibraryHistory() async throws {
+        let name = "downloads.engine_library_history"
+        guard options.runsScenario(name) else { return }
+        scenario = name
+        await quiet()
+        let rowsBefore = model.downloads.records.count
+        let footprintBefore = Self.footprintMB()
+        var last = 0.0, stalls: [Double] = [], offsets: [Double] = []
+        var start = 0.0
+        let timer = Timer(timeInterval: 0.002, repeats: true) { _ in
+            let now = ProcessInfo.processInfo.systemUptime
+            if last > 0, now - last > 0.016 {
+                stalls.append((now - last) * 1000)
+                offsets.append((last - start) * 1000)
+            }
+            last = now
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        start = ProcessInfo.processInfo.systemUptime
+        model.openLibrary(.downloads)
+        var rows = rowsBefore, changed = start
+        var settled: TimeInterval?
+        while ProcessInfo.processInfo.systemUptime < start + 60 {
+            let now = ProcessInfo.processInfo.systemUptime
+            let count = model.downloads.records.count
+            if count != rows {
+                rows = count
+                changed = now
+            }
+            if rows > rowsBefore, now - changed > 1 {
+                settled = changed
+                break
+            }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        timer.invalidate()
+        record("\(name).rows", ms(start, settled))
+        record("\(name).stall_total", stalls.reduce(0, +))
+        record("\(name).stall_max", stalls.max() ?? 0)
+        record("\(name).stalls", Double(stalls.count), unit: "count")
+        record("\(name).footprint_growth", Self.footprintMB() - footprintBefore, unit: "MB")
+        report.notes.append("\(name): \(model.downloads.records.count - rowsBefore) rows added to the Library")
+        report.notes.append("\(name) stalls (ms at +ms): " + zip(stalls, offsets).map { String(format: "%.0f@%.0f", $0, $1) }.joined(separator: " "))
+        model.closeLibrary()
         writeReport()
     }
 

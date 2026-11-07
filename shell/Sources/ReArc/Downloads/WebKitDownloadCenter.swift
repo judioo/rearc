@@ -31,6 +31,10 @@ final class WebKitDownloadCenter: NSObject, DownloadBackend {
     private var idsByDownload: [ObjectIdentifier: String] = [:]
     /// Items being paused or cancelled by the shell: their failure callback is expected.
     private var suppressedFailures: Set<String> = []
+    /// The download folder's file-system calls (a free name, the finished
+    /// file's size, quarantine), kept off the main thread: the folder can be
+    /// on a slow volume or one macOS asks the user about.
+    private let files = DispatchQueue(label: "net.rearc.webkit-download-files", qos: .userInitiated)
 
     /// Chromium-like decision: attachments, and main-frame responses WebKit cannot show.
     static func shouldDownload(response: URLResponse, canShowMIMEType: Bool, isForMainFrame: Bool) -> Bool {
@@ -156,7 +160,7 @@ final class WebKitDownloadCenter: NSObject, DownloadBackend {
     }
 
     /// Marks a finished file as downloaded from the web (Gatekeeper, "downloaded from" in Finder).
-    private func quarantine(_ path: String, origin: String) {
+    private static func quarantine(_ path: String, origin: String) {
         var url = URL(fileURLWithPath: path)
         var values = URLResourceValues()
         var properties: [String: Any] = [
@@ -180,13 +184,20 @@ extension WebKitDownloadCenter: WKDownloadDelegate {
             return completionHandler(nil)
         }
         let directory = controller.directory
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         guard controller.askWhereToSave else {
-            let destination = DownloadFormat.uniqueDestination(for: suggestedFilename, in: directory) {
-                FileManager.default.fileExists(atPath: $0.path)
+            files.async { [weak self] in
+                try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let destination = DownloadFormat.uniqueDestination(for: suggestedFilename, in: directory) {
+                    FileManager.default.fileExists(atPath: $0.path)
+                }
+                DispatchQueue.main.async {
+                    guard let self else { return completionHandler(nil) }
+                    self.start(id, at: destination, response: response, completionHandler: completionHandler)
+                }
             }
-            return start(id, at: destination, response: response, completionHandler: completionHandler)
+            return
         }
+        files.async { try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
         let request = FileChooserRequest(id: 0, mode: .save, defaultPath: directory.appendingPathComponent(suggestedFilename).path)
         _ = filePanels.present(request, in: download.webView?.window) { [weak self] urls in
             guard let self else { return completionHandler(nil) }
@@ -199,8 +210,13 @@ extension WebKitDownloadCenter: WKDownloadDelegate {
                 return
             }
             // The panel already confirmed replacing an existing file.
-            try? FileManager.default.removeItem(at: destination)
-            self.start(id, at: destination, response: response, completionHandler: completionHandler)
+            self.files.async { [weak self] in
+                try? FileManager.default.removeItem(at: destination)
+                DispatchQueue.main.async {
+                    guard let self else { return completionHandler(nil) }
+                    self.start(id, at: destination, response: response, completionHandler: completionHandler)
+                }
+            }
         }
     }
 
@@ -217,17 +233,25 @@ extension WebKitDownloadCenter: WKDownloadDelegate {
 
     func downloadDidFinish(_ download: WKDownload) {
         guard let id = id(for: download), var item = items[id] else { return }
-        if item.total <= 0 { item.total = item.received }
-        if let size = (try? FileManager.default.attributesOfItem(atPath: item.targetPath))?[.size] as? Int64 {
-            item.received = size
-            item.total = max(item.total, size)
-        }
         item.download = nil
         item.observation = nil
         items[id] = item
         idsByDownload[ObjectIdentifier(download)] = nil
-        quarantine(item.targetPath, origin: item.url)
-        emit(id, kind: .completed, state: .complete)
+        let path = item.targetPath, origin = item.url
+        files.async { [weak self] in
+            let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? Int64
+            Self.quarantine(path, origin: origin)
+            DispatchQueue.main.async {
+                guard let self, var item = self.items[id] else { return }
+                if item.total <= 0 { item.total = item.received }
+                if let size {
+                    item.received = size
+                    item.total = max(item.total, size)
+                }
+                self.items[id] = item
+                self.emit(id, kind: .completed, state: .complete)
+            }
+        }
     }
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {

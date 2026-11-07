@@ -1,7 +1,7 @@
 import AppKit
-import QuickLookThumbnailing
 import SwiftUI
 import SidebarModel
+import UniformTypeIdentifiers
 
 /// The slot between the media stack and the bottom bar for Arc's "New Arc
 /// Version Available" pill (ARC-RECORDING-2026-11-06.md §2 rule 6). Empty
@@ -134,7 +134,7 @@ private struct RecentDownloadRow: View {
 
     var body: some View {
         HStack(spacing: RecentDownloadsStack.iconSpacing) {
-            DownloadThumbnail(path: record.targetPath, size: RecentDownloadsStack.iconSize)
+            DownloadFileIcon(fileName: record.fileName, path: record.targetPath, size: RecentDownloadsStack.iconSize, kind: .thumbnail)
             VStack(alignment: .leading, spacing: 0) {
                 Text(record.fileName)
                     .font(.system(size: 13, weight: .bold))
@@ -156,33 +156,26 @@ private struct RecentDownloadRow: View {
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .onTapGesture(perform: open)
-        .onDrag { NSItemProvider(contentsOf: URL(fileURLWithPath: record.targetPath)) ?? NSItemProvider() }
+        .onDrag { Self.dragProvider(for: record.targetPath) }
         .help(record.targetPath)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("\(record.fileName), \(time)")
     }
-}
 
-/// The file as Finder draws it: a QuickLook thumbnail framed like an icon
-/// (page border, shadow), or the type's icon for files without one (a .dmg).
-private struct DownloadThumbnail: View {
-    let path: String
-    let size: CGFloat
-    @State private var thumbnail: NSImage?
-    @Environment(\.displayScale) private var scale
-
-    var body: some View {
-        Image(nsImage: thumbnail ?? NSWorkspace.shared.icon(forFile: path))
-            .resizable()
-            .aspectRatio(contentMode: .fit)
-            .frame(width: size, height: size)
-            .task(id: path) {
-                let request = QLThumbnailGenerator.Request(fileAt: URL(fileURLWithPath: path),
-                                                           size: CGSize(width: size, height: size), scale: scale,
-                                                           representationTypes: [.icon, .thumbnail])
-                request.iconMode = true
-                thumbnail = try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request).nsImage
+    /// The file for a drag, from its path and extension alone:
+    /// `NSItemProvider(contentsOf:)` reads its type from disk on the main
+    /// thread, which blocks on a slow or protected volume.
+    static func dragProvider(for path: String) -> NSItemProvider {
+        let url = URL(fileURLWithPath: path)
+        let provider = NSItemProvider(object: url as NSURL)
+        if let type = UTType(filenameExtension: url.pathExtension) {
+            provider.registerFileRepresentation(forTypeIdentifier: type.identifier, fileOptions: [], visibility: .all) { done in
+                done(url, false, nil)
+                return nil
             }
+        }
+        provider.suggestedName = url.lastPathComponent
+        return provider
     }
 }
 

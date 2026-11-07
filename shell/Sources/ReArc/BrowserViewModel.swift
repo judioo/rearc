@@ -526,7 +526,8 @@ final class BrowserViewModel {
         let reinstallFile = Self.siblingFile(PendingExtensionReinstall.fileName, of: persistence.fileURL)
         self.pendingExtensionReinstallURL = reinstallFile
         self.pendingExtensionReinstall = PendingExtensionReinstall.load(from: reinstallFile)
-        self.downloads = DownloadsController(fileURL: Self.siblingFile(DownloadListFile.fileName, of: persistence.fileURL), prepared: preparedStartup?.downloads)
+        self.downloads = DownloadsController(fileURL: Self.siblingFile(DownloadListFile.fileName, of: persistence.fileURL), prepared: preparedStartup?.downloads,
+                                             turnBudget: DownloadsController.appTurnBudget)
         engineHost.downloadCenter = downloads.webKit
         self.sitePermissions = SitePermissionsController(fileURL: Self.siblingFile(SitePermissionStore.fileName, of: persistence.fileURL), prepared: preparedStartup?.permissions)
         engineHost.sitePermissions = sitePermissions

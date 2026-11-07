@@ -27,12 +27,13 @@ struct BottomBarView: View {
     @State private var libraryReveal = HoverReveal()
     @State private var revealTask: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.displayScale) private var displayScale
 
     static let height: CGFloat = 49
 
     var body: some View {
         let libraryOpen = model.librarySection(in: window) != nil
-        let recent = libraryOpen ? [] : RecentDownloads.latest(model.downloads.records)
+        let recent = libraryOpen ? [] : model.downloads.recent
         let showsDownloads = libraryReveal.isShown && !recent.isEmpty
         VStack(spacing: 0) {
             // The downloads stack takes the update pill's place while shown.
@@ -67,6 +68,11 @@ struct BottomBarView: View {
             }
         }
         .onChange(of: libraryOpen) { _, _ in dismissLibraryHover() }
+        .task(id: recent.map(\.targetPath)) {
+            // The quick view's thumbnails, read before a hover shows them.
+            DownloadFileService.shared.prefetch(paths: recent.map(\.targetPath),
+                                                pixels: Int((RecentDownloadsStack.iconSize * displayScale).rounded(.up)), kind: .thumbnail)
+        }
     }
 
     @ViewBuilder
