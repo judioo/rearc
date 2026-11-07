@@ -1,0 +1,479 @@
+From 594549d9bf7d6cee87db82fe2a3b6b1bc593f4af Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Sat, 7 Nov 2026 17:14:44 +0400
+Subject: [PATCH] P-TAB-001 download event batches: history slices and archived
+ pages yield to the host's run loop
+
+The history load's slices, the bridge's drain of their created events and
+the host's layout ran as one main-thread stall (17-75 ms at 39,413 rows):
+the next slice was an immediate task, so the host's run loop never ran out
+of work between slices. DownloadHistory now creates items in slices of
+about 4 ms (8 ms before) and posts the next slice 4 ms later, after the
+slice's events have been delivered, for the initial load and for a restore;
+the run loop then sleeps and commits a frame between slices. A 1 ms delay
+came due while the events were delivered and changed nothing.
+
+ReArcDownloadQueryArchived posts each completion 1 ms after the worker's
+copy returns: a host that asks for the next page from a page's callback got
+every page in one burst. A drain over its 8 ms budget continues in a task
+1 ms later instead of at once.
+
+ABI 1.49 download_event_batches: ReArcEngineSetDownloadBatchCallback.
+While set, every download event goes to it instead of the per-event
+callback, in the same order relative to every other host callback: events
+queued back to back (a slice's created events) arrive in one call, at most
+1024 per call, each with its item's start and end times
+(ReArcDownloadTimes), so the host makes no ReArcDownloadGetTimes call per
+restored item. A queued batch is extended only while nothing else has been
+posted after it (ABIPostCount). Hosts that do not set it keep one task per
+event. No earlier struct changed.
+
+Bridge 0.52.0, ABI 1.49.
+
+Last rebased: 2026-11-07 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/app/framework.exports                  |   1 +
+ chrome/app/framework.order                    |   1 +
+ chrome/browser/download/download_history.cc   |  27 +++-
+ .../browser/rearc_bridge/rearc_abi_internal.h |   3 +
+ .../rearc_bridge/rearc_downloads_abi.cc       | 153 ++++++++++++++----
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  20 ++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |  19 ++-
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ 8 files changed, 181 insertions(+), 45 deletions(-)
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index d93fe77168..953eaf6d9e 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -131,6 +131,7 @@ _ReArcTabFindStart
+ _ReArcTabFindNext
+ _ReArcTabFindStop
+ _ReArcEngineSetDownloadCallback
++_ReArcEngineSetDownloadBatchCallback
+ _ReArcDownloadSetPolicy
+ _ReArcDownloadAction
+ _ReArcEngineSetJavaScriptDialogCallback
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 4485e611a0..e6904a7bf6 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -142,6 +142,7 @@ _ReArcTabFindStart
+ _ReArcTabFindNext
+ _ReArcTabFindStop
+ _ReArcEngineSetDownloadCallback
++_ReArcEngineSetDownloadBatchCallback
+ _ReArcDownloadSetPolicy
+ _ReArcDownloadAction
+ _ReArcEngineSetJavaScriptDialogCallback
+diff --git a/chrome/browser/download/download_history.cc b/chrome/browser/download/download_history.cc
+index 303392a286..b05e580ad6 100644
+--- a/chrome/browser/download/download_history.cc
++++ b/chrome/browser/download/download_history.cc
+@@ -276,8 +276,15 @@ bool ShouldSkipLoadingDownload(const history::DownloadRow& row,
+          download::GetOverwrittenDownloadDeleteTime();
+ }
+ 
+-// ReArc: UI-thread work per slice of the initial load.
+-constexpr base::TimeDelta kHistoryLoadSliceBudget = base::Milliseconds(8);
++// ReArc: UI-thread work per slice of the initial load. With the host's
++// delivery of the slice's events it fits a 120 Hz frame.
++constexpr base::TimeDelta kHistoryLoadSliceBudget = base::Milliseconds(4);
++// ReArc: the next slice is a delayed task, due after the host has taken the
++// slice's events (about half the slice's time), so the host's run loop runs
++// out of work between slices and commits a frame. An immediate task, or a
++// shorter delay that came due during the delivery, ran the slices and their
++// events back to back as one stall.
++constexpr base::TimeDelta kHistoryLoadSliceGap = base::Milliseconds(4);
+ 
+ // ReArc: DownloadHistory::SetLoadPolicy, kept on the BrowserContext.
+ class LoadPolicyData : public base::SupportsUserData::Data {
+@@ -584,9 +591,11 @@ void DownloadHistory::LoadHistorySlice() {
+       return;
+     }
+     if (load.next < load.live.size() && base::TimeTicks::Now() >= deadline) {
+-      content::GetUIThreadTaskRunner({})->PostTask(
+-          FROM_HERE, base::BindOnce(&DownloadHistory::LoadHistorySlice,
+-                                    weak_ptr_factory_.GetWeakPtr()));
++      content::GetUIThreadTaskRunner({})->PostDelayedTask(
++          FROM_HERE,
++          base::BindOnce(&DownloadHistory::LoadHistorySlice,
++                         weak_ptr_factory_.GetWeakPtr()),
++          kHistoryLoadSliceGap);
+       return;
+     }
+   }
+@@ -892,9 +901,11 @@ void DownloadHistory::RestoreSlice() {
+       return;
+     }
+     if (load.next < load.rows.size() && base::TimeTicks::Now() >= deadline) {
+-      content::GetUIThreadTaskRunner({})->PostTask(
+-          FROM_HERE, base::BindOnce(&DownloadHistory::RestoreSlice,
+-                                    weak_ptr_factory_.GetWeakPtr()));
++      content::GetUIThreadTaskRunner({})->PostDelayedTask(
++          FROM_HERE,
++          base::BindOnce(&DownloadHistory::RestoreSlice,
++                         weak_ptr_factory_.GetWeakPtr()),
++          kHistoryLoadSliceGap);
+       return;
+     }
+   }
+diff --git a/chrome/browser/rearc_bridge/rearc_abi_internal.h b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+index 0e9d74b762..9667c06aa0 100644
+--- a/chrome/browser/rearc_bridge/rearc_abi_internal.h
++++ b/chrome/browser/rearc_bridge/rearc_abi_internal.h
+@@ -15,6 +15,9 @@ bool ABIIsTrustedWebUI(const GURL& url);
+ class TabSession;
+ ReArcStatus ABICheckTab(uint64_t tab_id, TabSession** session);
+ void ABIPost(base::OnceClosure callback);
++// Deliveries ABIPost has queued so far: a caller that posted last can still
++// append to its queued delivery while this has not moved (in order).
++uint64_t ABIPostCount();
+ void ABIInitializeTab(uint64_t tab_id);
+ void ABITabDestroyed(uint64_t profile_id);
+ // Services extend these hooks in tab/018.
+diff --git a/chrome/browser/rearc_bridge/rearc_downloads_abi.cc b/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+index f250b64d98..2245d93b99 100644
+--- a/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+@@ -21,8 +21,11 @@
+ #include "base/files/file_path.h"
+ #include "base/functional/bind.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/memory/ref_counted.h"
++#include "base/memory/scoped_refptr.h"
+ #include "base/no_destructor.h"
+ #include "base/strings/string_util.h"
++#include "base/task/single_thread_task_runner.h"
+ #include "base/task/thread_pool.h"
+ #include "base/time/time.h"
+ #include "chrome/browser/download/download_core_service.h"
+@@ -48,6 +51,11 @@ namespace {
+ 
+ ReArcDownloadCallback download_callback = nullptr;
+ void* download_context = nullptr;
++// ABI 1.49 download_event_batches.
++ReArcDownloadBatchCallback batch_callback = nullptr;
++void* batch_context = nullptr;
++constexpr size_t kMaxEventsPerBatch = 1024;
++constexpr base::TimeDelta kArchivedPageYield = base::Milliseconds(1);
+ 
+ enum Kind : uint32_t {
+   kCreated = 0,
+@@ -66,8 +74,78 @@ struct Snapshot {
+   int64_t received_bytes, total_bytes;
+   uint32_t state, danger_type, interrupt_reason;
+   bool paused, can_resume;
++  int64_t start_time_us = 0, end_time_us = 0;
+ };
+ 
++// Borrows `s`'s strings.
++ReArcDownloadEvent EventFor(const Snapshot& s) {
++  ReArcDownloadEvent e{};
++  e.kind = s.kind;
++  e.profile_id = s.profile_id;
++  e.download_id = s.download_id;
++  e.tab_id = s.tab_id;
++  e.guid = s.guid.c_str();
++  e.url = s.url.c_str();
++  e.target_path = s.target_path.c_str();
++  e.mime_type = s.mime_type.c_str();
++  e.received_bytes = s.received_bytes;
++  e.total_bytes = s.total_bytes;
++  e.state = s.state;
++  e.danger_type = s.danger_type;
++  e.interrupt_reason = s.interrupt_reason;
++  e.paused = s.paused;
++  e.can_resume = s.can_resume;
++  return e;
++}
++
++int64_t UnixMicros(base::Time time) {
++  return time.is_null() ? 0 : (time - base::Time::UnixEpoch()).InMicroseconds();
++}
++
++// 1.49: events queued since this batch's delivery, appended while nothing
++// else has been posted after it, so order is unchanged.
++struct EventBatch : base::RefCounted<EventBatch> {
++  std::vector<Snapshot> events;
++  uint64_t posted = 0;  // ABIPostCount() once the delivery was queued
++
++ private:
++  friend class base::RefCounted<EventBatch>;
++  ~EventBatch() = default;
++};
++
++scoped_refptr<EventBatch>& OpenBatch() {
++  static base::NoDestructor<scoped_refptr<EventBatch>> batch;
++  return *batch;
++}
++
++void DeliverBatch(scoped_refptr<EventBatch> batch) {
++  CHECK(pthread_main_np());
++  if (OpenBatch() == batch) {
++    OpenBatch() = nullptr;
++  }
++  const std::vector<Snapshot> snapshots = std::move(batch->events);
++  if (batch_callback) {
++    std::vector<ReArcDownloadEvent> events;
++    std::vector<ReArcDownloadTimes> times;
++    events.reserve(snapshots.size());
++    times.reserve(snapshots.size());
++    for (const Snapshot& s : snapshots) {
++      events.push_back(EventFor(s));
++      times.push_back({s.start_time_us, s.end_time_us});
++    }
++    batch_callback(batch_context, events.data(), times.data(),
++                   static_cast<uint32_t>(events.size()));
++    return;
++  }
++  for (const Snapshot& s : snapshots) {
++    if (!download_callback) {
++      return;
++    }
++    const ReArcDownloadEvent e = EventFor(s);
++    download_callback(download_context, &e);
++  }
++}
++
+ uint64_t TabIdFor(download::DownloadItem* item) {
+   content::WebContents* contents =
+       content::DownloadItemUtils::GetWebContents(item);
+@@ -93,31 +171,31 @@ void Publish(uint32_t kind, uint64_t profile_id, download::DownloadItem* item) {
+              static_cast<uint32_t>(item->GetDangerType()),
+              static_cast<uint32_t>(item->GetLastReason()), item->IsPaused(),
+              item->CanResume()};
+-  ABIPost(base::BindOnce(
+-      [](Snapshot s) {
+-        CHECK(pthread_main_np());
+-        if (!download_callback) {
+-          return;
+-        }
+-        ReArcDownloadEvent e{};
+-        e.kind = s.kind;
+-        e.profile_id = s.profile_id;
+-        e.download_id = s.download_id;
+-        e.tab_id = s.tab_id;
+-        e.guid = s.guid.c_str();
+-        e.url = s.url.c_str();
+-        e.target_path = s.target_path.c_str();
+-        e.mime_type = s.mime_type.c_str();
+-        e.received_bytes = s.received_bytes;
+-        e.total_bytes = s.total_bytes;
+-        e.state = s.state;
+-        e.danger_type = s.danger_type;
+-        e.interrupt_reason = s.interrupt_reason;
+-        e.paused = s.paused;
+-        e.can_resume = s.can_resume;
+-        download_callback(download_context, &e);
+-      },
+-      std::move(s)));
++  if (!batch_callback) {
++    ABIPost(base::BindOnce(
++        [](Snapshot s) {
++          CHECK(pthread_main_np());
++          if (!download_callback) {
++            return;
++          }
++          const ReArcDownloadEvent e = EventFor(s);
++          download_callback(download_context, &e);
++        },
++        std::move(s)));
++    return;
++  }
++  s.start_time_us = UnixMicros(item->GetStartTime());
++  s.end_time_us = UnixMicros(item->GetEndTime());
++  scoped_refptr<EventBatch>& open = OpenBatch();
++  if (open && open->posted == ABIPostCount() &&
++      open->events.size() < kMaxEventsPerBatch) {
++    open->events.push_back(std::move(s));
++    return;
++  }
++  open = base::MakeRefCounted<EventBatch>();
++  open->events.push_back(std::move(s));
++  ABIPost(base::BindOnce(&DeliverBatch, open));
++  open->posted = ABIPostCount();
+ }
+ 
+ class ProfileDownloads : public download::AllDownloadItemNotifier::Observer {
+@@ -287,10 +365,6 @@ auto& ArchivedQueries() {
+ }
+ uint64_t next_archived_query = 1;
+ 
+-int64_t UnixMicros(base::Time time) {
+-  return time.is_null() ? 0 : (time - base::Time::UnixEpoch()).InMicroseconds();
+-}
+-
+ // On a worker: rows [offset, offset + limit) copied out of the immutable vector.
+ ArchivedPage CopyArchivedPage(
+     scoped_refptr<const DownloadHistory::ArchivedRows> archived,
+@@ -345,6 +419,16 @@ void FinishArchivedQuery(uint64_t id, ReArcStatus status, ArchivedPage page) {
+       query, status, std::move(page)));
+ }
+ 
++// A host that asks for the next page from a page's callback got the next
++// reply in the same burst (the copy takes well under a millisecond): pages
++// ran back to back. Each reply now waits for the host's run loop to sleep.
++void FinishArchivedQueryAfterYield(uint64_t id, ArchivedPage page) {
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE,
++      base::BindOnce(&FinishArchivedQuery, id, REARC_OK, std::move(page)),
++      kArchivedPageYield);
++}
++
+ }  // namespace
+ 
+ void ABIAttachDownloads(Profile* profile, uint64_t profile_id) {
+@@ -378,6 +462,15 @@ void ReArcEngineSetDownloadCallback(ReArcDownloadCallback callback,
+   rearc::download_callback = callback;
+   rearc::download_context = context;
+ }
++
++void ReArcEngineSetDownloadBatchCallback(ReArcDownloadBatchCallback callback,
++                                         void* context) {
++  CHECK(pthread_main_np());
++  rearc::batch_callback = callback;
++  rearc::batch_context = context;
++  // Later events start a new batch for the new callback.
++  rearc::OpenBatch() = nullptr;
++}
+ ReArcStatus ReArcDownloadSetPolicy(uint64_t profile_id,
+                                    const char* directory,
+                                    uint32_t prompt) {
+@@ -566,7 +659,7 @@ ReArcStatus ReArcDownloadQueryArchived(uint64_t profile_id,
+       FROM_HERE, {base::TaskPriority::USER_VISIBLE},
+       base::BindOnce(&rearc::CopyArchivedPage, history->archived_rows(), offset,
+                      limit),
+-      base::BindOnce(&rearc::FinishArchivedQuery, id, REARC_OK));
++      base::BindOnce(&rearc::FinishArchivedQueryAfterYield, id));
+   return REARC_OK;
+ }
+ ReArcStatus ReArcDownloadRemoveArchived(uint64_t profile_id,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 93548e5d9d..2d438106a8 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 48, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 49, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -825,6 +825,24 @@ typedef void (*ReArcDownloadCallback)(void* context,
+ // Null disables delivery, including already queued events.
+ REARC_ENGINE_EXPORT void ReArcEngineSetDownloadCallback(
+     ReArcDownloadCallback callback, void* context);
++// Download event batches (download_event_batches, ABI 1.49). While a batch
++// callback is set, every download event goes to it instead of the per-event
++// callback, in the same order relative to each other and to every other host
++// callback: events queued back to back (a history slice's created events)
++// arrive in one call, at most 1024 per call. times[i] is events[i]'s item
++// start and end (microseconds since the Unix epoch; end 0 until it finishes),
++// so a restored item's dates need no ReArcDownloadGetTimes. Both arrays are
++// borrowed for the call. Null returns to per-event delivery; a queued batch
++// then goes to the per-event callback, one event at a time.
++typedef struct ReArcDownloadTimes {
++  int64_t start_time_us, end_time_us;
++} ReArcDownloadTimes;
++typedef void (*ReArcDownloadBatchCallback)(void* context,
++                                           const ReArcDownloadEvent* events,
++                                           const ReArcDownloadTimes* times,
++                                           uint32_t count);
++REARC_ENGINE_EXPORT void ReArcEngineSetDownloadBatchCallback(
++    ReArcDownloadBatchCallback callback, void* context);
+ // directory: absolute UTF-8 path without '..' (null keeps Chromium's current
+ // default); persisted in the profile's Chromium download prefs. prompt: 0 save
+ // without asking; 1 asks through the registered host file chooser (1.19),
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index e2505a4041..71fa557152 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -56,6 +56,9 @@
+ 
+ // Main-thread time one drain of host callbacks may take before it yields.
+ constexpr base::TimeDelta kDrainBudget = base::Milliseconds(8);
++// A drain over budget continues in a delayed task, so the host's run loop
++// sleeps (and commits a frame) first; an immediate task kept it polling.
++constexpr base::TimeDelta kDrainYield = base::Milliseconds(1);
+ 
+ struct Window {
+   NSWindow* __strong native = nil;
+@@ -83,6 +86,7 @@
+   bool configured = false, ran = false, ready = false, stopping = false;
+   bool draining = false, scheduled = false;
+   std::deque<base::OnceClosure> deliveries;
++  uint64_t posted = 0;
+   std::map<uint64_t, Window> windows;
+   std::map<uint64_t, Presentation> presentations;
+   std::set<uint64_t> initial_navigations;
+@@ -108,9 +112,9 @@
+     return *state;
+   }
+ 
+-  // A budgeted drain yields after kDrainBudget and continues in a new task,
+-  // so a burst (a history slice's created events) never blocks input and
+-  // paint for longer than that; order is unchanged.
++  // A budgeted drain yields after kDrainBudget and continues in a task
++  // kDrainYield later, so a burst (a history slice's created events) never
++  // blocks input and paint for longer than that; order is unchanged.
+   void Drain(bool budgeted = true) {
+     CHECK([NSThread isMainThread]);
+     scheduled = false;
+@@ -124,8 +128,8 @@ void Drain(bool budgeted = true) {
+     while (!deliveries.empty()) {
+       if (budgeted && delivered && base::TimeTicks::Now() >= deadline) {
+         scheduled = true;
+-        base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+-            FROM_HERE, base::BindOnce([] { Get().Drain(); }));
++        base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++            FROM_HERE, base::BindOnce([] { Get().Drain(); }), kDrainYield);
+         break;
+       }
+       delivered = true;
+@@ -481,6 +485,7 @@ ReArcStatus CloseError(CloseRequestResult r) {
+ void ABIPost(base::OnceClosure callback) {
+   auto& a = ABI::Get();
+   a.deliveries.push_back(std::move(callback));
++  ++a.posted;
+   if (a.draining || a.scheduled) {
+     return;
+   }
+@@ -488,6 +493,9 @@ void ABIPost(base::OnceClosure callback) {
+   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+       FROM_HERE, base::BindOnce([] { ABI::Get().Drain(); }));
+ }
++uint64_t ABIPostCount() {
++  return ABI::Get().posted;
++}
+ ReArcStatus ABICheckTab(uint64_t id, TabSession** session) {
+   CHECK([NSThread isMainThread]);
+   auto status = Available();
+@@ -574,6 +582,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "downloads" ||
+          std::string(feature) == "dangerous_downloads" ||
+          std::string(feature) == "download_history" ||
++         std::string(feature) == "download_event_batches" ||
+          std::string(feature) == "javascript_dialogs" ||
+          std::string(feature) == "file_chooser" ||
+          std::string(feature) == "permission_prompts" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index a7f4283323..0dcef70e62 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.51.0";
++  return "0.52.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+-- 
+2.54.0 (Apple Git-157)
+

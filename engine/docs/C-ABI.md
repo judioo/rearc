@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.48** (major remains 1 for existing hosts), bridge **0.51.0**, compiled Chromium **156.0.8078.74**. Public header:
+ABI **1.49** (major remains 1 for existing hosts), bridge **0.52.0**, compiled Chromium **156.0.8078.74**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -12,8 +12,9 @@ Every call, including queries and frees, must run on the process main thread;
 entry points CHECK this. Chromium's UI scheduler delivers callbacks on main,
 after mutation/delegate stacks unwind. No main-queue polling pump is involved.
 From bridge 0.51.0 one task delivers callbacks for at most about 8 ms; a longer
-burst (a history slice's created events) continues in the next task, in the
-same order. The final flush after ChromeMain returns is not budgeted.
+burst (a history slice's created events) continues in a later task, in the
+same order (from 0.52.0 a delayed one, 1 ms later, so the host's run loop has
+a turn first). The final flush after ChromeMain returns is not budgeted.
 Inputs are borrowed for the call and copied if needed afterward. Callback
 structs and UTF-8 strings are borrowed until the callback returns: Swift must
 copy them immediately. Registered callback contexts remain host-owned and must
@@ -2088,3 +2089,32 @@ No ABI addition: the 1.48 layouts and functions are unchanged. Behaviour:
 
 Measurements and the decision are in `docs/DOWNLOADS-AT-SCALE.md`
 ("Follow-up").
+
+## Download event batches (1.49)
+
+Patch `tab/069-download-event-batches`, bridge 0.52.0, feature
+`download_event_batches`. No struct from an earlier ABI changed
+(`engine/tests/check_abi149_imports.py` compares every 1.48 layout).
+`framework.exports` and `framework.order` list the new function after
+`_ReArcEngineSetDownloadCallback`. Measurements are in
+`docs/DOWNLOADS-AT-SCALE.md` ("Second follow-up").
+
+| Function | Contract |
+|---|---|
+| `ReArcEngineSetDownloadBatchCallback(cb, ctx)` | `cb(ctx, events, times, count)`. While set, every download event goes to it instead of the 1.17 per-event callback, in the same order relative to each other and to every other host callback. Events queued back to back (a history slice's created events) arrive in one call, at most 1024 per call; others usually alone. `times[i]` is `events[i]`'s item start and end (`ReArcDownloadTimes`, microseconds since the Unix epoch, end 0 until it finishes), so a restored item's dates need no `ReArcDownloadGetTimes`. Both arrays are borrowed for the call. Null returns to per-event delivery; a batch already queued then goes to the per-event callback one event at a time. |
+
+A host that never sets it sees no change: one task per event, as before.
+
+Behaviour changes for every host (bridge 0.52.0):
+
+- **History slices yield to the run loop.** `DownloadHistory` creates items
+  in slices of about 4 ms (8 ms before) and posts the next slice as a task
+  4 ms later instead of at once, for the initial load and for a restore. The
+  slice's created events are delivered in between, and the host's run loop
+  then runs out of work and commits a frame before the next slice. Before, the
+  next slice was immediate (or, with a 1 ms delay, came due while the events
+  were delivered), and slices, events and the host's layout ran as one stall.
+- **Archived pages yield too.** A `ReArcDownloadQueryArchived` completion is
+  posted 1 ms after the worker's copy returns, so a host that asks for the
+  next page from a page's callback no longer gets every page in one burst.
+- **An over-budget drain** continues in a task 1 ms later (above).

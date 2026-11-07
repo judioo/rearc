@@ -74,6 +74,7 @@ tab/066-extension-side-panels.patch          # P-TAB-001 ABI 1.47: chrome.sidePa
 tab/067-download-history-at-scale.patch      # P-TAB-001 ABI 1.48: sliced download history loads, live-item limit, archived rows
 tab/068-download-history-follow-up.patch     # P-TAB-001 bridge 0.51.0: archived rows restored on demand, drain budget, Dock tile off the download's start
 chrome/007-chrome-browser-identity-headers.patch # P-BUILD-001 Web Store: Chrome's X-Browser-* headers to Google domains; no Google Chrome brand in the full version list
+tab/069-download-event-batches.patch          # P-TAB-001 ABI 1.49: download event batches with times; history slices and archived pages yield to the host's run loop
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:
