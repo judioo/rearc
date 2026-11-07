@@ -4,11 +4,13 @@
 # Usage: scripts/bench.sh [--bundle APP] [--build release|dev] [--suites ui,page,memory]
 #                         [--iterations N] [--warmups N] [--launch N] [--only IDS]
 #                         [--fixture items300|items500|items1000] [--seed N] [--allow-locked]
-#                         [--chrome] [--out DIR] [--no-guards]
+#                         [--chrome] [--downloads FILE] [--out DIR] [--no-guards]
 #   --bundle      app to measure (default shell/dist/release/ReArc.app; --build dev: dist/chromium)
 #   --launch N    N cold launches through LaunchServices (`open -n -W`), 5 s apart
 #   --chrome      also load the same page set in Google Chrome (own temporary
 #                 --user-data-dir, --no-first-run; only that instance is quit)
+#   --downloads   the downloads suite's records (a Downloads.json from seed-downloads.py;
+#                 --suites downloads); without it the suite runs on no records
 #   --allow-locked  run with the screen locked: input goes to direct entry points and
 #                 the results say so; the gate never compares them with unlocked runs
 #   --no-guards   skip the load guards (never for baselines)
@@ -36,6 +38,7 @@ FIXTURE=items500
 SEED=1
 ALLOW_LOCKED=0
 CHROME=0
+DOWNLOADS=""
 OUT=""
 GUARDS=1
 die() { echo "bench: $*" >&2; exit 1; }
@@ -53,9 +56,10 @@ while [[ $# -gt 0 ]]; do
     --seed) SEED="$2"; shift ;;
     --allow-locked) ALLOW_LOCKED=1 ;;
     --chrome) CHROME=1 ;;
+    --downloads) DOWNLOADS="$2"; shift ;;
     --out) OUT="$2"; shift ;;
     --no-guards) GUARDS=0 ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
@@ -91,6 +95,7 @@ LOCKED_FLAG=()
 COMMON=(--rearc-bench-iterations="$ITERATIONS" --rearc-bench-warmups="$WARMUPS" --rearc-bench-fixture="$FIXTURE"
         --rearc-bench-seed="$SEED" ${LOCKED_FLAG[@]+"${LOCKED_FLAG[@]}"})
 [[ -z $ONLY ]] || COMMON+=(--rearc-bench-only="$ONLY")
+[[ -z $DOWNLOADS ]] || COMMON+=(--rearc-bench-downloads="$DOWNLOADS")
 
 STATUS=0
 if [[ -n $SUITES ]]; then

@@ -3,6 +3,7 @@ import AppKit
 import CoreGraphics
 import Darwin
 import Foundation
+import QuickLookThumbnailing
 import ReArcEngine
 import SidebarModel
 
@@ -150,6 +151,7 @@ final class ChromiumBench {
         if options.suites.contains(.ui) { try await uiSuite() }
         if options.suites.contains(.page) { try await pageSuite() }
         if options.suites.contains(.memory) { try await memorySuite() }
+        if options.suites.contains(.downloads) { try await downloadsSuite() }
         report.status = report.status ?? "complete"
     }
 
@@ -175,6 +177,8 @@ final class ChromiumBench {
     private var server: LoopbackFixtureServer?
     /// Building the fixture sidebar in-process (a real launch decodes sidebar.json instead).
     private var fixtureBuildSeconds = 0.0
+    /// The model's persistence folder for this run, removed when it ends.
+    private let dataDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-bench-data-\(UUID().uuidString)", isDirectory: true)
 
     private func startServer() async throws {
         guard server == nil else { return }
@@ -209,6 +213,7 @@ final class ChromiumBench {
 
     private func finish() {
         hangs.stop()
+        try? FileManager.default.removeItem(at: dataDirectory)
         if writeReport() {
             log("wrote \(options.outputPath ?? "-") (\(report.metrics.count) metrics, status \(report.status ?? "-"))")
         } else if exitStatus == 0 {
@@ -285,7 +290,8 @@ final class ChromiumBench {
         // A small page selected at start: the first Today tab of the first space.
         if let first = store.content(for: fixture.spaceIDs[0]).todayLeaves.first?.id { store.selectTab(first) }
         runtime.legacyDefaultOwner = store.profiles.first?.id
-        let sidebarFile = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-bench-sidebar-\(UUID().uuidString).json")
+        // Its own folder: the model's sibling files (Downloads.json, History.json) land there and go at the end.
+        let sidebarFile = dataDirectory.appendingPathComponent("sidebar.json")
         let modelStart = ProcessInfo.processInfo.systemUptime
         model = BrowserViewModel(store: store, persistence: SidebarFilePersistence(fileURL: sidebarFile),
                                  syncEngine: LocalSyncEngine(), faviconStore: FaviconStore(directory: nil), deferStartup: true)
@@ -973,6 +979,229 @@ final class ChromiumBench {
         try? await Task.sleep(nanoseconds: 2_000_000_000)
         await sample("pages4")
         for id in opened { model.closeTab(id) }
+    }
+
+    // MARK: Downloads suite
+
+    /// Downloads at scale (docs/PERF-BASELINE.md): the records of
+    /// `--rearc-bench-downloads` (scripts/seed-downloads.py) read as launch
+    /// reads them, then replayed into the tray the way Chromium replays its
+    /// download history at launch (kind 0, finished, all in one main-queue
+    /// turn), so the Library, its search, the quick view and new downloads
+    /// all work on every record. No file is opened but by QuickLook.
+    private func downloadsSuite() async throws {
+        scenario = "downloads"
+        let file = options.downloadsPath.map { URL(fileURLWithPath: $0) }
+        let full = file.map(DownloadListFile.load(from:))?.list.records ?? []
+        report.notes.append("downloads: \(full.count) records")
+        record("downloads.footprint.start", Self.footprintMB(), unit: "MB")
+
+        try await iterate("downloads.load", count: 5) { _, warmup, contaminated in
+            let before = Self.footprintMB()
+            let start = ProcessInfo.processInfo.systemUptime
+            let contents = file.map(PreparedBrowserStartup.loadDownloads(from:)) ?? DownloadListFile.Contents()
+            let loaded = ProcessInfo.processInfo.systemUptime
+            record("downloads.load", ms(start, loaded), contaminated: contaminated(), warmup: warmup)
+            record("downloads.load_footprint", Self.footprintMB() - before, unit: "MB", warmup: warmup)
+            let controller = DownloadsController(fileURL: nil, prepared: contents)
+            record("downloads.controller_init", ms(loaded, ProcessInfo.processInfo.systemUptime), contaminated: contaminated(), warmup: warmup)
+            withExtendedLifetime(controller) {}
+        }
+
+        let events = full.map {
+            DownloadEvent(kind: .created, guid: $0.id, url: $0.url, targetPath: $0.targetPath, mimeType: $0.mimeType,
+                          receivedBytes: $0.receivedBytes, totalBytes: $0.totalBytes, state: .complete)
+        }
+        // A tray no view observes: the model's own cost.
+        try await iterate("downloads.history_replay.model", count: 3) { _, warmup, contaminated in
+            let controller = DownloadsController(fileURL: nil)
+            let start = ProcessInfo.processInfo.systemUptime
+            for event in events { controller.apply(event, source: .chromium) }
+            record("downloads.history_replay.model", ms(start, ProcessInfo.processInfo.systemUptime), contaminated: contaminated(), warmup: warmup)
+        }
+        // The shell's tray, once: then every surface below has all the records.
+        scenario = "downloads.history_replay.shell"
+        await quiet()
+        let replaying = ProcessInfo.processInfo.systemUptime
+        for event in events { model.downloads.apply(event, source: .chromium) }
+        let replayed = await probe.nextFrame(after: window)
+        record("downloads.history_replay.shell", ms(replaying, replayed?.target))
+        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        record("downloads.footprint.replayed", Self.footprintMB(), unit: "MB")
+        report.notes.append("downloads: \(model.downloads.records.count) rows in the tray after the replay")
+
+        try await iterate("downloads.recent_latest", count: 10) { _, warmup, contaminated in
+            let start = ProcessInfo.processInfo.systemUptime
+            let latest = RecentDownloads.latest(model.downloads.records)
+            record("downloads.recent_latest", ms(start, ProcessInfo.processInfo.systemUptime), contaminated: contaminated(), warmup: warmup)
+            withExtendedLifetime(latest) {}
+        }
+        try await iterate("downloads.quickview_thumbnails", count: 5) { index, warmup, contaminated in
+            let latest = RecentDownloads.latest(model.downloads.records)
+            let start = ProcessInfo.processInfo.systemUptime
+            for record in latest {
+                let request = QLThumbnailGenerator.Request(fileAt: URL(fileURLWithPath: record.targetPath), size: CGSize(width: 28, height: 28),
+                                                           scale: window.backingScaleFactor, representationTypes: [.icon, .thumbnail])
+                request.iconMode = true
+                _ = try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request)
+            }
+            if !latest.isEmpty {
+                record("downloads.quickview_thumbnails", ms(start, ProcessInfo.processInfo.systemUptime), contaminated: contaminated(), warmup: warmup)
+            }
+        }
+
+        // The pointer onto the Library button (a real move: CGEvent), until
+        // the quick view's rows are presented; then off again.
+        if let button = accessibilityFrame(window.contentView, help: "View Library") {
+            let away = window.convertToScreen(NSRect(x: window.frame.width * 0.6, y: window.frame.height * 0.5, width: 1, height: 1)).origin
+            try await iterate("ui.downloads_quickview_hover", count: max(options.iterations / 4, min(10, options.iterations))) { _, warmup, contaminated in
+                movePointer(to: away)
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                let shown = probe.arm("quickview", timeout: 3) { $0 == "shown" }
+                let start = ProcessInfo.processInfo.systemUptime
+                movePointer(to: NSPoint(x: button.midX, y: button.midY))
+                let presented = await shown.value()
+                record("ui.downloads_quickview_hover", ms(start, presented?.target), input: .appKit, contaminated: contaminated(), warmup: warmup)
+                try? await Task.sleep(nanoseconds: 400_000_000)
+            }
+            movePointer(to: away)
+            try? await Task.sleep(nanoseconds: 800_000_000)
+        } else {
+            report.notes.append("ui.downloads_quickview_hover: no Library button in the window's accessibility tree")
+        }
+
+        try await iterate("ui.downloads_library_open", count: max(options.iterations / 4, min(10, options.iterations))) { _, warmup, contaminated in
+            model.closeLibrary()
+            _ = await probe.nextFrame(after: window)
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            probe.startRecording()
+            let start = ProcessInfo.processInfo.systemUptime
+            model.openLibrary(.downloads)
+            let shown = await probe.nextFrame(after: window)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            record("ui.downloads_library_open", ms(start, shown?.target), input: .direct, contaminated: contaminated(), warmup: warmup)
+            frameStats("ui.downloads_library_open", from: start, to: ProcessInfo.processInfo.systemUptime, input: .direct,
+                       contaminated: contaminated(), warmup: warmup)
+        }
+        record("downloads.footprint.library", Self.footprintMB(), unit: "MB")
+
+        if let scroll = libraryScrollView() {
+            try await iterate("ui.downloads_scroll", count: max(options.iterations / 4, min(10, options.iterations))) { index, warmup, contaminated in
+                let clip = scroll.contentView
+                // At most 40 rows a frame: a whole stress list in 120 frames would skip every row.
+                let range = min(max(0, (scroll.documentView?.frame.height ?? 0) - clip.bounds.height), 120 * 40 * 46)
+                let down = index % 2 == 0
+                let step = range / 120
+                probe.startRecording()
+                var first: Double?, last: Double?
+                var frames = 0
+                await probe.eachFrame(of: window) { link in
+                    if first == nil { first = link.timestamp }
+                    last = link.timestamp
+                    frames += 1
+                    let y = down ? step * Double(frames) : range - step * Double(frames)
+                    clip.scroll(to: NSPoint(x: 0, y: min(max(0, y), range)))
+                    scroll.reflectScrolledClipView(clip)
+                    return frames < 120
+                }
+                frameStats("ui.downloads_scroll", from: first, to: last, input: .direct, contaminated: contaminated(), warmup: warmup)
+            }
+        } else {
+            report.notes.append("ui.downloads_scroll: no scroll view in the Library column (no rows?)")
+        }
+
+        if let field = libraryTextField(), window.makeFirstResponder(field), let editor = field.currentEditor() as? NSTextView {
+            try await iterate("ui.downloads_search_key", count: max(options.iterations / 4, min(10, options.iterations))) { _, warmup, contaminated in
+                for character in ["p", "d", "f"] {
+                    let start = ProcessInfo.processInfo.systemUptime
+                    editor.insertText(character, replacementRange: editor.selectedRange())
+                    let shown = await probe.nextFrame(after: window)
+                    record("ui.downloads_search_key", ms(start, shown?.target), input: .direct, contaminated: contaminated(), warmup: warmup)
+                }
+                editor.selectAll(nil)
+                editor.deleteBackward(nil)
+                _ = await probe.nextFrame(after: window)
+            }
+            window.makeFirstResponder(nil)
+        } else {
+            report.notes.append("ui.downloads_search_key: no search field in the Library column")
+        }
+        record("downloads.footprint.searched", Self.footprintMB(), unit: "MB")
+
+        // A new download while the Library shows every row: created, ten progress updates, completed.
+        try await iterate("downloads.new_download", count: 10) { index, warmup, contaminated in
+            let guid = "bench-new-\(index)-\(UUID().uuidString)"
+            let url = "https://example.com/bench-new/\(index)"
+            var worst = 0.0
+            for step in 0 ... 11 {
+                let kind: DownloadEvent.Kind = step == 0 ? .created : step == 11 ? .completed : .updated
+                let event = DownloadEvent(kind: kind, guid: guid, url: url, targetPath: step == 0 ? "" : "/nonexistent/bench-\(index)",
+                                          receivedBytes: Int64(step) * 100_000, totalBytes: 1_000_000, state: step == 11 ? .complete : .inProgress)
+                let start = ProcessInfo.processInfo.systemUptime
+                model.downloads.apply(event, source: .chromium)
+                let shown = await probe.nextFrame(after: window)
+                let elapsed = ms(start, shown?.target) ?? 0
+                worst = max(worst, elapsed)
+                if step == 0 { record("downloads.new_download.created", elapsed, contaminated: contaminated(), warmup: warmup) }
+                try? await Task.sleep(nanoseconds: 60_000_000)
+            }
+            record("downloads.new_download.worst_event", worst, contaminated: contaminated(), warmup: warmup)
+            let saving = ProcessInfo.processInfo.systemUptime
+            model.downloads.save()
+            record("downloads.save", ms(saving, ProcessInfo.processInfo.systemUptime), contaminated: contaminated(), warmup: warmup)
+        }
+        record("downloads.footprint.end", Self.footprintMB(), unit: "MB")
+        model.closeLibrary()
+    }
+
+    /// The screen frame of the first accessibility element under `element` whose help starts with `help`.
+    private func accessibilityFrame(_ element: Any?, help: String, depth: Int = 0) -> NSRect? {
+        guard depth < 40, let element = element as? NSAccessibilityProtocol else { return nil }
+        if element.accessibilityHelp()?.hasPrefix(help) == true { return element.accessibilityFrame() }
+        for child in element.accessibilityChildren() ?? [] {
+            if let frame = accessibilityFrame(child, help: help, depth: depth + 1) { return frame }
+        }
+        return nil
+    }
+
+    /// Moves the real pointer to `point` (screen coordinates, origin bottom left).
+    private func movePointer(to point: NSPoint) {
+        let height = NSScreen.screens.first?.frame.height ?? 0
+        CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: CGPoint(x: point.x, y: height - point.y),
+                mouseButton: .left)?.post(tap: .cghidEventTap)
+    }
+
+    /// This process's phys_footprint, MB.
+    private static func footprintMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let status = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+        }
+        return status == KERN_SUCCESS ? Double(info.phys_footprint) / 1_048_576 : 0
+    }
+
+    /// The Library column's views of `type`, from the window's left edge to the column's width.
+    private func libraryViews<T: NSView>(_ type: T.Type) -> [T] {
+        let width = model.sidebarWidth(in: model.store.keyWindowID)
+        var found: [T] = []
+        func walk(_ view: NSView) {
+            if let match = view as? T { found.append(match) }
+            view.subviews.forEach(walk)
+        }
+        if let content = window.contentView { walk(content) }
+        return found.filter {
+            let frame = $0.convert($0.bounds, to: nil)
+            return frame.minX < width && frame.maxX <= width + 2
+        }
+    }
+
+    private func libraryScrollView() -> NSScrollView? {
+        libraryViews(NSScrollView.self).max { ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0) }
+    }
+
+    private func libraryTextField() -> NSTextField? {
+        libraryViews(NSTextField.self).first { $0.isEditable }
     }
 
     // MARK: Launch child

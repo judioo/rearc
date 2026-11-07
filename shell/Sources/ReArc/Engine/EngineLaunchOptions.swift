@@ -49,7 +49,7 @@ struct EngineLaunchOptions: Equatable {
 
     /// `--rearc-bench` and its `--rearc-bench-*` options (docs/PERFORMANCE-PLAN.md §2.2).
     struct BenchOptions: Equatable {
-        enum Suite: String, CaseIterable { case ui, page, memory, launchChild = "launch-child" }
+        enum Suite: String, CaseIterable { case ui, page, memory, downloads, launchChild = "launch-child" }
         var suites: [Suite] = [.ui, .page, .memory]
         var outputPath: String?
         var iterations = 40
@@ -66,6 +66,8 @@ struct EngineLaunchOptions: Equatable {
         var dumpPagesPath: String?
         /// An iteration whose other processes used more of the machine's CPU than this is contaminated.
         var maxOtherCPU = 0.15
+        /// The downloads suite's records: a `Downloads.json` (scripts/seed-downloads.py); none is the empty baseline.
+        var downloadsPath: String?
 
         static func parse(_ arguments: [String]) -> BenchOptions? {
             var options: BenchOptions?
@@ -94,6 +96,7 @@ struct EngineLaunchOptions: Equatable {
                 if let start = value("launch-start").flatMap(Double.init) { result.launchStart = start }
                 if let path = value("dump-pages"), !path.isEmpty { result.dumpPagesPath = path }
                 if let share = value("max-other-cpu").flatMap(Double.init), share > 0 { result.maxOtherCPU = share }
+                if let path = value("downloads"), !path.isEmpty { result.downloadsPath = path }
                 if argument == EngineLaunchOptions.benchFlag + "-allow-locked" { result.allowLocked = true }
             }
             return result

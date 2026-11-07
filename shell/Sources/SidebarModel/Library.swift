@@ -123,6 +123,61 @@ public enum LibraryDownloads {
             [record.fileName, URL(string: record.url)?.host() ?? ""].contains { LibrarySearch.normalized($0).contains(needle) }
         }
     }
+
+    /// `matching` for a search typed over a long list: each row's folded file
+    /// name and site are kept between keystrokes (and while transfers update
+    /// the list), and worked out again only when its path or URL changes.
+    public struct SearchIndex: Sendable {
+        private struct Key: Sendable {
+            var targetPath: String
+            var url: String
+            var fileName: Folded
+            var host: Folded
+        }
+
+        private var keys: [String: Key] = [:]
+
+        public init() {}
+
+        public mutating func matching(_ records: [DownloadRecord], query: String) -> [DownloadRecord] {
+            let needle = Folded(folded: LibrarySearch.normalized(query))
+            guard !needle.text.isEmpty else { return records }
+            // Rows that left the list are dropped once they outnumber the rest.
+            if keys.count > 2 * records.count + 64 { keys = [:] }
+            return records.filter { record in
+                var key = keys[record.id]
+                if key?.targetPath != record.targetPath || key?.url != record.url {
+                    key = Key(targetPath: record.targetPath, url: record.url,
+                              fileName: Folded(folded: LibrarySearch.normalized(record.fileName)),
+                              host: Folded(folded: LibrarySearch.normalized(URL(string: record.url)?.host() ?? "")))
+                    keys[record.id] = key
+                }
+                return key!.fileName.contains(needle) || key!.host.contains(needle)
+            }
+        }
+    }
+
+    /// Folded text, with its bytes when it is ASCII and has no carriage
+    /// return: between two such texts a byte search finds exactly what
+    /// `contains` finds (each byte is a whole character), many times faster.
+    struct Folded: Sendable {
+        let text: String
+        let ascii: [UInt8]?
+
+        init(folded text: String) {
+            self.text = text
+            let bytes = Array(text.utf8)
+            ascii = bytes.allSatisfy { $0 < 0x80 && $0 != 0x0D } ? bytes : nil
+        }
+
+        func contains(_ needle: Folded) -> Bool {
+            guard let haystack = ascii, let bytes = needle.ascii else { return text.contains(needle.text) }
+            guard haystack.count >= bytes.count else { return false }
+            return haystack.withUnsafeBytes { h in
+                bytes.withUnsafeBytes { n in memmem(h.baseAddress, h.count, n.baseAddress, n.count) != nil }
+            }
+        }
+    }
 }
 
 /// Which windows show the Library, and on which page. The Library takes over
