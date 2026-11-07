@@ -2004,6 +2004,15 @@ Google's API key) is not sent; the store does not check it. The full version
 list (`Sec-CH-UA-Full-Version-List`, `getHighEntropyValues` `fullVersionList`)
 no longer has the Google Chrome brand; the major-version brands still do.
 
+**To undo when Google ships Chrome 156 to stable.** The store refuses 156 only
+because Google hasn't released it: in testing on 2026-11-07, 143 and below
+passed and 144 and above failed. Once Chrome stable reaches the engine's major
+version, put the Google Chrome brand back in the full version list (the one
+removal in chrome/007), so the short and full lists agree again. Check first by
+sending the store a request with `Sec-CH-UA-Full-Version-List` naming Google
+Chrome at the engine's version, and confirming `IJ_values[24]` comes back true.
+Don't report an older version instead: that misstates the engine to every site.
+
 ## Download history at scale (1.48)
 
 Patch `tab/067-download-history-at-scale`, bridge 0.50.0, feature
