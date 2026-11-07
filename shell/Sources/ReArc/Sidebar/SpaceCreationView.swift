@@ -16,6 +16,7 @@ struct SpaceCreationPage: View {
     @FocusState private var nameFocused: Bool
     @State private var emoji = ""
     @State private var choosingIcon = false
+    @State private var pageWindow = WeakWindow()
 
     /// While the page fades out after Cancel the session is gone; it keeps
     /// drawing the last draft instead of changing under the fade.
@@ -76,12 +77,19 @@ struct SpaceCreationPage: View {
         .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
-        .onAppear {
-            shown = model.spaceCreation?.draft
-            nameFocused = true
-        }
+        .background(PageWindowReader { window in
+            pageWindow.window = window
+            focusNameField(in: window)
+        })
+        // Esc in the focused name field, as well as Cancel's shortcut.
+        .onExitCommand { model.cancelSpaceCreation() }
+        .onAppear { shown = model.spaceCreation?.draft }
         .onChange(of: model.spaceCreation?.draft) { _, value in
             if let value { shown = value }
+        }
+        // New Space again while the page still fades out after Cancel.
+        .onChange(of: model.spaceCreation == nil) { _, closed in
+            if !closed, let window = pageWindow.window { focusNameField(in: window) }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Create a Space")
@@ -109,7 +117,7 @@ struct SpaceCreationPage: View {
             .help("Choose an icon")
             .accessibilityLabel("Choose an icon")
             .popover(isPresented: $choosingIcon, arrowEdge: .trailing) { iconPicker }
-            TextField("Space name…", text: draft.name)
+            TextField(Self.namePlaceholder, text: draft.name)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .focused($nameFocused)
@@ -119,6 +127,42 @@ struct SpaceCreationPage: View {
         .frame(height: 34)
         .background(fieldFill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(chrome.separator, lineWidth: 1))
+    }
+
+    static let namePlaceholder = "Space name…"
+
+    /// The name field takes the keyboard as the page opens, from the + menu,
+    /// the overscroll and the command bar. Focus asked of SwiftUI on appear
+    /// didn't hold: the command bar, closing, handed the keyboard back to the
+    /// page (`restorePageFocus` now leaves it), and a focused page keeps it
+    /// over SwiftUI's request. So, as the command bar does
+    /// (`focusFieldInFirstFrame`), the page lets go and the field takes the
+    /// keyboard over AppKit once the page is in its window, and takes it
+    /// again while the fade runs if the page or nothing has it. It never
+    /// takes it from another field.
+    private func focusNameField(in window: NSWindow, attempts: Int = 12) {
+        if ShortcutRouter.isWebContent(window.firstResponder) { window.makeFirstResponder(nil) }
+        DispatchQueue.main.async {
+            guard model.spaceCreation != nil else { return }
+            if let field = CommandBarOverlay.field(in: window, placeholder: Self.namePlaceholder) {
+                if field.currentEditor() == nil { window.makeFirstResponder(field) }
+            } else {
+                nameFocused = true
+            }
+            reclaimNameFocus(in: window, attempts: attempts)
+        }
+    }
+
+    private func reclaimNameFocus(in window: NSWindow, attempts: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+            guard attempts > 0, model.spaceCreation != nil, window.isKeyWindow,
+                  let field = CommandBarOverlay.field(in: window, placeholder: Self.namePlaceholder) else { return }
+            let responder = window.firstResponder
+            if field.currentEditor() == nil, responder == nil || responder === window || ShortcutRouter.isWebContent(responder) {
+                window.makeFirstResponder(field)
+            }
+            reclaimNameFocus(in: window, attempts: attempts - 1)
+        }
     }
 
     private func profileRow(_ current: SpaceDraft) -> some View {
@@ -204,6 +248,35 @@ struct SpaceCreationPage: View {
         if Space.isSymbolName(glyph), NSImage(systemSymbolName: glyph, accessibilityDescription: nil) == nil { return }
         draft.wrappedValue.iconName = Space.isSymbolName(glyph) ? glyph : String(glyph.prefix(2))
         choosingIcon = false
+    }
+}
+
+/// The window the page is in, kept for New Space again during the fade.
+private final class WeakWindow {
+    weak var window: NSWindow?
+}
+
+/// Calls back once the page is in a window.
+private struct PageWindowReader: NSViewRepresentable {
+    let onWindow: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = ReaderView()
+        view.onWindow = onWindow
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class ReaderView: NSView {
+        var onWindow: ((NSWindow) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window { onWindow?(window) }
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }
 

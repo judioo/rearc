@@ -44,11 +44,17 @@ extension BrowserViewModel {
     /// left; a tab the bar's ⌘T replaced re-attaches first, so it retries briefly.
     func restorePageFocus(attempts: Int = 10) {
         DispatchQueue.main.asyncAfter(deadline: .now() + (attempts == 10 ? 0 : 0.1)) { [weak self] in
-            // A rename the command bar started keeps its row's field focused.
-            guard let self, !self.isCommandBarPresented, self.inlineRename == nil else { return }
+            guard let self, !self.isCommandBarPresented, !self.sidebarFieldKeepsFocus else { return }
             if self.focusShownPage() || attempts <= 1 { return }
             self.restorePageFocus(attempts: attempts - 1)
         }
+    }
+
+    /// A field the bar opened in the sidebar keeps the keyboard: a row's
+    /// rename, or Create a Space's name (New Space from the bar took it from
+    /// the name field, so typing went nowhere).
+    var sidebarFieldKeepsFocus: Bool {
+        inlineRename != nil || spaceCreation != nil
     }
 
     private func focusShownPage() -> Bool {

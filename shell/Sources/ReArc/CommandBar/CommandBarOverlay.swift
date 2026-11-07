@@ -206,7 +206,7 @@ struct CommandBarOverlay: View {
     }
 
     /// The bar's text field: the window's visible editable field with its placeholder.
-    private static func field(in window: NSWindow, placeholder: String) -> NSTextField? {
+    static func field(in window: NSWindow, placeholder: String) -> NSTextField? {
         func search(_ view: NSView) -> NSTextField? {
             if view.isHidden { return nil }
             if let field = view as? NSTextField, field.isEditable, field.placeholderString == placeholder { return field }
