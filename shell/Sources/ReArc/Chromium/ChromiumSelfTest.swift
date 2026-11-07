@@ -892,7 +892,7 @@ final class ChromiumSelfTest {
                   "persisted tray: \(saved.directory ?? "nil"), \(saved.list.records.count) row(s)")
         try? FileManager.default.removeItem(at: directory)
         log("PASS downloads (ABI 1.17, DownloadsController + ChromiumDownloadBackend): \(LoopbackFixtureServer.smallDownloadSize)-byte "
-            + "attachment saved without a picker to the policy directory (tab stayed on /a), tray opened, remove -> removed event; "
+            + "attachment saved without a picker to the policy directory (tab stayed on /a), button pulsed and tray stayed closed, remove -> removed event; "
             + "trickle paused at \(pausedAt) B (pause again -> invalid_state), resumed to \(resumedAt) B, '\(status)', "
             + "removed (reveal -> not_found); relative directory -> invalid_argument, prompt 1 -> \(picker.rearcName); "
             + "\(backend.eventCount) events; \(asked)")

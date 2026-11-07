@@ -42,6 +42,8 @@ struct DownloadsButton: View {
         }
         .buttonStyle(.plain)
         .help(helpText)
+        // Without it VoiceOver reads the arrow symbol's name, "Down".
+        .accessibilityLabel("Downloads")
         .onChange(of: downloads.startCount) { _, _ in
             withAnimation(.spring(duration: 0.18, bounce: 0.6)) { pulse = true }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
