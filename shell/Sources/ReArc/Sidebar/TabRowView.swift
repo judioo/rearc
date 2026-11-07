@@ -37,8 +37,9 @@ struct TabRowView<Menu: View>: View {
     @State private var isHovering = false
     @Environment(\.themeChrome) private var chrome
 
-    /// The row's one tooltip (the icon has none of its own, to keep one
-    /// tooltip region per row).
+    /// The tooltip over the icon and title (the icon has none of its own,
+    /// to keep one region there). The hover buttons keep their own: a
+    /// `.help` on the whole row hid the ✕'s "Archive this tab ⌘W".
     private var tooltip: String {
         let url = tab.customTitle == nil ? tab.url.absoluteString : "\(tab.title)\n\(tab.url.absoluteString)"
         return isUnloaded ? "Unloaded — reloads when you open it\n\(url)" : url
@@ -49,42 +50,46 @@ struct TabRowView<Menu: View>: View {
         // on a 41 pt pitch; selected and hovered rows use the theme's
         // near-white roles.
         HStack(spacing: SidebarMetrics.iconToText) {
-            TabActivityIcon(activity: activity) {
-                SiteIconView(image: favicon, token: tab.faviconToken, size: SidebarMetrics.iconSize, customIcon: tab.customIcon)
-                    .saturation(isUnloaded ? 0 : 1)
-                    .opacity(isUnloaded ? 0.4 : 1)
-            }
-            .frame(width: SidebarMetrics.iconSize, height: SidebarMetrics.iconSize)
-
-            VStack(alignment: .leading, spacing: 0) {
-                if let rename {
-                    rename.field()
-                } else {
-                    Text(tab.displayTitle)
-                        .font(.system(size: SidebarMetrics.titleSize))
-                        .foregroundStyle(chrome.title)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+            HStack(spacing: SidebarMetrics.iconToText) {
+                TabActivityIcon(activity: activity) {
+                    SiteIconView(image: favicon, token: tab.faviconToken, size: SidebarMetrics.iconSize, customIcon: tab.customIcon)
+                        .saturation(isUnloaded ? 0 : 1)
+                        .opacity(isUnloaded ? 0.4 : 1)
                 }
-                if let subtitle, rename == nil {
-                    Text(subtitle)
-                        .font(.system(size: SidebarMetrics.subtitleSize))
-                        .foregroundStyle(chrome.secondaryText)
-                        .lineLimit(1)
-                        .transition(.opacity)
+                .frame(width: SidebarMetrics.iconSize, height: SidebarMetrics.iconSize)
+
+                VStack(alignment: .leading, spacing: 0) {
+                    if let rename {
+                        rename.field()
+                    } else {
+                        Text(tab.displayTitle)
+                            .font(.system(size: SidebarMetrics.titleSize))
+                            .foregroundStyle(chrome.title)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    if let subtitle, rename == nil {
+                        Text(subtitle)
+                            .font(.system(size: SidebarMetrics.subtitleSize))
+                            .foregroundStyle(chrome.secondaryText)
+                            .lineLimit(1)
+                            .transition(.opacity)
+                    }
                 }
-            }
-            .animation(.easeOut(duration: 0.3), value: subtitle)
+                .animation(.easeOut(duration: 0.3), value: subtitle)
 
-            if tab.isUnread {
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 6, height: 6)
-                    .help("New activity since you last looked")
-                    .accessibilityLabel("Unread")
-            }
+                if tab.isUnread {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 6, height: 6)
+                        .help("New activity since you last looked")
+                        .accessibilityLabel("Unread")
+                }
 
-            Spacer(minLength: 0)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .help(tooltip)
 
             if isInPictureInPicture {
                 Button {
@@ -164,7 +169,6 @@ struct TabRowView<Menu: View>: View {
         .simultaneousGesture(TapGesture(count: 2).onEnded { onRename?() }, including: rename == nil ? .all : .subviews)
         .onHover { isHovering = $0 }
         .contextMenu { menu() }
-        .help(tooltip)
         // One accessibility element per row: its title and badges read as
         // one label, the hover buttons become its actions. A rename field
         // stays its own element.
