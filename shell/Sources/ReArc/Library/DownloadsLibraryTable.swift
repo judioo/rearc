@@ -486,6 +486,24 @@ final class DownloadsTableView: NSTableView {
         }
     }
 
+    // MARK: Accessibility
+
+    /// Accessibility sees the rows on screen, as it saw the SwiftUI list's
+    /// built rows. By default a table reports every row: an Accessibility
+    /// client walking the tree (VoiceOver, window managers) made AppKit
+    /// create an element for each of 39k rows, ~1 s of main thread a walk.
+    /// Arrow keys move the selection and scroll, which brings rows in.
+    var visibleRowViews: [NSTableRowView] {
+        let range = rows(in: visibleRect)
+        guard range.length > 0 else { return [] }
+        return (range.location ..< range.location + range.length).compactMap { rowView(atRow: $0, makeIfNecessary: false) }
+    }
+
+    override func accessibilityChildren() -> [Any]? { visibleRowViews }
+    override func accessibilityRows() -> [NSAccessibilityRow]? { visibleRowViews }
+    override func accessibilityVisibleRows() -> [NSAccessibilityRow]? { visibleRowViews }
+    override func accessibilitySelectedRows() -> [NSAccessibilityRow]? { visibleRowViews.filter(\.isSelected) }
+
     @objc func copy(_ sender: Any?) {
         controller?.copySelection()
     }

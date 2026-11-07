@@ -145,6 +145,11 @@ final class DownloadsLibraryTableTests: XCTestCase {
         var made = 0
         table.enumerateAvailableRowViews { _, _ in made += 1 }
         XCTAssertLessThan(made, 40)
+        // Accessibility sees those rows too, not 39,414 elements.
+        let children = try! XCTUnwrap(table.accessibilityChildren())
+        XCTAssertEqual(children.count, made)
+        XCTAssertTrue(children.allSatisfy { $0 is DownloadsTableRowView })
+        XCTAssertEqual(table.accessibilityRows()?.count, made)
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 2, "debug build, generous")
     }
 
