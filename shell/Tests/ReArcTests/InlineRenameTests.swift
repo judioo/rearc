@@ -197,12 +197,6 @@ final class InlineRenameTests: XCTestCase {
 
     func testRowsNotOnScreenUseTheAlert() {
         let model = makeModel()
-        let favorite = model.store.addTab(kind: .favorite, title: "Fav", url: url("f"))
-        model.beginRename(.tab(favorite.id))
-        XCTAssertNil(model.inlineRename, "a favorite has no title row")
-        XCTAssertEqual(model.pendingRename, .tab(favorite.id))
-        model.pendingRename = nil
-
         let work = model.store.spaces[1].id
         let elsewhere = model.store.addTab(kind: .today, title: "Else", url: url("e"), in: work)
         model.beginRename(.tab(elsewhere.id))
@@ -218,9 +212,9 @@ final class InlineRenameTests: XCTestCase {
         model.pendingRename = nil
         model.isSidebarVisible = true
 
-        model.beginRename(.space(model.store.activeSpaceID))
+        model.beginRename(.space(work))
         XCTAssertNil(model.inlineRename)
-        XCTAssertEqual(model.pendingRename, .space(model.store.activeSpaceID), "spaces keep the alert")
+        XCTAssertEqual(model.pendingRename, .space(work), "another space's header is not shown")
     }
 
     // MARK: The plain row

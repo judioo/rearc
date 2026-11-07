@@ -286,11 +286,17 @@ struct SpaceHeaderView: View {
                 .frame(width: 18, height: 18)
                 .padding(.leading, SidebarMetrics.iconLeading - 1)
                 .padding(.trailing, SidebarMetrics.iconToText - 1)
-            Text(space.name)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(chrome.secondaryText)
-                .lineLimit(1)
-                .padding(.trailing, 4)
+            Group {
+                if let rename = SidebarRowRename(row: space.id, model: model) {
+                    rename.field(weight: .semibold)
+                } else {
+                    Text(space.name)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(chrome.secondaryText)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.trailing, 4)
             // Arc's pinned-section toggle: shown on hover, and always while collapsed.
             if hasPinned, isHovering || isPinnedCollapsed {
                 Button(action: onTogglePinned) {
@@ -329,7 +335,8 @@ struct SpaceHeaderView: View {
         }
         .frame(height: SidebarMetrics.headerHeight)
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { model.beginRename(.space(space.id)) }
+        .gesture(TapGesture(count: 2).onEnded { model.beginRename(.space(space.id)) },
+                 including: model.inlineRename(forRow: space.id) == nil ? .all : .subviews)
         .onHover { isHovering = $0 }
         .contextMenu {
             if hasPinned {

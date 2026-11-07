@@ -150,6 +150,7 @@ struct SectionItemContextMenu: View {
             }
             if let pane = split.tabs.first(where: { $0.id == (paneID ?? split.focusTabID) }) {
                 Section(pane.displayTitle) {
+                    Button("Rename Pane…") { model.beginRename(.tab(pane.id)) }
                     Button("Separate from Split View") { model.unsplitTabIfInSplit(pane.id) }
                     Button("Copy Link") { model.copyURL(of: pane.id) }
                     Button("Close Pane") { model.closeTab(pane.id) }
