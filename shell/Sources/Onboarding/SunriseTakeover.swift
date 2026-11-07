@@ -36,7 +36,7 @@ public final class SunrisePlayer: ObservableObject {
     /// Act 4: the motto, then the window.
     @Published public private(set) var act4: Act4Log? { didSet { rescore() } }
     public let reduced: Bool
-    public var line = "Good morning."
+    public var line = "A New Dawn"
     public enum Mode: Sendable { case firstRun, replay }
     /// Replay (Help › Watch the Sunrise Again) is Act 0 alone.
     public var mode: Mode = .firstRun

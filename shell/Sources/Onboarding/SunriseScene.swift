@@ -33,7 +33,7 @@ public struct SunriseSceneView: View {
     public var closing: SunriseClosingFrame?
 
     public init(variant: SunriseVariant, time: Double, reduced: Bool = false, showsDesktop: Bool = false,
-                exit: Double = 0, line: String = "Good morning.", onBegin: (() -> Void)? = nil,
+                exit: Double = 0, line: String = "A New Dawn", onBegin: (() -> Void)? = nil,
                 act1: Act1Log? = nil, controls: Act1Controls? = nil,
                 act2: Act2Log? = nil, act2Controls: Act2Controls? = nil,
                 act3: Act3Log? = nil, act3Controls: Act3Controls? = nil, act4: Act4Log? = nil,
