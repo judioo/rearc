@@ -17,7 +17,15 @@ final class DownloadsTableCell: NSView {
     private var warned = false
     private var canKeep = false
     private var canReview = false
-    var isHovered = false { didSet { if isHovered != oldValue { updateButtonOpacity() } } }
+    /// Only the hovered row has tooltips: AppKit rebuilds every tooltip's
+    /// rect on each scroll step, which a tooltip per row paid for.
+    var isHovered = false {
+        didSet {
+            guard isHovered != oldValue else { return }
+            updateButtonOpacity()
+            updateToolTips()
+        }
+    }
 
     private let icon = NSImageView()
     private let badge = NSImageView()
@@ -108,7 +116,6 @@ final class DownloadsTableCell: NSView {
         let text = downloads.warningText(for: record) ?? record.statusText
         if status.stringValue != text { status.stringValue = text }
         status.textColor = warned ? .systemOrange : record.state == .interrupted ? .systemRed : .secondaryLabelColor
-        if toolTip != record.url { toolTip = record.url }
 
         icon.alphaValue = record.state == .complete || record.isActive ? 1 : 0.5
         badge.image = warned ? Self.warningBadge : record.state == .interrupted ? Self.failureBadge : nil
@@ -118,7 +125,6 @@ final class DownloadsTableCell: NSView {
         discard.isHidden = !warned
         keep.isHidden = !(canKeep || canReview)
         keep.title = canKeep ? "Keep…" : "Review…"
-        keep.toolTip = canKeep ? "Save this file even though it may be harmful" : "Keep or discard it on the Downloads page"
         updateProgress()
         loadIcon()
         needsLayout = true
@@ -159,6 +165,15 @@ final class DownloadsTableCell: NSView {
             button.isEnabled = enabled
         }
         updateButtonOpacity()
+        updateToolTips()
+    }
+
+    private func updateToolTips() {
+        func set(_ view: NSView, _ tip: String?) { if view.toolTip != tip { view.toolTip = tip } }
+        set(self, isHovered ? record?.url : nil)
+        for button in buttons { set(button, isHovered && !button.isHidden ? button.help : nil) }
+        set(keep, isHovered && !keep.isHidden
+            ? (canKeep ? "Save this file even though it may be harmful" : "Keep or discard it on the Downloads page") : nil)
     }
 
     private func updateButtonOpacity() {
@@ -350,6 +365,8 @@ final class DownloadsTableCell: NSView {
 /// A row's round button: a 10 pt bold symbol on a faint circle.
 final class DownloadsRowButton: NSButton {
     private(set) var downloadAction: DownloadAction?
+    /// The tooltip, shown while the row is hovered.
+    private(set) var help = ""
     private var symbol = ""
 
     override init(frame frameRect: NSRect) {
@@ -369,8 +386,8 @@ final class DownloadsRowButton: NSButton {
 
     func configure(symbol: String, help: String, action: DownloadAction) {
         downloadAction = action
-        if toolTip != help {
-            toolTip = help
+        if self.help != help {
+            self.help = help
             setAccessibilityLabel(help)
         }
         guard symbol != self.symbol else { return }

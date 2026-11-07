@@ -166,17 +166,21 @@ final class DownloadsLibraryTableTests: XCTestCase {
         let done = try row("done")
         XCTAssertEqual(done.accessibilityRole(), .group)
         XCTAssertEqual(done.accessibilityLabel(), "done.zip, \(try XCTUnwrap(done.record).statusText)")
+        XCTAssertNil(done.toolTip, "tooltips only on the hovered row")
+        done.isHovered = true
         XCTAssertEqual(done.toolTip, "https://example.test/done")
         let doneButtons = done.subviews.compactMap { $0 as? DownloadsRowButton }.filter { !$0.isHidden }
         XCTAssertEqual(doneButtons.map(\.toolTip), ["Show in Finder"])
+        done.isHovered = false
+        XCTAssertNil(done.toolTip)
         let actions = try XCTUnwrap(done.accessibilityCustomActions()).map(\.name)
         XCTAssertEqual(actions, ["Open", "Show in Finder", "Copy Download Link", "Remove from List"])
 
         let busy = try row("busy")
-        XCTAssertEqual(busy.subviews.compactMap { $0 as? DownloadsRowButton }.filter { !$0.isHidden }.map(\.toolTip), ["Pause", "Cancel"])
+        XCTAssertEqual(busy.subviews.compactMap { $0 as? DownloadsRowButton }.filter { !$0.isHidden }.map(\.help), ["Pause", "Cancel"])
 
         let failed = try row("failed")
-        XCTAssertEqual(failed.subviews.compactMap { $0 as? DownloadsRowButton }.filter { !$0.isHidden }.map(\.toolTip), ["Resume"])
+        XCTAssertEqual(failed.subviews.compactMap { $0 as? DownloadsRowButton }.filter { !$0.isHidden }.map(\.help), ["Resume"])
 
         // A dangerous transfer: Discard instead of the round buttons, and an orange row.
         let risky = try row("risky")
