@@ -992,7 +992,7 @@ final class ChromiumBench {
     private func downloadsSuite() async throws {
         scenario = "downloads"
         let file = options.downloadsPath.map { URL(fileURLWithPath: $0) }
-        let full = file.map(DownloadListFile.load(from:))?.list.records ?? []
+        let full = file.map { DownloadListFile.load(from: $0) }?.list.records ?? []
         report.notes.append("downloads: \(full.count) records")
         record("downloads.footprint.start", Self.footprintMB(), unit: "MB")
 
