@@ -67,4 +67,10 @@ public protocol OnboardingHost: AnyObject {
     func revealBrowser(in frame: NSRect, below overlay: NSWindow)
     /// The overlay is gone.
     func onboardingFinished()
+    /// "Onboard later": the overlay closed before the end, nothing applied.
+    func onboardingDeferred()
+}
+
+public extension OnboardingHost {
+    func onboardingDeferred() { onboardingFinished() }
 }

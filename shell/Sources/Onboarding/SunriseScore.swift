@@ -188,6 +188,8 @@ public final class SunriseSynth {
     var sample: Int64 = 0
     /// 1 while playing; Begin fades it to 0.
     public var fadeOutStart: Double?
+    /// Seconds the fade takes; a closing sets its own.
+    public var fadeOutLength = 1.8
     /// The score after Begin, and how far the audio clock runs ahead of scene time.
     struct Current { var score = SunriseScore(); var offset = 0.0 }
     let current = OSAllocatedUnfairLock(initialState: Current())
@@ -242,7 +244,11 @@ public final class SunriseSynth {
     public var score: SunriseScore { current.withLock { $0.score } }
     public var time: Double { Double(sample) / sampleRate }
     public func seek(to t: Double) { sample = Int64(t * sampleRate) }
-    public func fadeOut() { if fadeOutStart == nil { fadeOutStart = time } }
+    public func fadeOut(over length: Double = 1.8) {
+        guard fadeOutStart == nil else { return }
+        fadeOutLength = length
+        fadeOutStart = time
+    }
 
     func noise() -> Double {
         noiseState ^= noiseState << 13; noiseState ^= noiseState >> 7; noiseState ^= noiseState << 17
@@ -343,7 +349,7 @@ public final class SunriseSynth {
             }
 
             var master = Ease.smooth((t + offset) / 0.4)
-            if let f = fadeOutStart { master *= 1 - Ease.smooth((t + offset - f) / 1.8) }
+            if let f = fadeOutStart { master *= 1 - Ease.smooth((t + offset - f) / fadeOutLength) }
             left[i] = Float(tanh(l * master * 1.1) * 0.85)
             right[i] = Float(tanh(r * master * 1.1) * 0.85)
         }
@@ -444,7 +450,7 @@ public final class SunriseAudio {
         }
     }
 
-    public func fadeOut() { synth.fadeOut() }
+    public func fadeOut(over length: Double = 1.8) { synth.fadeOut(over: length) }
 
     /// The score for what has happened so far (and what that sets in motion).
     /// Live runs pass the scene clock so the two stay aligned.

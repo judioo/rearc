@@ -12,6 +12,7 @@ import Onboarding
 //   --act3 [--fresh]          ...and Act 3 (spaces from the import, or suggested with --fresh).
 //   --act4                    ...and Act 4: the motto and the drop into the browser.
 //   --audio-only              Just score.wav (the frames do not depend on the score).
+//   --later STYLE [--later-at S]  "Onboard later" at S seconds: sunset, fade or nightfall.
 // sunrise --scan               Counts what Act 2 would find on this Mac (no names).
 // sunrise --demo-sources       Live, with the demo browsers instead of this Mac's.
 
@@ -81,13 +82,16 @@ MainActor.assumeIsolated {
             }
             let act4 = withAct4 ? act3?.handOff.map { Act4Log.after(act1: act1, act2: act2, act3: act3, start: $0) } : nil
             let end = (act4?.handOff ?? act3?.handOff ?? act2?.handOff ?? act1?.handOff).map { $0 + SunrisePlayer.exitDuration + 0.6 }
-            let duration = durationArg ?? end ?? 13
+            let later = value("--later").flatMap(SunriseClosing.init(rawValue:)).map { style in
+                (style: style, at: value("--later-at").flatMap(Double.init) ?? act1.map { $0.start + 6 } ?? start)
+            }
+            let duration = durationArg ?? later.map { $0.at + $0.style.duration + 0.4 } ?? end ?? 13
             let out = URL(fileURLWithPath: dir).appendingPathComponent(v.rawValue)
             do {
                 try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
                 let n = args.contains("--audio-only") ? 0
-                    : try SunrisePreview.renderFrames(v, size: size, fps: fps, duration: duration, reduced: reduced, act1: act1, act2: act2, act3: act3, act4: act4, to: out)
-                try SunrisePreview.renderAudio(v, duration: duration, reduced: reduced, act1: act1, act2: act2, act3: act3, act4: act4, to: out.appendingPathComponent("score.wav"))
+                    : try SunrisePreview.renderFrames(v, size: size, fps: fps, duration: duration, reduced: reduced, act1: act1, act2: act2, act3: act3, act4: act4, later: later, to: out)
+                try SunrisePreview.renderAudio(v, duration: duration, reduced: reduced, act1: act1, act2: act2, act3: act3, act4: act4, later: later, to: out.appendingPathComponent("score.wav"))
                 print("\(v.rawValue): \(n) frames and score.wav in \(out.path)")
             } catch {
                 print("\(v.rawValue): \(error)")

@@ -11,6 +11,14 @@ public final class SunrisePlayer: ObservableObject {
     /// In a window centred on the main screen rather than over all of it.
     @Published public internal(set) var windowed = false
     var onToggleWindow: (() -> Void)?
+    /// How "Onboard later" closes the scene.
+    @Published public var closingStyle: SunriseClosing = .sunset
+    /// When "Onboard later" was pressed, and how it is closing.
+    @Published public private(set) var closingStart: Date?
+    private(set) var activeClosing: SunriseClosing?
+    var closingFrom = 0.0
+    /// The prototype plays again after closing, so closings can be compared.
+    public var replaysAfterLater = false
     /// Full screen ⇄ a window centred on the main screen; offered throughout.
     public func toggleWindow() { onToggleWindow?() }
     /// Act 1, from Begin on.
@@ -53,7 +61,44 @@ public final class SunrisePlayer: ObservableObject {
     /// Every act's sounds follow from its log: re-scored on each change, so
     /// what you do is heard the moment it is drawn.
     func rescore() {
-        audio?.update(SunriseScore.build(act1: act1, act2: act2, act3: act3, act4: act4), sceneTime: time(at: Date()))
+        var score = SunriseScore.build(act1: act1, act2: act2, act3: act3, act4: act4)
+        if let start = closingStart, let style = activeClosing {
+            score.hits += SunriseClosingFrame.hits(style, start: time(at: start))
+        }
+        audio?.update(score, sceneTime: time(at: Date()))
+    }
+
+    /// "Onboard later" is offered until Act 4 applies what was chosen.
+    public var canOnboardLater: Bool { act4 == nil && exitStart == nil && closingStart == nil }
+
+    /// "Onboard later": the act steps back, the scene closes, nothing is applied.
+    public func later() {
+        guard canOnboardLater else { return }
+        let style = closingStyle.resolved(reduced: reduced)
+        let now = Date()
+        closingFrom = min(time(at: now), cues.end)
+        activeClosing = style
+        closingStart = now
+        rescore()
+        audio?.fadeOut(over: style.duration)
+        NSCursor.unhide()
+        DispatchQueue.main.asyncAfter(deadline: .now() + style.duration + 0.2) { [weak self] in
+            guard let self, self.closingStart == now else { return }
+            if self.replaysAfterLater { self.play(); return }
+            self.audio?.stop()
+            self.host?.onboardingDeferred()
+            self.onFinished?()
+        }
+    }
+
+    public func cycleClosing() {
+        let all = SunriseClosing.allCases
+        closingStyle = all[((all.firstIndex(of: closingStyle) ?? 0) + 1) % all.count]
+    }
+
+    public func closing(at date: Date) -> SunriseClosingFrame? {
+        guard let start = closingStart, let style = activeClosing else { return nil }
+        return SunriseClosingFrame(style: style, progress: min(1, date.timeIntervalSince(start) / style.duration), from: closingFrom)
     }
 
     public func time(at date: Date) -> Double { date.timeIntervalSince(startDate) }
@@ -67,6 +112,8 @@ public final class SunrisePlayer: ObservableObject {
     public func play(_ variant: SunriseVariant? = nil) {
         if let variant { self.variant = variant }
         exitStart = nil
+        closingStart = nil
+        activeClosing = nil
         act1 = nil
         act2 = nil
         act3 = nil
@@ -305,13 +352,16 @@ struct SunriseLiveView: View {
             let t = player.time(at: timeline.date)
             let exit = player.exit(at: timeline.date)
             let dawn = SunriseTimeline.dawn(player.variant, t, reduced: player.reduced)
+            let closing = player.closing(at: timeline.date)
             ZStack {
                 SunriseSceneView(variant: player.variant, time: t, reduced: player.reduced,
                                  exit: exit, line: player.line, onBegin: { player.begin() },
                                  act1: player.act1, controls: player.controls,
                                  act2: player.act2, act2Controls: player.act2Controls,
-                                 act3: player.act3, act3Controls: player.act3Controls, act4: player.act4)
-                hints(t: t, dawn: dawn, exit: exit)
+                                 act3: player.act3, act3Controls: player.act3Controls, act4: player.act4,
+                                 closing: closing)
+                hints(t: t, dawn: dawn, exit: max(exit, closing.map { Ease.smooth(Ease.progress($0.progress, 0, 0.2)) } ?? 0))
+                    .sunriseControlsActive(closing == nil)
             }
         }
         .ignoresSafeArea()
@@ -338,9 +388,26 @@ struct SunriseLiveView: View {
                             .opacity(0.6)
                             .sunriseButton(player.muted ? "Sound off" : "Sound on") { player.muted.toggle() }
                         Text("R  Watch again").opacity(0.6).sunriseButton("Watch again") { player.play() }
+                        Text("C  Close: \(player.closingStyle.title)").opacity(0.6)
+                            .sunriseButton("Closing: \(player.closingStyle.title)") { player.cycleClosing() }
                     }
+                } else {
+                    HStack(spacing: 6) {
+                        Image(systemName: player.muted ? "speaker.slash" : "speaker.wave.2")
+                        Text(player.muted ? "Sound off" : "Sound on")
+                    }
+                    .contentShape(Rectangle())
+                    .opacity(0.8)
+                    .sunriseButton(player.muted ? "Sound off" : "Sound on") { player.muted.toggle() }
                 }
                 Spacer()
+                if player.canOnboardLater {
+                    Text("Onboard later")
+                        .contentShape(Rectangle())
+                        .opacity(0.8)
+                        .sunriseButton("Onboard later") { player.later() }
+                        .padding(.trailing, 18)
+                }
                 HStack(spacing: 8) {
                     Text(player.windowed ? "Full screen" : "Use a window")
                     Text("⌃⌘F")
@@ -406,6 +473,7 @@ public final class SunriseTakeover {
         player.host = host
         player.mode = mode
         isPrototype = showsVariantPicker
+        player.replaysAfterLater = showsVariantPicker
         self.windowed = windowed
         player.windowed = windowed
         let window = TakeoverWindow(contentRect: Self.frame(windowed: windowed), styleMask: [.borderless], backing: .buffered, defer: false)
@@ -480,6 +548,7 @@ public final class SunriseTakeover {
     }
 
     func handle(_ event: NSEvent) -> Bool {
+        if player.closingStart != nil { return !event.modifierFlags.contains(.command) }
         // ⌃⌘F, the system's full-screen shortcut, works in every act.
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if mods.contains([.command, .control]), event.charactersIgnoringModifiers?.lowercased() == "f" {
@@ -529,6 +598,8 @@ public final class SunriseTakeover {
         case "3": player.play(.path)
         case "r": player.play()
         case "m": player.muted.toggle()
+        case "c": player.cycleClosing()
+        case "l": player.later()
         default: return false
         }
         return true

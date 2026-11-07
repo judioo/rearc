@@ -8,15 +8,20 @@ import UniformTypeIdentifiers
 @MainActor
 public enum SunrisePreview {
     public static func renderFrames(_ variant: SunriseVariant, size: CGSize, fps: Double, duration: Double,
-                                    reduced: Bool = false, act1: Act1Log? = nil, act2: Act2Log? = nil, act3: Act3Log? = nil, act4: Act4Log? = nil, to dir: URL) throws -> Int {
+                                    reduced: Bool = false, act1: Act1Log? = nil, act2: Act2Log? = nil, act3: Act3Log? = nil, act4: Act4Log? = nil,
+                                    later: (style: SunriseClosing, at: Double)? = nil, to dir: URL) throws -> Int {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let count = Int(duration * fps)
         for i in 0 ..< count {
             let t = Double(i) / fps
             let exit = (act4?.handOff ?? act3?.handOff ?? act2?.handOff ?? act1?.handOff).map { Ease.inOut(Ease.progress(t, $0, $0 + SunrisePlayer.exitDuration)) } ?? 0
             let log = act1.flatMap { t >= $0.start ? $0 : nil }
+            let cues = reduced ? SunriseCues.reduced : SunriseCues.of(variant)
+            let closing = later.flatMap { l in
+                t >= l.at ? SunriseClosingFrame(style: l.style, progress: min(1, (t - l.at) / l.style.duration), from: min(l.at, cues.end)) : nil
+            }
             let view = SunriseSceneView(variant: variant, time: t, reduced: reduced, showsDesktop: true, exit: exit,
-                                        act1: log, act2: act2, act3: act3, act4: act4)
+                                        act1: log, act2: act2, act3: act3, act4: act4, closing: closing)
                 .frame(width: size.width, height: size.height)
             let renderer = ImageRenderer(content: view)
             renderer.scale = 1
@@ -30,10 +35,16 @@ public enum SunrisePreview {
     }
 
     public static func renderAudio(_ variant: SunriseVariant, duration: Double, reduced: Bool = false,
-                                   act1: Act1Log? = nil, act2: Act2Log? = nil, act3: Act3Log? = nil, act4: Act4Log? = nil, to url: URL) throws {
+                                   act1: Act1Log? = nil, act2: Act2Log? = nil, act3: Act3Log? = nil, act4: Act4Log? = nil,
+                                   later: (style: SunriseClosing, at: Double)? = nil, to url: URL) throws {
         let audio = try SunriseAudio(variant: variant, reduced: reduced, offline: true)
-        audio.update(SunriseScore.build(act1: act1, act2: act2, act3: act3, act4: act4))
-        if let end = act4?.handOff ?? act3?.handOff ?? act2?.handOff ?? act1?.handOff { audio.synth.fadeOutStart = end }
+        var score = SunriseScore.build(act1: act1, act2: act2, act3: act3, act4: act4)
+        if let later { score.hits += SunriseClosingFrame.hits(later.style, start: later.at) }
+        audio.update(score)
+        if let later {
+            audio.synth.fadeOutLength = later.style.duration
+            audio.synth.fadeOutStart = later.at
+        } else if let end = act4?.handOff ?? act3?.handOff ?? act2?.handOff ?? act1?.handOff { audio.synth.fadeOutStart = end }
         try audio.render(duration: duration, to: url)
     }
 }

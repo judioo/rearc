@@ -29,22 +29,28 @@ public struct SunriseSceneView: View {
     public var act3Controls: Act3Controls?
     /// Act 4: the motto, then the window.
     public var act4: Act4Log?
+    /// "Onboard later": the scene closing, nil otherwise.
+    public var closing: SunriseClosingFrame?
 
     public init(variant: SunriseVariant, time: Double, reduced: Bool = false, showsDesktop: Bool = false,
                 exit: Double = 0, line: String = "Good morning.", onBegin: (() -> Void)? = nil,
                 act1: Act1Log? = nil, controls: Act1Controls? = nil,
                 act2: Act2Log? = nil, act2Controls: Act2Controls? = nil,
-                act3: Act3Log? = nil, act3Controls: Act3Controls? = nil, act4: Act4Log? = nil) {
+                act3: Act3Log? = nil, act3Controls: Act3Controls? = nil, act4: Act4Log? = nil,
+                closing: SunriseClosingFrame? = nil) {
         self.variant = variant; self.time = time; self.reduced = reduced; self.showsDesktop = showsDesktop
         self.exit = exit; self.line = line; self.onBegin = onBegin; self.act1 = act1; self.controls = controls
         self.act2 = act2; self.act2Controls = act2Controls
-        self.act3 = act3; self.act3Controls = act3Controls; self.act4 = act4
+        self.act3 = act3; self.act3Controls = act3Controls; self.act4 = act4; self.closing = closing
     }
 
     public var body: some View {
         GeometryReader { geo in
             let L = MarkLayout(size: geo.size)
-            let f = SunriseTimeline.frame(variant, time, L, reduced: reduced)
+            let actsOut = closing?.actsOut ?? 0
+            let closingFrame = SunriseTimeline.frame(variant, closing?.act0Time(time) ?? time, L, reduced: reduced)
+            let f = closing?.apply(closingFrame) ?? closingFrame
+            let live = exit == 0 && closing == nil
             let A2 = Act2Layout(size: geo.size)
             let L3 = Act3Layout(size: geo.size)
             let a4 = act4.flatMap { time >= $0.start ? Act4Timeline.frame($0, time) : nil }
@@ -66,6 +72,7 @@ public struct SunriseSceneView: View {
                 if let a2 { g.confirm *= 1 - a2.clearAct1; g.walk = a2.clearAct1 }
                 // The sky takes the colour of the space being edited.
                 if let a3 { g.tint = g.tint.mix(a3.tint, a3.tintAmount) }
+                g.tintAmount *= 1 - actsOut
                 return g
             }
             let A = Act1Layout(size: geo.size)
@@ -75,30 +82,35 @@ public struct SunriseSceneView: View {
                     ctx.drawLayer { scene in
                         scene.opacity = f.veil * (1 - exit)
                         SunrisePainter.scene(&scene, L, f, line: line, time: time, act1: a1, hidesMark: flying)
-                        if flying, let a4, let act4 {
-                            SunrisePainter.act4(&scene, L, act4, a4)
-                        } else {
-                            if let a2, let act2 { SunrisePainter.act2(&scene, A2, a2, act2, time) }
-                            if let a1 { SunrisePainter.act1(&scene, A, a1) }
-                            if let a3 { SunrisePainter.act3(&scene, A2, L3, a3) }
+                        scene.drawLayer { acts in
+                            acts.opacity = 1 - actsOut
+                            if flying, let a4, let act4 {
+                                SunrisePainter.act4(&acts, L, act4, a4)
+                            } else {
+                                if let a2, let act2 { SunrisePainter.act2(&acts, A2, a2, act2, time) }
+                                if let a1 { SunrisePainter.act1(&acts, A, a1) }
+                                if let a3 { SunrisePainter.act3(&acts, A2, L3, a3) }
+                            }
+                            if let a4 { SunrisePainter.motto(&acts, geo.size, a4) }
                         }
-                        if let a4 { SunrisePainter.motto(&scene, geo.size, a4) }
                     }
                 }
                 BeginButton(height: geo.size.height, action: onBegin)
                     .opacity(f.button * (1 - exit) * (1 - (a1?.clearAct0 ?? 0)))
-                    .sunriseControlsActive(f.button > 0.5 && exit == 0 && act1 == nil)
+                    .sunriseControlsActive(f.button > 0.5 && live && act1 == nil)
                     .position(x: geo.size.width / 2, y: L.markBottom + geo.size.height * 0.19)
                 if let a1, let controls, exit == 0, a2 == nil {
                     Act1ControlsView(frame: a1, layout: A, controls: controls)
+                        .opacity(1 - actsOut)
+                        .sunriseControlsActive(closing == nil)
                 }
                 if let a2, let act2, a3 == nil {
-                    Act2ControlsView(frame: a2, layout: A2, log: act2, controls: exit == 0 ? act2Controls : nil)
-                        .opacity(f.veil * (1 - exit))
+                    Act2ControlsView(frame: a2, layout: A2, log: act2, controls: live ? act2Controls : nil)
+                        .opacity(f.veil * (1 - exit) * (1 - actsOut))
                 }
                 if let a3, a4 == nil {
-                    Act3ControlsView(frame: a3, arc: A2, layout: L3, controls: exit == 0 ? act3Controls : nil)
-                        .opacity(f.veil * (1 - exit))
+                    Act3ControlsView(frame: a3, arc: A2, layout: L3, controls: live ? act3Controls : nil)
+                        .opacity(f.veil * (1 - exit) * (1 - actsOut))
                 }
             }
         }
