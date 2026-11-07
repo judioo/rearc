@@ -291,10 +291,13 @@ final class BrowserViewModel {
     var isCommandBarPresented = false
     var commandBarText = "" {
         didSet {
-            commandBarHighlightedIndex = 0
             // Deleting turns inline completion off until the next character (omnibox rule).
             commandBarSuppressesInlineCompletion = commandBarText.count < oldValue.count && oldValue.hasPrefix(commandBarText)
+            // Only an edit moves the highlight back to the top. The field
+            // writes its unchanged text back on Return, just before submit,
+            // so ↓ then Return ran the first row (Break check 2026-11-08).
             if commandBarText != oldValue {
+                commandBarHighlightedIndex = 0
                 PerfSignposts.interaction(.commandBarKey, "\(commandBarText.count) chars")
                 refreshCommandBarLive()
             }
@@ -1668,6 +1671,7 @@ final class BrowserViewModel {
         commandBarSplitAnchorID = nil
         commandBarTargetID = target
         commandBarText = text
+        commandBarHighlightedIndex = 0
         commandBarError = nil
         isCommandBarPresented = true
         commandBarServices.commandBarWillOpen(profileID: store.activeProfileID)
@@ -1852,10 +1856,12 @@ final class BrowserViewModel {
         case .peekAtURL:
             commandBarURLIntent = .peek
             commandBarText = ""
+            commandBarHighlightedIndex = 0
             commandBarError = nil
         case .openLittleArcWindow:
             commandBarURLIntent = .littleArc
             commandBarText = ""
+            commandBarHighlightedIndex = 0
             commandBarError = nil
         case .openInLittleArc:
             openInLittleArcFromContext()
