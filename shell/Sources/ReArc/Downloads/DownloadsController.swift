@@ -22,6 +22,9 @@ protocol DownloadBackend: AnyObject {
     func removeFinished(_ ids: [String])
     /// The Library wants the whole history: start the engine's history load.
     func loadHistory()
+    /// The engine keeps a long history in its database and reports its size
+    /// when it loads (ABI 1.48): until then the list is not the whole history.
+    var reportsHistorySize: Bool { get }
 }
 
 extension DownloadBackend {
@@ -29,6 +32,7 @@ extension DownloadBackend {
     func resolveDanger(_ decision: DownloadDangerDecision, id: String) -> Bool { false }
     func removeFinished(_ ids: [String]) { ids.forEach { _ = perform(.remove, id: $0) } }
     func loadHistory() {}
+    var reportsHistorySize: Bool { false }
 }
 
 /// The downloads tray's model, shared by every window: the recent list
@@ -70,6 +74,10 @@ final class DownloadsController {
     private(set) var hasDangerous = false
     /// Clear has something to remove.
     private(set) var hasFinished = false
+    /// History rows each engine profile reported at its load (ABI 1.48
+    /// `archived_rows`) that the list does not hold yet: they page in a chunk
+    /// at a time. Nil until the first profile's history loaded.
+    private var historyOutstanding: [UInt64: Int]?
 
     @ObservationIgnored let webKit = WebKitDownloadCenter()
     /// Chromium's backend when the engine has `downloads` (ABI 1.17).
@@ -103,7 +111,7 @@ final class DownloadsController {
     /// Work that waits for a later turn, in arrival order.
     private enum Pending {
         case event(DownloadEvent, DownloadSource, Date)
-        case archived([DownloadRecord])
+        case archived([DownloadRecord], profile: UInt64?)
     }
 
     /// What the app passes as `turnBudget`: Chromium's history slices are
@@ -138,6 +146,21 @@ final class DownloadsController {
     }
 
     var records: [DownloadRecord] { list.records }
+
+    /// Every download in the history, archived rows included, for the tray's
+    /// Show All: the list holds the rows loaded so far (the 50 `Downloads.json`
+    /// keeps until the engine's history loads, then its archived rows a chunk
+    /// at a time). Nil while an engine's history has not reported its size.
+    var historyCount: Int? {
+        guard chromium?.reportsHistorySize == true else { return list.summary.rows }
+        return historyOutstanding.map { list.summary.rows + $0.values.reduce(0, +) }
+    }
+
+    /// A profile's engine history loaded with `archived` rows kept in its
+    /// database only; the backend pages them in next (`appendArchived`).
+    func noteEngineHistory(profile: UInt64, archived: Int) {
+        historyOutstanding = (historyOutstanding ?? [:]).merging([profile: archived]) { $1 }
+    }
 
     /// The rows the Library's search shows (`LibraryDownloads.matching`).
     func matching(_ query: String) -> [DownloadRecord] {
@@ -281,10 +304,9 @@ final class DownloadsController {
             switch item {
             case .event(let event, let source, let now):
                 events.append((event, source, now))
-            case .archived(let records):
+            case .archived(let records, let profile):
                 applyEvents()
-                list.appendArchived(records)
-                refreshSummary()
+                applyArchived(records, profile: profile)
             }
         }
         applyEvents()
@@ -362,15 +384,20 @@ final class DownloadsController {
     /// at a time, as older rows. Not saved: `Downloads.json` keeps the newest.
     /// With a turn budget they go in a chunk at a time, after any events
     /// still waiting (live rows are newer and come first).
-    func appendArchived(_ records: [DownloadRecord]) {
-        guard turnBudget != nil else {
-            list.appendArchived(records)
-            return refreshSummary()
-        }
+    func appendArchived(_ records: [DownloadRecord], profile: UInt64? = nil) {
+        guard turnBudget != nil else { return applyArchived(records, profile: profile) }
         for start in stride(from: 0, to: records.count, by: Self.archivedChunk) {
-            pending.append(.archived(Array(records[start ..< min(start + Self.archivedChunk, records.count)])))
+            pending.append(.archived(Array(records[start ..< min(start + Self.archivedChunk, records.count)]), profile: profile))
         }
         scheduleDrain()
+    }
+
+    private func applyArchived(_ records: [DownloadRecord], profile: UInt64?) {
+        list.appendArchived(records)
+        if let profile, let outstanding = historyOutstanding?[profile] {
+            historyOutstanding?[profile] = max(outstanding - records.count, 0)
+        }
+        refreshSummary()
     }
 
     func setDirectory(_ url: URL) {

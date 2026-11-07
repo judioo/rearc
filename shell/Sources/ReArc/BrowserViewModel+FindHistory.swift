@@ -109,6 +109,15 @@ extension BrowserViewModel {
         downloads.isTrayPresented.toggle()
     }
 
+    /// Esc closes the tray wherever the keys go: they often go to the
+    /// browser window under the popover, not to the popover.
+    func handleDownloadsTrayEscape(_ event: NSEvent) -> Bool {
+        guard downloads.isTrayPresented, event.type == .keyDown, event.keyCode == 53,
+              event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return false }
+        downloads.isTrayPresented = false
+        return true
+    }
+
     /// The tray shows in one window: the key browser window (or the only one).
     func isKeyBrowserWindow(_ window: SidebarWindowID?) -> Bool {
         store.keyWindowID == nil || window == nil || store.keyWindowID == window
