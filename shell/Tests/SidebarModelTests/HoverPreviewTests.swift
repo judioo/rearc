@@ -91,6 +91,95 @@ final class HoverPreviewTests: XCTestCase {
         XCTAssertNil(timer.nextDeadline)
     }
 
+    // MARK: - Where the pointer really is
+
+    /// Break check 2026-11-07 night, issue 9: a fast diagonal flick out of
+    /// the sidebar crossed row 2 and the open card's window. Row 2's enter
+    /// arrived and its exit never did, nor the card's. Before the polls the
+    /// card moved to row 2 and stayed open with the pointer in the page.
+    func testAFlickThatLosesItsExitsStillCloses() {
+        var timer = Timer()
+        timer.pointerEntered(1, kind: .tab, now: t0)
+        XCTAssertEqual(timer.tick(now: at(0.8)), .show(1))
+        timer.pointerExited(1, now: at(2))
+        timer.pointerEntered(2, kind: .tab, now: at(2.02))
+        timer.previewHovered(true, now: at(2.04))
+        // No exit from row 2 or the card. The poll before row 2's warm
+        // deadline finds the pointer in the page.
+        timer.pointerLocated(inRow: nil, inPreview: false, now: at(2.12))
+        XCTAssertNil(timer.pending, "row 2's wait ends")
+        XCTAssertEqual(timer.nextDeadline, at(2.12 + Timer.closeGrace))
+        XCTAssertEqual(timer.tick(now: at(2.12)), .none)
+        // Later polls don't push the close back.
+        timer.pointerLocated(inRow: nil, inPreview: false, now: at(2.22))
+        XCTAssertEqual(timer.nextDeadline, at(2.12 + Timer.closeGrace))
+        XCTAssertEqual(timer.tick(now: at(2.12 + Timer.closeGrace)), .hide)
+        XCTAssertNil(timer.shown)
+        XCTAssertNil(timer.nextDeadline)
+    }
+
+    /// Without the polls, the same events leave the card open on row 2 with
+    /// nothing pending: what the break check saw.
+    func testTheSameFlickWithoutPollsLeavesTheCardOpen() {
+        var timer = Timer()
+        timer.pointerEntered(1, kind: .tab, now: t0)
+        _ = timer.tick(now: at(0.8))
+        timer.pointerExited(1, now: at(2))
+        timer.pointerEntered(2, kind: .tab, now: at(2.02))
+        timer.previewHovered(true, now: at(2.04))
+        XCTAssertEqual(timer.tick(now: at(2.02 + Timer.warmDelay)), .show(2))
+        XCTAssertNil(timer.nextDeadline)
+    }
+
+    func testAnOpenPreviewWithNoEventsAtAllClosesAfterTheGrace() {
+        var timer = Timer()
+        timer.pointerEntered(1, kind: .tab, now: t0)
+        _ = timer.tick(now: at(0.8))
+        // The row's exit is lost: only the polls say the pointer left.
+        timer.pointerLocated(inRow: 1, inPreview: false, now: at(0.9))
+        XCTAssertNil(timer.nextDeadline)
+        timer.pointerLocated(inRow: nil, inPreview: false, now: at(1))
+        XCTAssertEqual(timer.tick(now: at(1.1)), .none)
+        timer.pointerLocated(inRow: nil, inPreview: false, now: at(1.2))
+        XCTAssertEqual(timer.tick(now: at(1 + Timer.closeGrace)), .hide)
+    }
+
+    func testPollsOverTheRowOrThePreviewKeepItOpen() {
+        var timer = Timer()
+        timer.pointerEntered(1, kind: .folder, now: t0)
+        _ = timer.tick(now: at(0.5))
+        timer.pointerExited(1, now: at(1))
+        // Over the preview, though its enter went missing.
+        timer.pointerLocated(inRow: nil, inPreview: true, now: at(1.1))
+        XCTAssertNil(timer.nextDeadline)
+        XCTAssertEqual(timer.tick(now: at(2)), .none)
+        // Off it, then back on the row before the grace ends, with no enter.
+        timer.pointerLocated(inRow: nil, inPreview: false, now: at(3))
+        timer.pointerLocated(inRow: 1, inPreview: false, now: at(3.1))
+        XCTAssertEqual(timer.tick(now: at(4)), .none)
+        XCTAssertEqual(timer.shown, 1)
+    }
+
+    func testAPollOverThePendingRowLetsItOpen() {
+        var timer = Timer()
+        timer.pointerEntered(1, kind: .tab, now: t0)
+        _ = timer.tick(now: at(0.8))
+        timer.pointerExited(1, now: at(1))
+        timer.pointerEntered(2, kind: .tab, now: at(1.02))
+        timer.pointerLocated(inRow: 2, inPreview: false, now: at(1.1))
+        XCTAssertEqual(timer.pending, 2)
+        XCTAssertEqual(timer.tick(now: at(1.02 + Timer.warmDelay)), .show(2))
+        timer.pointerLocated(inRow: 2, inPreview: false, now: at(1.2))
+        XCTAssertNil(timer.nextDeadline)
+    }
+
+    func testAPollWithNothingOpenOrPendingDoesNothing() {
+        var timer = Timer()
+        timer.pointerLocated(inRow: nil, inPreview: false, now: t0)
+        XCTAssertNil(timer.nextDeadline)
+        XCTAssertEqual(timer.tick(now: at(1)), .none)
+    }
+
     // MARK: - Snapshot cache
 
     private let page = URL(string: "https://a.test/one")!

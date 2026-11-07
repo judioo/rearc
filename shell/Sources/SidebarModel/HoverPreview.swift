@@ -75,6 +75,27 @@ public struct HoverPreviewTimer<ID: Hashable>: Equatable {
         closeDeadline = hovering ? nil : now.addingTimeInterval(Self.closeGrace)
     }
 
+    /// Where the pointer really is: over the row named, over the open
+    /// preview, or neither (nil, false). The sidebar polls while a preview is
+    /// open and before each tick, so a lost exit can't keep one open: after a
+    /// fast flick out of the sidebar the card moved to the crossed row and
+    /// stayed open with the pointer in the page, as it does when that row's
+    /// exit (or the card's) never arrives. A wait for a row the pointer isn't
+    /// over ends; an open preview the pointer is off closes after the grace,
+    /// which a later poll never extends.
+    public mutating func pointerLocated(inRow row: ID?, inPreview: Bool, now: Date) {
+        if let id = pending, row != id {
+            pending = nil
+            pendingDeadline = nil
+        }
+        guard let shown else { return }
+        if inPreview || row == shown {
+            closeDeadline = nil
+        } else if closeDeadline == nil {
+            closeDeadline = now.addingTimeInterval(Self.closeGrace)
+        }
+    }
+
     /// A click, scroll, drag or menu: nothing opens and an open preview
     /// closes now, without warming the next one.
     public mutating func cancel() -> Action {

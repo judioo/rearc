@@ -92,10 +92,17 @@ struct DownloadsTrayView: View {
                     ))
                     .disabled(!downloads.canAskWhereToSave)
                 } label: {
-                    Label(downloads.directory.lastPathComponent, systemImage: "folder")
-                        .font(.caption)
+                    HStack(spacing: 3) {
+                        Label(downloads.directory.lastPathComponent, systemImage: "folder")
+                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                    }
+                    .font(.caption)
+                    .foregroundStyle(Color(nsColor: Self.folderLabelColor))
+                    .contentShape(Rectangle())
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
                 .fixedSize()
                 .help("Saved to \(downloads.directory.path)")
                 Button("Clear") { downloads.clearFinished() }
@@ -141,6 +148,16 @@ struct DownloadsTrayView: View {
         // Show All counts the engine's whole history, which loads on the
         // session's first download or here (a no-op once it has).
         .onAppear { if !embedded { downloads.loadEngineHistory() } }
+    }
+
+    /// The folder menu's label. A borderless menu drew it as inactive,
+    /// because the tray never becomes key: light lavender on the tray's grey.
+    /// A plain menu draws this instead, at least 4.5:1 on the tray in either
+    /// appearance (`DownloadsTrayContrastTests`).
+    static let folderLabelColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(white: 1, alpha: 0.72)
+            : NSColor(white: 0, alpha: 0.66)
     }
 
     /// The footer's title: every download in the history, archived rows

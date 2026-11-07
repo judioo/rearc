@@ -42,12 +42,17 @@ final class SidebarHoverPreview: NSObject, NSPopoverDelegate {
 
     // MARK: Timing
 
+    /// How often an open preview checks where the pointer is.
+    static let pointerCheckInterval: TimeInterval = 0.1
+
     private func reschedule() {
         wake?.invalidate()
         wake = nil
         updateClickMonitor()
-        guard let deadline = timer.nextDeadline else { return }
-        let wake = Timer(fire: max(deadline, Date()), interval: 0, repeats: false) { [weak self] _ in
+        let now = Date()
+        let check = timer.shown != nil ? now.addingTimeInterval(Self.pointerCheckInterval) : nil
+        guard let deadline = [timer.nextDeadline, check].compactMap({ $0 }).min() else { return }
+        let wake = Timer(fire: max(deadline, now), interval: 0, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.fire() }
         }
         RunLoop.main.add(wake, forMode: .common)
@@ -55,6 +60,7 @@ final class SidebarHoverPreview: NSObject, NSPopoverDelegate {
     }
 
     private func fire() {
+        locatePointer()
         let action = timer.tick(now: Date()) { [weak self] id in self?.canShow(id) ?? false }
         switch action {
         case .show(let id): show(id)
@@ -62,6 +68,27 @@ final class SidebarHoverPreview: NSObject, NSPopoverDelegate {
         case .none: break
         }
         reschedule()
+    }
+
+    /// Tells the timer where the pointer is, whatever enter and exit
+    /// events arrived (`HoverPreviewTimer.pointerLocated`).
+    private func locatePointer() {
+        guard timer.pending != nil || timer.shown != nil else { return }
+        let mouse = NSEvent.mouseLocation
+        let card = popover?.contentViewController?.view.window
+        let inPreview = card.map { $0.isVisible && $0.frame.contains(mouse) } ?? false
+        let row = [timer.shown, timer.pending].compactMap { $0 }.first { id in
+            guard let cell = anchors[id]?.value, cell.rowID == id, cell.window?.isVisible == true else { return false }
+            return Self.pointer(at: mouse, isOver: cell)
+        }
+        timer.pointerLocated(inRow: row, inPreview: inPreview, now: Date())
+    }
+
+    /// Whether a point on screen is over the visible part of a view.
+    static func pointer(at screenPoint: NSPoint, isOver view: NSView) -> Bool {
+        guard let window = view.window else { return false }
+        let point = view.convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        return view.bounds.contains(point) && view.visibleRect.contains(point)
     }
 
     private static func previewKind(_ kind: SidebarOutlineNode.Kind) -> HoverPreviewTimer<UUID>.Kind? {
