@@ -113,3 +113,33 @@ extension BrowserViewModel {
         updateLittleArcHotkey()
     }
 }
+
+extension BrowserViewModel {
+    func canSplitLittleArcWindow(_ id: LittleArcWindow.ID) -> Bool {
+        store.keyWindowID != nil && store.canSplitLittleArcToCurrentTab(id: id)
+    }
+
+    /// Open the live page beside the last focused browser window's tab.
+    /// Like Open in, this closes the Little Arc only after the split exists.
+    @discardableResult
+    func splitLittleArcWindow(_ id: LittleArcWindow.ID) -> Bool {
+        guard let target = store.keyWindowID, let record = store.littleArcWindow(withID: id) else { return false }
+        if let tab = store.selectedTab, store.splitContaining(tabID: tab.id)?.split.isFull == true {
+            showSplitFullToast()
+            return false
+        }
+        guard canSplitLittleArcWindow(id) else { return false }
+        if let engine = engineHost.existingLittleArcEngine(id, profileID: record.profileID) {
+            store.updateLittleArcWindow(id: id, title: engine.pageTitle.flatMap { $0.isEmpty ? nil : $0 }, url: engine.currentURL)
+        }
+        guard store.splitLittleArcToCurrentTab(id: id) != nil else { return false }
+        engineHost.removeLittleArc(id, profileID: record.profileID)
+        if focusedLittleArcID == id { focusedLittleArcID = nil }
+        if keyLittleArcID == id { keyLittleArcID = nil }
+        closeLibrary(in: target)
+        loadSelectedIfNeeded()
+        windowPresenter?.focusBrowserWindow(target)
+        windowPresenter?.dismissLittleArcWindow(id)
+        return true
+    }
+}
