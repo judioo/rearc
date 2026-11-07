@@ -66,6 +66,25 @@ public struct ArcSidebarImport: Sendable {
         export.spaces.filter { $0.profile == profile }
     }
 
+    /// Only the spaces and favorites of these Arc profile folders.
+    public func only(directories: Set<String>) -> ArcSidebarImport {
+        var copy = self
+        copy.export.spaces = export.spaces.filter { directories.contains($0.profile.directory) }
+        copy.export.favorites = export.favorites.filter { directories.contains($0.key.directory) }
+        copy.export.profiles = export.profiles.filter { directories.contains($0.directory) }
+        return copy
+    }
+
+    /// The favorites an import brings: each profile's that has a space
+    /// coming over (or is Arc's default), each URL once. Into a profile with
+    /// favorites already, a URL it has is skipped too.
+    public func favoritesToImport() -> Int {
+        let used = Set(export.spaces.map(\.profile))
+        return export.profiles.filter { used.contains($0) || $0 == .default }.reduce(0) { sum, profile in
+            sum + Set((export.favorites[profile] ?? []).map(\.url.absoluteString)).count
+        }
+    }
+
     /// Every space; Arc's default profile into the active ReArc profile, any
     /// other into the ReArc profile of the same name, else a new one.
     public func defaultChoices(for store: SidebarStore) -> ArcImportChoices {

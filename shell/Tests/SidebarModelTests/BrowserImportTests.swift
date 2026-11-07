@@ -388,6 +388,35 @@ final class BrowserImportTests: XCTestCase {
                        "https://chromewebstore.google.com/detail/\(BrowserImportFixture.webStoreID)")
     }
 
+    func testTheQueueTakesAnExtensionOnceAndSurvivesARelaunch() throws {
+        let profile = UUID()
+        let notes = SourceExtension(id: BrowserImportFixture.webStoreID, name: "Tab Notes", version: "1", isEnabled: true,
+                                    isPinned: false, isTheme: false, origin: .webStore)
+        let quiet = SourceExtension(id: BrowserImportFixture.disabledID, name: "Quiet Mode", version: "1", isEnabled: false,
+                                    isPinned: false, isTheme: false, origin: .webStore)
+        // From Arc, then the same one again from Chrome.
+        var queue = ExtensionReinstallQueue([notes, quiet, notes], into: profile)
+        XCTAssertEqual(queue.items.map(\.id), [BrowserImportFixture.webStoreID, BrowserImportFixture.disabledID])
+        queue.advance()
+        let saved = try JSONDecoder().decode(ExtensionReinstallQueue.self, from: JSONEncoder().encode(queue))
+        XCTAssertEqual(saved, queue)
+        XCTAssertEqual(saved.current?.name, "Quiet Mode", "where it was left")
+    }
+
+    func testOnlyTheChosenArcProfilesComeOver() throws {
+        let arc = ArcSidebarImport(export: try ArcSidebarReader.parse(JSONSerialization.data(withJSONObject: BrowserImportFixture.arcSidebar())))
+        XCTAssertEqual(arc.favoritesToImport(), 3)
+        let side = arc.only(directories: ["Profile 1"])
+        XCTAssertEqual(side.export.spaces.map(\.name), ["Side"])
+        XCTAssertEqual(side.export.profiles, [.custom(directory: "Profile 1")])
+        XCTAssertEqual(side.favoritesToImport(), 1, "the default profile's favorites stay behind")
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        let summary = store.importArcSidebar(side, choices: side.defaultChoices(for: store))
+        XCTAssertEqual(summary.spaces, 1)
+        XCTAssertEqual(summary.favorites, side.favoritesToImport())
+        XCTAssertEqual(arc.only(directories: []).favoritesToImport(), 0)
+    }
+
     // MARK: Setup
 
     func testProfileSetupReadsSearchEngineStartupAndTheme() throws {
