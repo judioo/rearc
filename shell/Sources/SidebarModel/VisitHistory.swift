@@ -256,10 +256,13 @@ public enum DownloadListFile {
         }
     }
 
-    public static func load(from url: URL) -> Contents {
+    /// `limit`: decode only the list's first that many rows (launch keeps the
+    /// newest `DownloadList.defaultLimit`, so it never decodes a long file's tail).
+    public static func load(from url: URL, limit: Int? = nil) -> Contents {
         guard let data = try? Data(contentsOf: url) else { return Contents() }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+        if let limit { decoder.userInfo[.downloadRecordLimit] = limit }
         return (try? decoder.decode(Contents.self, from: data)) ?? Contents()
     }
 

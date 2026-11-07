@@ -23,12 +23,18 @@ struct PreparedBrowserStartup {
         }
         let sidebar = load("sidebar") { SidebarFilePersistence.prepareLoad(from: sidebarFile) }
         let history = load("history") { VisitHistoryFile.load(from: directory.appendingPathComponent(VisitHistoryFile.fileName)) }
-        let downloads = load("downloads") { DownloadListFile.load(from: directory.appendingPathComponent(DownloadListFile.fileName)) }
+        let downloads = load("downloads") { loadDownloads(from: directory.appendingPathComponent(DownloadListFile.fileName)) }
         let permissions = load("permissions") { SitePermissionStore.load(from: directory.appendingPathComponent(SitePermissionStore.fileName)) }
         let syncState = load("sync") { SidebarSyncStateFile(fileURL: directory.appendingPathComponent(SidebarSyncStateFile.fileName)).load() }
         let result = PreparedBrowserStartup(sidebar: sidebar, history: history, downloads: downloads,
                                             permissions: permissions, syncState: syncState, loadSeconds: phases)
         PerfSignposts.launchEvent("StoreLoadFinished")
         return result
+    }
+
+    /// The downloads tray's file, read as launch reads it (the bench's downloads suite times this).
+    /// The tray keeps the newest `DownloadList.defaultLimit` rows, so the rest is never decoded.
+    static func loadDownloads(from file: URL) -> DownloadListFile.Contents {
+        DownloadListFile.load(from: file, limit: DownloadList.defaultLimit)
     }
 }
