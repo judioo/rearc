@@ -32,10 +32,7 @@ public enum SunrisePreview {
     public static func renderAudio(_ variant: SunriseVariant, duration: Double, reduced: Bool = false,
                                    act1: Act1Log? = nil, act2: Act2Log? = nil, act3: Act3Log? = nil, act4: Act4Log? = nil, to url: URL) throws {
         let audio = try SunriseAudio(variant: variant, reduced: reduced, offline: true)
-        if let act1 { audio.schedule(act1) }
-        if let act2 { audio.schedule(act2) }
-        if let act3 { audio.schedule(act3) }
-        if let act4 { audio.schedule(act4) }
+        audio.update(SunriseScore.build(act1: act1, act2: act2, act3: act3, act4: act4))
         if let end = act4?.handOff ?? act3?.handOff ?? act2?.handOff ?? act1?.handOff { audio.synth.fadeOutStart = end }
         try audio.render(duration: duration, to: url)
     }

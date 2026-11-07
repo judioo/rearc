@@ -46,6 +46,8 @@ final class BrowserImportSession {
     private(set) var result: String?
     /// Extensions waiting to be reinstalled, one store page at a time.
     var reinstall: ExtensionReinstallQueue?
+    /// The queue is the onboarding's, so each step is saved for a relaunch.
+    private(set) var reinstallIsPending = false
 
     @ObservationIgnored let applicationSupport: URL
     /// Arc's preferences, read-only (a dictionary in tests).
@@ -190,6 +192,7 @@ final class BrowserImportSession {
                                                           searchEngine: engine, into: target)
                     if let queue, !queue.isFinished {
                         self.reinstall = queue
+                        self.reinstallIsPending = false
                         lines.append("\(queue.items.count) extension\(queue.items.count == 1 ? "" : "s") to reinstall")
                     }
                     self.result = lines.isEmpty ? "Nothing was imported." : lines.joined(separator: " · ")
@@ -226,6 +229,29 @@ final class BrowserImportSession {
     func nextExtension() {
         reinstall?.advance()
         if reinstall?.isFinished == true { reinstall = nil }
+        savePendingReinstall()
+    }
+
+    func stopReinstall() {
+        reinstall = nil
+        savePendingReinstall()
+    }
+
+    /// The onboarding's queue, from the toast's Start or the command bar.
+    func resumeReinstall(_ queue: ExtensionReinstallQueue) {
+        reinstall = queue.isFinished ? nil : queue
+        reinstallIsPending = reinstall != nil
+    }
+
+    /// Next and Stop move the saved queue along: Stop is done with it.
+    private func savePendingReinstall() {
+        guard reinstallIsPending, let model else { return }
+        if let reinstall, let pending = model.pendingExtensionReinstall {
+            model.setPendingExtensionReinstall(PendingExtensionReinstall(queue: reinstall, from: pending.from))
+        } else {
+            model.setPendingExtensionReinstall(nil)
+            reinstallIsPending = false
+        }
     }
 }
 

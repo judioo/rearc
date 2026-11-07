@@ -11,6 +11,7 @@ import Onboarding
 //   --act2 [--real]           ...and into Act 2 (demo browsers, or this Mac's with --real).
 //   --act3 [--fresh]          ...and Act 3 (spaces from the import, or suggested with --fresh).
 //   --act4                    ...and Act 4: the motto and the drop into the browser.
+//   --audio-only              Just score.wav (the frames do not depend on the score).
 // sunrise --scan               Counts what Act 2 would find on this Mac (no names).
 // sunrise --demo-sources       Live, with the demo browsers instead of this Mac's.
 
@@ -83,7 +84,9 @@ MainActor.assumeIsolated {
             let duration = durationArg ?? end ?? 13
             let out = URL(fileURLWithPath: dir).appendingPathComponent(v.rawValue)
             do {
-                let n = try SunrisePreview.renderFrames(v, size: size, fps: fps, duration: duration, reduced: reduced, act1: act1, act2: act2, act3: act3, act4: act4, to: out)
+                try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+                let n = args.contains("--audio-only") ? 0
+                    : try SunrisePreview.renderFrames(v, size: size, fps: fps, duration: duration, reduced: reduced, act1: act1, act2: act2, act3: act3, act4: act4, to: out)
                 try SunrisePreview.renderAudio(v, duration: duration, reduced: reduced, act1: act1, act2: act2, act3: act3, act4: act4, to: out.appendingPathComponent("score.wav"))
                 print("\(v.rawValue): \(n) frames and score.wav in \(out.path)")
             } catch {

@@ -218,6 +218,8 @@ struct Act3ControlsView: View {
                         .position(x: layout.size.width / 2, y: layout.name)
                         // Focus set while appearing is dropped on macOS; a turn later it sticks.
                         .onAppear { DispatchQueue.main.async { focused = true } }
+                        // And again whenever the sunrise gets the keyboard (it may not have had it yet).
+                        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in focused = true }
                         .accessibilityLabel("Space name")
                 }
             }

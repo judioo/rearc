@@ -129,7 +129,7 @@ struct BrowserImportView: View {
                 Text("Reinstall \(item.name) (\(queue.progressText ?? ""))").lineLimit(1)
                 Button(item.origin == .webStore ? "Open in Web Store" : "Load Unpacked…") { session.openCurrentExtension() }
                 Button("Next") { session.nextExtension() }
-                Button("Stop") { session.reinstall = nil }
+                Button("Stop") { session.stopReinstall() }
             } else if let result = session.result {
                 Label(result, systemImage: "checkmark.circle").foregroundStyle(.secondary).lineLimit(2)
             }

@@ -4,7 +4,7 @@ import Foundation
 /// `Secure Preferences` and `Preferences` (`extensions.settings.<id>`,
 /// `extensions.pinned_extensions`) and the manifest under `Extensions/`.
 public struct SourceExtension: Identifiable, Equatable, Sendable {
-    public enum Origin: Equatable, Sendable {
+    public enum Origin: Equatable, Codable, Sendable {
         /// From the Chrome Web Store: reinstalls by id.
         case webStore
         /// Loaded unpacked from a folder (developer mode).
@@ -120,8 +120,8 @@ public enum ExtensionInventoryReader {
 /// signature belong to the source browser), so each opens on its store page,
 /// where the engine's install prompt asks for the user's consent; an
 /// unpacked one is loaded from its folder through chrome://extensions.
-public struct ExtensionReinstallQueue: Equatable, Sendable {
-    public struct Item: Identifiable, Equatable, Sendable {
+public struct ExtensionReinstallQueue: Equatable, Codable, Sendable {
+    public struct Item: Identifiable, Equatable, Codable, Sendable {
         public var id: String
         public var name: String
         public var origin: SourceExtension.Origin
@@ -131,8 +131,12 @@ public struct ExtensionReinstallQueue: Equatable, Sendable {
     public private(set) var items: [Item]
     public private(set) var position = 0
 
+    /// The ones that can be reinstalled, each once (the same extension can
+    /// come from more than one source profile).
     public init(_ extensions: [SourceExtension], into profileID: Profile.ID) {
-        items = extensions.filter(\.canReinstall).map { Item(id: $0.id, name: $0.name, origin: $0.origin, profileID: profileID) }
+        var seen = Set<String>()
+        items = extensions.filter { $0.canReinstall && seen.insert($0.id).inserted }
+            .map { Item(id: $0.id, name: $0.name, origin: $0.origin, profileID: profileID) }
     }
 
     public var current: Item? { items.indices.contains(position) ? items[position] : nil }

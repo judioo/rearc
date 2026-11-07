@@ -177,6 +177,9 @@ final class BrowserViewModel {
     @ObservationIgnored var presentAirTrafficControl: (() -> Void)?
     /// File › Import from Arc, Chrome or Brave… (both engines).
     @ObservationIgnored var browserImportWindow: BrowserImportWindowController?
+    /// Extensions the onboarding queued to reinstall (PendingExtensionReinstall).
+    var pendingExtensionReinstall: PendingExtensionReinstall?
+    @ObservationIgnored let pendingExtensionReinstallURL: URL
     /// Bumped by the Site Controls command; the key window's URL field opens its panel.
     var siteControlCenterRequest = 0
     @ObservationIgnored var defaultBrowser: any DefaultBrowserSetting = SystemDefaultBrowser()
@@ -348,7 +351,8 @@ final class BrowserViewModel {
                     store: store, isSidebarVisible: isSidebarVisible, closedTabStack: store.closedTabStack,
                     peekURL: peekSession?.url, focusedLittleArcID: focusedLittleArcID,
                     mediaByTab: mediaStateByTab, tabMuteModel: tabMuteModel,
-                    navigationSchemes: engineHost.navigationSchemes, externalLinkDestination: externalLinkDestination))
+                    navigationSchemes: engineHost.navigationSchemes, externalLinkDestination: externalLinkDestination,
+                    pendingExtensionReinstall: pendingExtensionReinstall?.title))
             },
             menuCommands: commandBarMenuCommands,
             externalLinkDestination: externalLinkDestination,
@@ -473,6 +477,9 @@ final class BrowserViewModel {
         let historyFile = Self.siblingFile(VisitHistoryFile.fileName, of: persistence.fileURL)
         self.historyFileURL = historyFile
         self.visitHistory = preparedStartup?.history ?? VisitHistoryFile.load(from: historyFile)
+        let reinstallFile = Self.siblingFile(PendingExtensionReinstall.fileName, of: persistence.fileURL)
+        self.pendingExtensionReinstallURL = reinstallFile
+        self.pendingExtensionReinstall = PendingExtensionReinstall.load(from: reinstallFile)
         self.downloads = DownloadsController(fileURL: Self.siblingFile(DownloadListFile.fileName, of: persistence.fileURL), prepared: preparedStartup?.downloads)
         engineHost.downloadCenter = downloads.webKit
         self.sitePermissions = SitePermissionsController(fileURL: Self.siblingFile(SitePermissionStore.fileName, of: persistence.fileURL), prepared: preparedStartup?.permissions)
@@ -1821,6 +1828,8 @@ final class BrowserViewModel {
             importBookmarksFile()
         case .importFromBrowser:
             showBrowserImport()
+        case .reinstallExtensions:
+            startPendingExtensionReinstall()
         case .pickElementToEdit:
             if boostEditorDraft != nil {
                 startBoostPicker()

@@ -25,7 +25,14 @@ enum WelcomePage {
     static func html(name: String, colour: RGBA, spaces: Int, imported: ImportStats?) -> String {
         let greeting = name.isEmpty ? "Welcome to ReArc." : "Welcome to ReArc, <span class=\"you\">\(escape(name))</span>."
         let ready = "Your profile and \(spaces) space\(spaces == 1 ? " is" : "s are") ready."
-        let brought = imported.flatMap { $0 == ImportStats() ? nil : "<p class=\"brought\">\(escape($0.summary)) came with you.</p>" } ?? ""
+        // Extensions are only queued: they come over one store page at a time.
+        var came = imported ?? ImportStats()
+        let queued = came.extensions
+        came.extensions = 0
+        var brought = came == ImportStats() ? "" : "<p class=\"brought\">\(escape(came.summary)) came with you.</p>"
+        if queued > 0 {
+            brought += "<p class=\"brought\">\(queued) extension\(queued == 1 ? " is" : "s are") queued to reinstall from the Chrome Web Store.</p>"
+        }
         let tips = [("⌘T", "New tab"), ("⌘L", "Command bar"), ("⌘S", "Hide the sidebar"), ("⌃1–9", "Switch spaces")]
             .map { "<li><kbd>\($0.0)</kbd>\($0.1)</li>" }.joined()
         return """

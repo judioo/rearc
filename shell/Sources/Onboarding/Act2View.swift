@@ -144,8 +144,9 @@ struct Act2ControlsView: View {
             .position(x: layout.size.width / 2, y: layout.chips)
             .allowsHitTesting(controls != nil && frame.chips > 0.5)
 
-            if log.offered.contains(.passwords), frame.chipOn[ImportCategory.passwords.rawValue] > 0.5 {
-                Text("macOS will ask once before ReArc reads each browser's passwords.")
+            // Not a chip that does nothing: one quiet, honest line where it would be.
+            if let browsers = frame.passwordsLeftBehind {
+                Text("Passwords: coming soon. Export them from \(browsers) as a CSV file and import them in Settings later.")
                     .font(.system(size: H * 0.0145))
                     .foregroundStyle(ink.opacity(0.45))
                     .opacity(frame.chips)
