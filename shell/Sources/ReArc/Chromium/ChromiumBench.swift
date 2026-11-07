@@ -121,6 +121,12 @@ final class ChromiumBench {
             }
             report.notes.append("display asleep: only frame-free scenarios ran")
         }
+        if options.background {
+            guard !options.only.isEmpty, options.only.allSatisfy(Self.frameFreeScenarios.contains) else {
+                throw Refusal(reason: "--rearc-bench-background runs frame-free scenarios only (an inactive window times no frame)")
+            }
+            report.notes.append("background: ReArc was never activated and its window never key")
+        }
         if conditions.screenLocked && !options.allowLocked {
             throw Refusal(reason: "the screen is locked; unlock it, or pass --rearc-bench-allow-locked (results are marked)")
         }
@@ -311,6 +317,7 @@ final class ChromiumBench {
             buildModel()
             shell = ChromiumShell(runtime: runtime, autosavesFrames: false)
         }
+        shell.activatesOnStart = !options.background
         if options.suites.contains(.launchChild) { record("launch.model_init", (modelInitSeconds ?? 0) * 1000) }
         let shellStart = ProcessInfo.processInfo.systemUptime
         shell.start(model: model)
@@ -322,8 +329,12 @@ final class ChromiumBench {
         self.window = window
         if !early { place(window) }
         probe.attach(to: window)
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        if options.background {
+            window.orderFront(nil)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 
     private func setUpShell() async throws {

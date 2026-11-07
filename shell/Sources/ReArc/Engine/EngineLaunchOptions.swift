@@ -60,6 +60,9 @@ struct EngineLaunchOptions: Equatable {
         var seed: UInt64 = 1
         /// Run with the screen locked (results are marked; the gate never compares them with unlocked runs).
         var allowLocked = false
+        /// Never activate the app or make its window key (`open -g`): the
+        /// frame-free scenarios run while someone else uses the Mac.
+        var background = false
         /// Launch child: the process start time the parent measured, for `launch.*` (mach seconds).
         var launchStart: Double?
         /// Writes the loopback page set here (the Chrome reference serves the same bytes).
@@ -98,6 +101,7 @@ struct EngineLaunchOptions: Equatable {
                 if let share = value("max-other-cpu").flatMap(Double.init), share > 0 { result.maxOtherCPU = share }
                 if let path = value("downloads"), !path.isEmpty { result.downloadsPath = path }
                 if argument == EngineLaunchOptions.benchFlag + "-allow-locked" { result.allowLocked = true }
+                if argument == EngineLaunchOptions.benchFlag + "-background" { result.background = true }
             }
             return result
         }

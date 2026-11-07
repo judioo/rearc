@@ -254,6 +254,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     /// The self-test and benches run this shell on a throwaway sidebar and
     /// must neither restore nor save the user's window session.
     private let autosavesFrames: Bool
+    /// `start` brings ReArc forward; a background bench turns it off.
+    var activatesOnStart = true
     /// Where the browser-window session is kept (nil: not kept).
     private let sessionFileURL: URL?
     private var sessionRecorder: WindowSessionRecorder?
@@ -431,7 +433,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             name: NSApplication.didBecomeActiveNotification,
             object: nil
         )
-        NSApp.activate(ignoringOtherApps: true)
+        if activatesOnStart { NSApp.activate(ignoringOtherApps: true) }
         DispatchQueue.main.async { [weak self] in self?.prepareLittleArcWindow() }
     }
 
