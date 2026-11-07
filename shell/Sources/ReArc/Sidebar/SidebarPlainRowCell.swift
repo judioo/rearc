@@ -336,7 +336,13 @@ final class SidebarPlainRowCell: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
-        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self)
+        // Hosting the SwiftUI row on entry rebuilds the area with the pointer
+        // inside. Without assumeInside a new area sends no exit until a move
+        // lands inside it, so a pointer flicked out at once left the row
+        // hosted and hovered.
+        var options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect]
+        if pointerInside { options.insert(.assumeInside) }
+        let area = NSTrackingArea(rect: .zero, options: options, owner: self)
         addTrackingArea(area)
         tracking = area
     }
