@@ -270,6 +270,15 @@ public struct DownloadList: Codable, Equatable, Sendable {
     /// hold skips the scan of every row (Chromium replays its whole download
     /// history at launch, one new GUID after another).
     private var idCounts: [String: Int]
+    /// The counts the bar and the tray show, kept per change.
+    public private(set) var summary = Summary()
+    /// Each row's place in list order, parallel to `records`: rows only go
+    /// in at the front or the back, so a row keeps its key while others come
+    /// and go, and keys ascend down the list.
+    private var orders: [Int]
+    private var frontOrder = 0
+    private var backOrder = -1
+    private var recent = RecentIndex()
 
     enum CodingKeys: String, CodingKey {
         case records
@@ -278,6 +287,9 @@ public struct DownloadList: Codable, Equatable, Sendable {
     public init(records: [DownloadRecord] = []) {
         self.records = records
         idCounts = records.reduce(into: [:]) { $0[$1.id, default: 0] += 1 }
+        orders = Array(records.indices)
+        backOrder = records.count - 1
+        rebuildIndexes()
     }
 
     /// `DownloadListFile.load(from:limit:)` passes a limit: only the first
@@ -306,24 +318,69 @@ public struct DownloadList: Codable, Equatable, Sendable {
     }
 
     private mutating func removeRecord(at index: Int) {
-        let id = records.remove(at: index).id
-        if let count = idCounts[id], count > 1 { idCounts[id] = count - 1 } else { idCounts[id] = nil }
+        let record = records.remove(at: index)
+        let order = orders.remove(at: index)
+        if let count = idCounts[record.id], count > 1 { idCounts[record.id] = count - 1 } else { idCounts[record.id] = nil }
+        summary.add(record, -1)
+        recent.remove(record, order: order)
+        refillRecentIfShort()
     }
 
     private mutating func replaceRecords(_ kept: [DownloadRecord]) {
         self = DownloadList(records: kept)
     }
 
-    public var activeCount: Int { records.filter(\.isActive).count }
-    public var hasDangerous: Bool { records.contains(where: \.isDangerous) }
+    private mutating func insertRecord(_ record: DownloadRecord, atFront: Bool) {
+        let order: Int
+        if atFront {
+            frontOrder -= 1
+            order = frontOrder
+            records.insert(record, at: 0)
+            orders.insert(order, at: 0)
+        } else {
+            backOrder += 1
+            order = backOrder
+            records.append(record)
+            orders.append(order)
+        }
+        idCounts[record.id, default: 0] += 1
+        summary.add(record)
+        recent.add(record, order: order)
+    }
+
+    private mutating func replaceRecord(at index: Int, with record: DownloadRecord) {
+        let old = records[index]
+        records[index] = record
+        summary.add(old, -1)
+        summary.add(record)
+        recent.remove(old, order: orders[index])
+        recent.add(record, order: orders[index])
+        refillRecentIfShort()
+    }
+
+    /// Counts and the quick view's rows from scratch (after a bulk edit).
+    private mutating func rebuildIndexes() {
+        summary = Summary()
+        for record in records { summary.add(record) }
+        recent.rebuild(records, orders: orders)
+    }
+
+    /// The quick view's index ran short of rows (its newest were removed or
+    /// lost their file) while the list holds more: one pass refills it.
+    private mutating func refillRecentIfShort() {
+        if recent.isShort { recent.rebuild(records, orders: orders) }
+    }
+
+    public var activeCount: Int { summary.active }
+    public var hasDangerous: Bool { summary.dangerous > 0 }
 
     /// Aggregate progress of the in-progress items with a known total (nil when none).
-    public var activeFraction: Double? {
-        let active = records.filter { $0.isActive && $0.totalBytes > 0 }
-        guard !active.isEmpty else { return nil }
-        let total = active.reduce(Int64(0)) { $0 + $1.totalBytes }
-        let received = active.reduce(Int64(0)) { $0 + min($1.receivedBytes, $1.totalBytes) }
-        return Double(received) / Double(max(total, 1))
+    public var activeFraction: Double? { summary.activeFraction }
+
+    /// `RecentDownloads.latest(records, limit:)` from the kept index, without
+    /// a pass over every row (the bar asks on every change).
+    public func latest(_ limit: Int = RecentDownloads.limit) -> [DownloadRecord] {
+        recent.latest(limit) ?? RecentDownloads.latest(records, limit: limit)
     }
 
     public func record(withID id: String) -> DownloadRecord? {
@@ -373,7 +430,7 @@ public struct DownloadList: Codable, Equatable, Sendable {
             } else if elapsed > 0.05 || event.state != .inProgress {
                 record.updatedAt = now
             }
-            records[index] = record
+            replaceRecord(at: index, with: record)
             return .updated(event.guid)
         }
         let record = DownloadRecord(
@@ -392,13 +449,16 @@ public struct DownloadList: Codable, Equatable, Sendable {
             startedAt: event.startedAt ?? now,
             updatedAt: event.state != .inProgress ? event.endedAt : nil
         )
-        if event.kind == .created, event.state != .inProgress {
-            records.append(record)
-        } else {
-            records.insert(record, at: 0)
-        }
-        idCounts[record.id, default: 0] += 1
+        insertRecord(record, atFront: !(event.kind == .created && event.state != .inProgress))
         return .inserted(event.guid)
+    }
+
+    /// `apply` for each event in order, each at its own time, in one change
+    /// to the list (one observation of it, not one per event).
+    @discardableResult
+    public mutating func apply<Events: Sequence>(_ events: Events) -> [Change]
+    where Events.Element == (event: DownloadEvent, source: DownloadSource, now: Date) {
+        events.map { apply($0.event, source: $0.source, now: $0.now) }
     }
 
     /// Appends history rows the engine keeps in its database only (archived
@@ -408,9 +468,9 @@ public struct DownloadList: Codable, Equatable, Sendable {
     public mutating func appendArchived(_ archived: [DownloadRecord]) -> Int {
         var added = 0
         records.reserveCapacity(records.count + archived.count)
+        orders.reserveCapacity(records.count + archived.count)
         for record in archived where idCounts[record.id] == nil {
-            records.append(record)
-            idCounts[record.id] = 1
+            insertRecord(record, atFront: false)
             added += 1
         }
         return added
@@ -446,6 +506,7 @@ public struct DownloadList: Codable, Equatable, Sendable {
             records[index].canResume = false
             records[index].bytesPerSecond = nil
         }
+        rebuildIndexes()
     }
 
     /// Keeps the newest `limit` finished rows; in-progress rows always stay.
@@ -456,6 +517,107 @@ public struct DownloadList: Codable, Equatable, Sendable {
             kept += 1
             return kept <= limit
         })
+    }
+}
+
+extension DownloadList {
+    /// Counts over every row, kept as rows change: the bar's badges and the
+    /// tray's progress ring read these on every change, and with a long
+    /// history a pass over the rows each time showed as stalls.
+    public struct Summary: Equatable, Sendable {
+        public private(set) var rows = 0
+        public private(set) var active = 0
+        /// In-progress rows with a danger warning (`DownloadRecord.isDangerous`).
+        public private(set) var dangerous = 0
+        /// Rows `hasFileOnDisk`: what the quick view can show.
+        public private(set) var onDisk = 0
+        private var activeWithTotal = 0
+        private var activeTotalBytes: Int64 = 0
+        private var activeReceivedBytes: Int64 = 0
+
+        public init() {}
+
+        public var finished: Int { rows - active }
+
+        /// Aggregate progress of the in-progress rows with a known total (nil when none).
+        public var activeFraction: Double? {
+            guard activeWithTotal > 0 else { return nil }
+            return Double(activeReceivedBytes) / Double(max(activeTotalBytes, 1))
+        }
+
+        /// Adds a row's share (`sign` 1), or takes it back (-1).
+        mutating func add(_ record: DownloadRecord, _ sign: Int = 1) {
+            rows += sign
+            if record.hasFileOnDisk { onDisk += sign }
+            guard record.isActive else { return }
+            active += sign
+            if record.isDangerous { dangerous += sign }
+            if record.totalBytes > 0 {
+                activeWithTotal += sign
+                activeTotalBytes += Int64(sign) * record.totalBytes
+                activeReceivedBytes += Int64(sign) * min(record.receivedBytes, record.totalBytes)
+            }
+        }
+    }
+
+    /// The newest rows with a file on disk, newest first and ties in list
+    /// order, as `RecentDownloads.latest` picks them. It holds the true top
+    /// `entries.count` of those rows (all of them when there are fewer than
+    /// `capacity`), so a row that changes or arrives is placed or skipped
+    /// against the last entry; only removing the newest rows can leave it
+    /// short, and then one pass refills it.
+    struct RecentIndex: Sendable {
+        static let capacity = 4 * RecentDownloads.limit
+
+        struct Entry: Sendable {
+            var record: DownloadRecord
+            var order: Int
+        }
+
+        private(set) var entries: [Entry] = []
+        /// Rows `hasFileOnDisk`, indexed or not.
+        private(set) var eligible = 0
+
+        private static func precedes(_ record: DownloadRecord, _ order: Int, _ other: Entry) -> Bool {
+            record.updatedAt > other.record.updatedAt || (record.updatedAt == other.record.updatedAt && order < other.order)
+        }
+
+        /// Fewer entries than the quick view shows while more rows qualify.
+        var isShort: Bool { entries.count < RecentDownloads.limit && eligible > entries.count }
+
+        func latest(_ limit: Int) -> [DownloadRecord]? {
+            guard limit <= entries.count || entries.count == eligible else { return nil }
+            return entries.prefix(max(limit, 0)).map(\.record)
+        }
+
+        mutating func add(_ record: DownloadRecord, order: Int) {
+            guard record.hasFileOnDisk else { return }
+            let holdsAll = entries.count == eligible
+            eligible += 1
+            if !holdsAll, let last = entries.last, !Self.precedes(record, order, last) { return }
+            let place = entries.firstIndex { Self.precedes(record, order, $0) } ?? entries.endIndex
+            entries.insert(Entry(record: record, order: order), at: place)
+            if entries.count > Self.capacity { entries.removeLast() }
+        }
+
+        mutating func remove(_ record: DownloadRecord, order: Int) {
+            guard record.hasFileOnDisk else { return }
+            eligible -= 1
+            if let index = entries.firstIndex(where: { $0.order == order }) { entries.remove(at: index) }
+        }
+
+        mutating func rebuild(_ records: [DownloadRecord], orders: [Int]) {
+            entries = []
+            eligible = 0
+            for index in records.indices where records[index].hasFileOnDisk {
+                eligible += 1
+                let record = records[index], order = orders[index]
+                if entries.count == Self.capacity, let last = entries.last, !Self.precedes(record, order, last) { continue }
+                let place = entries.firstIndex { Self.precedes(record, order, $0) } ?? entries.endIndex
+                entries.insert(Entry(record: record, order: order), at: place)
+                if entries.count > Self.capacity { entries.removeLast() }
+            }
+        }
     }
 }
 

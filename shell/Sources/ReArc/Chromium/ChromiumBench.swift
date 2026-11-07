@@ -1031,7 +1031,9 @@ final class ChromiumBench {
         await quiet()
         let replaying = ProcessInfo.processInfo.systemUptime
         for event in events { model.downloads.apply(event, source: .chromium) }
-        let replayed = await probe.nextFrame(after: window)
+        var replayed = await probe.nextFrame(after: window)
+        // The tray applies a burst a turn's budget at a time: time until it holds every row.
+        while model.downloads.hasPendingWork { replayed = await probe.nextFrame(after: window) }
         record("downloads.history_replay.shell", ms(replaying, replayed?.target))
         try? await Task.sleep(nanoseconds: 2_500_000_000)
         record("downloads.footprint.replayed", Self.footprintMB(), unit: "MB")
@@ -1039,7 +1041,8 @@ final class ChromiumBench {
 
         try await iterate("downloads.recent_latest", count: 10) { _, warmup, contaminated in
             let start = ProcessInfo.processInfo.systemUptime
-            let latest = RecentDownloads.latest(model.downloads.records)
+            // The bar's pick, from the list's kept index (a pass over every row before).
+            let latest = model.downloads.list.latest()
             record("downloads.recent_latest", ms(start, ProcessInfo.processInfo.systemUptime), contaminated: contaminated(), warmup: warmup)
             withExtendedLifetime(latest) {}
         }

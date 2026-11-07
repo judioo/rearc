@@ -15,7 +15,7 @@ struct DownloadsButton: View {
     var body: some View {
         Button { isPresented.wrappedValue.toggle() } label: {
             ZStack {
-                if let fraction = downloads.list.activeFraction {
+                if let fraction = downloads.activeFraction {
                     Circle()
                         .stroke(Color.primary.opacity(0.12), lineWidth: 2)
                     Circle()
@@ -99,7 +99,7 @@ struct DownloadsTrayView: View {
                 Button("Clear") { downloads.clearFinished() }
                     .buttonStyle(.borderless)
                     .font(.caption)
-                    .disabled(!downloads.records.contains { !$0.isActive })
+                    .disabled(!downloads.hasFinished)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
