@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.47** (major remains 1 for existing hosts), bridge **0.49.0**, compiled Chromium **156.0.8078.74**. Public header:
+ABI **1.48** (major remains 1 for existing hosts), bridge **0.50.0**, compiled Chromium **156.0.8078.74**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -1978,3 +1978,56 @@ token is `Chrome/156.0.0.0` (reduced) and the `Sec-CH-UA` /
 `Chromium` and the GREASE brand in Chromium's stable order. It supersedes
 chrome/001's `ReArc/` token and `ReArc` brand, which made the Chrome Web
 Store show "Switch to Chrome to install extensions and themes".
+
+## Download history at scale (1.48)
+
+Patch `tab/067-download-history-at-scale`, bridge 0.50.0, feature
+`download_history`. No struct from an earlier ABI changed
+(`engine/tests/check_abi148_imports.py` compares every 1.47 layout).
+`framework.exports` and `framework.order` list the seven new functions after
+`_ReArcEngineSetSidePanelCallback`. Measurements and the design are in
+`docs/DOWNLOADS-AT-SCALE.md`.
+
+Chromium loads a persistent profile's download history once, lazily: on the
+first download, chrome://downloads, the downloads extension API, clearing
+download history, or `ReArcDownloadLoadHistory`. Before 1.48 one UI task made a
+`DownloadItem` for every History DB row, and the host got one created event per
+row (39,413 rows: one ~0.5 s task, then ~250 MB that stays). From 1.48, for
+every host and without a policy, `DownloadHistory` (upstream file, patched):
+
+- prepares the rows on a worker: the rows Chromium forgets (overwritten
+  files) are still decided in database order, the rest are ordered newest
+  first (start time, then ID);
+- creates the items on the UI thread in slices of about 8 ms, newest first, so
+  restored items arrive newest first; each slice's created events (kind 0) are
+  drained before the next slice;
+- frees the rows on a worker.
+
+| Function | Contract |
+|---|---|
+| `ReArcDownloadSetHistoryPolicy(profile, live_limit)` | 0 (the default): every row becomes an item. Otherwise only the newest `live_limit` complete rows become items, plus every unfinished, cancelled or interrupted row, every row the in-progress DB still holds and every row without a URL (Chromium deletes those). Older complete rows stay in the History DB as archived rows. Read when the load starts: after it (the profile's `DownloadHistory` exists), `invalid_state`. OTR: `unsupported`. |
+| `ReArcDownloadLoadHistory(profile)` | Starts the load now (trigger `kDownloadsPage`); a no-op once started. OTR: `unsupported`. |
+| `ReArcEngineSetDownloadHistoryCallback(cb, ctx)` | `ReArcDownloadHistoryInfo{profile_id, rows, live_rows, archived_rows}`, posted on main once per load, after every live item's created event. `rows` is what the database held; rows Chromium dropped are in neither count. Null clears. |
+| `ReArcDownloadGetHistoryInfo(profile, &info)` | The same, synchronously; before the load completed `invalid_state`. |
+| `ReArcDownloadQueryArchived(profile, offset, limit, cb, ctx)` | Archived rows newest first, `limit` 1..5000, copied from the load's immutable snapshot on a worker, completion posted on main with `(status, rows, count, total)`; an offset past the end completes with count 0. Before the load completed `invalid_state`; 64 outstanding `busy`; the profile closing first completes `cancelled`. Rows are always complete; `history_id` is the History DB ID, not a `download_id`. |
+| `ReArcDownloadRemoveArchived(profile, guids, count, &removed)` | Deletes archived rows from the History DB (`HistoryService::RemoveDownloads`) and the snapshot; unknown GUIDs are skipped; count 1..100000. |
+| `ReArcDownloadGetTimes(profile, id, &start_us, &end_us)` | A live item's start and end, microseconds since the Unix epoch (end 0 until it finishes). The download event carries no times, and an item restored from history keeps its own. |
+
+**What archived rows lose.** They have no `DownloadItem`, so nothing in
+Chromium sees them: chrome://downloads, `chrome.downloads.search`, the
+download bubble and the in-progress reconciliation only know live items.
+Resumption and danger warnings are unaffected: every row that can resume or
+warn (anything not complete) stays live. Open and reveal need no item (the
+host uses Launch Services and Finder on the path); removal is
+`ReArcDownloadRemoveArchived`. Clearing download history
+(`ChromeBrowsingDataRemoverDelegate`, patched) deletes the archived rows
+that match its time range and URL filter, after the load if it is still
+running. Chromium's own clean-ups that run at item creation (an overwritten
+file's older rows, expired interrupted rows) only ever applied to rows that
+are not archived.
+
+Native host: none takes this path (the downloads host would need a seeded
+History DB). Exercised by a scratch host on the release engine at 0, 2,173 and
+39,413 rows and by the shell's `downloads.engine_first_download` bench
+scenario; built and checked: the dev and release engines,
+`check_abi148_imports.py`, `check_c_abi_exports.py`.

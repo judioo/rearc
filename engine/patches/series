@@ -71,6 +71,7 @@ tab/064-host-early-window.patch # P-TAB-001 launch: early window callback at Pre
 tab/065-host-media-capture-search-engines.patch # P-TAB-001 ABI 1.46: tab media capture state and mute, search engine list
 chrome/003-chrome-user-agent-identity.patch    # P-BUILD-001 Web Store: UA and client-hints brands as Google Chrome (supersedes chrome/001 hunks)
 tab/066-extension-side-panels.patch          # P-TAB-001 ABI 1.47: chrome.sidePanel panels as hosted registry tabs
+tab/067-download-history-at-scale.patch      # P-TAB-001 ABI 1.48: sliced download history loads, live-item limit, archived rows
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:

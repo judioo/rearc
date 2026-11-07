@@ -1,0 +1,1163 @@
+From c174b2d69cef7f9d374577f151330e45df1163eb Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Sat, 7 Nov 2026 11:25:26 +0400
+Subject: [PATCH] P-TAB-001 download history at scale: sliced history loads, a
+ live-item limit and archived rows for the host
+
+A profile's download history loaded in one UI task: DownloadHistory made a
+DownloadItem for every History DB row, and every item's observers ran, at
+the session's first download. With 39,413 rows that task took ~0.5 s and
+footprint grew ~250 MB, then the bridge replayed every item to the host.
+
+DownloadHistory now hands the rows to a worker, which still decides the
+rows to forget (overwritten files) in database order, orders the rest
+newest first and applies the profile's live limit. The UI thread creates
+the items in slices of 8 ms, newest first, and the rows are freed on a
+worker. With a live limit (DownloadHistory::SetLoadPolicy) only the newest
+N complete rows become items, with every unfinished row, every row the
+in-progress DB holds and every row without a URL; older complete rows stay
+in the database as immutable archived rows. Clearing download history
+(ChromeBrowsingDataRemoverDelegate) deletes matching archived rows too.
+
+ABI 1.48 (download_history, bridge 0.50.0): ReArcDownloadSetHistoryPolicy,
+ReArcDownloadLoadHistory, ReArcEngineSetDownloadHistoryCallback,
+ReArcDownloadGetHistoryInfo, ReArcDownloadQueryArchived (pages copied on a
+worker, posted on main), ReArcDownloadRemoveArchived and
+ReArcDownloadGetTimes (restored items keep their own dates; the download
+event carries none). framework.exports and framework.order list the seven
+functions. Existing ABI layouts remain unchanged.
+
+Last rebased: 2026-11-07 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/app/framework.exports                  |   7 +
+ chrome/app/framework.order                    |   7 +
+ .../chrome_browsing_data_remover_delegate.cc  |   6 +
+ chrome/browser/download/download_history.cc   | 404 ++++++++++++++----
+ chrome/browser/download/download_history.h    |  78 +++-
+ .../rearc_bridge/rearc_downloads_abi.cc       | 272 ++++++++++++
+ .../browser/rearc_bridge/rearc_engine_abi.h   |  74 +++-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ 9 files changed, 764 insertions(+), 87 deletions(-)
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index b618dd5433..d93fe77168 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -52,6 +52,13 @@ _ReArcTabGetSidePanel
+ _ReArcTabOpenSidePanel
+ _ReArcSidePanelSetShown
+ _ReArcEngineSetSidePanelCallback
++_ReArcEngineSetDownloadHistoryCallback
++_ReArcDownloadSetHistoryPolicy
++_ReArcDownloadLoadHistory
++_ReArcDownloadGetHistoryInfo
++_ReArcDownloadQueryArchived
++_ReArcDownloadRemoveArchived
++_ReArcDownloadGetTimes
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 83f8c8174e..4485e611a0 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -59,6 +59,13 @@ _ReArcTabGetSidePanel
+ _ReArcTabOpenSidePanel
+ _ReArcSidePanelSetShown
+ _ReArcEngineSetSidePanelCallback
++_ReArcEngineSetDownloadHistoryCallback
++_ReArcDownloadSetHistoryPolicy
++_ReArcDownloadLoadHistory
++_ReArcDownloadGetHistoryInfo
++_ReArcDownloadQueryArchived
++_ReArcDownloadRemoveArchived
++_ReArcDownloadGetTimes
+ _ReArcEngineConfigure
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+diff --git a/chrome/browser/browsing_data/chrome_browsing_data_remover_delegate.cc b/chrome/browser/browsing_data/chrome_browsing_data_remover_delegate.cc
+index f9cf732b90..9690ee8a36 100644
+--- a/chrome/browser/browsing_data/chrome_browsing_data_remover_delegate.cc
++++ b/chrome/browser/browsing_data/chrome_browsing_data_remover_delegate.cc
+@@ -46,6 +46,7 @@
+ #include "chrome/browser/downgrade/user_data_downgrade.h"  // nogncheck
+ #include "chrome/browser/download/download_core_service.h"
+ #include "chrome/browser/download/download_core_service_factory.h"
++#include "chrome/browser/download/download_history.h"
+ #include "chrome/browser/download/download_prefs.h"
+ #include "chrome/browser/external_protocol/external_protocol_handler.h"
+ #include "chrome/browser/file_system_access/chrome_file_system_access_permission_context.h"
+@@ -611,6 +612,11 @@ void ChromeBrowsingDataRemoverDelegate::RemoveEmbedderData(
+       service->InitializeHistory(
+           DownloadCoreService::DownloadHistoryLoadTrigger::
+               kBrowsingDataRemover);
++      // ReArc: rows the history load archived have no item to remove.
++      if (DownloadHistory* history = service->GetDownloadHistory()) {
++        history->RemoveArchivedRowsByURLAndTime(filter, delete_begin_,
++                                                delete_end_);
++      }
+     }
+     DownloadPrefs* download_prefs =
+         DownloadPrefs::FromDownloadManager(profile_->GetDownloadManager());
+diff --git a/chrome/browser/download/download_history.cc b/chrome/browser/download/download_history.cc
+index b538f53be5..b283283c81 100644
+--- a/chrome/browser/download/download_history.cc
++++ b/chrome/browser/download/download_history.cc
+@@ -29,15 +29,19 @@
+ 
+ #include "chrome/browser/download/download_history.h"
+ 
++#include <algorithm>
+ #include <memory>
+ #include <optional>
+ #include <utility>
+ 
+ #include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "base/observer_list.h"
++#include "base/supports_user_data.h"
++#include "base/task/thread_pool.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/download/download_crx_util.h"
+ #include "chrome/browser/profiles/profile.h"
+@@ -232,8 +236,6 @@ ShouldUpdateHistoryResult ShouldUpdateHistory(
+ // the result into |file_path_count|.
+ void CountFilePathOccurences(const std::vector<history::DownloadRow>& rows,
+                              std::map<std::string, int>* file_path_count) {
+-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+-
+   if (!base::FeatureList::IsEnabled(
+           download::features::kDeleteOverwrittenDownloads)) {
+     return;
+@@ -253,8 +255,6 @@ void CountFilePathOccurences(const std::vector<history::DownloadRow>& rows,
+ // the number of times the same target file path appears in |file_path_count|.
+ bool ShouldSkipLoadingDownload(const history::DownloadRow& row,
+                                std::map<std::string, int>* file_path_count) {
+-  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+-
+   if (!base::FeatureList::IsEnabled(
+           download::features::kDeleteOverwrittenDownloads)) {
+     return false;
+@@ -274,8 +274,44 @@ bool ShouldSkipLoadingDownload(const history::DownloadRow& row,
+          download::GetOverwrittenDownloadDeleteTime();
+ }
+ 
++// ReArc: UI-thread work per slice of the initial load.
++constexpr base::TimeDelta kHistoryLoadSliceBudget = base::Milliseconds(8);
++
++// ReArc: DownloadHistory::SetLoadPolicy, kept on the BrowserContext.
++class LoadPolicyData : public base::SupportsUserData::Data {
++ public:
++  static constexpr char kKey[] = "DownloadHistory LoadPolicy";
++  size_t live_limit = 0;
++  base::RepeatingClosure on_loaded;
++};
++
++const LoadPolicyData* GetLoadPolicy(content::BrowserContext* context) {
++  return context ? static_cast<const LoadPolicyData*>(
++                       context->GetUserData(LoadPolicyData::kKey))
++                 : nullptr;
++}
++
+ }  // anonymous namespace
+ 
++struct DownloadHistory::PreparedLoad {
++  std::vector<history::DownloadRow> live;  // newest first
++  std::vector<ArchivedRow> archived;       // newest first
++  std::vector<uint32_t> skipped;           // rows the database forgets
++  size_t total = 0;
++  size_t next = 0;
++  size_t created = 0;
++};
++
++// static
++void DownloadHistory::SetLoadPolicy(content::BrowserContext* context,
++                                    size_t live_limit,
++                                    base::RepeatingClosure on_loaded) {
++  auto data = std::make_unique<LoadPolicyData>();
++  data->live_limit = live_limit;
++  data->on_loaded = std::move(on_loaded);
++  context->SetUserData(LoadPolicyData::kKey, std::move(data));
++}
++
+ DownloadHistory::HistoryAdapter::HistoryAdapter(
+     history::HistoryService* history)
+     : history_(history) {
+@@ -366,7 +402,7 @@ void DownloadHistory::QueryCallback(std::vector<history::DownloadRow> rows) {
+                            nullptr);
+ #else
+   base::OnceClosure callback =
+-      base::BindOnce(&DownloadHistory::LoadHistoryDownloads,
++      base::BindOnce(&DownloadHistory::PrepareHistoryLoad,
+                      weak_ptr_factory_.GetWeakPtr(), std::move(rows));
+ #endif
+   notifier_.GetManager()->OnHistoryQueryComplete(std::move(callback));
+@@ -394,10 +430,6 @@ void DownloadHistory::RetrieveDisplayNamesAndLoadHistoryDownloads(
+ void DownloadHistory::LoadHistoryDownloads(
+     const std::vector<history::DownloadRow>& rows,
+     download::DisplayNames display_names) {
+-#else
+-void DownloadHistory::LoadHistoryDownloads(
+-    const std::vector<history::DownloadRow>& rows) {
+-#endif
+   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+   if (!notifier_.GetManager()) {
+     return;
+@@ -413,7 +445,6 @@ void DownloadHistory::LoadHistoryDownloads(
+     }
+ 
+     base::FilePath display_name;
+-#if BUILDFLAG(IS_ANDROID)
+     if (base::FeatureList::IsEnabled(
+             download::features::kRetrieveDisplayNamesForHistoryDownloads) &&
+         row.target_path.IsContentUri() && display_names) {
+@@ -422,89 +453,232 @@ void DownloadHistory::LoadHistoryDownloads(
+         display_name = iter->second;
+       }
+     }
+-#endif
+-
+-    loading_id_ = history::ToContentDownloadId(row.id);
+-    download::DownloadItem::DownloadState history_download_state =
+-        history::ToContentDownloadState(row.state);
+-    download::DownloadInterruptReason history_reason =
+-        history::ToContentDownloadInterruptReason(row.interrupt_reason);
+-    std::vector<GURL> url_chain = row.url_chain;
+-    download::TruncateDataUrlAtTheEndIfNeeded(&url_chain);
+-
+-    // If the serialized EmbedderDownloadData is not present in DownloadRow,
+-    // use the site URL to grab the appropriate StoragePartitionConfig to use
+-    // to create the DownloadItem. Since DownloadRow comes from the download
+-    // history database, it may contain entries that still use site URL.
+-    content::StoragePartitionConfig storage_partition_config;
+-    if (row.embedder_download_data.empty()) {
+-      storage_partition_config =
+-          notifier_.GetManager()->GetStoragePartitionConfigForSiteUrl(
+-              row.site_url);
++    if (LoadHistoryRow(row, display_name)) {
++      ++live_row_count_;
++    }
++  }
++  history_row_count_ = rows.size();
++  FinishHistoryLoad();
++}
++#else
++// static
++std::unique_ptr<DownloadHistory::PreparedLoad>
++DownloadHistory::PrepareHistoryRows(std::vector<history::DownloadRow> rows,
++                                    size_t live_limit,
++                                    std::set<std::string> in_progress_guids) {
++  auto load = std::make_unique<PreparedLoad>();
++  load->total = rows.size();
++  std::map<std::string, int> file_name_count;
++  CountFilePathOccurences(rows, &file_name_count);
++  // Skips are decided in database order, so the newest copy of a file stays.
++  std::vector<size_t> order;
++  order.reserve(rows.size());
++  for (size_t i = 0; i < rows.size(); ++i) {
++    if (ShouldSkipLoadingDownload(rows[i], &file_name_count)) {
++      load->skipped.push_back(rows[i].id);
+     } else {
+-      storage_partition_config =
+-          notifier_.GetManager()
+-              ->SerializedEmbedderDownloadDataToStoragePartitionConfig(
+-                  row.embedder_download_data);
++      order.push_back(i);
+     }
+-    download::DownloadItem* item = notifier_.GetManager()->CreateDownloadItem(
+-        row.guid, loading_id_, row.current_path, row.target_path, url_chain,
+-        row.referrer_url, storage_partition_config, row.tab_url,
+-        row.tab_referrer_url, std::nullopt, row.mime_type,
+-        row.original_mime_type, row.start_time, row.end_time, row.etag,
+-        row.last_modified, row.received_bytes, row.total_bytes,
+-        std::string(),  // TODO(asanka): Need to persist and restore hash of
+-                        // partial file for an interrupted download. No need to
+-                        // store hash for a completed file.
+-        history_download_state,
+-        history::ToContentDownloadDangerType(row.danger_type), history_reason,
+-        row.opened, row.last_access_time, row.transient,
+-        history::ToContentReceivedSlices(row.download_slice_info),
+-        display_name);
+-    // DownloadManager returns a nullptr if it decides to remove the download
+-    // permanently.
+-    if (item == nullptr) {
+-      ScheduleRemoveDownload(row.id);
++  }
++  std::sort(order.begin(), order.end(), [&rows](size_t a, size_t b) {
++    if (rows[a].start_time != rows[b].start_time) {
++      return rows[a].start_time > rows[b].start_time;
++    }
++    return rows[a].id > rows[b].id;
++  });
++  size_t live_complete = 0;
++  for (size_t i : order) {
++    history::DownloadRow& row = rows[i];
++    bool live = !live_limit || row.state != DownloadState::COMPLETE ||
++                row.url_chain.empty() || in_progress_guids.contains(row.guid);
++    if (!live && live_complete < live_limit) {
++      ++live_complete;
++      live = true;
++    }
++    if (live) {
++      load->live.push_back(std::move(row));
+       continue;
+     }
+-    DCHECK_EQ(download::DownloadItem::kInvalidId, loading_id_);
+-
+-    // The download might have been in the terminal state without informing
+-    // history DB. If this is the case, populate the new state back to history
+-    // DB.
+-    if (item->IsDone() &&
+-        !download::IsDownloadDone(item->GetURL(), history_download_state,
+-                                  history_reason)) {
+-      OnDownloadUpdated(notifier_.GetManager(), item);
++    download::TruncateDataUrlAtTheEndIfNeeded(&row.url_chain);
++    ArchivedRow archived;
++    archived.id = row.id;
++    archived.guid = std::move(row.guid);
++    archived.url = row.url_chain.back().spec();
++    archived.target_path = std::move(row.target_path);
++    archived.mime_type = std::move(row.mime_type);
++    archived.received_bytes = row.received_bytes;
++    archived.total_bytes = row.total_bytes;
++    archived.start_time = row.start_time;
++    archived.end_time = row.end_time;
++    archived.danger_type =
++        history::ToContentDownloadDangerType(row.danger_type);
++    load->archived.push_back(std::move(archived));
++  }
++  return load;
++}
++
++void DownloadHistory::PrepareHistoryLoad(
++    std::vector<history::DownloadRow> rows) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  content::DownloadManager* manager = notifier_.GetManager();
++  if (!manager) {
++    return;
++  }
++  // Rows the in-progress DB still holds become items: CreateDownloadItem
++  // reconciles the two databases.
++  std::set<std::string> in_progress_guids;
++  download::SimpleDownloadManager::DownloadVector in_progress;
++  manager->GetUninitializedActiveDownloadsIfAny(&in_progress);
++  for (download::DownloadItem* item : in_progress) {
++    in_progress_guids.insert(item->GetGuid());
++  }
++  const LoadPolicyData* policy = GetLoadPolicy(manager->GetBrowserContext());
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE,
++      {base::TaskPriority::USER_VISIBLE,
++       base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
++      base::BindOnce(&DownloadHistory::PrepareHistoryRows, std::move(rows),
++                     policy ? policy->live_limit : 0,
++                     std::move(in_progress_guids)),
++      base::BindOnce(&DownloadHistory::LoadPreparedHistory,
++                     weak_ptr_factory_.GetWeakPtr()));
++}
++
++void DownloadHistory::LoadPreparedHistory(std::unique_ptr<PreparedLoad> load) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  if (!notifier_.GetManager()) {
++    return;
++  }
++  for (uint32_t id : load->skipped) {
++    ScheduleRemoveDownload(id);
++  }
++  history_row_count_ = load->total;
++  if (!load->archived.empty()) {
++    archived_rows_ =
++        base::MakeRefCounted<ArchivedRows>(std::move(load->archived));
++  }
++  pending_load_ = std::move(load);
++  LoadHistorySlice();
++}
++
++void DownloadHistory::LoadHistorySlice() {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  if (!notifier_.GetManager() || !pending_load_) {
++    return;
++  }
++  const base::TimeTicks deadline =
++      base::TimeTicks::Now() + kHistoryLoadSliceBudget;
++  PreparedLoad& load = *pending_load_;
++  while (load.next < load.live.size()) {
++    if (LoadHistoryRow(load.live[load.next++], base::FilePath())) {
++      ++load.created;
+     }
++    if (!notifier_.GetManager()) {
++      return;
++    }
++    if (load.next < load.live.size() && base::TimeTicks::Now() >= deadline) {
++      content::GetUIThreadTaskRunner({})->PostTask(
++          FROM_HERE, base::BindOnce(&DownloadHistory::LoadHistorySlice,
++                                    weak_ptr_factory_.GetWeakPtr()));
++      return;
++    }
++  }
++  live_row_count_ = load.created;
++  // A long history's rows take tens of milliseconds to free.
++  base::ThreadPool::PostTask(
++      FROM_HERE, {base::TaskPriority::BEST_EFFORT},
++      base::DoNothingWithBoundArgs(std::move(pending_load_)));
++  FinishHistoryLoad();
++}
++#endif
++
++bool DownloadHistory::LoadHistoryRow(const history::DownloadRow& row,
++                                     const base::FilePath& display_name) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  loading_id_ = history::ToContentDownloadId(row.id);
++  download::DownloadItem::DownloadState history_download_state =
++      history::ToContentDownloadState(row.state);
++  download::DownloadInterruptReason history_reason =
++      history::ToContentDownloadInterruptReason(row.interrupt_reason);
++  std::vector<GURL> url_chain = row.url_chain;
++  download::TruncateDataUrlAtTheEndIfNeeded(&url_chain);
++
++  // If the serialized EmbedderDownloadData is not present in DownloadRow,
++  // use the site URL to grab the appropriate StoragePartitionConfig to use
++  // to create the DownloadItem. Since DownloadRow comes from the download
++  // history database, it may contain entries that still use site URL.
++  content::StoragePartitionConfig storage_partition_config;
++  if (row.embedder_download_data.empty()) {
++    storage_partition_config =
++        notifier_.GetManager()->GetStoragePartitionConfigForSiteUrl(
++            row.site_url);
++  } else {
++    storage_partition_config =
++        notifier_.GetManager()
++            ->SerializedEmbedderDownloadDataToStoragePartitionConfig(
++                row.embedder_download_data);
++  }
++  download::DownloadItem* item = notifier_.GetManager()->CreateDownloadItem(
++      row.guid, loading_id_, row.current_path, row.target_path, url_chain,
++      row.referrer_url, storage_partition_config, row.tab_url,
++      row.tab_referrer_url, std::nullopt, row.mime_type,
++      row.original_mime_type, row.start_time, row.end_time, row.etag,
++      row.last_modified, row.received_bytes, row.total_bytes,
++      std::string(),  // TODO(asanka): Need to persist and restore hash of
++                      // partial file for an interrupted download. No need to
++                      // store hash for a completed file.
++      history_download_state,
++      history::ToContentDownloadDangerType(row.danger_type), history_reason,
++      row.opened, row.last_access_time, row.transient,
++      history::ToContentReceivedSlices(row.download_slice_info),
++      display_name);
++  // DownloadManager returns a nullptr if it decides to remove the download
++  // permanently.
++  if (item == nullptr) {
++    loading_id_ = download::DownloadItem::kInvalidId;
++    ScheduleRemoveDownload(row.id);
++    return false;
++  }
++  DCHECK_EQ(download::DownloadItem::kInvalidId, loading_id_);
++
++  // The download might have been in the terminal state without informing
++  // history DB. If this is the case, populate the new state back to history
++  // DB.
++  if (item->IsDone() &&
++      !download::IsDownloadDone(item->GetURL(), history_download_state,
++                                history_reason)) {
++    OnDownloadUpdated(notifier_.GetManager(), item);
++  }
+ 
+-    // The item was created already and observers were notified of its creation
+-    // via OnDownloadCreated(). Since we are about to possibly add extra info to
+-    // it (for extensions and web apps), we must notify observers again, after
+-    // modification, so that observers who care about the extra info may have an
+-    // updated view of the item.
+-    bool should_update_observers = false;
++  // The item was created already and observers were notified of its creation
++  // via OnDownloadCreated(). Since we are about to possibly add extra info to
++  // it (for extensions and web apps), we must notify observers again, after
++  // modification, so that observers who care about the extra info may have an
++  // updated view of the item.
++  bool should_update_observers = false;
+ #if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+-    if (!row.by_ext_id.empty() && !row.by_ext_name.empty()) {
+-      new extensions::DownloadedByExtension(item, row.by_ext_id,
+-                                            row.by_ext_name);
+-      should_update_observers = true;
+-    }
++  if (!row.by_ext_id.empty() && !row.by_ext_name.empty()) {
++    new extensions::DownloadedByExtension(item, row.by_ext_id,
++                                          row.by_ext_name);
++    should_update_observers = true;
++  }
+ #endif
+ #if !BUILDFLAG(IS_ANDROID)
+-    if (!row.by_web_app_id.empty()) {
+-      DownloadItemWebAppData::CreateAndAttachToItem(item, row.by_web_app_id);
+-      should_update_observers = true;
+-    }
++  if (!row.by_web_app_id.empty()) {
++    DownloadItemWebAppData::CreateAndAttachToItem(item, row.by_web_app_id);
++    should_update_observers = true;
++  }
+ #endif
+-    if (should_update_observers) {
+-      item->UpdateObservers();
+-    }
+-
+-    DCHECK_EQ(DownloadHistoryData::PERSISTED,
+-              DownloadHistoryData::Get(item)->state());
++  if (should_update_observers) {
++    item->UpdateObservers();
+   }
+ 
++  DCHECK_EQ(DownloadHistoryData::PERSISTED,
++            DownloadHistoryData::Get(item)->state());
++  return true;
++}
++
++void DownloadHistory::FinishHistoryLoad() {
+   // Indicate that the history db is initialized.
+   notifier_.GetManager()->PostInitialization(
+       content::DownloadManager::DOWNLOAD_INITIALIZATION_DEPENDENCY_HISTORY_DB);
+@@ -512,13 +686,77 @@ void DownloadHistory::LoadHistoryDownloads(
+   base::UmaHistogramCustomTimes("Download.History.LoadLatency",
+                                 base::TimeTicks::Now() - load_start_time_,
+                                 base::Milliseconds(1), base::Minutes(1), 50);
+-  base::UmaHistogramCounts100000("Download.History.DownloadCount",
+-                                 base::saturated_cast<int>(rows.size()));
++  base::UmaHistogramCounts100000(
++      "Download.History.DownloadCount",
++      base::saturated_cast<int>(history_row_count_));
+ 
+   initial_history_query_complete_ = true;
++  for (base::OnceClosure& closure : std::exchange(after_load_, {})) {
++    std::move(closure).Run();
++  }
+   for (Observer& observer : observers_) {
+     observer.OnHistoryQueryComplete();
+   }
++  const LoadPolicyData* policy =
++      GetLoadPolicy(notifier_.GetManager()->GetBrowserContext());
++  if (policy && policy->on_loaded) {
++    policy->on_loaded.Run();
++  }
++}
++
++size_t DownloadHistory::RemoveArchivedRows(
++    const std::set<std::string>& guids) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  if (!archived_rows_ || guids.empty()) {
++    return 0;
++  }
++  // Published rows are immutable: a removal publishes a new vector.
++  std::vector<ArchivedRow> kept;
++  IdSet removed;
++  for (const ArchivedRow& row : archived_rows_->data) {
++    if (guids.contains(row.guid)) {
++      removed.insert(row.id);
++    } else {
++      kept.push_back(row);
++    }
++  }
++  if (removed.empty()) {
++    return 0;
++  }
++  archived_rows_ = kept.empty()
++                       ? nullptr
++                       : base::MakeRefCounted<ArchivedRows>(std::move(kept));
++  history_->RemoveDownloads(removed);
++  for (Observer& observer : observers_) {
++    observer.OnDownloadsRemoved(removed);
++  }
++  return removed.size();
++}
++
++void DownloadHistory::RemoveArchivedRowsByURLAndTime(
++    base::RepeatingCallback<bool(const GURL&)> url_filter,
++    base::Time remove_begin,
++    base::Time remove_end) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  if (!initial_history_query_complete_) {
++    after_load_.push_back(
++        base::BindOnce(&DownloadHistory::RemoveArchivedRowsByURLAndTime,
++                       weak_ptr_factory_.GetWeakPtr(), std::move(url_filter),
++                       remove_begin, remove_end));
++    return;
++  }
++  if (!archived_rows_) {
++    return;
++  }
++  std::set<std::string> guids;
++  for (const ArchivedRow& row : archived_rows_->data) {
++    if (row.start_time >= remove_begin &&
++        (remove_end.is_null() || row.start_time < remove_end) &&
++        (!url_filter || url_filter.Run(GURL(row.url)))) {
++      guids.insert(row.guid);
++    }
++  }
++  RemoveArchivedRows(guids);
+ }
+ 
+ void DownloadHistory::MaybeAddToHistory(download::DownloadItem* item) {
+diff --git a/chrome/browser/download/download_history.h b/chrome/browser/download/download_history.h
+index aec0b9bfee..4d66154ee2 100644
+--- a/chrome/browser/download/download_history.h
++++ b/chrome/browser/download/download_history.h
+@@ -7,11 +7,15 @@
+ 
+ #include <stdint.h>
+ 
++#include <memory>
+ #include <set>
++#include <string>
+ #include <vector>
+ 
++#include "base/files/file_path.h"
+ #include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/memory/ref_counted.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/observer_list.h"
+ #include "base/time/time.h"
+@@ -22,6 +26,10 @@
+ #include "components/history/core/browser/history_service.h"
+ #include "content/public/browser/download_manager.h"
+ 
++namespace content {
++class BrowserContext;
++}  // namespace content
++
+ namespace history {
+ struct DownloadRow;
+ }  // namespace history
+@@ -102,7 +110,54 @@ class DownloadHistory : public download::AllDownloadItemNotifier::Observer {
+   void AddObserver(Observer* observer);
+   void RemoveObserver(Observer* observer);
+ 
++  // ReArc (download history at scale). The initial load creates the items in
++  // slices of a few milliseconds of UI-thread work, newest first. With a live
++  // limit, only the newest |live_limit| complete rows become items (with
++  // every unfinished row and every row the in-progress DB still holds); older
++  // complete rows stay in the database as archived rows. 0 loads every row.
++  // |on_loaded| runs after the initial load completes. Read when it starts.
++  static void SetLoadPolicy(content::BrowserContext* context,
++                            size_t live_limit,
++                            base::RepeatingClosure on_loaded);
++
++  // A complete row the initial load kept in the database only.
++  struct ArchivedRow {
++    uint32_t id = 0;
++    std::string guid;
++    std::string url;
++    base::FilePath target_path;
++    std::string mime_type;
++    int64_t received_bytes = 0;
++    int64_t total_bytes = 0;
++    base::Time start_time;
++    base::Time end_time;
++    download::DownloadDangerType danger_type =
++        download::DOWNLOAD_DANGER_TYPE_NOT_DANGEROUS;
++  };
++  // Newest first. Immutable once published: readable on any sequence.
++  using ArchivedRows = base::RefCountedData<std::vector<ArchivedRow>>;
++
++  bool initial_history_query_complete() const {
++    return initial_history_query_complete_;
++  }
++  // After the initial load: rows the database held, items made from them.
++  size_t history_row_count() const { return history_row_count_; }
++  size_t live_row_count() const { return live_row_count_; }
++  // Null when no row was archived.
++  scoped_refptr<const ArchivedRows> archived_rows() const {
++    return archived_rows_;
++  }
++  // Deletes archived rows from the database by GUID; returns how many.
++  size_t RemoveArchivedRows(const std::set<std::string>& guids);
++  // Clear browsing data: as DownloadManager::RemoveDownloadsByURLAndTime for
++  // archived rows (a null filter matches every URL); waits for the load.
++  void RemoveArchivedRowsByURLAndTime(
++      base::RepeatingCallback<bool(const GURL&)> url_filter,
++      base::Time remove_begin,
++      base::Time remove_end);
++
+  private:
++  struct PreparedLoad;
+   // Callback from |history_| containing all entries in the downloads database
+   // table.
+   void QueryCallback(std::vector<history::DownloadRow> rows);
+@@ -113,9 +168,21 @@ class DownloadHistory : public download::AllDownloadItemNotifier::Observer {
+   void LoadHistoryDownloads(const std::vector<history::DownloadRow>& rows,
+                             download::DisplayNames display_names);
+ #else
+-  // Called to create all history downloads.
+-  void LoadHistoryDownloads(const std::vector<history::DownloadRow>& rows);
++  // ReArc: drops rows to forget, orders the rest newest first and archives
++  // complete rows past the live limit (on a worker).
++  static std::unique_ptr<PreparedLoad> PrepareHistoryRows(
++      std::vector<history::DownloadRow> rows,
++      size_t live_limit,
++      std::set<std::string> in_progress_guids);
++  void PrepareHistoryLoad(std::vector<history::DownloadRow> rows);
++  void LoadPreparedHistory(std::unique_ptr<PreparedLoad> load);
++  // Creates items for the prepared rows until the slice's budget is spent.
++  void LoadHistorySlice();
+ #endif
++  // Creates the item for one row; false when the row was dropped instead.
++  bool LoadHistoryRow(const history::DownloadRow& row,
++                      const base::FilePath& display_name);
++  void FinishHistoryLoad();
+ 
+   // May add |item| to |history_|.
+   void MaybeAddToHistory(download::DownloadItem* item);
+@@ -169,6 +236,13 @@ class DownloadHistory : public download::AllDownloadItemNotifier::Observer {
+ 
+   bool initial_history_query_complete_;
+ 
++  // ReArc: the load in progress, its counts and the archived rows.
++  std::unique_ptr<PreparedLoad> pending_load_;
++  size_t history_row_count_ = 0;
++  size_t live_row_count_ = 0;
++  scoped_refptr<ArchivedRows> archived_rows_;
++  std::vector<base::OnceClosure> after_load_;
++
+   const base::TimeTicks load_start_time_{base::TimeTicks::Now()};
+ 
+   base::ObserverList<Observer>::Unchecked observers_;
+diff --git a/chrome/browser/rearc_bridge/rearc_downloads_abi.cc b/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+index 51d2320928..f250b64d98 100644
+--- a/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+@@ -5,19 +5,29 @@
+ // Wave 18b downloads: Chromium's DownloadManager (via AllDownloadItemNotifier)
+ // is the source of truth; the bridge maps item state transitions to events
+ // and forwards actions to DownloadItem / ChromeDownloadManagerDelegate.
++// ABI 1.48 download_history: DownloadHistory's load policy (live limit) and
++// its archived rows, paged on a worker.
+ 
+ #include <pthread.h>
+ 
+ #include <map>
+ #include <memory>
++#include <set>
+ #include <string>
+ #include <utility>
++#include <vector>
+ 
+ #include "base/check.h"
+ #include "base/files/file_path.h"
+ #include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
+ #include "base/no_destructor.h"
+ #include "base/strings/string_util.h"
++#include "base/task/thread_pool.h"
++#include "base/time/time.h"
++#include "chrome/browser/download/download_core_service.h"
++#include "chrome/browser/download/download_core_service_factory.h"
++#include "chrome/browser/download/download_history.h"
+ #include "chrome/browser/download/download_prefs.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
+@@ -188,15 +198,176 @@ ReArcStatus Available() {
+   return ReArcEngineDefaultProfile() ? REARC_OK : REARC_ENGINE_NOT_READY;
+ }
+ 
++// ABI 1.48 download_history.
++ReArcDownloadHistoryCallback history_callback = nullptr;
++void* history_context = nullptr;
++
++// The persistent profile's download service; OTR profiles have no history.
++ReArcStatus HistoryService(uint64_t profile_id, Profile** profile,
++                           DownloadCoreService** service) {
++  CHECK(pthread_main_np());
++  if (auto status = Available()) {
++    return status;
++  }
++  *profile = FindBridgeProfile(profile_id);
++  if (!*profile) {
++    return REARC_PROFILE_NOT_FOUND;
++  }
++  if ((*profile)->IsOffTheRecord()) {
++    return REARC_UNSUPPORTED;
++  }
++  *service = DownloadCoreServiceFactory::GetForBrowserContext(*profile);
++  return *service ? REARC_OK : REARC_UNSUPPORTED;
++}
++
++// The loaded history, else invalid_state.
++ReArcStatus LoadedHistory(uint64_t profile_id, DownloadHistory** history) {
++  Profile* profile;
++  DownloadCoreService* service;
++  if (auto status = HistoryService(profile_id, &profile, &service)) {
++    return status;
++  }
++  *history = service->GetDownloadHistory();
++  return *history && (*history)->initial_history_query_complete()
++             ? REARC_OK
++             : REARC_INVALID_STATE;
++}
++
++ReArcDownloadHistoryInfo InfoFor(uint64_t profile_id,
++                                 const DownloadHistory& history) {
++  ReArcDownloadHistoryInfo info{};
++  info.profile_id = profile_id;
++  info.rows = static_cast<uint32_t>(history.history_row_count());
++  info.live_rows = static_cast<uint32_t>(history.live_row_count());
++  auto archived = history.archived_rows();
++  info.archived_rows = archived ? static_cast<uint32_t>(archived->data.size()) : 0;
++  return info;
++}
++
++// DownloadHistory's on_loaded: after the last live item's created event.
++void HistoryLoaded(uint64_t profile_id) {
++  DownloadHistory* history;
++  if (LoadedHistory(profile_id, &history)) {
++    return;
++  }
++  ABIPost(base::BindOnce(
++      [](ReArcDownloadHistoryInfo info) {
++        CHECK(pthread_main_np());
++        if (history_callback) {
++          history_callback(history_context, &info);
++        }
++      },
++      InfoFor(profile_id, *history)));
++}
++
++void SetLoadPolicy(Profile* profile, uint64_t profile_id, uint32_t live_limit) {
++  DownloadHistory::SetLoadPolicy(
++      profile, live_limit, base::BindRepeating(&HistoryLoaded, profile_id));
++}
++
++// One archived row, owned until the completion returns.
++struct ArchivedPageRow {
++  uint32_t history_id;
++  std::string guid, url, target_path, mime_type;
++  int64_t received_bytes, total_bytes, start_time_us, end_time_us;
++  uint32_t danger_type;
++};
++struct ArchivedPage {
++  std::vector<ArchivedPageRow> rows;
++  uint32_t total = 0;
++};
++struct ArchivedQuery {
++  uint64_t profile_id;
++  ReArcDownloadRowsCallback callback;
++  raw_ptr<void> context;
++};
++auto& ArchivedQueries() {
++  static base::NoDestructor<std::map<uint64_t, ArchivedQuery>> queries;
++  return *queries;
++}
++uint64_t next_archived_query = 1;
++
++int64_t UnixMicros(base::Time time) {
++  return time.is_null() ? 0 : (time - base::Time::UnixEpoch()).InMicroseconds();
++}
++
++// On a worker: rows [offset, offset + limit) copied out of the immutable vector.
++ArchivedPage CopyArchivedPage(
++    scoped_refptr<const DownloadHistory::ArchivedRows> archived,
++    uint32_t offset,
++    uint32_t limit) {
++  ArchivedPage page;
++  if (!archived) {
++    return page;
++  }
++  const auto& rows = archived->data;
++  page.total = static_cast<uint32_t>(rows.size());
++  for (size_t i = offset; i < rows.size() && i < size_t{offset} + limit; ++i) {
++    const auto& row = rows[i];
++    page.rows.push_back({row.id, row.guid, row.url, row.target_path.value(),
++                         row.mime_type, row.received_bytes, row.total_bytes,
++                         UnixMicros(row.start_time), UnixMicros(row.end_time),
++                         static_cast<uint32_t>(row.danger_type)});
++  }
++  return page;
++}
++
++void FinishArchivedQuery(uint64_t id, ReArcStatus status, ArchivedPage page) {
++  auto it = ArchivedQueries().find(id);
++  if (it == ArchivedQueries().end()) {
++    return;
++  }
++  ArchivedQuery query = it->second;
++  ArchivedQueries().erase(it);
++  ABIPost(base::BindOnce(
++      [](ArchivedQuery query, ReArcStatus status, ArchivedPage page) {
++        CHECK(pthread_main_np());
++        std::vector<ReArcDownloadRow> rows;
++        rows.reserve(page.rows.size());
++        for (const auto& row : page.rows) {
++          ReArcDownloadRow r{};
++          r.history_id = row.history_id;
++          r.guid = row.guid.c_str();
++          r.url = row.url.c_str();
++          r.target_path = row.target_path.c_str();
++          r.mime_type = row.mime_type.c_str();
++          r.received_bytes = row.received_bytes;
++          r.total_bytes = row.total_bytes;
++          r.start_time_us = row.start_time_us;
++          r.end_time_us = row.end_time_us;
++          r.danger_type = row.danger_type;
++          rows.push_back(r);
++        }
++        query.callback(query.context.get(), status,
++                       rows.empty() ? nullptr : rows.data(),
++                       static_cast<uint32_t>(rows.size()), page.total);
++      },
++      query, status, std::move(page)));
++}
++
+ }  // namespace
+ 
+ void ABIAttachDownloads(Profile* profile, uint64_t profile_id) {
+   CHECK(pthread_main_np());
+   Downloads()[profile_id] = std::make_unique<ProfileDownloads>(profile, profile_id);
++  // 1.48: every row stays live until the host sets a limit; the host hears
++  // when the load completed.
++  if (!profile->IsOffTheRecord()) {
++    SetLoadPolicy(profile, profile_id, 0);
++  }
+ }
+ void ABIDetachDownloads(uint64_t profile_id) {
+   CHECK(pthread_main_np());
+   Downloads().erase(profile_id);
++  std::vector<uint64_t> queries;
++  for (const auto& [id, query] : ArchivedQueries()) {
++    if (query.profile_id == profile_id) {
++      queries.push_back(id);
++    }
++  }
++  for (uint64_t id : queries) {
++    FinishArchivedQuery(id, REARC_CANCELLED, {});
++  }
+ }
+ 
+ }  // namespace rearc
+@@ -336,3 +507,104 @@ ReArcStatus ReArcDownloadResolveDanger(uint64_t profile, uint32_t id,
+   else item->ValidateDangerousDownload();
+   return REARC_OK;
+ }
++
++void ReArcEngineSetDownloadHistoryCallback(ReArcDownloadHistoryCallback callback,
++                                           void* context) {
++  CHECK(pthread_main_np());
++  rearc::history_callback = callback;
++  rearc::history_context = context;
++}
++ReArcStatus ReArcDownloadSetHistoryPolicy(uint64_t profile_id,
++                                          uint32_t live_limit) {
++  Profile* profile;
++  DownloadCoreService* service;
++  if (auto status = rearc::HistoryService(profile_id, &profile, &service)) {
++    return status;
++  }
++  // Read when the load starts: too late once DownloadHistory exists.
++  if (service->GetDownloadHistory()) {
++    return REARC_INVALID_STATE;
++  }
++  rearc::SetLoadPolicy(profile, profile_id, live_limit);
++  return REARC_OK;
++}
++ReArcStatus ReArcDownloadLoadHistory(uint64_t profile_id) {
++  Profile* profile;
++  DownloadCoreService* service;
++  if (auto status = rearc::HistoryService(profile_id, &profile, &service)) {
++    return status;
++  }
++  service->InitializeHistory(
++      DownloadCoreService::DownloadHistoryLoadTrigger::kDownloadsPage);
++  return REARC_OK;
++}
++ReArcStatus ReArcDownloadGetHistoryInfo(uint64_t profile_id,
++                                        ReArcDownloadHistoryInfo* info) {
++  if (info) *info = {};
++  DownloadHistory* history;
++  if (auto status = rearc::LoadedHistory(profile_id, &history)) {
++    return status;
++  }
++  if (!info) return REARC_INVALID_ARGUMENT;
++  *info = rearc::InfoFor(profile_id, *history);
++  return REARC_OK;
++}
++ReArcStatus ReArcDownloadQueryArchived(uint64_t profile_id,
++                                       uint32_t offset,
++                                       uint32_t limit,
++                                       ReArcDownloadRowsCallback callback,
++                                       void* context) {
++  DownloadHistory* history;
++  if (auto status = rearc::LoadedHistory(profile_id, &history)) {
++    return status;
++  }
++  if (!callback || !limit || limit > 5000) return REARC_INVALID_ARGUMENT;
++  if (rearc::ArchivedQueries().size() >= 64) return REARC_BUSY;
++  const uint64_t id = rearc::next_archived_query++;
++  rearc::ArchivedQueries()[id] = {profile_id, callback, context};
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::TaskPriority::USER_VISIBLE},
++      base::BindOnce(&rearc::CopyArchivedPage, history->archived_rows(), offset,
++                     limit),
++      base::BindOnce(&rearc::FinishArchivedQuery, id, REARC_OK));
++  return REARC_OK;
++}
++ReArcStatus ReArcDownloadRemoveArchived(uint64_t profile_id,
++                                        const char* const* guids,
++                                        uint32_t count,
++                                        uint32_t* removed) {
++  if (removed) *removed = 0;
++  DownloadHistory* history;
++  if (auto status = rearc::LoadedHistory(profile_id, &history)) {
++    return status;
++  }
++  if (!guids || !count || count > 100000) return REARC_INVALID_ARGUMENT;
++  std::set<std::string> set;
++  for (uint32_t i = 0; i < count; ++i) {
++    if (!guids[i]) return REARC_INVALID_ARGUMENT;
++    std::string guid(guids[i]);
++    if (guid.empty() || guid.size() > 128 || !base::IsStringASCII(guid))
++      return REARC_INVALID_ARGUMENT;
++    set.insert(std::move(guid));
++  }
++  const size_t n = history->RemoveArchivedRows(set);
++  if (removed) *removed = static_cast<uint32_t>(n);
++  return REARC_OK;
++}
++ReArcStatus ReArcDownloadGetTimes(uint64_t profile_id,
++                                  uint32_t download_id,
++                                  int64_t* start_time_us,
++                                  int64_t* end_time_us) {
++  CHECK(pthread_main_np());
++  if (start_time_us) *start_time_us = 0;
++  if (end_time_us) *end_time_us = 0;
++  if (auto status = rearc::Available()) return status;
++  if (!start_time_us || !end_time_us) return REARC_INVALID_ARGUMENT;
++  auto it = rearc::Downloads().find(profile_id);
++  if (it == rearc::Downloads().end()) return REARC_PROFILE_NOT_FOUND;
++  auto* item = it->second->Find(download_id);
++  if (!item) return REARC_NOT_FOUND;
++  *start_time_us = rearc::UnixMicros(item->GetStartTime());
++  *end_time_us = rearc::UnixMicros(item->GetEndTime());
++  return REARC_OK;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index d5e3acf179..9420e7e648 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 47, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 48, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -1193,6 +1193,78 @@ typedef void (*ReArcSidePanelCallback)(void* context,
+ REARC_ENGINE_EXPORT void ReArcEngineSetSidePanelCallback(
+     ReArcSidePanelCallback callback, void* context);
+ 
++// Download history at scale (download_history, ABI 1.48). Chromium loads a
++// persistent profile's download history from its History DB once: on the
++// first download, chrome://downloads, the downloads extension API, clearing
++// download history, or ReArcDownloadLoadHistory. From 1.48 a worker orders the
++// rows and the UI thread creates their items newest first, in slices of about
++// 8 ms, each slice's created events (kind 0) following it; before 1.48 one
++// task created every item. live_limit 0 (the default) makes every row an
++// item. Otherwise only the newest live_limit complete rows (by start time)
++// become items, with every unfinished, cancelled or interrupted row and every
++// row the in-progress DB holds; older complete rows stay in the History DB as
++// archived rows: no item, no event, not in chrome://downloads or the downloads
++// extension API. Clearing download history (BrowsingDataRemover) deletes
++// matching archived rows too. Set before the profile's history load starts,
++// else invalid_state. OTR profiles have no history: unsupported.
++REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadSetHistoryPolicy(
++    uint64_t profile_id, uint32_t live_limit);
++// Starts the profile's history load now; no-op once started.
++REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadLoadHistory(uint64_t profile_id);
++// rows: History DB rows when the load read them; live_rows: items made;
++// archived_rows: rows kept in the database only. Rows Chromium dropped
++// (overwritten files, expired interruptions) are in neither.
++typedef struct ReArcDownloadHistoryInfo {
++  uint64_t profile_id;
++  uint32_t rows, live_rows, archived_rows;
++} ReArcDownloadHistoryInfo;
++// Posted on main once per load, after every live item's created event.
++typedef void (*ReArcDownloadHistoryCallback)(
++    void* context, const ReArcDownloadHistoryInfo* info);
++REARC_ENGINE_EXPORT void ReArcEngineSetDownloadHistoryCallback(
++    ReArcDownloadHistoryCallback callback, void* context);
++// Before the load completed: invalid_state.
++REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadGetHistoryInfo(
++    uint64_t profile_id, ReArcDownloadHistoryInfo* info);
++// An archived row: always complete (download event state 1). history_id is
++// the History DB row's ID, not a download_id: ReArcDownloadAction does not
++// take it. Times are microseconds since the Unix epoch.
++typedef struct ReArcDownloadRow {
++  uint32_t history_id;
++  const char* guid;
++  const char* url;
++  const char* target_path;
++  const char* mime_type;
++  int64_t received_bytes, total_bytes;
++  int64_t start_time_us, end_time_us;
++  uint32_t danger_type;
++} ReArcDownloadRow;
++// status ok: count rows from offset of total archived rows, newest first.
++// cancelled when the profile closed first. Rows are borrowed for the callback.
++typedef void (*ReArcDownloadRowsCallback)(void* context,
++                                          ReArcStatus status,
++                                          const ReArcDownloadRow* rows,
++                                          uint32_t count,
++                                          uint32_t total);
++// Pages archived rows: copied on a background sequence, posted on main. limit
++// 1..5000; an offset past the end completes with count 0. Before the load
++// completed: invalid_state. 64 queries outstanding: busy.
++REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadQueryArchived(
++    uint64_t profile_id, uint32_t offset, uint32_t limit,
++    ReArcDownloadRowsCallback completion, void* context);
++// A live item's start and end times (microseconds since the Unix epoch; end
++// 0 until it finishes): the download event carries neither, and an item
++// restored from history keeps its own.
++REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadGetTimes(uint64_t profile_id,
++                                                      uint32_t download_id,
++                                                      int64_t* start_time_us,
++                                                      int64_t* end_time_us);
++// Deletes archived rows from the History DB by GUID (count 1..100000);
++// GUIDs of no archived row are skipped. removed (optional): rows deleted.
++REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadRemoveArchived(
++    uint64_t profile_id, const char* const* guids, uint32_t count,
++    uint32_t* removed);
++
+ // Local card/address offers (autofill_save_prompts, ABI 1.37).
+ // phase 0 request, 1 withdrawn; kind 0 local card, 1 address (update supplied).
+ // summary is Chromium data for display: card network/last four/expiration/name,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 36822dda54..cdd7abecf7 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -557,6 +557,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "find_in_page" ||
+          std::string(feature) == "downloads" ||
+          std::string(feature) == "dangerous_downloads" ||
++         std::string(feature) == "download_history" ||
+          std::string(feature) == "javascript_dialogs" ||
+          std::string(feature) == "file_chooser" ||
+          std::string(feature) == "permission_prompts" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 96c7ffb150..131cbaeb42 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.49.0";
++  return "0.50.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+-- 
+2.54.0 (Apple Git-157)
+
