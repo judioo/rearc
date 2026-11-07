@@ -57,6 +57,13 @@ final class SplitViewTests: XCTestCase {
         XCTAssertEqual(factors[b.id] ?? 0, 1.0 / 6, accuracy: 1e-9)
     }
 
+    func testAPaneSavedWithAZeroFactorGetsAnEqualShare() {
+        let (_, a, b, c) = makeStoreWithTabs()
+        let factors = SplitViewItem.normalizedFactors([a.id: 0.5, b.id: 0.5, c.id: 0], tabIDs: [a.id, b.id, c.id])
+        XCTAssertEqual(factors[c.id] ?? 0, 0.25, accuracy: 1e-9)
+        XCTAssertEqual(factors[a.id] ?? 0, 0.375, accuracy: 1e-9)
+    }
+
     func testTwoTabSplitDissolvesOnRemoveTab() {
         let (store, a, b, _) = makeStoreWithTabs()
         guard let split = store.createSplit(tabIDs: [a.id, b.id], orientation: .horizontal) else {
