@@ -10,9 +10,9 @@ protocol ExtensionSidePanelBackend: AnyObject {
 }
 
 /// Extension side panels (`chrome.sidePanel`), one per window as in Arc: a
-/// pane beside the page on the side opposite the sidebar, with the
-/// extension's icon and name over its page, kept across the window's tab
-/// switches. The backend decides what each window shows; the pane width is
+/// pane beside the page, on the side opposite the sidebar unless Settings ›
+/// General › Side panel position fixes it, with the extension's icon and
+/// name over its page, kept across the window's tab switches. The backend decides what each window shows; the pane width is
 /// shared and persisted (docs/arc-recordings/2026-11-06-side-panel.md).
 @Observable
 final class ExtensionSidePanelController {
@@ -66,38 +66,49 @@ extension View {
     /// The window's content with its extension side panel beside it
     /// (`ExtensionSidePanelSplit`).
     func extensionSidePanel(_ extensions: ExtensionsController, window: SidebarWindowID,
-                            sidebarSide: SidebarSide = .left, topInset: CGFloat = 10, isHidden: Bool) -> some View {
-        ExtensionSidePanelSplit(extensions: extensions, window: window, sidebarSide: sidebarSide, topInset: topInset,
-                                isHidden: isHidden) { self }
+                            side: SidebarSide = .right, topInset: CGFloat = 10, paneOffset: CGFloat = 0,
+                            isHidden: Bool) -> some View {
+        ExtensionSidePanelSplit(extensions: extensions, window: window, side: side, topInset: topInset,
+                                paneOffset: paneOffset, isHidden: isHidden) { self }
     }
 }
 
 /// The window's content beside its extension side panel. Only this view and
 /// the pane read the panel state, and only the pane reads a drag's live
 /// width: opening, closing and resizing never evaluate the sidebar or the
-/// page card again, they are only laid out narrower.
+/// page card again, they are only laid out narrower. `BrowserView` has two:
+/// one around the sidebar and card for a pane at the window's other edge,
+/// one around the card for a pane beside the sidebar (`SidePanelLayout`);
+/// the one not in use is hidden and measures nothing.
 struct ExtensionSidePanelSplit<Content: View>: View {
     let extensions: ExtensionsController
     private var controller: ExtensionSidePanelController { extensions.sidePanels }
     let window: SidebarWindowID
-    /// `SidePanelPlacement` puts the pane on the other side.
-    var sidebarSide: SidebarSide = .left
+    /// The pane's side (`SidePanelPlacement`).
+    var side: SidebarSide = .right
     /// Level with the page card's top (below the traffic lights when the pane takes their side).
     var topInset: CGFloat = 10
-    /// HTML fullscreen: the page alone (the pane is not removed from under it).
+    /// Beside the sidebar, ⌘S's receding edge (`SidePanelLayout.paneOffset`).
+    var paneOffset: CGFloat = 0
+    /// HTML fullscreen, or the other split's pane: the content alone (it is
+    /// not removed from under it).
     var isHidden = false
     @ViewBuilder var content: Content
     @State private var available: Double?
 
     var body: some View {
-        let side = SidePanelPlacement.side(sidebarSide: sidebarSide)
         let panel = isHidden ? nil : controller.panel(in: window)
         HStack(spacing: 0) {
             if side == .left, let panel { pane(panel, side: side) }
             content
             if side == .right, let panel { pane(panel, side: side) }
         }
-        .onGeometryChange(for: Double.self) { Double($0.size.width) } action: { available = $0 }
+        // Measured only while a pane shows: without one the split costs no layout callbacks.
+        .background {
+            if panel != nil {
+                Color.clear.onGeometryChange(for: Double.self) { Double($0.size.width) } action: { available = $0 }
+            }
+        }
         // Arc slides it in over ~160 ms and out over ~70 ms (§1 of the recording notes).
         // A replaced panel swaps in place (same width, no motion).
         .animation(panel == nil ? .easeIn(duration: 0.07) : .easeOut(duration: 0.16), value: panel != nil)
@@ -106,6 +117,7 @@ struct ExtensionSidePanelSplit<Content: View>: View {
     private func pane(_ panel: ExtensionSidePanelController.Shown, side: SidebarSide) -> some View {
         ExtensionSidePanelPane(extensions: extensions, window: window, panel: panel, side: side, topInset: topInset,
                                available: available)
+            .offset(x: paneOffset)
             .id(panel.panelID)
             .transition(.move(edge: side == .right ? .trailing : .leading))
     }

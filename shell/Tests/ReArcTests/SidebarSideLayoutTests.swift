@@ -77,4 +77,32 @@ final class SidebarSideLayoutTests: XCTestCase {
         XCTAssertEqual(SidebarSide.load(from: model.externalLinkDefaults), .left)
         XCTAssertEqual(model.pendingSidebarSide ?? model.sidebarSide, .left, "the newer choice wins")
     }
+
+    func testSettingTheSidePanelPositionSavesItAndSharesTheFlip() {
+        let model = makeModel()
+        model.sidebarSide = .left
+        model.sidePanelPosition = .oppositeSidebar
+        XCTAssertEqual(model.sidePanelLayout.side, .right)
+        model.setSidePanelPosition(.left)
+        XCTAssertEqual(SidePanelPosition.load(from: model.externalLinkDefaults), .left)
+        XCTAssertEqual(model.pendingSidePanelPosition ?? model.sidePanelPosition, .left)
+        // A sidebar flip during the same fade lands with it.
+        model.setSidebarSide(.right)
+        XCTAssertEqual(model.pendingSidebarSide ?? model.sidebarSide, .right)
+        XCTAssertEqual(model.pendingSidePanelPosition ?? model.sidePanelPosition, .left)
+        model.setSidePanelPosition(.right)
+        XCTAssertEqual(SidePanelPosition.load(from: model.externalLinkDefaults), .right)
+        XCTAssertEqual(model.pendingSidePanelPosition ?? model.sidePanelPosition, .right, "the newer choice wins")
+    }
+
+    func testTheSidePanelLayoutFollowsBothSettings() {
+        let model = makeModel()
+        model.sidebarSide = .right
+        model.sidePanelPosition = .right
+        XCTAssertTrue(model.sidePanelLayout.isBesideSidebar)
+        XCTAssertFalse(model.sidePanelLayout.clearsTrafficLights, "the card keeps the window's left")
+        model.sidePanelPosition = .left
+        XCTAssertFalse(model.sidePanelLayout.isBesideSidebar)
+        XCTAssertTrue(model.sidePanelLayout.clearsTrafficLights)
+    }
 }
