@@ -151,11 +151,15 @@ final class DownloadsLibraryTableTests: XCTestCase {
         var made = 0
         table.enumerateAvailableRowViews { _, _ in made += 1 }
         XCTAssertLessThan(made, 40)
-        // Accessibility sees those rows too, not 39,414 elements.
-        let children = try! XCTUnwrap(table.accessibilityChildren())
-        XCTAssertEqual(children.count, made)
-        XCTAssertTrue(children.allSatisfy { $0 is DownloadsTableRowView })
-        XCTAssertEqual(table.accessibilityRows()?.count, made)
+        // Accessibility clients see the rows on screen too, not 39,414 elements.
+        let visible = table.rows(in: table.visibleRect).length
+        let rows = try! XCTUnwrap(table.accessibilityAttributeValue(.rows) as? [NSObject])
+        XCTAssertEqual(rows.count, visible)
+        XCTAssertTrue(rows.allSatisfy { $0.accessibilityAttributeValue(.role) as? NSAccessibility.Role == .row })
+        XCTAssertLessThan((table.accessibilityAttributeValue(.children) as? [Any])?.count ?? .max, 40)
+        XCTAssertEqual(table.accessibilityArrayAttributeCount(.rows), visible)
+        table.selectRowIndexes([1], byExtendingSelection: false)
+        XCTAssertEqual((table.accessibilityAttributeValue(.selectedRows) as? [Any])?.count, 1)
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 2, "debug build, generous")
     }
 

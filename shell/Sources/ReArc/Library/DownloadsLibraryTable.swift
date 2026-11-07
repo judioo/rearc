@@ -494,20 +494,38 @@ final class DownloadsTableView: NSTableView {
     // MARK: Accessibility
 
     /// Accessibility sees the rows on screen, as it saw the SwiftUI list's
-    /// built rows. By default a table reports every row: an Accessibility
-    /// client walking the tree (VoiceOver, window managers) made AppKit
-    /// create an element for each of 39k rows, ~1 s of main thread a walk.
-    /// Arrow keys move the selection and scroll, which brings rows in.
-    var visibleRowViews: [NSTableRowView] {
-        let range = rows(in: visibleRect)
-        guard range.length > 0 else { return [] }
-        return (range.location ..< range.location + range.length).compactMap { rowView(atRow: $0, makeIfNecessary: false) }
+    /// built rows. By default a table reports an element for every row, and
+    /// a client walking the tree (VoiceOver, window managers) then asked each
+    /// row for its cell, which made a cell view for each of 39k rows: a
+    /// sample showed ~1 s of main thread a walk. Clients read the table
+    /// through the attribute API, so that is where the rows are limited;
+    /// AppKit's own visible-row elements keep their roles, cells and
+    /// selection. Arrow keys move the selection, which scrolls rows in.
+    override func accessibilityAttributeValue(_ attribute: NSAccessibility.Attribute) -> Any? {
+        switch attribute {
+        case .rows:
+            return super.accessibilityAttributeValue(.visibleRows)
+        case .children:
+            let rows = super.accessibilityAttributeValue(.visibleRows) as? [Any] ?? []
+            return rows + (super.accessibilityAttributeValue(.columns) as? [Any] ?? [])
+        default:
+            return super.accessibilityAttributeValue(attribute)
+        }
     }
 
-    override func accessibilityChildren() -> [Any]? { visibleRowViews }
-    override func accessibilityRows() -> [NSAccessibilityRow]? { visibleRowViews }
-    override func accessibilityVisibleRows() -> [NSAccessibilityRow]? { visibleRowViews }
-    override func accessibilitySelectedRows() -> [NSAccessibilityRow]? { visibleRowViews.filter(\.isSelected) }
+    override func accessibilityArrayAttributeCount(_ attribute: NSAccessibility.Attribute) -> Int {
+        guard attribute == .rows || attribute == .children else { return super.accessibilityArrayAttributeCount(attribute) }
+        return (accessibilityAttributeValue(attribute) as? [Any])?.count ?? 0
+    }
+
+    override func accessibilityArrayAttributeValues(_ attribute: NSAccessibility.Attribute, index: Int, maxCount: Int) -> [Any] {
+        guard attribute == .rows || attribute == .children else {
+            return super.accessibilityArrayAttributeValues(attribute, index: index, maxCount: maxCount)
+        }
+        let all = accessibilityAttributeValue(attribute) as? [Any] ?? []
+        guard index < all.count else { return [] }
+        return Array(all[index ..< min(all.count, index + maxCount)])
+    }
 
     @objc func copy(_ sender: Any?) {
         controller?.copySelection()
