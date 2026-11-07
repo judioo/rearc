@@ -34,6 +34,7 @@ final class ChromiumDownloadBackend: DownloadBackend {
         runtime.onDownloadEvent = { [weak self] in self?.handle($0) }
         runtime.onDownloadEvents = { [weak self] in self?.handle($0) }
         runtime.onDownloadHistoryLoaded = { [weak self] info in
+            self?.controller?.noteEngineHistory(profile: info.profileID, archived: Int(info.archivedRows))
             guard info.archivedRows > 0 else { return }
             self?.appendArchived(profile: info.profileID, from: 0)
         }
@@ -146,7 +147,7 @@ final class ChromiumDownloadBackend: DownloadBackend {
             if !records.isEmpty, next < total {
                 self.appendArchived(profile: profile, from: next)
             } else if let pages = self.archivedPages.removeValue(forKey: profile) {
-                self.controller?.appendArchived(pages)
+                self.controller?.appendArchived(pages, profile: profile)
             }
         }
     }
@@ -154,6 +155,8 @@ final class ChromiumDownloadBackend: DownloadBackend {
     func loadHistory() {
         runtime.loadDownloadHistory()
     }
+
+    var reportsHistorySize: Bool { runtime.capabilities.downloadHistory }
 
     /// Live items one by one (Chromium confirms each), archived rows in one call per profile.
     func removeFinished(_ ids: [String]) {

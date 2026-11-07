@@ -127,9 +127,9 @@ struct DownloadsTrayView: View {
                     .padding(6)
                 }
                 .frame(maxHeight: embedded ? .infinity : 360)
-                if !embedded, matching.count > records.count, let showAll {
+                if !embedded, let showAll, let title = Self.showAllTitle(total: downloads.historyCount, shown: records.count) {
                     Divider()
-                    Button("Show All \(matching.count) Downloads", action: showAll)
+                    Button(title, action: showAll)
                         .buttonStyle(.borderless)
                         .font(.caption)
                         .frame(maxWidth: .infinity)
@@ -138,6 +138,17 @@ struct DownloadsTrayView: View {
             }
         }
         .frame(width: embedded ? nil : 340)
+        // Show All counts the engine's whole history, which loads on the
+        // session's first download or here (a no-op once it has).
+        .onAppear { if !embedded { downloads.loadEngineHistory() } }
+    }
+
+    /// The footer's title: every download in the history, archived rows
+    /// included; no count while the engine's history is still loading; nil
+    /// when the popover already lists them all.
+    static func showAllTitle(total: Int?, shown: Int) -> String? {
+        guard let total else { return "Show All Downloads" }
+        return total > shown ? "Show All \(total.formatted()) Downloads" : nil
     }
 }
 

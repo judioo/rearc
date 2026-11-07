@@ -44,6 +44,7 @@ enum ShellInput {
             NSApp.postEvent(up, atStart: false)
         case .direct:
             if model.handleTabSwitcherEvent(down)
+                || model.handleDownloadsTrayEscape(down)
                 || model.handleLibraryEscape(down, pageHasFocus: model.shortcutRouter.pageHasFocus(down))
                 || model.shortcutRouter.handleKeyDown(down) { return timestamp }
             if let view = window.firstResponder as? NSView, ShortcutRouter.isWebContent(view) {
@@ -83,10 +84,13 @@ enum ShellInput {
         return timestamp
     }
 
-    /// Posts a mouse move at a window point; returns its timestamp.
+    /// Posts a mouse move at a window point; returns its timestamp. A real
+    /// move also shows a cursor that typing hid, and SwiftUI drops hover
+    /// while the cursor is hidden; a posted move does not, so this does.
     @discardableResult
     static func moveMouse(to point: NSPoint, in window: NSWindow) -> TimeInterval {
         let timestamp = ProcessInfo.processInfo.systemUptime
+        NSCursor.setHiddenUntilMouseMoves(false)
         if let event = NSEvent.mouseEvent(with: .mouseMoved, location: point, modifierFlags: [], timestamp: timestamp,
                                           windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0) {
             PerfSignposts.interactionEvent("InputReceived", "mouseMoved \(point.x),\(point.y) at \(timestamp)")
