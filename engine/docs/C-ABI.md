@@ -1982,6 +1982,27 @@ token is `Chrome/156.0.0.0` (reduced) and the `Sec-CH-UA` /
 chrome/001's `ReArc/` token and `ReArc` brand, which made the Chrome Web
 Store show "Switch to Chrome to install extensions and themes".
 
+## Chrome's browser identity headers (chrome/007)
+
+Not an ABI change. Patch `chrome/007-chrome-browser-identity-headers`
+finishes what chrome/003 started. The Web Store's install-state controller
+shows "Switch to Chrome" when the page's `IJ_values[24]` is false. The server
+sets it only for a request carrying Google Chrome's `X-Browser-Copyright` and
+`X-Browser-Year` headers (with a Google Chrome `Sec-CH-UA` brand), and refuses
+a Google Chrome full version it does not know (156 today).
+`variations::AppendBrowserIdentityHeaders`
+(`components/variations/net/variations_http_headers.cc`) adds
+`X-Browser-Channel: stable`, `X-Browser-Copyright` (Chromium's own line) and
+`X-Browser-Year` (the build year) to the requests that may carry
+`X-Client-Data`: HTTPS Google-associated URLs, not incognito. It does so from
+`VariationsURLLoaderThrottle`, so navigations and browser-side requests carry
+them with or without variation IDs (renderer subresources only where the
+renderer has variation IDs). They are CORS-exempt like `X-Client-Data` and
+removed on a redirect away from Google. `X-Browser-Validation` (a hash with
+Google's API key) is not sent; the store does not check it. The full version
+list (`Sec-CH-UA-Full-Version-List`, `getHighEntropyValues` `fullVersionList`)
+no longer has the Google Chrome brand; the major-version brands still do.
+
 ## Download history at scale (1.48)
 
 Patch `tab/067-download-history-at-scale`, bridge 0.50.0, feature

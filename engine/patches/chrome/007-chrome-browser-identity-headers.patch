@@ -1,0 +1,182 @@
+From b1b71b3dfb57baf2bbc4457b41f5e35cf845ba87 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Sat, 7 Nov 2026 14:53:02 +0400
+Subject: [PATCH] P-BUILD-001 Web Store: Chrome's X-Browser identity headers, a
+ Chromium full version list
+
+chrome/003 made the User-Agent and the UA-CH brands say Google Chrome 156,
+and installs worked, yet chromewebstore.google.com still showed "Switch to
+Chrome to install extensions and themes". The store's install-state
+controller (jscontroller o2G9me) shows that banner (state 17) when
+_.SS(Mk) is false. With the store's experiment bit 64 set and a Chrome
+version from webstorePrivate.getFullChromeVersion of 142.0.7430.0 or later,
+_.SS returns Mk, IJ_values[24], which the server computes from the
+request. Probed against the live store: Mk is true only when the request
+carries Google Chrome's X-Browser-Copyright and X-Browser-Year (2025 or
+later) headers with a "Google Chrome" Sec-CH-UA brand, and, if
+Sec-CH-UA-Full-Version-List names Google Chrome, only for a Google Chrome
+major the server knows (143 or lower today; 156.0.8078.74 is refused). The
+X-Browser-Validation hash is not checked.
+
+Google Chrome attaches X-Browser-Channel, -Copyright, -Year and
+-Validation in closed source. Chromium has none of them.
+variations::AppendBrowserIdentityHeaders adds the first three to the same
+requests as X-Client-Data (HTTPS Google-associated URLs, not incognito)
+from VariationsURLLoaderThrottle, with or without variation IDs, so every
+browser-side request and navigation carries them; they are CORS-exempt
+like X-Client-Data and removed on a redirect away from Google. The values
+are "stable", Chromium's own copyright line and the build year. Validation
+is not sent: it is a hash with Google's API key.
+
+The full version list (Sec-CH-UA-Full-Version-List,
+userAgentData.getHighEntropyValues fullVersionList) no longer carries the
+Google Chrome brand chrome/003 adds: a full Google Chrome version names a
+Google build, which Google's servers check against their releases. The
+major-version brands are unchanged.
+
+Last rebased: 2026-11-07 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../embedder_support/user_agent_utils.cc      | 18 ++++++++---
+ .../variations/net/variations_http_headers.cc | 32 +++++++++++++++++++
+ .../variations/net/variations_http_headers.h  | 11 +++++++
+ .../net/variations_url_loader_throttle.cc     |  3 ++
+ 4 files changed, 60 insertions(+), 4 deletions(-)
+
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 1c48329ebf..ed84d573be 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -209,10 +209,20 @@ bool ShouldSendUserAgentUnifiedPlatform() {
+ // GetVersionNumber()
+ const blink::UserAgentBrandList GetUserAgentBrandFullVersionListInternal(
+     std::optional<blink::UserAgentBrandVersion> additional_brand_version) {
+-  return GetUserAgentBrandList(version_info::GetMajorVersionNumber(),
+-                               std::string(version_info::GetVersionNumber()),
+-                               blink::UserAgentBrandVersionType::kFullVersion,
+-                               additional_brand_version);
++  blink::UserAgentBrandList list = GetUserAgentBrandList(
++      version_info::GetMajorVersionNumber(),
++      std::string(version_info::GetVersionNumber()),
++      blink::UserAgentBrandVersionType::kFullVersion, additional_brand_version);
++#if BUILDFLAG(CHROMIUM_BRANDING)
++  // ReArc: the Google Chrome brand (chrome/003) is a major-version claim. A
++  // full Google Chrome version names a Google build, which Google's servers
++  // check against their releases (the Chrome Web Store treats an unknown one
++  // as not Chrome), so the full version list carries Chromium's own version.
++  std::erase_if(list, [](const blink::UserAgentBrandVersion& brand_version) {
++    return brand_version.brand == "Google Chrome";
++  });
++#endif
++  return list;
+ }
+ 
+ // Internal function to handle return the full or "reduced" user agent string,
+diff --git a/components/variations/net/variations_http_headers.cc b/components/variations/net/variations_http_headers.cc
+index 5d35d51f56..7fdc2ebdbd 100644
+--- a/components/variations/net/variations_http_headers.cc
++++ b/components/variations/net/variations_http_headers.cc
+@@ -6,9 +6,11 @@
+ 
+ #include <utility>
+ 
++#include "base/build_time.h"
+ #include "base/functional/bind.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/metrics/histogram_functions.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_util.h"
+ #include "build/build_config.h"
+ #include "components/google/core/common/google_util.h"
+@@ -36,6 +38,12 @@ namespace variations {
+ // Note that prior to M33 this header was named X-Chrome-Variations.
+ const char kClientDataHeader[] = "X-Client-Data";
+ 
++// ReArc: the browser identity headers Google Chrome sends to Google domains
++// beside X-Client-Data (AppendBrowserIdentityHeaders).
++const char kBrowserChannelHeader[] = "X-Browser-Channel";
++const char kBrowserCopyrightHeader[] = "X-Browser-Copyright";
++const char kBrowserYearHeader[] = "X-Browser-Year";
++
+ namespace {
+ 
+ // The result of checking whether a request to a URL should have variations
+@@ -363,7 +371,28 @@ void RemoveVariationsHeaderIfNeeded(
+     std::vector<std::string>* to_be_removed_headers) {
+   if (!ShouldAppendVariationsHeader(redirect_info.new_url, incognito)) {
+     to_be_removed_headers->push_back(kClientDataHeader);
++    to_be_removed_headers->push_back(kBrowserChannelHeader);
++    to_be_removed_headers->push_back(kBrowserCopyrightHeader);
++    to_be_removed_headers->push_back(kBrowserYearHeader);
++  }
++}
++
++bool AppendBrowserIdentityHeaders(const GURL& url,
++                                  InIncognito incognito,
++                                  network::ResourceRequest* request) {
++  if (!ShouldAppendVariationsHeader(url, incognito)) {
++    return false;
+   }
++  base::Time::Exploded build_time;
++  base::GetBuildTime().UTCExplode(&build_time);
++  const std::string year = base::NumberToString(build_time.year);
++  request->cors_exempt_headers.SetHeaderIfMissing(kBrowserChannelHeader,
++                                                  "stable");
++  request->cors_exempt_headers.SetHeaderIfMissing(
++      kBrowserCopyrightHeader,
++      "Copyright " + year + " The Chromium Authors. All rights reserved.");
++  request->cors_exempt_headers.SetHeaderIfMissing(kBrowserYearHeader, year);
++  return true;
+ }
+ 
+ std::unique_ptr<network::SimpleURLLoader>
+@@ -422,6 +451,9 @@ bool ShouldAppendVariationsHeaderForTesting(const GURL& url,  // IN-TEST
+ void UpdateCorsExemptHeaderForVariations(
+     network::mojom::NetworkContextParams* params) {
+   params->cors_exempt_header_list.push_back(kClientDataHeader);
++  params->cors_exempt_header_list.push_back(kBrowserChannelHeader);
++  params->cors_exempt_header_list.push_back(kBrowserCopyrightHeader);
++  params->cors_exempt_header_list.push_back(kBrowserYearHeader);
+ }
+ 
+ }  // namespace variations
+diff --git a/components/variations/net/variations_http_headers.h b/components/variations/net/variations_http_headers.h
+index e44974c0a7..1b69eb2c82 100644
+--- a/components/variations/net/variations_http_headers.h
++++ b/components/variations/net/variations_http_headers.h
+@@ -130,6 +130,17 @@ void RemoveVariationsHeaderIfNeeded(
+     InIncognito incognito,
+     std::vector<std::string>* to_be_removed_headers);
+ 
++// ReArc: adds the X-Browser-Channel, X-Browser-Copyright and X-Browser-Year
++// headers Google Chrome sends to the same Google URLs as X-Client-Data, for
++// sites that tell Chrome from other Chromium browsers by them (the Chrome Web
++// Store offers installs only with them). The copyright is Chromium's; Chrome's
++// X-Browser-Validation (a hash with Google's API key) is not sent. Returns
++// true when added. RemoveVariationsHeaderIfNeeded removes them with
++// X-Client-Data.
++bool AppendBrowserIdentityHeaders(const GURL& url,
++                                  InIncognito incognito,
++                                  network::ResourceRequest* request);
++
+ // Creates a SimpleURLLoader that will include the variations header for
+ // requests to Google and ensures they're removed if a redirect to a non-Google
+ // URL occurs.  The content of the headers will depend on |incognito| and
+diff --git a/components/variations/net/variations_url_loader_throttle.cc b/components/variations/net/variations_url_loader_throttle.cc
+index da904891a1..5888220e31 100644
+--- a/components/variations/net/variations_url_loader_throttle.cc
++++ b/components/variations/net/variations_url_loader_throttle.cc
+@@ -61,6 +61,9 @@ void VariationsURLLoaderThrottle::DetachFromCurrentSequence() {}
+ void VariationsURLLoaderThrottle::WillStartRequest(
+     network::ResourceRequest* request,
+     bool* defer) {
++  // ReArc: Chrome's identity headers go with or without variation IDs.
++  variations::AppendBrowserIdentityHeaders(request->url, InIncognito::kNo,
++                                           request);
+   if (variations_headers_.is_null()) {
+     return;
+   }
+-- 
+2.54.0 (Apple Git-157)
+
