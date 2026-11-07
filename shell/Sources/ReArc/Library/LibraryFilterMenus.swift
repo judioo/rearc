@@ -19,9 +19,11 @@ struct DownloadsLibraryFilterMenu: View {
             Button("Reset Filters") { downloads.libraryFilter = LibraryDownloadFilter() }
                 .disabled(!downloads.libraryFilter.isActive)
         } label: {
-            Label("Filter", systemImage: downloads.libraryFilter.isActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+            LibraryFilterLabel(isActive: downloads.libraryFilter.isActive)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel(downloads.libraryFilter.isActive ? "Filter Downloads, active" : "Filter Downloads")
     }
@@ -48,10 +50,31 @@ struct ArchiveLibraryFilterMenu: View {
             Button("Reset Filters") { model.archiveFilter = LibraryArchiveFilter() }
                 .disabled(!model.archiveFilter.isActive)
         } label: {
-            Label("Filter", systemImage: model.archiveFilter.isActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+            LibraryFilterLabel(isActive: model.archiveFilter.isActive)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel(model.archiveFilter.isActive ? "Filter Archive, active" : "Filter Archive")
+    }
+}
+
+/// The Filter menus' label, in the sidebar's ink. A borderless menu draws
+/// its title in the theme's tint, which on a light theme all but vanished
+/// into the column (#D7D9F3 on #E2E2F4, about 1.1:1, on the default lavender).
+private struct LibraryFilterLabel: View {
+    let isActive: Bool
+    @Environment(\.themeChrome) private var chrome
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Label("Filter", systemImage: isActive ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+            Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                .accessibilityHidden(true)
+        }
+        .font(.system(size: 13))
+        .foregroundStyle(chrome.title)
+        .contentShape(Rectangle())
     }
 }
