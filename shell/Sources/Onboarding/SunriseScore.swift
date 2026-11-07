@@ -177,6 +177,12 @@ public final class SunriseSynth {
     public let reduced: Bool
     let cues: SunriseCues
     struct Note { let freq, start, attack, gain: Double }
+    // Constant tables, hoisted out of the per-sample loop: an array literal there
+    // is a heap allocation per sample in debug builds, which starves the audio thread.
+    static let padVoices: [(Double, Double, Double)] = [(-1.0, 1.0, 0.45), (0.0, 0.8, 0.8), (1.0, 0.45, 1.0)]
+    static let toneVoices: [(Double, Double, Double)] = [(-1.0, 1.0, 0.55), (1.0, 0.55, 1.0)]
+    static let arpNotes = [440.0, 587.33, 739.99, 880.0, 739.99, 587.33]
+    static let beats: [(Double, Double)] = [(0.0, 0.5), (0.28, 0.3)]
     let notes: [Note]
     let chimes: [SunriseScore.Hit]
     var sample: Int64 = 0
@@ -255,7 +261,7 @@ public final class SunriseSynth {
             + score.airs.filter { $0.start <= s1 && $0.end >= s0 }
         var airMemory = airs.map { airState[$0.id] ?? (0, 0) }
         // After your name: a slow arpeggio joins the chord.
-        let arpNotes = [440.0, 587.33, 739.99, 880.0, 739.99, 587.33]
+        let arpNotes = Self.arpNotes, padVoices = Self.padVoices, toneVoices = Self.toneVoices, beats = Self.beats
         for i in 0 ..< frames {
             let t = Double(sample) / sampleRate - offset
             sample += 1
@@ -266,7 +272,7 @@ public final class SunriseSynth {
             for (k, n) in notes.enumerated() where t > n.start {
                 let env = Ease.smooth((t - n.start) / n.attack) * (0.86 + 0.14 * sin(twoPi * 0.09 * t + Double(k)))
                 let g = env * n.gain * pad
-                for (d, (wl, wr)) in [(-1.0, (1.0, 0.45)), (0.0, (0.8, 0.8)), (1.0, (0.45, 1.0))] {
+                for (d, wl, wr) in padVoices {
                     let ph = twoPi * n.freq * (1 + d * 0.0023) * t + Double(k) * 1.7 + d
                     var v = sin(ph)
                     if bright > 0.05 { v += bright * (0.22 * sin(2 * ph) + 0.07 * sin(3 * ph)) }
@@ -291,7 +297,7 @@ public final class SunriseSynth {
                 guard g > 1e-5 else { continue }
                 let cyc = tone.pitch.cycles(t)
                 let b = tone.bright(t), pan = tone.pan(t)
-                for (d, (wl, wr)) in [(-1.0, (1.0, 0.55)), (1.0, (0.55, 1.0))] {
+                for (d, wl, wr) in toneVoices {
                     let ph = twoPi * cyc * (1 + d * 0.0021) + tone.seed + d
                     let v = g * (sin(ph) + b * (0.28 * sin(2 * ph) + 0.1 * sin(3 * ph)))
                     l += v * wl * (1 - pan); r += v * wr * (1 + pan)
@@ -311,7 +317,7 @@ public final class SunriseSynth {
             }
 
             for h in cues.heartbeats {
-                for (offset, gain) in [(0.0, 0.5), (0.28, 0.3)] {
+                for (offset, gain) in beats {
                     let dt = t - h - offset
                     guard dt >= 0, dt < 0.7 else { continue }
                     let ph = twoPi * (46 * dt + 64 * (1 - exp(-26 * dt)) / 26)

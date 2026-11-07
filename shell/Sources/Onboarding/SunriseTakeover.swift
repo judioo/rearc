@@ -8,6 +8,11 @@ public final class SunrisePlayer: ObservableObject {
     @Published public private(set) var startDate = Date()
     @Published public private(set) var exitStart: Date?
     @Published public var muted = false { didSet { audio?.muted = muted } }
+    /// In a window centred on the main screen rather than over all of it.
+    @Published public internal(set) var windowed = false
+    var onToggleWindow: (() -> Void)?
+    /// Full screen ⇄ a window centred on the main screen; offered throughout.
+    public func toggleWindow() { onToggleWindow?() }
     /// Act 1, from Begin on.
     @Published public private(set) var act1: Act1Log? { didSet { rescore() } }
     @Published public var name = "" { didSet { edited(oldValue) } }
@@ -337,6 +342,18 @@ struct SunriseLiveView: View {
                 }
                 Spacer()
                 HStack(spacing: 8) {
+                    Text(player.windowed ? "Full screen" : "Use a window")
+                    Text("⌃⌘F")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(ink, lineWidth: 1))
+                }
+                .contentShape(Rectangle())
+                .opacity(0.8)
+                .sunriseButton(player.windowed ? "Full screen" : "Use a window") { player.toggleWindow() }
+                .padding(.trailing, skip > 0 ? 18 : 0)
+                if skip > 0 {
+                HStack(spacing: 8) {
                     Text("Skip intro")
                     Text("esc")
                         .font(.system(size: 10, weight: .medium, design: .rounded))
@@ -347,6 +364,7 @@ struct SunriseLiveView: View {
                 .opacity(skip)
                 .sunriseButton("Skip intro") { player.skip() }
                 .sunriseControlsActive(skip > 0.5)
+                }
             }
             .font(.system(size: 12))
             .foregroundStyle(ink)
@@ -372,7 +390,10 @@ final class TakeoverHostingView<Content: View>: NSHostingView<Content> {
 @MainActor
 public final class SunriseTakeover {
     public let player: SunrisePlayer
-    let windowed: Bool
+    private(set) var windowed: Bool
+    var presented = false
+    /// The browser has come in under the drawn window (Act 4).
+    var revealed = false
     var window: NSWindow?
     var monitor: Any?
     var activation: NSObjectProtocol?
@@ -386,11 +407,8 @@ public final class SunriseTakeover {
         player.mode = mode
         isPrototype = showsVariantPicker
         self.windowed = windowed
-        let screen = NSScreen.main ?? NSScreen.screens[0]
-        let frame = windowed
-            ? NSRect(x: screen.frame.midX - 720, y: screen.frame.midY - 450, width: 1440, height: 900)
-            : screen.frame
-        let window = TakeoverWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        player.windowed = windowed
+        let window = TakeoverWindow(contentRect: Self.frame(windowed: windowed), styleMask: [.borderless], backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = windowed
@@ -399,6 +417,40 @@ public final class SunriseTakeover {
         window.contentView = TakeoverHostingView(rootView: SunriseLiveView(player: player, showsVariantPicker: showsVariantPicker))
         self.window = window
         player.onReveal = { [weak self] in self?.reveal() }
+        player.onToggleWindow = { [weak self] in
+            guard let self else { return }
+            self.setWindowed(!self.windowed)
+        }
+    }
+
+    /// The main screen: the one with the menu bar (System Settings › Displays),
+    /// not whichever screen holds the key window. `NSScreen.main` is the latter,
+    /// so launched from a window on another display the intro would open there.
+    static var mainScreen: NSScreen? { NSScreen.screens.first ?? NSScreen.main }
+
+    /// The whole main screen, or a 16:10 window centred on it (1440 x 900 where
+    /// that fits, else 85% of the space beside the menu bar and Dock).
+    static func frame(windowed: Bool) -> NSRect {
+        guard let screen = mainScreen else { return NSRect(x: 0, y: 0, width: 1440, height: 900) }
+        guard windowed else { return screen.frame }
+        let area = screen.visibleFrame
+        let scale = min(1, area.width * 0.85 / 1440, area.height * 0.85 / 900)
+        let size = NSSize(width: (1440 * scale).rounded(), height: (900 * scale).rounded())
+        return NSRect(x: (area.midX - size.width / 2).rounded(), y: (area.midY - size.height / 2).rounded(),
+                      width: size.width, height: size.height)
+    }
+
+    /// Full screen ⇄ a window centred on the main screen. The scene lays itself
+    /// out for whatever size it is given, so the intro carries on where it was.
+    public func setWindowed(_ on: Bool) {
+        guard let window else { return }
+        windowed = on
+        player.windowed = on
+        window.hasShadow = on
+        if presented { NSApp.presentationOptions = on ? [] : [.hideDock, .hideMenuBar] }
+        window.setFrame(Self.frame(windowed: on), display: true, animate: true)
+        // Once the browser is in, it follows the drawn window to its new place.
+        if revealed, let frame = revealFrame { player.host?.revealBrowser(in: frame, below: window) }
     }
 
     public func present(onFinished: @escaping () -> Void) {
@@ -406,6 +458,7 @@ public final class SunriseTakeover {
             self?.dismiss()
             onFinished()
         }
+        presented = true
         if !windowed { NSApp.presentationOptions = [.hideDock, .hideMenuBar] }
         // macOS only lets an app take the keyboard from the frontmost one when
         // it was launched to the front (Finder, the Dock, `open`); from a bare
@@ -427,6 +480,12 @@ public final class SunriseTakeover {
     }
 
     func handle(_ event: NSEvent) -> Bool {
+        // ⌃⌘F, the system's full-screen shortcut, works in every act.
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods.contains([.command, .control]), event.charactersIgnoringModifiers?.lowercased() == "f" {
+            setWindowed(!windowed)
+            return true
+        }
         if event.modifierFlags.contains(.command) { return false }
         if player.act4 != nil { return false }
         if player.act3 != nil {
@@ -484,6 +543,7 @@ public final class SunriseTakeover {
 
     func reveal() {
         guard let window, let frame = revealFrame else { return }
+        revealed = true
         player.host?.revealBrowser(in: frame, below: window)
         // Keep the overlay on top of the window that just came in.
         window.orderFrontRegardless()
@@ -495,6 +555,7 @@ public final class SunriseTakeover {
         if let activation { NotificationCenter.default.removeObserver(activation) }
         activation = nil
         window?.orderOut(nil)
+        presented = false
         NSApp.presentationOptions = []
     }
 }
