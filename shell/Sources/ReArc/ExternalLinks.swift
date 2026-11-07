@@ -4,13 +4,17 @@ import SidebarModel
 /// Receives links other apps open in ReArc (the `GetURL` Apple Event sent
 /// to the default browser) on both engines, and hands them to the model.
 /// Links that arrive before the model exists (the one that launched the
-/// app) wait until it attaches.
+/// app) wait until it attaches. On the Chromium path they also wait for the
+/// engine (`hold`): the early window attaches its model before ready, and a
+/// link opened then would get a WebKit engine.
 final class ExternalLinkRouter: NSObject {
     static let shared = ExternalLinkRouter()
 
     private weak var model: BrowserViewModel?
     private var pending: [URL] = []
     private var observers: [NSObjectProtocol] = []
+    /// Links queue even with a model attached, until `release`.
+    private(set) var isHeld = false
 
     /// Installs the handler now and again around launch, since AppKit (and
     /// SwiftUI's app delegate) may install their own while finishing launch.
@@ -39,6 +43,22 @@ final class ExternalLinkRouter: NSObject {
     func attach(_ model: BrowserViewModel) {
         installHandler()
         self.model = model
+        flush()
+    }
+
+    /// Queues every link until `release` (Chromium, before its engine is ready).
+    func hold() {
+        isHeld = true
+    }
+
+    /// Opens the links queued so far in the attached model, if any.
+    func release() {
+        isHeld = false
+        flush()
+    }
+
+    private func flush() {
+        guard let model, !isHeld else { return }
         let queued = pending
         pending = []
         queued.forEach { model.openExternalURL($0) }
@@ -51,7 +71,7 @@ final class ExternalLinkRouter: NSObject {
     }
 
     func receive(_ url: URL) {
-        if let model {
+        if let model, !isHeld {
             model.openExternalURL(url)
         } else {
             pending.append(url)

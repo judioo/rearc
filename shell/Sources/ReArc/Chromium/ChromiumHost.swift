@@ -79,6 +79,8 @@ enum ChromiumHost {
                 runtime.onReady = { probe.start() }
                 exit(probe.exitCode(runResult: runtime.run(arguments: arguments, keychain: keychain)))
             }
+            // Links wait for the engine: the early window's model would open them in WebKit.
+            ExternalLinkRouter.shared.hold()
             let shell = ChromiumShell(runtime: runtime)
             // Overlap JSON I/O/decoding with ChromeMain. Neither path waits on
             // the main queue: whichever finishes last starts the cached shell.
@@ -422,6 +424,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         // In this same turn, so the first window is put away before it is ever drawn.
         if let kind = FirstRunOnboarding.kind(isFirstRun: model.isFirstRun) { runOnboarding(kind) }
         ExternalLinkRouter.shared.attach(model)
+        ExternalLinkRouter.shared.release()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(applicationDidBecomeActive(_:)),

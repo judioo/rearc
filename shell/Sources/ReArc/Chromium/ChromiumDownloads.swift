@@ -72,6 +72,8 @@ final class ChromiumDownloadBackend: DownloadBackend {
             handles[guid] = nil
         } else if !guid.isEmpty {
             handles[guid] = (download.profileID, download.downloadID)
+            // An archived row Chromium restored (the downloads API, chrome://downloads) is an item now.
+            if download.event.kind == .created { archived[guid] = nil }
         }
         var event = download.event
         // An item restored from history (created, already finished) keeps its own dates (ABI 1.48).
@@ -124,7 +126,7 @@ final class ChromiumDownloadBackend: DownloadBackend {
                 self.archivedPages[profile] = nil
                 return
             }
-            for record in records { self.archived[record.id] = profile }
+            for record in records where self.handles[record.id] == nil { self.archived[record.id] = profile }
             self.archivedPages[profile, default: []].append(contentsOf: records)
             let next = offset + UInt32(records.count)
             if !records.isEmpty, next < total {

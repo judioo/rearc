@@ -340,4 +340,28 @@ final class Wave21ShellTests: XCTestCase {
         router.attach(model)
         XCTAssertEqual(model.store.selectedTab?.url, page)
     }
+
+    /// Chromium's early window attaches its model before the engine is ready:
+    /// held links wait for `release`, then open in that model.
+    func testHeldLinksWaitForReleaseEvenWithAModel() {
+        let router = ExternalLinkRouter()
+        router.hold()
+        let first = URL(string: "https://example.net/first")!
+        let second = URL(string: "https://example.net/second")!
+        router.receive(first)
+        let model = makeModel()
+        model.externalLinkDefaults = UserDefaults(suiteName: "rearc-w21-\(UUID().uuidString)")!
+        model.externalLinkDestination = .activeSpace
+        let before = model.store.selectedTab?.url
+        router.attach(model)
+        router.receive(second)
+        XCTAssertEqual(model.store.selectedTab?.url, before)
+        XCTAssertEqual(router.pendingURLs, [first, second])
+        router.release()
+        XCTAssertEqual(router.pendingURLs, [])
+        XCTAssertEqual(model.store.selectedTab?.url, second)
+        let third = URL(string: "https://example.net/third")!
+        router.receive(third)
+        XCTAssertEqual(model.store.selectedTab?.url, third)
+    }
 }
