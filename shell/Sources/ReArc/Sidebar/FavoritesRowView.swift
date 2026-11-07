@@ -35,6 +35,7 @@ struct FavoritesRowView: View {
                     )
                     .onTapGesture { model.selectTab(tab.id) }
                     .contextMenu { TabContextMenu(model: model, tab: tab) }
+                    .modifier(ItemIconPopover(model: model, itemID: tab.id))
                     .onDrag {
                         draggedTabID = tab.id
                         SidebarDropHaptics.dragBegan()

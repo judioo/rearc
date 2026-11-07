@@ -65,6 +65,7 @@ struct SidebarEntryRow: View, Equatable {
             ) {
                 entryRow(entry)
             }
+            .modifier(ItemIconPopover(model: model, itemID: id))
             .padding(.leading, CGFloat(depth) * 14)
         }
     }

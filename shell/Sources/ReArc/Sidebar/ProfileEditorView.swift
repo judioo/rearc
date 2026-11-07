@@ -132,11 +132,6 @@ struct SidebarPersonalizationSheets: ViewModifier {
                     model.saveProfile(draft, id: request.profileID, selecting: request.profileID == nil) != nil
                 }
             }
-            .sheet(isPresented: Binding(
-                get: { model.itemIconEditorID != nil && isOwner },
-                set: { if !$0 { model.itemIconEditorID = nil } }
-            )) {
-                if let id = model.itemIconEditorID { ItemIconEditorView(model: model, itemID: id) }
-            }
+
     }
 }

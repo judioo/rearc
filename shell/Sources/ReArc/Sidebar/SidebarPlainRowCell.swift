@@ -458,11 +458,12 @@ struct PlainRowState: Equatable {
                 || model.isPictureInPicture(tab.id)
                 || model.renameHint?.tabID == tab.id
                 || model.inlineRename(forRow: tab.id) != nil
+                || model.itemIconEditorID == tab.id
         case .folder(let folder):
             state.title = folder.title
             state.customIcon = folder.customIcon
             state.isExpanded = model.store.isFolderExpanded(folder.id)
-            state.needsHosting = model.inlineRename(forRow: folder.id) != nil
+            state.needsHosting = model.inlineRename(forRow: folder.id) != nil || model.itemIconEditorID == folder.id
         case .split, .easel, nil:
             // Not a row the plain cell draws: the SwiftUI row takes over.
             state.needsHosting = true
