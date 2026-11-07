@@ -87,7 +87,7 @@ public struct SunriseSceneView: View {
                 }
                 BeginButton(height: geo.size.height, action: onBegin)
                     .opacity(f.button * (1 - exit) * (1 - (a1?.clearAct0 ?? 0)))
-                    .allowsHitTesting(f.button > 0.5 && exit == 0 && act1 == nil)
+                    .sunriseControlsActive(f.button > 0.5 && exit == 0 && act1 == nil)
                     .position(x: geo.size.width / 2, y: L.markBottom + geo.size.height * 0.19)
                 if let a1, let controls, exit == 0, a2 == nil {
                     Act1ControlsView(frame: a1, layout: A, controls: controls)
@@ -126,10 +126,7 @@ struct BeginButton: View {
             .animation(.spring(response: 0.3, dampingFraction: 0.8), value: hovering)
             .contentShape(Capsule())
             .onHover { hovering = $0 }
-            .onTapGesture { action?() }
-            .accessibilityAddTraits(.isButton)
-            .accessibilityLabel("Begin")
-            .accessibilityAction { action?() }
+            .sunriseButton("Begin") { action?() }
     }
 }
 

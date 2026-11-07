@@ -135,14 +135,13 @@ struct Act2ControlsView: View {
                     .background(Capsule().fill(Color.white.opacity(0.25 + 0.4 * on)))
                     .overlay(Capsule().strokeBorder(ink.opacity(0.1), lineWidth: 1))
                     .contentShape(Capsule())
-                    .onTapGesture { controls?.toggleCategory(cat) }
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityLabel("\(cat.title), \(on > 0.5 ? "on" : "off")")
+                    .sunriseButton(cat.title) { controls?.toggleCategory(cat) }
+                    .accessibilityValue(on > 0.5 ? "on" : "off")
                 }
             }
             .opacity(frame.chips)
             .position(x: layout.size.width / 2, y: layout.chips)
-            .allowsHitTesting(controls != nil && frame.chips > 0.5)
+            .sunriseControlsActive(controls != nil && frame.chips > 0.5)
 
             // Not a chip that does nothing: one quiet, honest line where it would be.
             if let browsers = frame.passwordsLeftBehind {
@@ -158,8 +157,7 @@ struct Act2ControlsView: View {
                     .font(.system(size: H * 0.018, weight: .medium))
                     .foregroundStyle(ink.opacity(0.6))
                     .contentShape(Rectangle())
-                    .onTapGesture { controls?.choose(false) }
-                    .accessibilityAddTraits(.isButton)
+                    .sunriseButton("Start fresh") { controls?.choose(false) }
                 Text("Bring them over")
                     .font(.system(size: H * 0.019, weight: .medium))
                     .foregroundStyle(.white)
@@ -167,23 +165,20 @@ struct Act2ControlsView: View {
                     .background(Capsule().fill(MarkPalette.navy.color))
                     .shadow(color: MarkPalette.navy.color.opacity(0.25), radius: 14, y: 5)
                     .contentShape(Capsule())
-                    .onTapGesture { controls?.choose(true) }
-                    .accessibilityAddTraits(.isButton)
+                    .sunriseButton("Bring them over") { controls?.choose(true) }
             }
             .opacity(frame.buttons)
             .position(x: layout.size.width / 2, y: layout.buttons)
-            .allowsHitTesting(controls != nil && frame.buttons > 0.5)
+            .sunriseControlsActive(controls != nil && frame.buttons > 0.5)
 
             if let controls, frame.buttons > 0.5 {
                 ForEach(log.sources.indices, id: \.self) { i in
                     Circle().fill(Color.white.opacity(0.001))
                         .frame(width: layout.nodeRadius * 2.8, height: layout.nodeRadius * 2.8)
                         .contentShape(Circle())
-                        .onTapGesture { controls.toggleSource(i) }
+                        .sunriseButton("\(log.sources[i].browser) \(log.sources[i].profile)") { controls.toggleSource(i) }
+                        .accessibilityValue(frame.nodeOn[i] > 0.5 ? "on" : "off")
                         .position(layout.point(layout.nodeAngle(i, of: log.sources.count)))
-                        .accessibilityElement()
-                        .accessibilityLabel("\(log.sources[i].browser) \(log.sources[i].profile)")
-                        .accessibilityAddTraits(.isButton)
                 }
             }
         }

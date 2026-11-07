@@ -260,6 +260,9 @@ struct BottomBarView: View {
 /// The space dots. Hover lives here so moving along the row redraws only the
 /// row: the hovered dot morphs into its space's icon and the current space's
 /// icon falls back to its larger dot, so one icon shows at a time (§5.2).
+/// The row reflows around the hovered dot, and `SpaceDotLayout` both sizes
+/// the dots and picks the hovered one, so the pointer, a click and the
+/// drawing agree on which dot is where.
 /// After a rest a chip above the dot names the space and its ⌃N, in the
 /// space's own colours; it moves straight to the next dot along the row.
 private struct SpaceDotRow: View {
@@ -275,6 +278,7 @@ private struct SpaceDotRow: View {
     var body: some View {
         let spaces = model.store.spaces(in: current.profileID)
         let appearances = SpaceDots.appearances(spaces: spaces, current: current.id, hovered: hoveredSpaceID)
+        let layout = SpaceDotLayout(appearances: appearances, hovered: spaces.firstIndex { $0.id == hoveredSpaceID })
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 0) {
                 ForEach(Array(spaces.enumerated()), id: \.element.id) { index, space in
@@ -283,11 +287,20 @@ private struct SpaceDotRow: View {
                         space: space,
                         index: index,
                         appearance: appearances[index],
+                        width: layout.widths[index],
                         isLabelled: chip.shown == space.id,
-                        onHover: { hover(space.id, $0) },
                         draggedItemID: $draggedItemID,
                         draggedSpaceID: $draggedSpaceID
                     )
+                }
+            }
+            .onContinuousHover { phase in
+                switch phase {
+                case let .active(location):
+                    hover(SpaceDotLayout.hovered(at: location.x - layout.width / 2, spaces: spaces,
+                                                 current: current.id, hovered: hoveredSpaceID))
+                case .ended:
+                    hover(nil)
                 }
             }
         }
@@ -308,10 +321,10 @@ private struct SpaceDotRow: View {
     }
 
     /// The row reflows in the same transaction as the morph.
-    private func hover(_ id: Space.ID, _ hovering: Bool) {
-        hoverChip($chip, $chipTask, hovering: hovering, id: id)
-        let next = hovering ? id : (hoveredSpaceID == id ? nil : hoveredSpaceID)
+    private func hover(_ next: Space.ID?) {
         guard next != hoveredSpaceID else { return }
+        if let previous = hoveredSpaceID { hoverChip($chip, $chipTask, hovering: false, id: previous) }
+        if let next { hoverChip($chip, $chipTask, hovering: true, id: next) }
         withAnimation(SidebarMotion.spring(response: SpaceIconButton.morphResponse, reduceMotion: reduceMotion)) {
             hoveredSpaceID = next
         }
@@ -342,8 +355,9 @@ private struct SpaceIconButton: View {
     let space: Space
     let index: Int
     let appearance: SpaceDotAppearance
+    /// The dot's slot from `SpaceDotLayout`, which is also its hit area.
+    let width: CGFloat
     let isLabelled: Bool
-    let onHover: (Bool) -> Void
     @Binding var draggedItemID: UUID?
     @Binding var draggedSpaceID: Space.ID?
     @State private var isTargeted = false
@@ -375,7 +389,6 @@ private struct SpaceIconButton: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover(perform: onHover)
         .anchorPreference(key: SpaceDotChipAnchor.self, value: .bounds) { isLabelled ? $0 : nil }
         .accessibilityLabel(space.name)
         .accessibilityHint("Drop a tab here to move it to this space")
@@ -385,14 +398,6 @@ private struct SpaceIconButton: View {
             return SidebarDragPayload.itemProvider(for: space.id)
         }
         .onDrop(of: [.plainText], delegate: SpaceIconDropDelegate(icon: self, isTargeted: $isTargeted))
-    }
-
-    private var width: CGFloat {
-        switch appearance {
-        case .dot: return 9
-        case .largeDot: return 13
-        case .icon: return 22
-        }
     }
 
     private var morph: AnyTransition {

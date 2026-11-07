@@ -41,6 +41,71 @@ public enum SpaceDots {
     }
 }
 
+/// Where each dot sits in the row, which is also where it takes the pointer.
+/// The row reflows as Arc's does (§5.2): a hovered dot widens to an icon's
+/// slot and its neighbours move aside, so a click lands on the dot drawn
+/// under the pointer. The row stays centred in the bar, so x is measured from
+/// its middle, which holds still while the row reflows.
+public struct SpaceDotLayout: Equatable, Sendable {
+    /// A 4 pt dot on a 9 pt pitch.
+    public static let dotWidth = 9.0
+    public static let largeDotWidth = 13.0
+    public static let iconWidth = 22.0
+
+    public let widths: [Double]
+
+    public init(widths: [Double]) {
+        self.widths = widths
+    }
+
+    /// A hovered dot takes an icon's slot even when it only draws its larger
+    /// dot. Narrower, a dot handed the hover from a neighbour's icon could
+    /// shrink out from under the pointer and pass it on to the next one.
+    public init(appearances: [SpaceDotAppearance], hovered: Int?) {
+        widths = appearances.indices.map { i in
+            if i == hovered { return Self.iconWidth }
+            switch appearances[i] {
+            case .dot: return Self.dotWidth
+            case .largeDot: return Self.largeDotWidth
+            case .icon: return Self.iconWidth
+            }
+        }
+    }
+
+    public init(spaces: [Space], current: Space.ID, hovered: Space.ID?) {
+        self.init(appearances: SpaceDots.appearances(spaces: spaces, current: current, hovered: hovered),
+                  hovered: spaces.firstIndex { $0.id == hovered })
+    }
+
+    public var width: Double {
+        widths.reduce(0, +)
+    }
+
+    /// The slot of the dot at `index`, from the row's middle.
+    public func slot(_ index: Int) -> Range<Double> {
+        let minX = widths[..<index].reduce(-width / 2, +)
+        return minX ..< minX + widths[index]
+    }
+
+    /// The dot under `x` (from the row's middle), if any.
+    public func index(at x: Double) -> Int? {
+        var minX = -width / 2
+        for (i, w) in widths.enumerated() {
+            if x >= minX, x < minX + w { return i }
+            minX += w
+        }
+        return nil
+    }
+
+    /// The space hovered once the pointer is at `x` in the row as it is drawn
+    /// with `hovered`. The row then reflows around the new one with the
+    /// pointer still on it, so moving along the row hands the icon from dot
+    /// to dot without flicker.
+    public static func hovered(at x: Double, spaces: [Space], current: Space.ID, hovered: Space.ID?) -> Space.ID? {
+        SpaceDotLayout(spaces: spaces, current: current, hovered: hovered).index(at: x).map { spaces[$0].id }
+    }
+}
+
 /// What a bottom-bar hover chip says: a name and the shortcut that does the
 /// same, when one is bound (Arc's "View Library" chip, §5.1). A space dot's
 /// chip names its space; the dot itself only ever shows the icon.
