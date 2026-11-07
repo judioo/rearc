@@ -152,6 +152,11 @@ mkdir -p "$DIST"
 cp -cR "$OUT/Chromium.app" "$APP"
 rm -f "$APP/Contents/MacOS/Chromium"
 cp "$BIN" "$APP/Contents/MacOS/ReArc"
+# SwiftPM resource bundles (the onboarding voice) go in Contents/Resources, where the code
+# looks for them; at the bundle root they would break the signature's seal.
+for res in "$(dirname "$BIN")"/*.bundle; do
+  [[ -d $res ]] && cp -R "$res" "$APP/Contents/Resources/"
+done
 PLIST="$APP/Contents/Info.plist"
 plutil -replace CFBundleExecutable -string ReArc "$PLIST"
 plutil -replace CFBundleName -string ReArc "$PLIST"

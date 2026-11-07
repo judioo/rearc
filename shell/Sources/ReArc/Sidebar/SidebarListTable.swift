@@ -180,7 +180,7 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
         table.delegate = self
         tableView = table
 
-        let scroll = NSScrollView()
+        let scroll = SidebarScrollView()
         scroll.documentView = table
         scroll.drawsBackground = false
         scroll.contentView.drawsBackground = false
@@ -494,6 +494,13 @@ extension SidebarListHeights {
 
 /// A table that never takes keyboard focus or draws a selection, and lets
 /// clicks reach the SwiftUI rows inside its cells.
+/// Responsive scrolling takes a gesture's events after the first straight off
+/// the queue, past `sendEvent`, so the space-swipe monitor (a local event
+/// monitor) only ever saw a swipe begin and the pager was left mid-swipe.
+private final class SidebarScrollView: NSScrollView {
+    override class var isCompatibleWithResponsiveScrolling: Bool { false }
+}
+
 private final class SidebarTableView: NSTableView {
     override var acceptsFirstResponder: Bool { false }
     override func validateProposedFirstResponder(_ responder: NSResponder, for event: NSEvent?) -> Bool { true }

@@ -210,6 +210,15 @@ final class BrowserImportTests: XCTestCase {
 
     // MARK: Discovery
 
+    func testDiscoveryLeavesOutArcsInternalProfile() throws {
+        try fixture.installBrowsers()
+        try fixture.write(BrowserImportFixture.localState([("Default", "Home"), ("Profile 1", "Studio"), ("Profile 3", "__ARC_SYSTEM_PROFILE")]),
+                          to: "Arc/User Data/Local State")
+        try fixture.write([:] as [String: Any], to: "Arc/User Data/Profile 3/Preferences")
+        let arc = try XCTUnwrap(BrowserImportDiscovery.discover(in: fixture.root).first { $0.browser == .arc })
+        XCTAssertEqual(arc.profiles.map(\.directory), ["Default", "Profile 1"])
+    }
+
     func testDiscoveryFindsInstalledBrowsersAndTheirProfiles() throws {
         try fixture.installBrowsers()
         let found = BrowserImportDiscovery.discover(in: fixture.root)

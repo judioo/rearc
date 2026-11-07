@@ -44,6 +44,26 @@ final class SplitViewTests: XCTestCase {
         XCTAssertFalse(store.addTabToSplit(splitID: split.id, tabID: e.id))
     }
 
+    func testAddedPaneTakesAnEqualShare() {
+        let (store, a, b, c) = makeStoreWithTabs()
+        guard let split = store.createSplit(tabIDs: [a.id, b.id], orientation: .horizontal) else {
+            return XCTFail("split")
+        }
+        store.resizeSplitPanes(splitID: split.id, widthFactors: [a.id: 0.75, b.id: 0.25])
+        XCTAssertTrue(store.addTabToSplit(splitID: split.id, tabID: c.id))
+        let factors = store.split(withID: split.id)?.widthFactors ?? [:]
+        XCTAssertEqual(factors[c.id] ?? 0, 1.0 / 3, accuracy: 1e-9)
+        XCTAssertEqual(factors[a.id] ?? 0, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(factors[b.id] ?? 0, 1.0 / 6, accuracy: 1e-9)
+    }
+
+    func testAPaneSavedWithAZeroFactorGetsAnEqualShare() {
+        let (_, a, b, c) = makeStoreWithTabs()
+        let factors = SplitViewItem.normalizedFactors([a.id: 0.5, b.id: 0.5, c.id: 0], tabIDs: [a.id, b.id, c.id])
+        XCTAssertEqual(factors[c.id] ?? 0, 0.25, accuracy: 1e-9)
+        XCTAssertEqual(factors[a.id] ?? 0, 0.375, accuracy: 1e-9)
+    }
+
     func testTwoTabSplitDissolvesOnRemoveTab() {
         let (store, a, b, _) = makeStoreWithTabs()
         guard let split = store.createSplit(tabIDs: [a.id, b.id], orientation: .horizontal) else {

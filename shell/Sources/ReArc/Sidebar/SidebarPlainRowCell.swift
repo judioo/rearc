@@ -122,8 +122,8 @@ final class SidebarPlainRowCell: NSView {
     private func apply() {
         let chrome = state.chrome
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            title.stringValue = state.title
             title.font = .systemFont(ofSize: SidebarMetrics.titleSize, weight: kind == .folder ? .semibold : .regular)
+            title.stringValue = state.title
             title.textColor = NSColor(chrome.title)
             if let customIcon = state.customIcon {
                 applyCustomIcon(customIcon)
@@ -233,7 +233,9 @@ final class SidebarPlainRowCell: NSView {
         let titleX = iconX + size + SidebarMetrics.iconToText
         let trailing = highlight.maxX - 8
         let dot: CGFloat = state.isUnread ? 6 + SidebarMetrics.iconToText : 0
-        let natural = ceil(title.intrinsicContentSize.width)
+        // The cell measures the current font and string; the field's cached
+        // intrinsic size could still be the default 13 pt font's and cut titles short.
+        let natural = ceil(title.cell?.cellSize.width ?? title.intrinsicContentSize.width)
         let titleWidth = max(0, min(natural, trailing - titleX - dot))
         let titleHeight = ceil(title.intrinsicContentSize.height)
         title.frame = NSRect(x: titleX, y: (midY - titleHeight / 2).rounded(), width: titleWidth, height: titleHeight)

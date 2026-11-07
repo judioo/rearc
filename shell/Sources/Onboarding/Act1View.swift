@@ -128,7 +128,8 @@ struct Act1ControlsView: View {
                     .onSubmit { controls.submit() }
                     .frame(width: layout.fieldWidth, height: layout.size.height * 0.07)
                     .position(x: layout.size.width / 2, y: layout.fieldBaseline - layout.size.height * 0.04)
-                    .onAppear { focused = true }
+                    // Focus set while appearing is dropped on macOS; a turn later it sticks.
+                    .onAppear { DispatchQueue.main.async { focused = true } }
                     .accessibilityLabel("Your name")
             }
             if frame.prompt > 0.5 {

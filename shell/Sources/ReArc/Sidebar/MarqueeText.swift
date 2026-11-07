@@ -51,7 +51,9 @@ struct MarqueeText: View {
                     }
                     .offset(x: -x)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                // minWidth 0: without it the frame takes the doubled title's width
+                // and the hovered strip grows past the sidebar.
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 .clipped()
                 .mask(fadeMask)
             } else {

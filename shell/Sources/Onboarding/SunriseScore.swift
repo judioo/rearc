@@ -252,8 +252,19 @@ public final class SunriseAudio {
         engine.connect(voiceReverb, to: engine.mainMixerNode, format: format)
     }
 
+    /// The target's resource bundle, found without SwiftPM's `Bundle.module`, which traps
+    /// when the bundle is missing: Contents/Resources in the app, next to the binary for
+    /// `swift run`, next to the test bundle for `swift test`. Missing means no voice.
+    static let resourceBundle: Bundle? = {
+        let name = "ReArcShell_Onboarding.bundle"
+        let code = Bundle(for: BundleFinder.self)
+        let roots = [Bundle.main.resourceURL, Bundle.main.bundleURL, code.resourceURL,
+                     code.bundleURL.deletingLastPathComponent()]
+        return roots.lazy.compactMap { $0.flatMap { Bundle(url: $0.appendingPathComponent(name)) } }.first
+    }()
+
     static func loadVoice() -> AVAudioPCMBuffer? {
-        guard let url = Bundle.module.url(forResource: "voice-placeholder", withExtension: "wav"),
+        guard let url = resourceBundle?.url(forResource: "voice-placeholder", withExtension: "wav"),
               let file = try? AVAudioFile(forReading: url),
               let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))
         else { return nil }
@@ -371,3 +382,5 @@ public final class SunriseAudio {
         engine.stop()
     }
 }
+
+private final class BundleFinder {}

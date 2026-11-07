@@ -216,7 +216,8 @@ struct Act3ControlsView: View {
                         .onSubmit { controls.select(nil) }
                         .frame(width: H * 0.32, height: H * 0.05)
                         .position(x: layout.size.width / 2, y: layout.name)
-                        .onAppear { focused = true }
+                        // Focus set while appearing is dropped on macOS; a turn later it sticks.
+                        .onAppear { DispatchQueue.main.async { focused = true } }
                         .accessibilityLabel("Space name")
                 }
             }

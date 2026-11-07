@@ -91,7 +91,11 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
         _ factors: [Tab.ID: Double],
         tabIDs: [Tab.ID]
     ) -> [Tab.ID: Double] {
-        let raw = tabIDs.map { max(factors[$0] ?? 0, 0) }
+        // A pane with no factor, or the zero that splits saved before panes took
+        // a share when added, gets an equal one rather than none: a divider
+        // never makes a pane narrower than 120 pt, so zero is never chosen.
+        let equal = 1.0 / Double(max(tabIDs.count, 1))
+        let raw = tabIDs.map { id in factors[id].map { $0 > 0 ? $0 : equal } ?? equal }
         let sum = raw.reduce(0, +)
         guard sum > 0 else {
             let equal = 1.0 / Double(tabIDs.count)
