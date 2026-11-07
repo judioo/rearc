@@ -153,6 +153,11 @@ final class BrowserViewModel {
     var sidebarFlipOpacity: Double = 1
     /// The side asked for last, while a flip's fade-out runs (Settings shows it at once).
     var pendingSidebarSide: SidebarSide?
+    /// Settings › General › Side panel position, as laid out now. `setSidePanelPosition`
+    /// changes it behind the same fade as the sidebar's side.
+    var sidePanelPosition: SidePanelPosition = .load(from: .standard)
+    /// The position asked for last, while the fade-out runs.
+    var pendingSidePanelPosition: SidePanelPosition?
     /// The Library per window (Home button, View Library).
     var library = LibraryPresentation()
     /// Windows whose sidebar the Library is widening (animated).

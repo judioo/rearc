@@ -2,7 +2,8 @@ import Foundation
 
 /// Settings › General › Sidebar position (P3.14): Arc's sidebar on the
 /// window's left (the default) or right. Other side-dependent chrome, such
-/// as Chrome's extension side panel, takes `opposite`.
+/// as Chrome's extension side panel, takes `opposite` unless Settings ›
+/// General › Side panel position fixes its side (`SidePanelPlacement`).
 public enum SidebarSide: String, CaseIterable, Sendable {
     case left, right
 

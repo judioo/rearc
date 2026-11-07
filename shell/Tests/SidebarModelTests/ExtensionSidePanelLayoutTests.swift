@@ -10,6 +10,66 @@ final class ExtensionSidePanelLayoutTests: XCTestCase {
         XCTAssertEqual(SidePanelPlacement.side(sidebarSide: .right), .left)
     }
 
+    func testEveryPositionResolvesForEitherSidebarSide() {
+        let expected: [SidePanelPosition: [SidebarSide: SidebarSide]] = [
+            .oppositeSidebar: [.left: .right, .right: .left],
+            .left: [.left: .left, .right: .left],
+            .right: [.left: .right, .right: .right],
+        ]
+        XCTAssertEqual(Set(expected.keys), Set(SidePanelPosition.allCases), "every position is covered")
+        for position in SidePanelPosition.allCases {
+            for sidebar in SidebarSide.allCases {
+                let side = SidePanelPlacement.side(sidebarSide: sidebar, position: position)
+                XCTAssertEqual(side, expected[position]?[sidebar], "\(position) with the sidebar \(sidebar)")
+                let layout = SidePanelLayout(sidebarSide: sidebar, position: position)
+                XCTAssertEqual(layout.side, side, "the layout asks the one function")
+                XCTAssertEqual(layout.isBesideSidebar, side == sidebar)
+                XCTAssertEqual(layout.clearsTrafficLights, side == .left && sidebar == .right,
+                               "only a pane at the window's left without the sidebar there clears the lights")
+            }
+        }
+        XCTAssertEqual(SidePanelPlacement.side(sidebarSide: .right), .left, "the default keeps today's placement")
+    }
+
+    func testPositionPersists() throws {
+        let suite = "ExtensionSidePanelLayoutTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(SidePanelPosition.load(from: defaults), .oppositeSidebar)
+        SidePanelPosition.left.save(to: defaults)
+        XCTAssertEqual(defaults.string(forKey: "rearc.sidePanelPosition"), "left")
+        XCTAssertEqual(SidePanelPosition.load(from: defaults), .left)
+        defaults.set("middle", forKey: SidePanelPosition.defaultsKey)
+        XCTAssertEqual(SidePanelPosition.load(from: defaults), .oppositeSidebar, "an unknown value falls back")
+        XCTAssertEqual(SidePanelPosition.allCases.map(\.title), ["Opposite the sidebar", "Left", "Right"])
+    }
+
+    func testBesideTheSidebarThePaneAndCardFollowItsEdge() {
+        let inset = 10.0, sidebar = 240.0, pane = 372.0
+        // At rest the lead plus the pane's own inset puts its content flush with the sidebar,
+        // as the card is without a pane; the card follows the pane after its inset.
+        let lead = SidePanelLayout.lead(sidebarLaidOut: true, sidebarWidth: sidebar, inset: inset)
+        XCTAssertEqual(lead + inset, sidebar)
+        XCTAssertEqual(lead + pane + inset, sidebar + pane, "the card starts a pane's width further in")
+        // Hidden or sliding: the pane takes the window's edge with its inset.
+        XCTAssertEqual(SidePanelLayout.lead(sidebarLaidOut: false, sidebarWidth: sidebar, inset: inset), 0)
+        XCTAssertEqual(SidePanelLayout.lead(sidebarLaidOut: true, sidebarWidth: 4, inset: inset), 0, "never negative")
+        // The Library mid-widening leads with its starting width.
+        let growth = LibrarySidebarGrowth(from: sidebar, shown: 300)
+        XCTAssertEqual(SidePanelLayout.lead(sidebarLaidOut: true, sidebarWidth: growth.from, inset: inset), lead)
+    }
+
+    func testThePaneRidesTheRecedingSidebarOnItsSide() {
+        let left = SidePanelLayout(sidebarSide: .left, position: .left)
+        let right = SidePanelLayout(sidebarSide: .right, position: .right)
+        XCTAssertEqual(left.paneOffset(sidebarCut: 120), 120, "towards the page")
+        XCTAssertEqual(right.paneOffset(sidebarCut: 120), -120, "the mirror")
+        XCTAssertEqual(left.paneOffset(sidebarCut: 0), 0, "at rest it stays put")
+        XCTAssertEqual(SidePanelLayout(sidebarSide: .left).paneOffset(sidebarCut: 120), 0,
+                       "opposite the sidebar the pane keeps the window's other edge")
+        XCTAssertEqual(SidePanelLayout(sidebarSide: .right, position: .left).paneOffset(sidebarCut: 120), 0)
+    }
+
     func testWidthStaysWithinBoundsAndLeavesThePage() {
         XCTAssertEqual(SidePanelWidth.clamped(100), SidePanelWidth.minimum)
         XCTAssertEqual(SidePanelWidth.clamped(5000), SidePanelWidth.maximum)

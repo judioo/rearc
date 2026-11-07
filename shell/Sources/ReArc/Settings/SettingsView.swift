@@ -221,6 +221,17 @@ struct GeneralSettingsPane: View {
                     .pickerStyle(.segmented)
                     .labelsHidden().fixedSize()
                 }
+                SettingsRow(label: "Side panel position",
+                            detail: "Extension side panels. On the sidebar's side, the panel sits between the sidebar and the page.") {
+                    Picker("Side panel position", selection: Binding(
+                        get: { model.pendingSidePanelPosition ?? model.sidePanelPosition },
+                        set: { model.setSidePanelPosition($0) }
+                    )) {
+                        ForEach(SidePanelPosition.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden().fixedSize()
+                }
             }
             SettingsBox {
                 SettingsRow(label: "Manage your default search engine, Auto-Archive, and downloads in Profile Settings.") {

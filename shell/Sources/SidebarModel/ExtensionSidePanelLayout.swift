@@ -1,12 +1,88 @@
 import Foundation
 
-/// Which side of the window an extension's side panel sits on: the side
-/// opposite the sidebar (Arc and Chrome: the right, with the sidebar on the
-/// left; Settings › General › Sidebar position Right puts it on the left).
-/// Every caller asks here (docs/arc-recordings/2026-11-06-side-panel.md §2).
+/// Settings › General › Side panel position: opposite the sidebar (the
+/// default, as Arc and Chrome place it), or always on the window's left or
+/// right. A fixed side that is the sidebar's puts the pane between the
+/// sidebar and the page card.
+public enum SidePanelPosition: String, CaseIterable, Sendable {
+    case oppositeSidebar, left, right
+
+    public static let defaultsKey = "rearc.sidePanelPosition"
+
+    public var title: String {
+        switch self {
+        case .oppositeSidebar: return "Opposite the sidebar"
+        case .left: return "Left"
+        case .right: return "Right"
+        }
+    }
+
+    public static func load(from defaults: UserDefaults) -> SidePanelPosition {
+        defaults.string(forKey: defaultsKey).flatMap(SidePanelPosition.init(rawValue:)) ?? .oppositeSidebar
+    }
+
+    public func save(to defaults: UserDefaults) {
+        defaults.set(rawValue, forKey: Self.defaultsKey)
+    }
+}
+
+/// Which side of the window an extension's side panel sits on: by default
+/// the side opposite the sidebar (Arc and Chrome: the right, with the
+/// sidebar on the left; Settings › General › Sidebar position Right puts it
+/// on the left), else the side Settings › General › Side panel position
+/// names. Every caller asks here (docs/arc-recordings/2026-11-06-side-panel.md §2).
 public enum SidePanelPlacement {
-    public static func side(sidebarSide: SidebarSide = .left) -> SidebarSide {
-        sidebarSide.opposite
+    public static func side(sidebarSide: SidebarSide = .left,
+                            position: SidePanelPosition = .oppositeSidebar) -> SidebarSide {
+        switch position {
+        case .oppositeSidebar: return sidebarSide.opposite
+        case .left: return .left
+        case .right: return .right
+        }
+    }
+}
+
+/// Where the pane goes against the sidebar and the page card. Opposite the
+/// sidebar it takes the window's other edge, outside the sidebar and card's
+/// layout. On the sidebar's side it sits between the two, laid out with the
+/// card: the sidebar's width (less the card's inset) leads both, ⌘S slides
+/// and the Library's widening move both, and HTML fullscreen drops both
+/// lead and pane. Offsets are in points from the sidebar's window edge.
+public struct SidePanelLayout: Equatable, Sendable {
+    public var sidebarSide: SidebarSide
+    public var position: SidePanelPosition
+
+    public init(sidebarSide: SidebarSide, position: SidePanelPosition = .oppositeSidebar) {
+        self.sidebarSide = sidebarSide
+        self.position = position
+    }
+
+    public var side: SidebarSide { SidePanelPlacement.side(sidebarSide: sidebarSide, position: position) }
+
+    /// Between the sidebar and the page card, rather than at the window's other edge.
+    public var isBesideSidebar: Bool { side == sidebarSide }
+
+    /// The pane holds the window's top left, where macOS draws the traffic
+    /// lights, so its top clears them. On the left beside a left sidebar the
+    /// lights are in the sidebar's top row instead.
+    public var clearsTrafficLights: Bool { side == .left && sidebarSide == .right }
+
+    /// Beside the sidebar, how far the pane and card start from the
+    /// sidebar's window edge. Each keeps its own `inset` on that side (the
+    /// pane at the window's edge, the card beside the pane), so at rest the
+    /// lead is the sidebar's width less the inset and the first of them sits
+    /// flush with the sidebar; with the sidebar hidden, sliding or in HTML
+    /// fullscreen it is 0. `sidebarWidth` is the Library's `from` mid-widening.
+    public static func lead(sidebarLaidOut: Bool, sidebarWidth: Double, inset: Double) -> Double {
+        sidebarLaidOut ? max(0, sidebarWidth - inset) : 0
+    }
+
+    /// The pane's x offset while ⌘S hides the sidebar: it rides the receding
+    /// edge, by the strip the card is cut at (`SidebarSlide.cut`), so it never
+    /// sits under the sidebar. The card's own slide offset moves both.
+    public func paneOffset(sidebarCut: Double) -> Double {
+        guard isBesideSidebar else { return 0 }
+        return sidebarCut * SidebarPlacement(side: sidebarSide).inward
     }
 }
 

@@ -44,11 +44,11 @@ struct BrowserView: View {
                                                                    growth: model.sidebarGrowth(in: windowID))))
                 }
             }
-            .overlay(alignment: .topTrailing) { if !isPageFullscreen { zoomBadge } }
-            // An extension's side panel, opposite the sidebar (ABI 1.47).
-            .extensionSidePanel(model.extensions, window: windowID, sidebarSide: placement.side,
-                                topInset: placement.trafficLightsInSidebar ? Self.cardInset : TrafficLightPositioner.cardClearance,
-                                isHidden: isPageFullscreen)
+            // An extension's side panel (ABI 1.47) at the window's other
+            // edge; one on the sidebar's side is laid out with the card.
+            .extensionSidePanel(model.extensions, window: windowID, side: sidePanelLayout.side,
+                                topInset: sidePanelLayout.clearsTrafficLights ? TrafficLightPositioner.cardClearance : Self.cardInset,
+                                isHidden: isPageFullscreen || sidePanelLayout.isBesideSidebar)
             // The sidebar and card run up under the title bar: the traffic
             // lights sit on the theme like the rest of the sidebar (§4.5).
             .ignoresSafeArea(.container, edges: .top)
@@ -309,6 +309,7 @@ struct BrowserView: View {
     }
 
     private var placement: SidebarPlacement { model.sidebarPlacement }
+    private var sidePanelLayout: SidePanelLayout { model.sidePanelLayout }
 
     /// The card's toolbar strip, when shown (it holds the traffic lights with the sidebar on the right).
     private var showsCardToolbar: Bool {
@@ -363,6 +364,7 @@ struct BrowserView: View {
     }
 
     /// Shown while the focused tab is not at 100%; clicking resets it (Cmd+0).
+    /// At the card's top right, so a sidebar or side panel beside it on the right moves it in.
     @ViewBuilder
     private var zoomBadge: some View {
         if let engine = model.focusedEngine(in: windowID), !PageZoom.isDefault(engine.zoomFactor) {
@@ -372,10 +374,6 @@ struct BrowserView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(.ultraThinMaterial, in: Capsule())
-                .padding(10)
-                // At the card's top right, which a sidebar on the right moves in.
-                .padding(.trailing, placement.side == .right && model.isSidebarLaidOut
-                         ? model.sidebarWidth(in: windowID) - Self.cardInset : 0)
                 .help("Page zoom — click to reset to 100% (⌘0)")
         }
     }
@@ -409,7 +407,10 @@ struct BrowserView: View {
     /// "URL in toolbar" on, the toolbar strip sits at its top (§4.4). With
     /// the sidebar hidden it is inset on every side. With the sidebar on the
     /// right it is the mirror, and without the strip its top clears the
-    /// traffic lights. In HTML fullscreen the same view loses its inset and
+    /// traffic lights. An extension side panel on the sidebar's side sits
+    /// between the two: the sidebar's lead is outside both, so ⌘S and the
+    /// Library's widening move the pane with the card (`SidePanelLayout`). In
+    /// HTML fullscreen the same view loses its inset and
     /// corners: a different view tree would detach the page, which ends fullscreen.
     private var contentCard: some View {
         let fullscreen = isPageFullscreen
@@ -426,6 +427,10 @@ struct BrowserView: View {
             showing: model.isSidebarVisible, laidOut: model.isSidebarLaidOut
         )
         let shape = CardShape(radius: radius, sidebarCut: slide.cut, cutEdge: placement.cardSidebarEdge)
+        let panelLayout = sidePanelLayout
+        let lead = fullscreen ? 0 : SidePanelLayout.lead(sidebarLaidOut: model.isSidebarLaidOut,
+                                                          sidebarWidth: growth.map(\.from) ?? Double(sidebarWidth),
+                                                          inset: Double(inset))
         return VStack(spacing: 0) {
             if showsToolbar {
                 CardToolbarView(model: model, trafficLightsClearance: placement.trafficLightsInSidebar || !showsTrafficLights
@@ -455,11 +460,14 @@ struct BrowserView: View {
         .background(shape.fill(cardFill))
         .background(CardShadow(shape: shape).opacity(fullscreen ? 0 : 1))
         .overlay { LibrarySpacesOverlay(model: model, window: windowID) }
+        .overlay(alignment: .topTrailing) { if !fullscreen { zoomBadge } }
         .padding(.top, topInset)
         .padding(.bottom, inset)
-        .padding(placement.side.opposite.edgeSet, inset)
-        .padding(placement.side.edgeSet,
-                 model.isSidebarLaidOut && !fullscreen ? growth.map { CGFloat($0.from) } ?? sidebarWidth : inset)
+        .padding(.horizontal, inset)
+        .extensionSidePanel(model.extensions, window: windowID, side: panelLayout.side, topInset: topInset,
+                            paneOffset: CGFloat(panelLayout.paneOffset(sidebarCut: Double(slide.cut))),
+                            isHidden: fullscreen || !panelLayout.isBesideSidebar)
+        .padding(placement.side.edgeSet, CGFloat(lead))
         .offset(x: CGFloat(placement.pageOffset(slide: Double(slide.offset), growth: growth)))
         .ignoresSafeArea(edges: fullscreen ? .all : [])
     }
