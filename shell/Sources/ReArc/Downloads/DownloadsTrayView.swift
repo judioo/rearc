@@ -66,7 +66,6 @@ struct DownloadsTrayView: View {
     var embedded = false
     /// The Library column's search (`LibraryDownloads.matching`).
     var query = ""
-    @State private var window = LibraryDownloads.RowWindow()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -110,12 +109,8 @@ struct DownloadsTrayView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 2) {
-                        // A page at a time (RowWindow): never the whole history.
-                        ForEach(Array(records.prefix(window.shown(of: records.count)).enumerated()), id: \.element.id) { index, record in
+                        ForEach(records) { record in
                             DownloadRowView(record: record, downloads: downloads)
-                                .onAppear {
-                                    if window.needsNextPage(after: index, of: records.count) { window.rowAppeared(index, of: records.count) }
-                                }
                         }
                     }
                     .padding(6)
@@ -124,7 +119,6 @@ struct DownloadsTrayView: View {
             }
         }
         .frame(width: embedded ? nil : 340)
-        .onChange(of: query) { if !window.isFirstPage { window.reset() } }
     }
 }
 

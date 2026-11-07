@@ -124,48 +124,6 @@ public enum LibraryDownloads {
         }
     }
 
-    /// How many of the matching rows the Downloads page lays out: a page at
-    /// first, and another each time a row near the end of what it shows
-    /// appears. The lazy stack still walks every row it is handed whenever
-    /// the list changes (each event of a transfer, each keystroke), so a long
-    /// history goes in a page at a time.
-    public struct RowWindow: Equatable, Sendable {
-        public static let page = 100
-        /// A row this close to the last one shown asks for the next page.
-        public static let lead = 25
-
-        public private(set) var limit: Int
-
-        public init(limit: Int = RowWindow.page) {
-            self.limit = limit
-        }
-
-        /// The rows shown of `count` matching rows.
-        public func shown(of count: Int) -> Int { min(count, limit) }
-
-        /// Row `index` of `count` is near the end of what is shown, and more
-        /// rows wait. Views ask this first: writing a `@State` window back,
-        /// even unchanged, costs the page another update.
-        public func needsNextPage(after index: Int, of count: Int) -> Bool {
-            limit < count && index >= limit - Self.lead
-        }
-
-        /// Row `index` of `count` appeared: near the end, the next page joins.
-        @discardableResult
-        public mutating func rowAppeared(_ index: Int, of count: Int) -> Bool {
-            guard needsNextPage(after: index, of: count) else { return false }
-            limit += Self.page
-            return true
-        }
-
-        public var isFirstPage: Bool { limit == Self.page }
-
-        /// A new search starts again from the first page.
-        public mutating func reset() {
-            limit = Self.page
-        }
-    }
-
     /// `matching` for a search typed over a long list: each row's folded file
     /// name and site are kept between keystrokes (and while transfers update
     /// the list), and worked out again only when its path or URL changes.
