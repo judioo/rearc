@@ -212,7 +212,9 @@ private struct LibraryDownloadsPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             LibraryColumnHeader(prompt: LibrarySection.downloads.searchPrompt ?? "", text: $query,
-                                onMoveDown: { table.controller?.focusList() })
+                                onMoveDown: { table.controller?.focusList() }) {
+                DownloadsLibraryFilterMenu(downloads: model.downloads)
+            }
             VStack(alignment: .leading, spacing: 0) {
                 DownloadsTrayHeader(downloads: model.downloads, showsTitle: false)
                 Divider()

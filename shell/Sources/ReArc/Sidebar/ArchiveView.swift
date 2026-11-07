@@ -11,9 +11,13 @@ struct ArchiveView: View {
 
     var body: some View {
         let store = model.store
-        let groups = TabArchivePolicy.grouped(store.archivedTabs, matching: query, now: Date())
+        let now = Date()
+        let records = store.archivedTabs.filter { model.archiveFilter.includes($0, now: now) }
+        let groups = TabArchivePolicy.grouped(records, matching: query, now: now)
         VStack(spacing: 0) {
-            LibraryColumnHeader(prompt: LibrarySection.archive.searchPrompt ?? "", text: $query)
+            LibraryColumnHeader(prompt: LibrarySection.archive.searchPrompt ?? "", text: $query) {
+                ArchiveLibraryFilterMenu(model: model)
+            }
 
             VStack(alignment: .leading, spacing: 2) {
                 Menu("Archive Today Tabs After: \(store.autoArchiveThreshold().title)") {
@@ -39,7 +43,7 @@ struct ArchiveView: View {
             if groups.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "archivebox").font(.system(size: 30)).foregroundStyle(.tertiary)
-                    Text(query.isEmpty ? "Closed and archived tabs appear here." : "No matches.")
+                    Text(query.isEmpty && !model.archiveFilter.isActive ? "Closed and archived tabs appear here." : "No matches.")
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
