@@ -459,7 +459,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
 
     @MainActor
     func reopenIfNoWindows() {
-        guard !terminating, !windows.values.contains(where: { $0.window.isVisible }) else { return }
+        // The onboarding hides the browser windows and shows its own, untracked one;
+        // coming back to the app mid-onboarding is not "no windows left".
+        guard !terminating, onboarding == nil, !windows.values.contains(where: { $0.window.isVisible }) else { return }
         openBrowserWindow()
     }
 
