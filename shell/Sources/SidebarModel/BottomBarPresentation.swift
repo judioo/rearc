@@ -393,4 +393,37 @@ public enum SpaceCircles {
     public static func prefersLightInk(on theme: SpaceTheme) -> Bool {
         PageColor(red: theme.red, green: theme.green, blue: theme.blue).prefersLightInk
     }
+
+    /// The colour emoji a circle shows for an SF Symbol icon, so every space
+    /// in the bar is a coloured item, as in onboarding's switcher. Matched by
+    /// the symbol's first word ("heart.circle.fill" is "heart"); nil keeps the
+    /// symbol, drawn in the contrasting ink.
+    public static func emoji(forSymbol name: String) -> String? {
+        guard Space.isSymbolName(name) else { return nil }
+        let word = name.split(separator: ".").first.map(String.init) ?? name
+        return symbolEmoji[word]
+    }
+
+    static let symbolEmoji: [String: String] = [
+        "house": "🏠", "briefcase": "💼", "star": "⭐️", "flame": "🔥", "leaf": "🌿", "moon": "🌙",
+        "globe": "🌍", "music": "🎵", "book": "📚", "books": "📚", "graduationcap": "🎓",
+        "gamecontroller": "🎮", "cart": "🛒", "heart": "❤️", "bolt": "⚡️", "paintbrush": "🖌️",
+        "paintpalette": "🎨", "hammer": "🔨", "wrench": "🔧", "airplane": "✈️", "camera": "📷",
+        "chart": "📊", "terminal": "💻", "laptopcomputer": "💻", "desktopcomputer": "🖥️",
+        "cup": "☕️", "mug": "☕️", "pawprint": "🐾", "sun": "☀️", "lightbulb": "💡",
+        "magnifyingglass": "🔍", "pencil": "✏️", "highlighter": "🖍️", "cloud": "☁️", "sparkles": "✨",
+        "dollarsign": "💵", "banknote": "💵", "creditcard": "💳", "bag": "🛍️", "gift": "🎁",
+        "folder": "📁", "doc": "📄", "envelope": "✉️", "paperplane": "📨", "person": "👤",
+        "building": "🏢", "car": "🚗", "bicycle": "🚲", "tram": "🚋", "fork": "🍴", "carrot": "🥕",
+        "tv": "📺", "film": "🎬", "headphones": "🎧", "mic": "🎙️", "guitars": "🎸", "dumbbell": "🏋️",
+        "figure": "🏃", "brain": "🧠", "atom": "⚛️", "flask": "🧪", "testtube": "🧪", "tree": "🌳",
+        "drop": "💧", "snowflake": "❄️", "map": "🗺️", "mappin": "📍", "phone": "📞", "message": "💬",
+        "bubble": "💬", "calendar": "📅", "clock": "🕒", "alarm": "⏰", "lock": "🔒", "key": "🔑",
+        "shield": "🛡️", "crown": "👑", "trophy": "🏆", "flag": "🚩", "bell": "🔔", "puzzlepiece": "🧩",
+        "tag": "🏷️", "bookmark": "🔖", "newspaper": "📰", "graduation": "🎓", "stethoscope": "🩺",
+        "cross": "➕", "pills": "💊", "bed": "🛏️", "sofa": "🛋️", "tent": "⛺️", "mountain": "⛰️",
+        "beach": "🏖️", "fish": "🐟", "bird": "🐦", "hare": "🐇", "tortoise": "🐢", "ant": "🐜",
+        "ladybug": "🐞", "dice": "🎲", "theatermasks": "🎭", "scissors": "✂️",
+        "ruler": "📏", "eyeglasses": "👓", "tshirt": "👕", "basket": "🧺",
+    ]
 }

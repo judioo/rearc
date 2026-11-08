@@ -38,4 +38,15 @@ final class SpaceCircleTests: XCTestCase {
         defaults.set("unknown", forKey: SpaceIconStyle.defaultsKey)
         XCTAssertEqual(SpaceIconStyle.load(from: defaults), .colouredCircles)
     }
+
+    func testSymbolIconsShowAsColourEmoji() {
+        XCTAssertEqual(SpaceCircles.emoji(forSymbol: "house.fill"), "🏠")
+        XCTAssertEqual(SpaceCircles.emoji(forSymbol: "heart.circle.fill"), "❤️")
+        XCTAssertEqual(SpaceCircles.emoji(forSymbol: "music.note"), "🎵")
+        XCTAssertNil(SpaceCircles.emoji(forSymbol: "🌿"), "an emoji draws as itself")
+        XCTAssertNil(SpaceCircles.emoji(forSymbol: "circle.fill"), "no emoji keeps the symbol")
+        for symbol in Space.iconChoices where symbol != "circle.fill" {
+            XCTAssertNotNil(SpaceCircles.emoji(forSymbol: symbol), symbol)
+        }
+    }
 }
