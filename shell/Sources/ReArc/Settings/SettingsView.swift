@@ -650,6 +650,7 @@ struct AdvancedSettingsPane: View {
     let capabilities: SettingsCapabilities
     @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
     @AppStorage(ReorderHapticsPreference.key) private var reorderHaptics = ReorderHapticsPreference.defaultValue
+    @AppStorage(ToolbarPageColorPreference.key) private var matchesPageColor = ToolbarPageColorPreference.defaultValue
 
     var body: some View {
         SettingsForm {
@@ -660,6 +661,9 @@ struct AdvancedSettingsPane: View {
                     ? "Back, forward, reload and the address sit in a strip at the top of the page."
                     : "Back, forward, reload and the address sit at the top of the sidebar.",
                     isOn: $urlInToolbar)
+                SettingsToggleRow(label: "Match toolbar to website colours",
+                                  detail: "The toolbar takes the page's theme colour, or the colour along its top edge.",
+                                  isOn: $matchesPageColor)
             }
             SettingsBox {
                 if capabilities.pictureInPicture {

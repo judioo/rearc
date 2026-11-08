@@ -16,17 +16,19 @@ struct CardToolbarView: View {
     @State private var siteControlsAnchor: NSView?
     @State private var isHoveringURL = false
     @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
+    @AppStorage(ToolbarPageColorPreference.key) private var matchesPageColor = ToolbarPageColorPreference.defaultValue
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static let height: CGFloat = 32
-
-    private var ink: Color { CardToolbarInk(isDark: chrome.isDark).ink }
-    private var quietInk: Color { CardToolbarInk(isDark: chrome.isDark).quiet }
 
     var body: some View {
         let engine = model.focusedEngine(in: window)
         let tab = model.selectedTab(in: window)
         let url = engine?.currentURL ?? tab?.url
         let site = SiteControlCenter.site(for: url)
+        let tint = matchesPageColor ? engine?.pageColor : nil
+        let palette = CardToolbarInk(chrome: chrome, tint: tint)
+        let ink = palette.ink, quietInk = palette.quiet
         ZStack {
             Button { model.focusLocation() } label: {
                 Text(url.flatMap(Self.displayURL) ?? "Search or Enter URL…")
@@ -36,7 +38,7 @@ struct CardToolbarView: View {
                     .truncationMode(.middle)
                     .padding(.horizontal, 10)
                     .frame(height: 22)
-                    .background(Color.primary.opacity(isHoveringURL ? 0.05 : 0), in: RoundedRectangle(cornerRadius: 6))
+                    .background(palette.hover.opacity(isHoveringURL ? 1 : 0), in: RoundedRectangle(cornerRadius: 6))
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -63,6 +65,7 @@ struct CardToolbarView: View {
                 }
                 Spacer(minLength: 0)
                 ExtensionToolbarView(model: model, engine: engine)
+                    .foregroundStyle(palette.extensionInk)
                 Button { showsSiteControls.toggle() } label: {
                     Image(systemName: "slider.horizontal.2.square")
                         .font(.system(size: 15))
@@ -101,12 +104,7 @@ struct CardToolbarView: View {
             .padding(.leading, trafficLightsClearance)
         }
         .frame(height: Self.height)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.primary.opacity(chrome.isDark ? 0.12 : 0.05))
-                .frame(height: 1)
-                .offset(y: 1)
-        }
+        .pageColorToolbar(tint, palette: palette, reduceMotion: reduceMotion)
         .onChange(of: model.siteControlCenterRequest) { _, _ in
             if site != nil, model.isKeyBrowserWindow(window) { showsSiteControls = true }
         }
@@ -135,13 +133,72 @@ struct CardToolbarView: View {
 }
 
 /// Measured greys (§4.4): enabled glyphs and the address, disabled glyphs,
-/// right icons. The split panes' rows use the same.
+/// right icons. The split panes' rows use the same. On the page's colour
+/// (Settings › Advanced › Match toolbar to website colours) they are white or
+/// black, whichever contrasts more (`PageColorInk`).
 struct CardToolbarInk {
     let isDark: Bool
+    var pageInk: PageColorInk?
 
-    var ink: Color { isDark ? Color(white: 0.78) : Color(.sRGB, red: 0.384, green: 0.384, blue: 0.392) }
-    var disabled: Color { isDark ? Color(white: 0.42) : Color(.sRGB, red: 0.714, green: 0.714, blue: 0.737) }
-    var quiet: Color { isDark ? Color(white: 0.55) : Color(.sRGB, red: 0.733, green: 0.725, blue: 0.733) }
+    init(isDark: Bool) {
+        self.isDark = isDark
+    }
+
+    init(chrome: ThemeChromeColors, tint: PageColor?) {
+        let ink = tint.map(PageColorInk.init(on:))
+        isDark = ink?.isLight ?? chrome.isDark
+        pageInk = ink
+    }
+
+    var ink: Color {
+        if let pageInk { return Color(pageInk.base).opacity(pageInk.inkOpacity) }
+        return isDark ? Color(white: 0.78) : Color(.sRGB, red: 0.384, green: 0.384, blue: 0.392)
+    }
+    var disabled: Color {
+        if let pageInk { return Color(pageInk.base).opacity(pageInk.disabledOpacity) }
+        return isDark ? Color(white: 0.42) : Color(.sRGB, red: 0.714, green: 0.714, blue: 0.737)
+    }
+    var quiet: Color {
+        if let pageInk { return Color(pageInk.base).opacity(pageInk.quietOpacity) }
+        return isDark ? Color(white: 0.55) : Color(.sRGB, red: 0.733, green: 0.725, blue: 0.733)
+    }
+    /// The extension buttons draw in `.secondary` of this.
+    var extensionInk: Color { pageInk == nil ? .primary : ink }
+    /// The address's hover wash.
+    var hover: Color {
+        if let pageInk { return Color(pageInk.base).opacity(pageInk.isLight ? 0.12 : 0.06) }
+        return Color.primary.opacity(0.05)
+    }
+}
+
+extension EnvironmentValues {
+    /// The page colour the toolbar strip around a `CardToolbarButton` is drawn in.
+    @Entry var pageToolbarTint: PageColor?
+}
+
+extension Color {
+    init(_ color: PageColor) {
+        self.init(.sRGB, red: color.red, green: color.green, blue: color.blue)
+    }
+}
+
+extension View {
+    /// The strip's fill and hairline. On the page's colour it is filled with it
+    /// and loses the hairline, so it runs into the page's own top bar as in
+    /// Arc; the change cross-fades in 0.25 s, at once under Reduce Motion.
+    func pageColorToolbar(_ tint: PageColor?, palette: CardToolbarInk, reduceMotion: Bool) -> some View {
+        environment(\.pageToolbarTint, tint)
+            .background { if let tint { Color(tint) } }
+            .overlay(alignment: .bottom) {
+                if tint == nil {
+                    Rectangle()
+                        .fill(Color.primary.opacity(palette.isDark ? 0.12 : 0.05))
+                        .frame(height: 1)
+                        .offset(y: 1)
+                }
+            }
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: tint)
+    }
 }
 
 /// A navigation glyph on the card toolbar's 37 pt pitch.
@@ -152,9 +209,10 @@ struct CardToolbarButton: View {
     var width: CGFloat = 37
     let action: () -> Void
     @Environment(\.themeChrome) private var chrome
+    @Environment(\.pageToolbarTint) private var tint
 
     var body: some View {
-        let ink = CardToolbarInk(isDark: chrome.isDark)
+        let ink = CardToolbarInk(chrome: chrome, tint: tint)
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 13))

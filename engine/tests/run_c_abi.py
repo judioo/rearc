@@ -234,6 +234,9 @@ class Fixture(BaseHTTPRequestHandler):
         elif self.path.startswith("/welcome"):
             body = b"<!doctype html><title>welcome</title><p>signed in"
             mime = "text/html"
+        elif self.path in THEME_PAGES:
+            body = THEME_PAGES[self.path]
+            mime = "text/html"
         else:
             body = b'''<!doctype html><html><head><link rel="icon" href="/favicon.png"><script>
 const pageWorld = typeof rearcSecret === 'undefined';
@@ -500,6 +503,16 @@ LOOPBACK = {"127.0.0.1", "localhost", "[::1]", "::1"}
 # Wave 18f: test processes reach no outside service (Google or otherwise).
 # Chromium's background services are switched off, and any remaining lookup
 # of a non-loopback name fails locally instead of resolving.
+# ABI 1.51 page_theme_color: a declared colour, none over a #1f2023 top bar,
+# and a colour a script adds after the load (c_abi_theme_host.mm).
+THEME_BAR = b'<body style="margin:0;height:3000px"><div style="height:60px;background:#1f2023"></div><p>theme fixture</p></body>'
+THEME_PAGES = {
+    "/theme-meta": b'<!doctype html><title>probe:meta</title><meta name="theme-color" content="#336699">' + THEME_BAR,
+    "/theme-none": b'<!doctype html><title>probe:none</title>' + THEME_BAR,
+    "/theme-script": b'<!doctype html><title>probe:script</title><script>setTimeout(()=>{const m=document.createElement("meta");'
+                     b'm.name="theme-color";m.content="#00ff00";document.head.append(m)},300)</script>' + THEME_BAR,
+}
+
 NO_OUTSIDE_NETWORK = [
     "--disable-background-networking", "--disable-component-update",
     "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost",
@@ -576,11 +589,11 @@ def main():
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
-        for kind in (sys.argv[1:] or ("launch", "devtools", "client_certificates", "links", "interstitials", "auth", "save", "leak", "autofill", "extensions", "pip", "pip_embedded", "perf", "drops", "print", "fullscreen", "search", "history", "danger", "discard", "passwords", "context", "permissions", "files", "dialogs", "helpers", "find", "downloads", "webui", "migration", "shutdown", "shutdown_veto", "core", "services", "urls", "eval", "scheme_return", "profiles", "identity", "zoom", "messages", "branding")):
+        for kind in (sys.argv[1:] or ("launch", "devtools", "client_certificates", "links", "interstitials", "auth", "save", "leak", "autofill", "extensions", "pip", "pip_embedded", "perf", "drops", "print", "fullscreen", "search", "history", "danger", "discard", "passwords", "context", "permissions", "files", "dialogs", "helpers", "find", "downloads", "webui", "migration", "shutdown", "shutdown_veto", "core", "services", "urls", "eval", "scheme_return", "profiles", "identity", "zoom", "messages", "branding", "theme")):
             source = ENGINE / f"tests/c_abi_{kind}_host.mm"
             subprocess.run([
                 "xcrun", "clang++", "-std=c++20", "-fobjc-arc", f"-I{BRIDGE}",
-                str(source), "-framework", "AppKit", "-framework", "QuartzCore", f"-F{OUT}", "-framework",
+                str(source), "-framework", "AppKit", "-framework", "QuartzCore", "-framework", "ImageIO", f"-F{OUT}", "-framework",
                 "Chromium Framework", f"-Wl,-rpath,{OUT}", "-o", str(executable),
             ], check=True)
             build_gate()
@@ -638,7 +651,7 @@ def main():
                         *(["--process-per-site", *(["--disable-features=WebContentsDiscard"] if phase else [])] if kind == "discard" else []),
                         *(["--safebrowsing-manual-download-blacklist=" + hashlib.sha256(b"a" * 65536).hexdigest()] if kind == "danger" else []),
                         *(["--remote-debugging-port=0", "--enable-logging=stderr", "--vmodule=close_controller=1,rearc_keep_alive=1,keep_alive_registry=1,devtools_ui_bindings=1"] if kind in ("devtools", "webui", "helpers", "permissions", "passwords", "fullscreen", "pip", "extensions", "autofill", "leak", "save", "interstitials") else []),
-                        *(["--disable-backgrounding-occluded-windows"] if kind in ("devtools", "helpers", "permissions", "passwords", "fullscreen", "pip", "pip_embedded", "perf", "extensions", "autofill", "leak", "save", "interstitials") else []),
+                        *(["--disable-backgrounding-occluded-windows"] if kind in ("theme", "devtools", "helpers", "permissions", "passwords", "fullscreen", "pip", "pip_embedded", "perf", "extensions", "autofill", "leak", "save", "interstitials") else []),
                         *(["--use-fake-device-for-media-stream"] if kind == "permissions" else []),
                         *(["--autoplay-policy=no-user-gesture-required"] if kind in ("pip", "pip_embedded") else []),
                         *([f"--mark_as_phishing=http://127.0.0.1:{server.server_port}/phishing-a,http://localhost:{server.server_port}/phishing-b"] if kind == "interstitials" else []),

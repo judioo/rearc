@@ -59,6 +59,10 @@ protocol WebEngine: AnyObject {
     /// Site icon image bytes (Chromium: PNG from `ReArcFaviconGet`; WebKit:
     /// the page's `<link rel=icon>` or /favicon.ico). Nil until one arrives.
     var faviconData: Data? { get }
+    /// The page's colour for the card toolbar and a split pane's row (its
+    /// theme colour, else its top edge); nil keeps the toolbar's own look.
+    /// Changes only when the colour does.
+    var pageColor: PageColor? { get }
 
     /// Latest media snapshot from the in-page probe.
     var mediaState: WebMediaState { get }

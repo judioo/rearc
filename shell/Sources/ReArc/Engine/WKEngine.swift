@@ -215,6 +215,21 @@ final class WKEngine: NSObject, WebEngine {
     private(set) var canGoForward = false
     private(set) var securityState: WebSecurityState = .unknown
     private(set) var faviconData: Data?
+    /// The page's colour for the toolbar: `WKWebView.themeColor`, else its
+    /// sampled top edge (`PageColorTracker`).
+    private(set) var pageColor: PageColor?
+    @ObservationIgnored private lazy var colorTracker: PageColorTracker = {
+        let tracker = PageColorTracker(
+            capture: { [weak self] in await self?.captureTopEdge() },
+            canSample: { [weak self] in
+                guard let self else { return false }
+                return self.webView.window?.isVisible == true && ToolbarPageColorPreference.pageHasColor(self.currentURL)
+            }
+        )
+        tracker.onChange = { [weak self] in self?.pageColor = $0 }
+        return tracker
+    }()
+    @ObservationIgnored private var documentCount: UInt64 = 0
 
     let webView: WKWebView
     /// KVO on the web view keeps the observable navigation state current
@@ -307,6 +322,7 @@ final class WKEngine: NSObject, WebEngine {
             PagePrinter.shared.print(self)
         }
         observeNavigationState()
+        PageScrollSettleWatcher.shared.watch(webView) { [weak self] in self?.colorTracker.pageSettled() }
     }
 
     deinit {
@@ -331,7 +347,30 @@ final class WKEngine: NSObject, WebEngine {
             webView.observe(\.estimatedProgress, options: [.new]) { webView, _ in refresh(webView) },
             webView.observe(\.hasOnlySecureContent, options: [.new]) { webView, _ in refresh(webView) },
             webView.observe(\.url, options: [.new]) { webView, _ in refresh(webView) },
+            webView.observe(\.themeColor, options: [.new]) { [weak self] webView, _ in
+                DispatchQueue.main.async { self?.syncThemeColor(from: webView) }
+            },
         ]
+    }
+
+    private func syncThemeColor(from webView: WKWebView) {
+        let color = webView.themeColor?.usingColorSpace(.sRGB).map {
+            PageColor(red: Double($0.redComponent), green: Double($0.greenComponent), blue: Double($0.blueComponent))
+        }
+        colorTracker.themeColorChanged(ToolbarPageColorPreference.pageHasColor(currentURL) ? color : nil)
+    }
+
+    /// The visible page's top 4 pt as PNG; nil when WebKit can't take it.
+    @MainActor
+    private func captureTopEdge() async -> Data? {
+        let configuration = WKSnapshotConfiguration()
+        configuration.rect = CGRect(x: 0, y: 0, width: webView.bounds.width, height: min(4, webView.bounds.height))
+        guard configuration.rect.width > 0, configuration.rect.height > 0 else { return nil }
+        let image: NSImage? = await withCheckedContinuation { continuation in
+            webView.takeSnapshot(with: configuration) { snapshot, _ in continuation.resume(returning: snapshot) }
+        }
+        guard let cgImage = image?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        return NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:])
     }
 
     private func syncNavigationState(from webView: WKWebView) {
@@ -707,6 +746,9 @@ extension WKEngine: WKNavigationDelegate {
         pagePrompts.documentChanged()
         refreshBoostsOnPage()
         onNavigationCommit?(currentURL, pageTitle)
+        documentCount += 1
+        colorTracker.documentChanged(to: documentCount, isWebPage: ToolbarPageColorPreference.pageHasColor(currentURL))
+        syncThemeColor(from: webView)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -717,6 +759,7 @@ extension WKEngine: WKNavigationDelegate {
         onNavigationCommit?(currentURL, pageTitle)
         syncNavigationState(from: webView)
         loadFavicon()
+        colorTracker.pageSettled()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

@@ -22,6 +22,8 @@ struct SplitPaneToolbarView: View, Equatable {
     @State private var siteControlsAnchor: NSView?
     @State private var isHoveringURL = false
     @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
+    @AppStorage(ToolbarPageColorPreference.key) private var matchesPageColor = ToolbarPageColorPreference.defaultValue
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The split re-renders on every divider drag step; a row's body runs
     /// again only when its own inputs change.
@@ -31,7 +33,9 @@ struct SplitPaneToolbarView: View, Equatable {
     }
 
     var body: some View {
-        let ink = CardToolbarInk(isDark: chrome.isDark)
+        // Each pane's row takes its own page's colour.
+        let tint = matchesPageColor ? engine.pageColor : nil
+        let ink = CardToolbarInk(chrome: chrome, tint: tint)
         let url = engine.currentURL ?? tab.url
         let side = model.sidebarSide
         let showsToggle = !model.isSidebarVisible
@@ -80,12 +84,7 @@ struct SplitPaneToolbarView: View, Equatable {
         .padding(.horizontal, 2.5)
         .padding(.leading, row.isAtLeadingCorner ? trafficLightsClearance : 0)
         .frame(height: CardToolbarView.height)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.primary.opacity(chrome.isDark ? 0.12 : 0.05))
-                .frame(height: 1)
-                .offset(y: 1)
-        }
+        .pageColorToolbar(tint, palette: ink, reduceMotion: reduceMotion)
         .onChange(of: model.siteControlCenterRequest) { _, _ in
             if row.isActive, SiteControlCenter.site(for: url) != nil, model.isKeyBrowserWindow(window) { showsSiteControls = true }
         }
@@ -118,7 +117,7 @@ struct SplitPaneToolbarView: View, Equatable {
             }
             .padding(.horizontal, 8)
             .frame(height: 22)
-            .background(Color.primary.opacity(isHoveringURL ? 0.05 : 0), in: RoundedRectangle(cornerRadius: 6))
+            .background(ink.hover.opacity(isHoveringURL ? 1 : 0), in: RoundedRectangle(cornerRadius: 6))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -131,6 +130,7 @@ struct SplitPaneToolbarView: View, Equatable {
     private func paneControls(_ url: URL?, ink: CardToolbarInk) -> some View {
         let site = SiteControlCenter.site(for: url)
         ExtensionToolbarView(model: model, engine: engine)
+            .foregroundStyle(ink.extensionInk)
         Button { showsSiteControls.toggle() } label: {
             Image(systemName: "slider.horizontal.2.square")
                 .font(.system(size: 15))

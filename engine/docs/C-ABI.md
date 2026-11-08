@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.50** (major remains 1 for existing hosts), bridge **0.53.0**, compiled Chromium **156.0.8078.74**. Public header:
+ABI **1.51** (major remains 1 for existing hosts), bridge **0.54.0**, compiled Chromium **156.0.8078.74**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -296,6 +296,9 @@ the current frame. Page JS cannot manufacture a trusted click or call the
 isolated binding. While enabled the eligible click's normal navigation is
 suppressed. Disable with SetLinkPeek(false) when the Swift handler is nil.
 There is no renderer browser-target/debugging connection exposed by this ABI.
+
+Scope 2 (ABI 1.51, `page_theme_color`) is the top edge: see "Page theme
+colour (1.51)".
 
 Snapshot callback `(context, status, tab_id, content_generation, data, size)`
 receives null/0 on failure; success transfers a PNG buffer to the host. The
@@ -2186,4 +2189,30 @@ extension's own `createGroup` and `isolateTab` (the anchor), `tabs_context`,
 `tabs_create`, the MCP group in a new window, and its `computer` tool's
 screenshot, click, scroll and key all succeed; `navigate` and the permission
 manager need a signed-in account. `docs/QA-2026-11-07.md` has the manual check.
+
+## Page theme colour (1.51)
+
+Patch `tab/071-page-theme-color`, bridge 0.54.0, feature `page_theme_color`.
+No earlier struct changed (`engine/tests/check_abi151_imports.py` compares
+every 1.50 layout). `framework.exports` and `framework.order` list the two new
+functions after `_ReArcTabGetZoomFactor`. For the host's toolbar, which Arc
+draws in the page's colour.
+
+| Function | Contract |
+|---|---|
+| `ReArcEngineSetThemeColorCallback(cb, ctx)` | `cb(ctx, const ReArcThemeColorEvent*)`, borrowed for the call: `document` (`ReArcDocumentIdentity`), `has_color`, `argb` (0xAARRGGBB, `WebContents::GetThemeColor`: the last matching `<meta name="theme-color">`, media queries applied). Posted once when the tab's services attach, on each change (`DidChangeThemeColor`), and once per new primary document even when unchanged, so the host can key it by document; never twice in a row with the same value for one document. A tag a script adds later arrives as a change. Null disables delivery. |
+| `ReArcTabGetThemeColor(tab, &has_color, &argb)` | The current value. Null outputs are invalid_argument; outputs are zeroed on error. |
+| `ReArcTabCaptureSnapshot(tab, 2, …)` | Scope 2: the visible viewport's top 4 CSS px at its scroll offset (`cssVisualViewport.pageX/pageY`), so a sticky header is what a capture after a scroll sees. Same path, limits, busy rule and cancellation as scope 0; the PNG is a few rows (800 pt at 2x: 1600×8, about 0.5 KB). Scope 3 and up are invalid_argument. |
+
+The shell uses the theme colour when there is one, else samples scope 2
+rarely: on a new document, at the load's end, after a scroll settles and when
+the page comes on screen, only while it is attached in a visible window (a
+hidden page's capture would wait for a frame), decoding off the main thread
+(`shell/Sources/ReArc/Engine/PageColorTracking.swift`).
+
+`engine/tests/run_c_abi.py theme` (`c_abi_theme_host.mm`) checks the declared
+colour, none on a new document without one, a colour added by script, that
+events come only on change, the getter, scope 3's rejection and that scope 2
+of a page with a `#1f2023` top bar is that colour. Its window is far off
+screen, ordered back and never key.
 

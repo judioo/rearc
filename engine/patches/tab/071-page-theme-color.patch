@@ -1,0 +1,279 @@
+From ca527c68692c3ed8e2dd33d2b3a908a755bc9895 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Sun, 8 Nov 2026 09:00:17 +0400
+Subject: [PATCH] P-TAB-001 page theme colour: theme-color events and a
+ top-edge snapshot for the host's toolbar
+
+Arc draws its toolbar strip in the page's colour: the page's
+<meta name="theme-color">, else the colour along its top edge (PAN Home
+declares none and gets its black top bar). The host had neither.
+
+ABI 1.51 page_theme_color. ReArcEngineSetThemeColorCallback delivers
+ReArcThemeColorEvent {document, has_color, argb} from the tab's services
+observer (WebContents::GetThemeColor, DidChangeThemeColor): once when the
+services attach, on each change, and once per new document so the host can
+key it by document; an unchanged colour is not repeated. ReArcTabGetThemeColor
+reads it. ReArcTabCaptureSnapshot scope 2 captures the visible viewport's top
+4 CSS px at its scroll offset (a sticky header after a scroll), through the
+same internal Page.captureScreenshot path as scope 0; the PNG is a few rows
+(1600x8, 466 bytes, for an 800 pt viewport at 2x). No earlier struct
+changed. Bridge 0.54.0.
+
+Last rebased: 2026-11-08 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ chrome/app/framework.exports                  |  2 +
+ chrome/app/framework.order                    |  2 +
+ .../browser/rearc_bridge/rearc_engine_abi.h   | 21 +++++-
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |  2 +-
+ .../rearc_bridge/rearc_services_abi.cc        | 72 ++++++++++++++++---
+ 5 files changed, 87 insertions(+), 12 deletions(-)
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 953eaf6d9e..9799411502 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -99,6 +99,8 @@ _ReArcTabCaptureSnapshot
+ _ReArcEngineSetPageMessageCallback
+ _ReArcEngineSetZoomCallback
+ _ReArcTabGetZoomFactor
++_ReArcTabGetThemeColor
++_ReArcEngineSetThemeColorCallback
+ _ReArcTabSetZoomFactor
+ _ReArcTabGetDocumentIdentity
+ _ReArcTabEvaluateScript2
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index e6904a7bf6..3cea8f03f6 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -110,6 +110,8 @@ _ReArcTabCaptureSnapshot
+ _ReArcEngineSetPageMessageCallback
+ _ReArcEngineSetZoomCallback
+ _ReArcTabGetZoomFactor
++_ReArcTabGetThemeColor
++_ReArcEngineSetThemeColorCallback
+ _ReArcTabSetZoomFactor
+ _ReArcTabGetDocumentIdentity
+ _ReArcTabEvaluateScript2
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 4501b02807..9cbf414b91 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 50, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 51, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -672,7 +672,8 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetLinkPeek(uint64_t tab_id,
+                                                     bool enabled,
+                                                     ReArcCompletion completion,
+                                                     void* context);
+-// scope: 0 viewport, 1 full page. Callback owns +1 PNG data; free with
++// scope: 0 viewport, 1 full page, 2 the viewport's top 4 CSS px at its scroll
++// offset (page_theme_color, ABI 1.51). Callback owns +1 PNG data; free with
+ // ReArcBufferFree, including when the host discards a stale result. Error:
+ // null data/0 size. Captures fail cancelled on navigation/content teardown;
+ // at most one snapshot per tab; 16 MiB encoded, 64 Mpixel/16384 side bound.
+@@ -749,6 +750,22 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetZoomFactor(uint64_t tab_id,
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetZoomFactor(uint64_t tab_id,
+                                                       double factor);
+ 
++// Page theme colour (page_theme_color, ABI 1.51): the current document's
++// <meta name="theme-color"> as Chromium resolves it (WebContents::
++// GetThemeColor; media queries and the last matching tag apply). argb is
++// 0xAARRGGBB, opaque in practice; has_color false means the page declares
++// none. Posted only when it changes, and once per new document, so a host can
++// key it by document; the initial state is posted when the tab's services
++// attach. Null callback disables delivery.
++typedef struct ReArcThemeColorEvent {
++  ReArcDocumentIdentity document;
++  bool has_color;
++  uint32_t argb;
++} ReArcThemeColorEvent;
++typedef void (*ReArcThemeColorCallback)(void* context, const ReArcThemeColorEvent* event);
++REARC_ENGINE_EXPORT void ReArcEngineSetThemeColorCallback(ReArcThemeColorCallback callback, void* context);
++REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetThemeColor(uint64_t tab_id, bool* has_color, uint32_t* argb);
++
+ // Installed boost and explicitly evaluated isolated worlds get
+ // rearcPostMessage(JSON.stringify(value)). Never injected into the main world.
+ // Top-frame http(s) only; valid UTF-8 RFC JSON <=64 KiB, <=60 attempts/sec/tab,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index dfd479c9f4..631852082a 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.53.0";
++  return "0.54.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 4557529825..2e9fce9206 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -53,6 +53,7 @@
+ #include "content/public/browser/web_contents_observer.h"
+ #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
+ #include "services/media_session/public/mojom/media_session.mojom.h"
++#include "third_party/skia/include/core/SkColor.h"
+ #include "url/gurl.h"
+ 
+ namespace rearc {
+@@ -63,6 +64,8 @@ void* message_context = nullptr;
+ uint64_t message_registration = 0;
+ ReArcZoomCallback zoom_callback = nullptr;
+ void* zoom_context = nullptr;
++ReArcThemeColorCallback theme_color_callback = nullptr;
++void* theme_color_context = nullptr;
+ ReArcServiceCallback service_callback = nullptr;
+ void* service_context = nullptr;
+ 
+@@ -265,6 +268,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+     zoom_->SetShowsNotificationBubble(false);
+     zoom_->AddObserver(this);
+     PublishZoom();
++    PublishThemeColor();
+   }
+   ~PageServices() override {
+     CHECK(pthread_main_np());
+@@ -288,6 +292,20 @@ class PageServices : public content::DevToolsAgentHostClient,
+   void OnZoomChanged(const zoom::ZoomController::ZoomChangedEventData&) override {
+     PublishZoom();
+   }
++  // ABI 1.51: the page's <meta name="theme-color">, posted only when it
++  // changes (a new document without one changes it to none).
++  std::optional<SkColor> theme_color() const { return web_contents()->GetThemeColor(); }
++  void DidChangeThemeColor() override { PublishThemeColor(); }
++  void PublishThemeColor() {
++    const auto color = theme_color();
++    if (theme_color_published_ && published_theme_color_ == color) return;
++    theme_color_published_ = true;
++    published_theme_color_ = color;
++    ReArcThemeColorEvent event{document(), color.has_value(), color.value_or(0)};
++    ABIPost(base::BindOnce([](base::WeakPtr<PageServices> self, ReArcThemeColorEvent e) {
++      if (self && self->Current() && theme_color_callback) theme_color_callback(theme_color_context, &e);
++    }, weak_factory_.GetWeakPtr(), event));
++  }
+   void PublishZoom() {
+     ReArcZoomEvent event{document(), zoom_factor()};
+     ABIPost(base::BindOnce([](base::WeakPtr<PageServices> self, ReArcZoomEvent e) {
+@@ -348,7 +366,12 @@ class PageServices : public content::DevToolsAgentHostClient,
+   void DidFinishNavigation(content::NavigationHandle* handle) override {
+     if (handle->IsInPrimaryMainFrame() && handle->HasCommitted()) {
+       navigation_id_ = static_cast<uint64_t>(handle->GetNavigationId());
+-      if (!handle->IsSameDocument()) ++document_generation_;
++      if (!handle->IsSameDocument()) {
++        ++document_generation_;
++        // The host keys colours by document; repeat an unchanged one for it.
++        theme_color_published_ = false;
++        PublishThemeColor();
++      }
+     }
+   }
+   ReArcDocumentIdentity document() const {
+@@ -946,16 +969,20 @@ class PageServices : public content::DevToolsAgentHostClient,
+       FinishSnapshot(status ? status : REARC_CANCELLED, {});
+       return;
+     }
++    // Scope 2 (ABI 1.51): the visible viewport's top 4 CSS px, where a
++    // sticky header sits after a scroll, for the host's toolbar colour.
++    const bool top_edge = scope == 2;
++    const bool full_page = scope == 1;
+     const auto* dimensions =
+-        result.FindDict(scope ? "cssContentSize" : "cssVisualViewport");
++        result.FindDict(full_page ? "cssContentSize" : "cssVisualViewport");
+     if (!dimensions) {
+       FinishSnapshot(REARC_UNSUPPORTED, {});
+       return;
+     }
+     const double width =
+-        dimensions->FindDouble(scope ? "width" : "clientWidth").value_or(0);
+-    const double height =
+-        dimensions->FindDouble(scope ? "height" : "clientHeight").value_or(0);
++        dimensions->FindDouble(full_page ? "width" : "clientWidth").value_or(0);
++    const double height = top_edge ? 4 :
++        dimensions->FindDouble(full_page ? "height" : "clientHeight").value_or(0);
+     if (!std::isfinite(width) || !std::isfinite(height) || width <= 0 ||
+         height <= 0 || width > 16384 || height > 16384 ||
+         width * height > 64000000) {
+@@ -965,8 +992,15 @@ class PageServices : public content::DevToolsAgentHostClient,
+     base::DictValue params;
+     params.Set("format", "png");
+     params.Set("fromSurface", true);
+-    params.Set("captureBeyondViewport", scope != 0);
+-    if (scope) {
++    params.Set("captureBeyondViewport", full_page);
++    if (top_edge) {
++      params.Set("clip", base::DictValue()
++                             .Set("x", dimensions->FindDouble("pageX").value_or(0))
++                             .Set("y", dimensions->FindDouble("pageY").value_or(0))
++                             .Set("width", width)
++                             .Set("height", height)
++                             .Set("scale", 1));
++    } else if (full_page) {
+       params.Set("clip", base::DictValue()
+                              .Set("x", 0)
+                              .Set("y", 0)
+@@ -1030,6 +1064,8 @@ class PageServices : public content::DevToolsAgentHostClient,
+   }
+ 
+   raw_ptr<zoom::ZoomController> zoom_ = nullptr;
++  bool theme_color_published_ = false;
++  std::optional<SkColor> published_theme_color_;
+   const uint64_t tab_id_, profile_id_, generation_;
+   scoped_refptr<content::DevToolsAgentHost> host_;
+   bool attached_ = false, installing_ = false, peek_installing_ = false,
+@@ -1123,7 +1159,8 @@ bool ABIHasServiceFeature(const char* feature) {
+   return name == "media_session" || name == "media_metadata_snapshot" || name == "favicon" ||
+          name == "security_state" || name == "user_scripts" ||
+          name == "link_peek" || name == "snapshot_viewport" ||
+-         name == "snapshot_full_page" || name == "script_evaluation" || name == "script_evaluation_identity" || name == "page_zoom" || name == "isolated_page_messages";
++         name == "snapshot_full_page" || name == "script_evaluation" || name == "script_evaluation_identity" || name == "page_zoom" || name == "isolated_page_messages" ||
++         name == "page_theme_color";
+ }
+ }  // namespace rearc
+ 
+@@ -1338,7 +1375,7 @@ ReArcStatus ReArcTabCaptureSnapshot(uint64_t id,
+                                     ReArcSnapshotCallback completion,
+                                     void* context) {
+   CHECK(pthread_main_np());
+-  if (!completion || scope > 1) {
++  if (!completion || scope > 2) {
+     return REARC_INVALID_ARGUMENT;
+   }
+   rearc::PageServices* page;
+@@ -1404,6 +1441,23 @@ void ReArcEngineSetZoomCallback(ReArcZoomCallback callback, void* context) {
+   rearc::zoom_callback = callback;
+   rearc::zoom_context = context;
+ }
++void ReArcEngineSetThemeColorCallback(ReArcThemeColorCallback callback, void* context) {
++  CHECK(pthread_main_np());
++  rearc::theme_color_callback = callback;
++  rearc::theme_color_context = context;
++}
++ReArcStatus ReArcTabGetThemeColor(uint64_t id, bool* has_color, uint32_t* argb) {
++  CHECK(pthread_main_np());
++  if (!has_color || !argb) return REARC_INVALID_ARGUMENT;
++  *has_color = false;
++  *argb = 0;
++  rearc::PageServices* page;
++  if (auto status = rearc::FindPage(id, &page)) return status;
++  const auto color = page->theme_color();
++  *has_color = color.has_value();
++  *argb = color.value_or(0);
++  return REARC_OK;
++}
+ ReArcStatus ReArcTabGetZoomFactor(uint64_t id, double* factor) {
+   CHECK(pthread_main_np());
+   if (!factor) return REARC_INVALID_ARGUMENT;
+-- 
+2.54.0 (Apple Git-157)
+

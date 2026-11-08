@@ -313,6 +313,12 @@ private let zoomCallback: ReArcZoomCallback = { context, event in
     MainActor.assumeIsolated { runtime(from: context).handleZoom(document: document, factor: factor) }
 }
 
+private let themeColorCallback: ReArcThemeColorCallback = { context, event in
+    guard let e = event?.pointee else { return }
+    let document = ChromiumDocumentIdentity(e.document), color = e.has_color ? PageColor(argb: e.argb) : nil
+    MainActor.assumeIsolated { runtime(from: context).handleThemeColor(document: document, color: color) }
+}
+
 private let pageMessageCallback: ReArcPageMessageCallback = { context, message in
     guard let m = message?.pointee, let json = m.json else { return }
     let copied = ChromiumPageMessage(
@@ -736,6 +742,9 @@ final class ChromiumRuntime {
         }
         if capabilities.isolatedPageMessages {
             ReArcEngineSetPageMessageCallback(pageMessageCallback, context)
+        }
+        if capabilities.pageThemeColor {
+            ReArcEngineSetThemeColorCallback(themeColorCallback, context)
         }
         if capabilities.findInPage {
             ReArcEngineSetFindCallback(findCallback, context)
@@ -1282,6 +1291,10 @@ final class ChromiumRuntime {
     fileprivate func handleZoom(document: ChromiumDocumentIdentity, factor: Double) {
         ChromiumLog.trace("zoom_event \(document) factor \(factor)")
         engines[document.tabID]?.value?.handleZoom(document: document, factor: factor)
+    }
+
+    fileprivate func handleThemeColor(document: ChromiumDocumentIdentity, color: PageColor?) {
+        engines[document.tabID]?.value?.handleThemeColor(document: document, color: color)
     }
 
     fileprivate func handleFind(tab: UInt64, contentGeneration: UInt64, event: FindInPageEvent) {

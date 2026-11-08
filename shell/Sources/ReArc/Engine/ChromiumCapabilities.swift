@@ -57,6 +57,8 @@ struct ChromiumCapabilities: Equatable {
     static let extensionSidePanelsFeature = "extension_side_panels"
     static let downloadHistoryFeature = "download_history"
     static let downloadEventBatchesFeature = "download_event_batches"
+    static let extensionTabGroupsFeature = "extension_tab_groups"
+    static let pageThemeColorFeature = "page_theme_color"
 
     /// ABI minor version that introduced each adopted feature (C-ABI.md).
     static let introducedIn: [String: UInt32] = [
@@ -110,6 +112,8 @@ struct ChromiumCapabilities: Equatable {
         extensionSidePanelsFeature: 47,
         downloadHistoryFeature: 48,
         downloadEventBatchesFeature: 49,
+        extensionTabGroupsFeature: 50,
+        pageThemeColorFeature: 51,
     ]
 
     /// nil when the engine does not export `ReArcEngineABIMinorVersion`.
@@ -225,6 +229,12 @@ struct ChromiumCapabilities: Equatable {
     /// Download events in batches with their items' times
     /// (`ReArcEngineSetDownloadBatchCallback`); requires `downloads`.
     var downloadEventBatches: Bool
+    /// Tab groups, tab events and window focus for extensions (Claude in
+    /// Chrome's anchor group); engine-only, nothing to register. Requires `extensionWindows`.
+    var extensionTabGroups: Bool
+    /// Theme-colour events and the top-edge snapshot for the toolbar colour
+    /// (`ReArcEngineSetThemeColorCallback`, snapshot scope 2).
+    var pageThemeColor: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
 
@@ -284,6 +294,8 @@ struct ChromiumCapabilities: Equatable {
         extensionSidePanels = extensionActions && adopted(Self.extensionSidePanelsFeature)
         downloadHistory = downloads && adopted(Self.downloadHistoryFeature)
         downloadEventBatches = downloads && adopted(Self.downloadEventBatchesFeature)
+        extensionTabGroups = extensionWindows && adopted(Self.extensionTabGroupsFeature)
+        pageThemeColor = adopted(Self.pageThemeColorFeature)
     }
 
     /// Inspect in the page menu: the shell opens a hosted frontend itself
@@ -362,6 +374,8 @@ struct ChromiumCapabilities: Equatable {
             (Self.extensionSidePanelsFeature, extensionSidePanels),
             (Self.downloadHistoryFeature, downloadHistory),
             (Self.downloadEventBatchesFeature, downloadEventBatches),
+            (Self.extensionTabGroupsFeature, extensionTabGroups),
+            (Self.pageThemeColorFeature, pageThemeColor),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

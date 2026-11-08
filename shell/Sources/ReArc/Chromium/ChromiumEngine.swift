@@ -101,6 +101,19 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     private(set) var attachmentID: UInt64?
     /// Browser page zoom from Chromium's zoom events (1.0 = 100%).
     private(set) var zoomFactor: Double = 1.0
+    /// The page's colour for the toolbar (ABI 1.51): its theme colour, else
+    /// its sampled top edge; nil keeps the toolbar's own look.
+    private(set) var pageColor: PageColor?
+    @ObservationIgnored private lazy var colorTracker: PageColorTracker = {
+        let tracker = PageColorTracker(
+            capture: { [weak self] in await self?.captureTopEdge() },
+            canSample: { [weak self] in self?.canSampleTopEdge ?? false }
+        )
+        tracker.onChange = { [weak self] in self?.pageColor = $0 }
+        return tracker
+    }()
+    /// Counts primary documents; the tracker drops a sample of an older one.
+    @ObservationIgnored private var documentCount: UInt64 = 0
     /// Completed boost plan installs; navigation waits for the in-flight one.
     private(set) var boostInstallCount = 0
     private(set) var navigationsDeferredForBoosts = 0
@@ -300,7 +313,10 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
             if changes.contains(.loading) {
                 let finished = isLoading && !event.isLoading
                 isLoading = event.isLoading
-                if finished { onNavigationCommit?(currentURL, pageTitle) }
+                if finished {
+                    onNavigationCommit?(currentURL, pageTitle)
+                    if runtime.capabilities.pageThemeColor { colorTracker.pageSettled() }
+                }
             }
         case .committed:
             guard event.isMainFrame else { return }
@@ -317,6 +333,10 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
                 applyPendingZoom()
                 pagePrompts.documentChanged()
                 onNavigationCommit?(currentURL, pageTitle)
+                if runtime.capabilities.pageThemeColor {
+                    documentCount += 1
+                    colorTracker.documentChanged(to: documentCount, isWebPage: ToolbarPageColorPreference.pageHasColor(currentURL))
+                }
             }
         case .failed:
             guard event.isMainFrame else { return }
@@ -350,6 +370,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
             // tab.closed is final: no later media event will report the session ended.
             if mediaState != .silent { mediaStateSubject.send(.silent) }
             if mediaCaptureSubject.value != .idle { mediaCaptureSubject.send(.idle) }
+            if runtime.capabilities.pageThemeColor { colorTracker.reset() }
         }
     }
 
@@ -911,6 +932,10 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
         guard host === changedHost else { return }
         self.attachmentID = attachmentID
         for display in displayHosts.compactMap(\.value) { display.updatePlaceholder() }
+        if attachmentID != nil, runtime.capabilities.pageThemeColor {
+            PageScrollSettleWatcher.shared.watch(changedHost) { [weak self] in self?.colorTracker.pageSettled() }
+            colorTracker.pageShown()
+        }
     }
 
     func hostAppeared(_ newHost: ChromiumHostView) {
@@ -923,6 +948,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     /// A host left (dismantled or its window closed). If it held the lease,
     /// another host still showing this tab takes it, preferring the key window.
     func hostDisappeared(_ oldHost: ChromiumHostView) {
+        PageScrollSettleWatcher.shared.unwatch(oldHost)
         displayHosts.removeAll { $0.value == nil || $0.value === oldHost }
         guard host === oldHost else { return }
         host = nil
@@ -952,6 +978,35 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
             let request = SnapshotRequest(continuation: continuation, contentGeneration: generation)
             let context = Unmanaged.passRetained(request).toOpaque()
             let status = ReArcTabCaptureSnapshot(tab, scope == .visible ? 0 : 1, snapshotCallback, context)
+            if status != .rearcOK {
+                Unmanaged<SnapshotRequest>.fromOpaque(context).release()
+                continuation.resume(throwing: ChromiumEngineError.rejected("snapshot", status))
+            }
+        }
+    }
+
+    // MARK: Toolbar colour (ABI 1.51)
+
+    func handleThemeColor(document: ChromiumDocumentIdentity, color: PageColor?) {
+        guard document.tabID == tabID, document.contentGeneration == contentGeneration || contentGeneration == 0 else { return }
+        colorTracker.themeColorChanged(ToolbarPageColorPreference.pageHasColor(currentURL) ? color : nil)
+    }
+
+    /// Shown in a window, on a web page: a hidden page's capture would wait for a frame.
+    private var canSampleTopEdge: Bool {
+        runtime.capabilities.pageThemeColor && tabID != 0 && attachmentID != nil && !isDiscarded && !isCrashed
+            && host?.window?.isVisible == true && ToolbarPageColorPreference.pageHasColor(currentURL)
+    }
+
+    /// The viewport's top 4 CSS px (snapshot scope 2); nil when busy or refused.
+    private func captureTopEdge() async -> Data? {
+        guard tabID != 0 else { return nil }
+        let tab = tabID
+        let generation = contentGeneration
+        return try? await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+            let request = SnapshotRequest(continuation: continuation, contentGeneration: generation)
+            let context = Unmanaged.passRetained(request).toOpaque()
+            let status = ReArcTabCaptureSnapshot(tab, 2, snapshotCallback, context)
             if status != .rearcOK {
                 Unmanaged<SnapshotRequest>.fromOpaque(context).release()
                 continuation.resume(throwing: ChromiumEngineError.rejected("snapshot", status))
