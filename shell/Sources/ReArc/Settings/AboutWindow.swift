@@ -57,7 +57,7 @@ enum AboutInfo {
     }
 
     static var copyright: String {
-        "Copyright © \(Calendar.current.component(.year, from: Date())) ReArc. All rights reserved."
+        "Copyright © \(Calendar.current.component(.year, from: Date())) Imara Ani LLC. All rights reserved."
     }
 }
 
