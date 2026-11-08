@@ -278,6 +278,7 @@ struct SiteControlsExtensionGrid: View {
     let engine: (any WebEngine)?
     let run: (String) -> Void
     let add: () -> Void
+    @Environment(\.displayScale) private var displayScale
 
     private let columns = Array(repeating: GridItem(.fixed(SiteControlCenterView.tile.width), spacing: SiteControlCenterView.spacing),
                                 count: SiteControlCenter.extensionColumns)
@@ -321,6 +322,9 @@ struct SiteControlsExtensionGrid: View {
                 }
             }
         }
+        // The list is the tab's last answer. Asked again on opening, so an
+        // extension that loaded after the tab first asked shows up (QA 2026-11-08 #20).
+        .task { controller.refresh(engine, scale: displayScale) }
     }
 }
 
