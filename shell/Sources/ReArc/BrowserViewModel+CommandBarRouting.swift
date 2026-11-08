@@ -95,9 +95,14 @@ extension BrowserViewModel {
     /// current tab, or steps it while it is open. Without Control held (the
     /// menu) it switches at once.
     func cycleRecentTabs(forward: Bool, controlHeld: Bool = NSEvent.modifierFlags.contains(.control)) {
+        guard keyBrowserWindowIsFront, !isCommandBarPresented else {
+            cancelTabSwitcher()
+            return
+        }
         PerfSignposts.interaction(.tabSwitcher, tabSwitcher == nil ? "open" : "step")
         if tabSwitcher != nil {
             tabSwitcher?.step(forward: forward)
+            if !controlHeld { commitTabSwitcher() }
             return
         }
         guard let session = TabSwitcherSession(items: store.recentTabSwitcherItems(), forward: forward),
@@ -127,7 +132,7 @@ extension BrowserViewModel {
     /// pressed while a page has focus (`ShortcutRouter`).
     func installTabSwitcherMonitor() {
         guard tabSwitcherMonitor == nil else { return }
-        tabSwitcherMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged, .leftMouseDown]) { [weak self] event in
+        tabSwitcherMonitor = ShellKeyMonitor(handle: { [weak self] event in
             guard let self else { return event }
             if event.type == .leftMouseDown {
                 // ⌥⌘-click routing on Chromium reads this (BrowserViewModel+LittleArcChrome).
@@ -138,16 +143,27 @@ extension BrowserViewModel {
             if self.handleDownloadsTrayEscape(event) { return nil }
             if self.handleLibraryEscape(event, pageHasFocus: self.shortcutRouter.pageHasFocus(event)) { return nil }
             return self.shortcutRouter.handleKeyDown(event) ? nil : event
-        }
+        }, onInterrupt: { [weak self] in self?.cancelTabSwitcher() })
         shortcutRouter.onPrompt = { [weak self] in self?.showShortcutPrompt($0) }
     }
 
     /// True when the event was the switcher's.
     func handleTabSwitcherEvent(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // A missed Control release (synthetic input, or focus lost mid-switch)
+        // must not let an abandoned session take the next field's Return/Esc.
+        // Use this event's flags, never the process-wide physical key state.
+        guard keyBrowserWindowIsFront, !isCommandBarPresented,
+              !(event.window is NSPanel), event.window?.attachedSheet == nil else {
+            cancelTabSwitcher()
+            return false
+        }
+        if event.type == .keyDown, !flags.contains(.control) {
+            cancelTabSwitcher()
+            return false
+        }
         switch event.type {
         case .keyDown where event.keyCode == 48 && flags.contains(.control) && !flags.contains(.command) && !flags.contains(.option):
-            guard keyBrowserWindowIsFront else { return false }
             cycleRecentTabs(forward: !flags.contains(.shift), controlHeld: true)
             return true
         case .keyDown where event.keyCode == 53 && tabSwitcher != nil:
@@ -159,6 +175,10 @@ extension BrowserViewModel {
         case .flagsChanged where tabSwitcher != nil && !flags.contains(.control):
             commitTabSwitcher()
             return false
+        case .keyDown:
+            // Any other shortcut or edit belongs to its normal destination.
+            cancelTabSwitcher()
+            return false
         default:
             return false
         }
@@ -167,5 +187,26 @@ extension BrowserViewModel {
     /// Ctrl+Tab belongs to browser windows, not private windows.
     private var keyBrowserWindowIsFront: Bool {
         keyPrivateWindow == nil && keyLittleArcID == nil
+    }
+}
+
+/// App-wide shell routing outlives each switcher: it also handles the downloads
+/// tray, Library and page shortcuts. Its owner removes all registrations when
+/// released; focus changes cancel the session even if Control's release is lost.
+final class ShellKeyMonitor {
+    private let monitor: Any?
+    private let observers: [NSObjectProtocol]
+
+    init(handle: @escaping (NSEvent) -> NSEvent?, onInterrupt: @escaping () -> Void) {
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged, .leftMouseDown], handler: handle)
+        observers = [NSApplication.didResignActiveNotification, NSWindow.didResignKeyNotification,
+                     NSWindow.didBecomeKeyNotification, NSWindow.willCloseNotification].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in onInterrupt() }
+        }
+    }
+
+    deinit {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        observers.forEach(NotificationCenter.default.removeObserver)
     }
 }
