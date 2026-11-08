@@ -265,7 +265,7 @@ final class BrowserViewModel {
     var splitMaximize = SplitPaneMaximizeState()
     /// The open Ctrl+Tab switcher.
     var tabSwitcher: TabSwitcherSession?
-    @ObservationIgnored var tabSwitcherMonitor: Any?
+    @ObservationIgnored var tabSwitcherMonitor: ShellKeyMonitor?
     /// Arc's shortcut priorities while a page has focus (wave 30).
     @ObservationIgnored let shortcutRouter = ShortcutRouter()
     /// Cycle Tab Backward/Forward's visit order (⌃⌘← / ⌃⌘→).
@@ -294,7 +294,11 @@ final class BrowserViewModel {
     @ObservationIgnored var lastCopiedLinkText: String?
     /// Copy URL's pasteboard (tests use a private one).
     @ObservationIgnored var linkPasteboard: NSPasteboard = .general
-    var isCommandBarPresented = false
+    var isCommandBarPresented = false {
+        didSet {
+            if isCommandBarPresented { cancelTabSwitcher() }
+        }
+    }
     var commandBarText = "" {
         didSet {
             // Deleting turns inline completion off until the next character (omnibox rule).
