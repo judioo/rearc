@@ -34,6 +34,14 @@ final class FullscreenEscapeTests: XCTestCase {
         XCTAssertEqual(state.press(at: 10.2, consumed: false), .showHint)
     }
 
+    /// With neither a page nor a field focused (a new split pane), the shell
+    /// keeps the first press: passed on, AppKit leaves full screen at once.
+    func testOnlyPageAndFieldsTakeTheFirstPress() {
+        XCTAssertTrue(FullscreenEscape.Focus.page.takesFirstPress)
+        XCTAssertTrue(FullscreenEscape.Focus.text.takesFirstPress)
+        XCTAssertFalse(FullscreenEscape.Focus.other.takesFirstPress)
+    }
+
     func testExitClearsArmedPress() {
         var state = FullscreenEscape()
         _ = state.setFullscreen(true)

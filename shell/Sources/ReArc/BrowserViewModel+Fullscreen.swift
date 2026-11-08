@@ -59,17 +59,19 @@ extension BrowserViewModel {
         fullscreenHintID = toast?.id
     }
 
-    /// Observes the first press without taking it away from AppKit or the page.
+    /// Observes the first press without taking it away from the page or a field.
     func handleFullscreenEscape(_ event: NSEvent) -> Bool {
         guard event.type == .keyDown, event.keyCode == 53, !event.isARepeat,
               let window = event.window else { return false }
+        let focus: FullscreenEscape.Focus = shortcutRouter.pageHasFocus(event) ? .page
+            : window.firstResponder is NSText ? .text : .other
         let consumed = isCommandBarPresented || peekSession != nil || tabSwitcher != nil
             || keyLittleArcID != nil || keyPrivateWindow != nil || window is NSPanel
             || window.attachedSheet != nil || inlineRename != nil || pendingRename != nil
             || renamingSplitID != nil || themePopoverSpaceID != nil || itemIconEditorID != nil
             || spaceEditorID != nil || profileEditorRequest != nil || isAirTrafficControlPresented
             || downloads.isTrayPresented || librarySection(in: store.keyWindowID) != nil
-            || (!shortcutRouter.pageHasFocus(event) && !findBar.isPresented)
+            || (focus == .text && !findBar.isPresented)
         let fullscreen = window.styleMask.contains(.fullScreen)
         _ = fullscreenEscapes[window.windowNumber, default: FullscreenEscape()].setFullscreen(fullscreen)
         let action = fullscreenEscapes[window.windowNumber, default: FullscreenEscape()]
@@ -78,7 +80,7 @@ extension BrowserViewModel {
         case .none: return false
         case .showHint:
             showFullscreenHint()
-            return false
+            return !focus.takesFirstPress
         case .exit:
             if let engine = focusedEngine as? PageFullscreenControlling, engine.isPageFullscreen {
                 engine.exitPageFullscreen()
