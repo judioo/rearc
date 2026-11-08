@@ -2,15 +2,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 import SidebarModel
 
-/// The sidebar's bottom bar as Arc draws it (THEMES.md §4.7): the Library
-/// (archive) button at the left, one 4 pt dot per space of this window's
-/// profile on a 9 pt pitch (the current space: its icon, or an 8 pt dot),
-/// and the "+" menu at the right, 17 pt in from each side and centred
-/// 24.5 pt above the window's bottom. Click a dot to switch, right-click
-/// for the space menu, drag to reorder, drop a sidebar item on one to move
-/// it there (hovering a drag over one switches to it). Downloads and the
-/// sync dot show only while they have something to say; the space and
-/// profile lists open from the "+" menu (SIDEBAR-SPEC §3.1.6, §4.3, §4.7).
+/// The sidebar's bottom bar: Library, the space switcher and the + menu.
+/// ReArc defaults to coloured circles; Settings also offers Arc's dots.
+/// Space menus, reordering and tab drop targets are shared by both styles.
 struct BottomBarView: View {
     let model: BrowserViewModel
     @Binding var draggedItemID: UUID?
@@ -263,14 +257,7 @@ struct BottomBarView: View {
     }
 }
 
-/// The space dots. Hover lives here so moving along the row redraws only the
-/// row: the hovered dot morphs into its space's icon and the current space's
-/// icon falls back to its larger dot, so one icon shows at a time (§5.2).
-/// The row reflows around the hovered dot, and `SpaceDotLayout` both sizes
-/// the dots and picks the hovered one, so the pointer, a click and the
-/// drawing agree on which dot is where.
-/// After a rest a chip above the dot names the space and its ⌃N, in the
-/// space's own colours; it moves straight to the next dot along the row.
+/// Both space switcher styles share the hover chip, menus and drag targets.
 private struct SpaceDotRow: View {
     let model: BrowserViewModel
     let current: Space
@@ -283,35 +270,53 @@ private struct SpaceDotRow: View {
 
     var body: some View {
         let spaces = model.store.spaces(in: current.profileID)
+        let circles = model.spaceIconStyle == .colouredCircles
         let appearances = SpaceDots.appearances(spaces: spaces, current: current.id, hovered: hoveredSpaceID)
         let layout = SpaceDotLayout(appearances: appearances, hovered: spaces.firstIndex { $0.id == hoveredSpaceID })
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 0) {
-                ForEach(Array(spaces.enumerated()), id: \.element.id) { index, space in
-                    SpaceIconButton(
-                        model: model,
-                        space: space,
-                        index: index,
-                        appearance: appearances[index],
-                        width: layout.widths[index],
-                        isLabelled: chip.shown == space.id,
-                        draggedItemID: $draggedItemID,
-                        draggedSpaceID: $draggedSpaceID
-                    )
+        let widths = circles ? SpaceCircles.widths(count: spaces.count) : layout.widths
+        ScrollViewReader { reader in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 0) {
+                    ForEach(Array(spaces.enumerated()), id: \.element.id) { index, space in
+                        SpaceIconButton(
+                            model: model,
+                            space: space,
+                            index: index,
+                            appearance: appearances[index],
+                            width: widths[index],
+                            isCircle: circles,
+                            isCurrent: space.id == current.id,
+                            isHovered: space.id == hoveredSpaceID,
+                            isLabelled: chip.shown == space.id,
+                            draggedItemID: $draggedItemID,
+                            draggedSpaceID: $draggedSpaceID
+                        )
+                        .id(space.id)
+                    }
+                }
+                .onContinuousHover { phase in
+                    switch phase {
+                    case let .active(location):
+                        let hitLayout = SpaceDotLayout(widths: widths)
+                        if circles {
+                            hover(hitLayout.index(at: location.x - hitLayout.width / 2).map { spaces[$0].id })
+                        } else {
+                            hover(SpaceDotLayout.hovered(at: location.x - layout.width / 2, spaces: spaces,
+                                                         current: current.id, hovered: hoveredSpaceID))
+                        }
+                    case .ended:
+                        hover(nil)
+                    }
                 }
             }
-            .onContinuousHover { phase in
-                switch phase {
-                case let .active(location):
-                    hover(SpaceDotLayout.hovered(at: location.x - layout.width / 2, spaces: spaces,
-                                                 current: current.id, hovered: hoveredSpaceID))
-                case .ended:
-                    hover(nil)
-                }
+            .frame(maxWidth: .infinity)
+            .frame(height: 28)
+            .onChange(of: current.id, initial: true) { _, id in reader.scrollTo(id, anchor: .center) }
+            .onChange(of: model.spaceIconStyle) { _, _ in
+                hover(nil)
+                reader.scrollTo(current.id, anchor: .center)
             }
         }
-        .frame(maxWidth: 140)
-        .fixedSize(horizontal: true, vertical: false)
         // Outside the scroll view, so the chip is not clipped to the row.
         .overlayPreferenceValue(SpaceDotChipAnchor.self) { anchor in
             if let anchor, let index = spaces.firstIndex(where: { $0.id == chip.shown }) {
@@ -363,6 +368,9 @@ private struct SpaceIconButton: View {
     let appearance: SpaceDotAppearance
     /// The dot's slot from `SpaceDotLayout`, which is also its hit area.
     let width: CGFloat
+    let isCircle: Bool
+    let isCurrent: Bool
+    let isHovered: Bool
     let isLabelled: Bool
     @Binding var draggedItemID: UUID?
     @Binding var draggedSpaceID: Space.ID?
@@ -377,7 +385,9 @@ private struct SpaceIconButton: View {
     var body: some View {
         Button { model.selectSpace(space.id) } label: {
             ZStack {
-                if appearance == .icon {
+                if isCircle {
+                    circleIcon
+                } else if appearance == .icon {
                     SpaceIconView(iconName: space.iconName, size: 11)
                         .foregroundStyle(chrome.accent)
                         .transition(morph)
@@ -404,6 +414,36 @@ private struct SpaceIconButton: View {
             return SidebarDragPayload.itemProvider(for: space.id)
         }
         .onDrop(of: [.plainText], delegate: SpaceIconDropDelegate(icon: self, isTargeted: $isTargeted))
+    }
+
+    private var circleInk: Color {
+        SpaceCircles.prefersLightInk(on: space.theme) ? .white : .black
+    }
+
+    private var circleIcon: some View {
+        ZStack {
+            Circle()
+                .fill(Color(space.theme))
+                .overlay { Circle().strokeBorder(circleInk.opacity(0.18), lineWidth: 0.5) }
+                .frame(width: SpaceCircles.diameter, height: SpaceCircles.diameter)
+            if !space.hasIcon {
+                Text(SpaceCircles.initial(for: space.name))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(circleInk)
+            } else if Space.isSymbolName(space.iconName) {
+                Image(systemName: space.iconName)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(circleInk)
+            } else {
+                Text(space.iconName).font(.system(size: 12))
+            }
+            if isCurrent {
+                Circle().stroke(chrome.accent, lineWidth: SpaceCircles.ringWidth)
+                    .frame(width: SpaceCircles.ringDiameter, height: SpaceCircles.ringDiameter)
+            }
+        }
+        .scaleEffect(isHovered && !reduceMotion ? 1.06 : 1)
+        .brightness(isHovered && reduceMotion ? 0.06 : 0)
     }
 
     private var morph: AnyTransition {

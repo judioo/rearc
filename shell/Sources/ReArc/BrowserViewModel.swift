@@ -108,6 +108,10 @@ final class BrowserViewModel {
         didSet { LittleArcArchivePreference.save(littleArcArchiveAfter, to: externalLinkDefaults) }
     }
     /// Settings › General › Warn before quitting (⌘Q only).
+    var spaceIconStyle = SpaceIconStyle.load(from: .standard) {
+        didSet { spaceIconStyle.save(to: externalLinkDefaults) }
+    }
+
     var warnBeforeQuitting = QuitWarning.isEnabled(in: .standard) {
         didSet { externalLinkDefaults.set(warnBeforeQuitting, forKey: QuitWarning.defaultsKey) }
     }

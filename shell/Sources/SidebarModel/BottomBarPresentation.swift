@@ -374,3 +374,23 @@ public struct AvailableUpdate: Equatable, Sendable {
     /// Arc's "New Arc Version Available" pill, in ReArc's words.
     public static let title = "New Version Available"
 }
+
+/// ReArc's intentional alternative to Arc's morphing dots.
+public enum SpaceCircles {
+    public static let diameter = 18.0
+    public static let slotWidth = 24.0
+    public static let ringDiameter = 23.0
+    public static let ringWidth = 1.5
+
+    public static func widths(count: Int) -> [Double] {
+        Array(repeating: slotWidth, count: max(count, 0))
+    }
+
+    public static func initial(for name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines).first.map { String($0).uppercased() } ?? "?"
+    }
+
+    public static func prefersLightInk(on theme: SpaceTheme) -> Bool {
+        PageColor(red: theme.red, green: theme.green, blue: theme.blue).prefersLightInk
+    }
+}

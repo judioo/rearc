@@ -211,6 +211,13 @@ struct GeneralSettingsPane: View {
                 }
             }
             SettingsBox {
+                SettingsRow(label: "Space icons") {
+                    Picker("Space icons", selection: $model.spaceIconStyle) {
+                        ForEach(SpaceIconStyle.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden().fixedSize()
+                }
                 SettingsRow(label: "Sidebar position", detail: "The traffic lights stay at the window's top left.") {
                     Picker("Sidebar position", selection: Binding(
                         get: { model.pendingSidebarSide ?? model.sidebarSide },

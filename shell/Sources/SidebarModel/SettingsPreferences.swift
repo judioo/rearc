@@ -72,3 +72,25 @@ public enum WindowRestorePreference {
         defaults.object(forKey: defaultsKey) as? Bool ?? true
     }
 }
+
+/// Settings › General: keep Arc's dots available alongside ReArc's circles.
+public enum SpaceIconStyle: String, CaseIterable, Sendable {
+    case colouredCircles, arcDots
+
+    public static let defaultsKey = "rearc.spaceIconStyle"
+
+    public var title: String {
+        switch self {
+        case .colouredCircles: return "Coloured circles (default)"
+        case .arcDots: return "Dots, as in Arc"
+        }
+    }
+
+    public static func load(from defaults: UserDefaults) -> Self {
+        defaults.string(forKey: defaultsKey).flatMap(Self.init(rawValue:)) ?? .colouredCircles
+    }
+
+    public func save(to defaults: UserDefaults) {
+        defaults.set(rawValue, forKey: Self.defaultsKey)
+    }
+}
