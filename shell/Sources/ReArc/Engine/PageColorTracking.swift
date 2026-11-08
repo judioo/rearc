@@ -69,6 +69,9 @@ final class PageColorTracker {
         }
     }
 
+    /// Main actor: a nonisolated async method would run on the global
+    /// executor, and the tracker's state belongs to the main thread.
+    @MainActor
     private func sample() async {
         guard canSample(), state.themeColor == nil else { return }
         sampling = true

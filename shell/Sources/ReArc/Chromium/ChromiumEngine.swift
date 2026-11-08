@@ -999,6 +999,8 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     }
 
     /// The viewport's top 4 CSS px (snapshot scope 2); nil when busy or refused.
+    /// Main actor: the engine CHECKs the snapshot call is on the main thread.
+    @MainActor
     private func captureTopEdge() async -> Data? {
         guard tabID != 0 else { return nil }
         let tab = tabID
