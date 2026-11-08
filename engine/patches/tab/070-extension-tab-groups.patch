@@ -1,0 +1,607 @@
+From c362c74ae98743b8bbab5e74da6d2ab34a17c7e8 Mon Sep 17 00:00:00 2001
+From: ReArc Overlay <overlay@rearc.invalid>
+Date: Sun, 8 Nov 2026 08:40:27 +0400
+Subject: [PATCH] P-TAB-001 extension tab groups: tabs.group and tabGroups for
+ registry tabs, tab events, window focus
+
+Claude in Chrome anchors its session in a tab group: it groups the side
+panel's tab with tabs.group and names it with tabGroups.update. Registry tabs
+have no TabStripModel, so both failed and every browser action reported
+"anchor tab group not established".
+
+Tab groups now live in the bridge, next to the logical extension windows:
+tabs.group (new group, or an existing one) and ungroup, tabGroups.get,
+query, update and move (in place only), the tabs groupId field and the
+tabs.query groupId filter, and the tabGroups onCreated, onUpdated and
+onRemoved events with tabs.onUpdated {groupId}. A group stays in one
+window: grouping a tab from another window is an error, since the host owns
+placement. A tab that leaves its window or the host's mapping leaves its
+group; the last tab out removes the group. Colours follow Chromium's order
+of unused colours. The host shows grouped tabs as ordinary tabs.
+
+Mapped tabs now send tabs.onCreated, onActivated, onRemoved and onUpdated
+(status on commit and on the first stop after it, url, title, mutedInfo),
+after TabsEventRouter::TabEntry; each listener's tab is looked up by ID at
+dispatch. windows.update focuses a window through the host's activation
+request (geometry and state are errors); windows.create accepts the popup
+type and ignores its geometry (the host opens a Little Arc); chrome://newtab
+in tabs.create and windows.create is the host's blank tab.
+
+ABI 1.50 extension_tab_groups, no new functions or structs. Bridge 0.53.0.
+
+Last rebased: 2026-11-08 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../api/tab_groups/tab_groups_api.cc          |  38 +++
+ .../browser/extensions/api/tabs/tabs_api.cc   |  46 +++-
+ .../browser/rearc_bridge/rearc_engine_abi.h   |   7 +-
+ .../browser/rearc_bridge/rearc_engine_abi.mm  |   1 +
+ .../rearc_bridge/rearc_engine_entry_mac.mm    |   2 +-
+ .../rearc_bridge/rearc_extension_windows.cc   | 240 +++++++++++++++++-
+ .../rearc_bridge/rearc_extension_windows.h    |  15 ++
+ 7 files changed, 335 insertions(+), 14 deletions(-)
+
+diff --git a/chrome/browser/extensions/api/tab_groups/tab_groups_api.cc b/chrome/browser/extensions/api/tab_groups/tab_groups_api.cc
+index 36cb957c10..f0c51aff65 100644
+--- a/chrome/browser/extensions/api/tab_groups/tab_groups_api.cc
++++ b/chrome/browser/extensions/api/tab_groups/tab_groups_api.cc
+@@ -3,6 +3,10 @@
+ // found in the LICENSE file.
+ 
+ #include "chrome/browser/extensions/api/tab_groups/tab_groups_api.h"
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/rearc_bridge/engine_mode.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
++#endif
+ 
+ #include <memory>
+ #include <string>
+@@ -99,6 +103,14 @@ ExtensionFunction::ResponseAction TabGroupsGetFunction::Run() {
+ 
+   EXTENSION_FUNCTION_VALIDATE(params);
+   int group_id = params->group_id;
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    std::string error;
++    auto group = rearc::GetExtensionGroup(this, group_id, &error);
++    if (!group) return RespondNow(Error(std::move(error)));
++    return RespondNow(ArgumentList(api::tab_groups::Get::Results::Create(*group)));
++  }
++#endif
+ 
+   tab_groups::TabGroupId id = tab_groups::TabGroupId::CreateEmpty();
+   tab_groups::TabGroupVisualData visual_data;
+@@ -120,6 +132,10 @@ ExtensionFunction::ResponseAction TabGroupsQueryFunction::Run() {
+       api::tab_groups::Query::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
+ 
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode())
++    return RespondNow(WithArguments(rearc::QueryExtensionGroups(this, params->query_info)));
++#endif
+   base::ListValue result_list;
+   Profile* profile = Profile::FromBrowserContext(browser_context());
+ 
+@@ -222,6 +238,15 @@ ExtensionFunction::ResponseAction TabGroupsUpdateFunction::Run() {
+   EXTENSION_FUNCTION_VALIDATE(params);
+ 
+   int group_id = params->group_id;
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    std::string error;
++    auto group = rearc::UpdateExtensionGroup(this, group_id, params->update_properties, &error);
++    if (!group) return RespondNow(Error(std::move(error)));
++    if (!has_callback()) return RespondNow(NoArguments());
++    return RespondNow(ArgumentList(api::tab_groups::Get::Results::Create(*group)));
++  }
++#endif
+   WindowController* window = nullptr;
+   tab_groups::TabGroupId id = tab_groups::TabGroupId::CreateEmpty();
+   tab_groups::TabGroupVisualData visual_data;
+@@ -322,6 +347,19 @@ ExtensionFunction::ResponseAction TabGroupsMoveFunction::Run() {
+   int group_id = params->group_id;
+   int new_index = params->move_properties.index;
+   const auto& window_id = params->move_properties.window_id;
++#if BUILDFLAG(IS_MAC)
++  // Registry tabs have no strip order to move within; a group stays in its
++  // window, so a move there is accepted and changes nothing.
++  if (rearc::IsEngineEmbeddedMode()) {
++    std::string error;
++    auto group = rearc::GetExtensionGroup(this, group_id, &error);
++    if (!group) return RespondNow(Error(std::move(error)));
++    if (window_id && *window_id != group->window_id)
++      return RespondNow(Error("Moving a group to another window is unsupported."));
++    if (!has_callback()) return RespondNow(NoArguments());
++    return RespondNow(ArgumentList(api::tab_groups::Move::Results::Create(*group)));
++  }
++#endif
+ 
+   tab_groups::TabGroupId group = tab_groups::TabGroupId::CreateEmpty();
+   bool cross_window = false;
+diff --git a/chrome/browser/extensions/api/tabs/tabs_api.cc b/chrome/browser/extensions/api/tabs/tabs_api.cc
+index 4721918e09..09daf7bf5d 100644
+--- a/chrome/browser/extensions/api/tabs/tabs_api.cc
++++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
+@@ -1049,9 +1049,12 @@ ExtensionFunction::ResponseAction WindowsCreateFunction::Run() {
+ #if BUILDFLAG(IS_MAC)
+   if (rearc::IsEngineEmbeddedMode()) {
+     auto* profile = Profile::FromBrowserContext(browser_context());
+-    if (create_data_ && (create_data_->tab_id || create_data_->left || create_data_->top ||
+-        create_data_->width || create_data_->height || create_data_->state != windows::WindowState::kNone ||
+-        (create_data_->type != windows::CreateType::kNone && create_data_->type != windows::CreateType::kNormal) ||
++    // A popup's type and geometry are ignored: the host opens every extension
++    // window as a Little Arc (ABI 1.50, for Claude's sign-in and prompt popups).
++    if (create_data_ && (create_data_->tab_id ||
++        (create_data_->state != windows::WindowState::kNone && create_data_->state != windows::WindowState::kNormal) ||
++        (create_data_->type != windows::CreateType::kNone && create_data_->type != windows::CreateType::kNormal &&
++         create_data_->type != windows::CreateType::kPopup) ||
+         (create_data_->incognito && *create_data_->incognito != profile->IsOffTheRecord())))
+       return RespondNow(Error("Unsupported shell window creation properties."));
+     std::string url_string = "about:blank";
+@@ -1628,12 +1631,18 @@ void WindowsCreateFunction::OnBocaWindowCreatedAsynchronously(
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
+ ExtensionFunction::ResponseAction WindowsUpdateFunction::Run() {
+-#if BUILDFLAG(IS_MAC)
+-  if (rearc::IsEngineEmbeddedMode()) return RespondNow(Error("Shell window mutation is unsupported."));
+-#endif
+   std::optional<windows::Update::Params> params =
+       windows::Update::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    rearc::UpdateExtensionWindow(this, params->window_id, params->update_info,
++      base::BindOnce([](scoped_refptr<WindowsUpdateFunction> self, std::optional<base::DictValue> window, std::string error) {
++        self->Respond(window ? self->WithArguments(std::move(*window)) : self->Error(std::move(error)));
++      }, base::WrapRefCounted(this)));
++    return did_respond() ? AlreadyResponded() : RespondLater();
++  }
++#endif
+ 
+   WindowController* window_controller = nullptr;
+   std::string error;
+@@ -3509,6 +3518,21 @@ ExtensionFunction::ResponseAction TabsGroupFunction::Run() {
+   std::optional<tabs::Group::Params> params =
+       tabs::Group::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    if (params->options.group_id && params->options.create_properties)
++      return RespondNow(Error(tabs_constants::kGroupParamsError));
++    std::vector<int> ids;
++    if (params->options.tab_ids.as_integers) ids = *params->options.tab_ids.as_integers;
++    else if (params->options.tab_ids.as_integer) ids.push_back(*params->options.tab_ids.as_integer);
++    std::optional<int> window;
++    if (params->options.create_properties) window = params->options.create_properties->window_id;
++    std::string error;
++    int group = rearc::GroupExtensionTabs(this, ids, params->options.group_id, window, &error);
++    if (group < 0) return RespondNow(Error(std::move(error)));
++    return RespondNow(ArgumentList(tabs::Group::Results::Create(group)));
++  }
++#endif
+ 
+   std::string error;
+ 
+@@ -3656,6 +3680,16 @@ ExtensionFunction::ResponseAction TabsUngroupFunction::Run() {
+   std::optional<tabs::Ungroup::Params> params =
+       tabs::Ungroup::Params::Create(args());
+   EXTENSION_FUNCTION_VALIDATE(params);
++#if BUILDFLAG(IS_MAC)
++  if (rearc::IsEngineEmbeddedMode()) {
++    std::vector<int> ids;
++    if (params->tab_ids.as_integers) ids = *params->tab_ids.as_integers;
++    else if (params->tab_ids.as_integer) ids.push_back(*params->tab_ids.as_integer);
++    std::string error;
++    if (!rearc::UngroupExtensionTabs(this, ids, &error)) return RespondNow(Error(std::move(error)));
++    return RespondNow(NoArguments());
++  }
++#endif
+ 
+   std::vector<int> tab_ids;
+   if (params->tab_ids.as_integers) {
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 2d438106a8..4501b02807 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 49, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 50, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -1138,6 +1138,11 @@ typedef struct ReArcExtensionTabState {
+ } ReArcExtensionTabState;
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabSetExtensionWindow(uint64_t tab_id, int32_t window_id, bool active, bool focused);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabGetExtensionState(uint64_t tab_id, ReArcExtensionTabState* state);
++// Extension tab groups (extension_tab_groups, ABI 1.50): tabs.group/ungroup,
++// tabGroups.get/query/update/move and tab/group events for mapped tabs, kept in
++// the engine. A group stays in one window and ends with its last tab; a tab
++// that leaves its window (or the host's mapping) leaves its group. No new
++// functions: the host shows grouped tabs as ordinary tabs.
+ // kind: 0 tabs.create, 1 windows.create, 2 options page, 3 activate existing.
+ // phase: 0 request, 1 withdrawn. Borrowed strings during callback only.
+ // opener_tab_id and tab_id are bridge IDs. window_id=0 means current space.
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 71fa557152..355b393aeb 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -599,6 +599,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "autofill_suggestions" ||
+          std::string(feature) == "password_leak_detection" ||
+          std::string(feature) == "extension_windows" ||
++         std::string(feature) == "extension_tab_groups" ||
+          std::string(feature) == "autofill_save_prompts" ||
+          std::string(feature) == "http_auth" ||
+          std::string(feature) == "link_open_requests" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 0dcef70e62..dfd479c9f4 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.52.0";
++  return "0.53.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_windows.cc b/chrome/browser/rearc_bridge/rearc_extension_windows.cc
+index c1f89966a8..81fbc263fb 100644
+--- a/chrome/browser/rearc_bridge/rearc_extension_windows.cc
++++ b/chrome/browser/rearc_bridge/rearc_extension_windows.cc
+@@ -10,6 +10,7 @@
+ #include "base/functional/bind.h"
+ #include "base/no_destructor.h"
+ #include "base/strings/pattern.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/time/time.h"
+ #include "chrome/browser/extensions/extension_tab_util.h"
+@@ -18,19 +19,26 @@
+ #include "chrome/browser/rearc_bridge/rearc_profile_registry.h"
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
+ #include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
+ #include "content/public/browser/page_navigator.h"
+ #include "content/public/common/referrer.h"
+ #include "content/public/browser/site_instance.h"
+ #include "url/origin.h"
++#include "url/url_constants.h"
++#include "extensions/browser/event_router.h"
+ #include "extensions/browser/extension_function.h"
+ #include "extensions/browser/view_type_utils.h"
+ #include "extensions/common/mojom/view_type.mojom.h"
+ #include "extensions/common/url_pattern_set.h"
+ namespace rearc {
+ namespace {
+-struct State { int window; bool active; };
++struct State { int window; bool active; int group = -1; };
++namespace groups = extensions::api::tab_groups;
++struct Group { int window; uint64_t profile; std::string title; groups::Color color; bool collapsed; };
++auto& Groups() { static base::NoDestructor<std::map<int, Group>> g; return *g; }
++int next_group = 1;
+ auto& States() { static base::NoDestructor<std::map<uint64_t, State>> s; return *s; }
+ int focused_window = 0;
+ ReArcExtensionTabRequestCallback host = nullptr;
+@@ -52,6 +60,73 @@ struct Request {
+   std::unique_ptr<LinkNavigation> link;
+ };
+ auto& Requests() { static base::NoDestructor<std::map<uint64_t, Request>> r; return *r; }
++void Broadcast(content::BrowserContext* browser_context, extensions::events::HistogramValue histogram, const std::string& name, base::ListValue args) {
++  if (auto* router = extensions::EventRouter::Get(browser_context))
++    router->BroadcastEvent(std::make_unique<extensions::Event>(histogram, name, std::move(args), browser_context));
++}
++// The tab is looked up again when the event reaches each extension, as
++// TabsEventRouter does, but by ID: a lazy listener may run after the tab closed.
++void BroadcastTab(content::WebContents* c, extensions::events::HistogramValue histogram, const std::string& name, std::set<std::string> keys) {
++  auto event = std::make_unique<extensions::Event>(histogram, name, base::ListValue(), c->GetBrowserContext());
++  event->user_gesture = extensions::EventRouter::UserGestureState::kNotEnabled;
++  event->will_dispatch_callback = base::BindRepeating([](int id, const std::set<std::string>& keys, bool created,
++      content::BrowserContext* browser_context, extensions::mojom::ContextType target, const extensions::Extension* extension,
++      const base::DictValue*, std::optional<base::ListValue>& args, extensions::mojom::EventFilteringInfoPtr&, bool*) {
++    content::WebContents* c = nullptr;
++    if (!extensions::ExtensionTabUtil::GetTabById(id, browser_context, true, &c) || !c) return false;
++    auto tab = extensions::ExtensionTabUtil::CreateTabObject(c,
++        extensions::ExtensionTabUtil::GetScrubTabBehavior(extension, target, c), extension).ToValue();
++    args.emplace();
++    if (created) { args->Append(std::move(tab)); return true; }
++    base::DictValue changed;
++    for (const auto& key : keys) if (const auto* value = tab.Find(key)) changed.Set(key, value->Clone());
++    args->Append(id); args->Append(std::move(changed)); args->Append(std::move(tab));
++    return true;
++  }, extensions::ExtensionTabUtil::GetTabId(c), std::move(keys), histogram == extensions::events::TABS_ON_CREATED);
++  if (auto* router = extensions::EventRouter::Get(c->GetBrowserContext())) router->BroadcastEvent(std::move(event));
++}
++void TabUpdated(content::WebContents* c, std::set<std::string> keys) {
++  BroadcastTab(c, extensions::events::TABS_ON_UPDATED, extensions::api::tabs::OnUpdated::kEventName, std::move(keys));
++}
++// tabs.onUpdated for registry tabs in a logical window, after
++// TabsEventRouter::TabEntry: status on commit and on the first stop after it.
++class TabEvents : public content::WebContentsObserver {
++ public:
++  explicit TabEvents(content::WebContents* c) : WebContentsObserver(c), url_(c->GetURL()) {}
++  void NavigationEntryCommitted(const content::LoadCommittedDetails&) override { waiting_ = true; Changed({"status"}); }
++  void DidStopLoading() override { if (!waiting_) return; waiting_ = false; Changed({"status"}); }
++  void TitleWasSet(content::NavigationEntry*) override { TabUpdated(web_contents(), {"title"}); }
++  void DidUpdateAudioMutingState(bool) override { TabUpdated(web_contents(), {"mutedInfo"}); }
++ private:
++  void Changed(std::set<std::string> keys) {
++    if (web_contents()->GetURL() != url_) { url_ = web_contents()->GetURL(); keys.insert("url"); }
++    TabUpdated(web_contents(), std::move(keys));
++  }
++  GURL url_;
++  bool waiting_ = false;
++};
++auto& Observers() { static base::NoDestructor<std::map<uint64_t, std::unique_ptr<TabEvents>>> o; return *o; }
++groups::TabGroup GroupObject(int id, const Group& g) {
++  groups::TabGroup group; group.id = id; group.collapsed = g.collapsed; group.color = g.color;
++  group.title = g.title; group.window_id = g.window; group.shared = false; return group;
++}
++void BroadcastGroup(content::BrowserContext* browser_context, extensions::events::HistogramValue histogram, const std::string& name, int id) {
++  auto it = Groups().find(id); if (it == Groups().end()) return;
++  base::ListValue args; args.Append(GroupObject(id, it->second).ToValue());
++  Broadcast(browser_context, histogram, name, std::move(args));
++}
++// Moves a tab to group (-1: none). An emptied group is removed. Events are
++// sent unless the tab is closing (its onRemoved stands for the change).
++void SetGroup(uint64_t id, int group, bool events) {
++  auto it = States().find(id); if (it == States().end() || it->second.group == group) return;
++  int old = it->second.group; it->second.group = group;
++  auto* s = TabRegistry::Get().FindSession(id); if (!s) return;
++  if (events) TabUpdated(s->web_contents(), {"groupId"});
++  if (old < 0) return;
++  for (const auto& [other, state] : States()) if (state.group == old) return;
++  BroadcastGroup(s->web_contents()->GetBrowserContext(), extensions::events::TAB_GROUPS_ON_REMOVED, groups::OnRemoved::kEventName, old);
++  Groups().erase(old);
++}
+ bool Open(TabSession* s) {
+   return s && s->close_state() == TabSession::CloseState::kOpen &&
+     extensions::GetViewType(s->web_contents()) == extensions::mojom::ViewType::kTabContents;
+@@ -99,6 +174,7 @@ void DecorateExtensionTab(content::WebContents* c, extensions::api::tabs::Tab& t
+   auto* s = ExtensionSession(c); if (!s) return;
+   auto it = States().find(s->tab_id()); if (it == States().end()) return;
+   tab.window_id = it->second.window;
++  tab.group_id = it->second.group;
+   tab.active = it->second.active; tab.selected = tab.active; tab.highlighted = tab.active;
+   tab.index = 0;
+   for (auto id : TabRegistry::Get().SessionIds()) {
+@@ -134,7 +210,7 @@ base::ListValue QueryExtensionTabs(ExtensionFunction* f, const extensions::api::
+         !matches(q.current_window,tab.window_id == current_window) || !matches(q.last_focused_window,tab.window_id == focused_window) ||
+         !matches(q.pinned,false) || !matches(q.audible,tab.audible.value_or(false)) || !matches(q.muted,c->IsAudioMuted()) ||
+         !matches(q.discarded,c->WasDiscarded()) || !matches(q.frozen,false) || !matches(q.auto_discardable,true) ||
+-        (q.group_id && *q.group_id != -1) || (q.split_view_id && *q.split_view_id != -1) ||
++        (q.group_id && *q.group_id != tab.group_id) || (q.split_view_id && *q.split_view_id != -1) ||
+         (q.window_type != extensions::api::tabs::WindowType::kNone && q.window_type != extensions::api::tabs::WindowType::kNormal) ||
+         (q.status != extensions::api::tabs::TabStatus::kNone && q.status != tab.status)) continue;
+     if (q.title && !q.title->empty() && (!tab.title || !base::MatchPattern(*tab.title,*q.title))) continue;
+@@ -166,8 +242,11 @@ base::ListValue QueryExtensionWindows(ExtensionFunction* f, int window, bool pop
+   }
+   return result;
+ }
+-void RequestExtensionTab(Profile* p, const std::string& extension, const GURL& url, bool active, uint64_t opener, int window, uint32_t kind, uint64_t tab, base::OnceCallback<void(content::WebContents*)> done) {
++void RequestExtensionTab(Profile* p, const std::string& extension, const GURL& requested, bool active, uint64_t opener, int window, uint32_t kind, uint64_t tab, base::OnceCallback<void(content::WebContents*)> done) {
+   uint64_t profile = BridgeProfileId(p);
++  // The host's new tab is its blank tab; chrome://newtab is not admitted.
++  const GURL url = requested.SchemeIs("chrome") && (requested.host() == "newtab" || requested.host() == "new-tab-page")
++      ? GURL(url::kAboutBlankURL) : requested;
+   if (!host || !profile || Requests().size() >= 64 || (!url.is_empty() && ABIValidateNavigationURL(url) != REARC_OK && !(url.SchemeIs("chrome-extension") && url.host() == extension))) {
+     ABIPost(base::BindOnce(std::move(done),nullptr)); return;
+   }
+@@ -201,7 +280,142 @@ void ABICancelExtensionTabs(uint64_t tab, uint64_t profile) {
+   std::vector<uint64_t> ids;
+   for (auto& [id,r] : Requests()) if ((tab && (r.event.tab_id == tab || r.event.opener_tab_id == tab)) || (profile && r.event.profile_id == profile)) ids.push_back(id);
+   for (auto id : ids) Cancel(id);
+-  if (tab) States().erase(tab);
++  if (profile) {
++    std::erase_if(Groups(), [&](const auto& g) { return g.second.profile == profile; });
++    for (auto& [id, state] : States()) if (!Groups().contains(state.group)) state.group = -1;
++  }
++  auto state = States().find(tab); if (!tab || state == States().end()) return;
++  if (auto* s = TabRegistry::Get().FindSession(tab)) {
++    base::ListValue args; args.Append(extensions::ExtensionTabUtil::GetTabId(s->web_contents()));
++    base::DictValue info; info.Set("windowId", state->second.window); info.Set("isWindowClosing", false);
++    args.Append(std::move(info));
++    Broadcast(s->web_contents()->GetBrowserContext(), extensions::events::TABS_ON_REMOVED, extensions::api::tabs::OnRemoved::kEventName, std::move(args));
++  }
++  SetGroup(tab, -1, false);
++  Observers().erase(tab);
++  States().erase(tab);
++}
++namespace {
++// Resolves extension tab IDs to mapped registry tabs the function may see.
++bool MappedTabs(ExtensionFunction* f, const std::vector<int>& ids, std::vector<uint64_t>* out, std::string* error) {
++  for (int id : ids) {
++    content::WebContents* c = nullptr;
++    TabSession* s = nullptr;
++    if (extensions::ExtensionTabUtil::GetTabById(id, f->browser_context(), f->include_incognito_information(), &c)) s = ExtensionSession(c);
++    if (!s || !Visible(f, s)) { *error = "No tab with id: " + base::NumberToString(id) + "."; return false; }
++    out->push_back(s->tab_id());
++  }
++  return true;
++}
++// A group is visible when one of its tabs is.
++bool VisibleGroup(ExtensionFunction* f, int id) {
++  for (const auto& [tab, state] : States()) {
++    auto* s = TabRegistry::Get().FindSession(tab);
++    if (state.group == id && s && Visible(f, s)) return true;
++  }
++  return false;
++}
++int CurrentWindow(ExtensionFunction* f) {
++  auto* s = ExtensionSession(ActiveExtensionContents(Profile::FromBrowserContext(f->browser_context())));
++  return s ? States().at(s->tab_id()).window : 0;
++}
++std::string GroupNotFound(int id) { return "No group with id: " + base::NumberToString(id) + "."; }
++}  // namespace
++int GroupExtensionTabs(ExtensionFunction* f, const std::vector<int>& ids, std::optional<int> group_id, std::optional<int> window_id, std::string* error) {
++  std::vector<uint64_t> tabs;
++  if (ids.empty() || !MappedTabs(f, ids, &tabs, error)) { if (error->empty()) *error = "No tabs to group."; return -1; }
++  int window = States().at(tabs[0]).window;
++  if (group_id) {
++    if (!Groups().contains(*group_id) || !VisibleGroup(f, *group_id)) { *error = GroupNotFound(*group_id); return -1; }
++    window = Groups().at(*group_id).window;
++  } else if (window_id) {
++    window = *window_id == -2 ? CurrentWindow(f) : *window_id;
++  }
++  // Chromium would move the tabs; the host owns placement, so they must
++  // already be in the group's window.
++  for (auto tab : tabs) if (States().at(tab).window != window) { *error = "Tabs can only be grouped within their window."; return -1; }
++  auto* contents = TabRegistry::Get().FindSession(tabs[0])->web_contents();
++  int group = group_id.value_or(0);
++  if (!group_id) {
++    std::set<groups::Color> used;
++    for (const auto& [id, g] : Groups()) used.insert(g.color);
++    groups::Color color = groups::Color::kGrey;
++    for (auto c : {groups::Color::kGrey, groups::Color::kBlue, groups::Color::kRed, groups::Color::kYellow, groups::Color::kGreen,
++                   groups::Color::kPink, groups::Color::kPurple, groups::Color::kCyan, groups::Color::kOrange})
++      if (!used.contains(c)) { color = c; break; }
++    group = next_group++;
++    Groups()[group] = {window, BridgeProfileId(Profile::FromBrowserContext(contents->GetBrowserContext())), "", color, false};
++    BroadcastGroup(contents->GetBrowserContext(), extensions::events::TAB_GROUPS_ON_CREATED, groups::OnCreated::kEventName, group);
++  }
++  for (auto tab : tabs) SetGroup(tab, group, true);
++  return group;
++}
++bool UngroupExtensionTabs(ExtensionFunction* f, const std::vector<int>& ids, std::string* error) {
++  std::vector<uint64_t> tabs;
++  if (!MappedTabs(f, ids, &tabs, error)) return false;
++  for (auto tab : tabs) SetGroup(tab, -1, true);
++  return true;
++}
++std::optional<groups::TabGroup> GetExtensionGroup(ExtensionFunction* f, int id, std::string* error) {
++  auto it = Groups().find(id);
++  if (it == Groups().end() || !VisibleGroup(f, id)) { *error = GroupNotFound(id); return std::nullopt; }
++  return GroupObject(id, it->second);
++}
++base::ListValue QueryExtensionGroups(ExtensionFunction* f, const groups::Query::Params::QueryInfo& q) {
++  base::ListValue result;
++  int current = q.window_id && *q.window_id == -2 ? CurrentWindow(f) : 0;
++  for (const auto& [id, g] : Groups()) {
++    if (!VisibleGroup(f, id) || (q.collapsed && *q.collapsed != g.collapsed) ||
++        (q.color != groups::Color::kNone && q.color != g.color) || (q.shared && *q.shared) ||
++        (q.window_id && (*q.window_id == -2 ? g.window != current : *q.window_id >= 0 && *q.window_id != g.window)) ||
++        (q.title && !base::MatchPattern(g.title, *q.title))) continue;
++    result.Append(GroupObject(id, g).ToValue());
++  }
++  return result;
++}
++std::optional<groups::TabGroup> UpdateExtensionGroup(ExtensionFunction* f, int id, const groups::Update::Params::UpdateProperties& u, std::string* error) {
++  auto group = GetExtensionGroup(f, id, error); if (!group) return std::nullopt;
++  auto& g = Groups().at(id);
++  const Group before = g;
++  if (u.collapsed) g.collapsed = *u.collapsed;
++  if (u.color != groups::Color::kNone) g.color = u.color;
++  if (u.title) g.title = *u.title;
++  if (g.collapsed != before.collapsed || g.color != before.color || g.title != before.title)
++    BroadcastGroup(f->browser_context(), extensions::events::TAB_GROUPS_ON_UPDATED, groups::OnUpdated::kEventName, id);
++  return GroupObject(id, g);
++}
++void UpdateExtensionWindow(ExtensionFunction* f, int window, const extensions::api::windows::Update::Params::UpdateInfo& u,
++    base::OnceCallback<void(std::optional<base::DictValue>, std::string)> done) {
++  if (u.left || u.top || u.width || u.height ||
++      (u.state != extensions::api::windows::WindowState::kNone && u.state != extensions::api::windows::WindowState::kNormal)) {
++    std::move(done).Run(std::nullopt, "Shell windows have no geometry or state."); return;
++  }
++  auto values = QueryExtensionWindows(f, window, false);
++  if (values.empty()) { std::move(done).Run(std::nullopt, "No matching shell window."); return; }
++  window = *values[0].GetDict().FindInt("id");
++  auto respond = [](scoped_refptr<ExtensionFunction> f, int window, base::OnceCallback<void(std::optional<base::DictValue>, std::string)> done) {
++    auto values = QueryExtensionWindows(f.get(), window, false);
++    if (values.empty()) std::move(done).Run(std::nullopt, "No matching shell window.");
++    else std::move(done).Run(std::move(values[0]).TakeDict(), "");
++  };
++  // Focus selects the window's active tab through the host, which brings its
++  // space forward; unfocusing and drawAttention have no shell meaning.
++  uint64_t active = 0;
++  for (const auto& [id, state] : States()) {
++    auto* s = TabRegistry::Get().FindSession(id);
++    if (state.window == window && state.active && s && Visible(f, s)) active = id;
++  }
++  if (!u.focused.value_or(false) || focused_window == window || !active) {
++    respond(base::WrapRefCounted(f), window, std::move(done)); return;
++  }
++  auto* s = TabRegistry::Get().FindSession(active);
++  RequestExtensionTab(Profile::FromBrowserContext(s->web_contents()->GetBrowserContext()), f->extension() ? f->extension()->id() : "",
++      GURL(), true, 0, 0, 3, active,
++      base::BindOnce([](decltype(respond) respond, scoped_refptr<ExtensionFunction> f, int window,
++          base::OnceCallback<void(std::optional<base::DictValue>, std::string)> done, content::WebContents* c) {
++        if (!c) { std::move(done).Run(std::nullopt, "Shell activation cancelled."); return; }
++        respond(f, window, std::move(done));
++      }, respond, base::WrapRefCounted(f), window, std::move(done)));
+ }
+ }
+ ReArcStatus ReArcTabSetExtensionWindow(uint64_t id, int32_t window, bool active, bool focused) {
+@@ -213,11 +427,25 @@ ReArcStatus ReArcTabSetExtensionWindow(uint64_t id, int32_t window, bool active,
+     auto* candidate = rearc::TabRegistry::Get().FindSession(other);
+     if (window && candidate && state.window == window && candidate->profile_id() != s->profile_id()) return REARC_INVALID_ARGUMENT;
+   }
+-  if (!window) { rearc::States().erase(id); return REARC_OK; }
++  auto previous = rearc::States().find(id);
++  if (previous != rearc::States().end() && previous->second.window != window) rearc::SetGroup(id, -1, true);
++  if (!window) { rearc::Observers().erase(id); rearc::States().erase(id); return REARC_OK; }
++  const bool created = previous == rearc::States().end();
++  const bool activated = active && (created || !previous->second.active || previous->second.window != window);
+   if (active) for (auto& [other,state] : rearc::States()) if (state.window == window) state.active = false;
+-  rearc::States()[id] = {window,active};
++  auto& state = rearc::States()[id];
++  state.window = window; state.active = active;
+   if (focused) rearc::focused_window = window;
+   else if (rearc::focused_window == window) rearc::focused_window = 0;
++  auto* c = s->web_contents();
++  auto& observer = rearc::Observers()[id];
++  if (!observer || observer->web_contents() != c) observer = std::make_unique<rearc::TabEvents>(c);
++  if (created) rearc::BroadcastTab(c, extensions::events::TABS_ON_CREATED, extensions::api::tabs::OnCreated::kEventName, {});
++  if (activated) {
++    base::DictValue info; info.Set("tabId", extensions::ExtensionTabUtil::GetTabId(c)); info.Set("windowId", window);
++    base::ListValue args; args.Append(std::move(info));
++    rearc::Broadcast(c->GetBrowserContext(), extensions::events::TABS_ON_ACTIVATED, extensions::api::tabs::OnActivated::kEventName, std::move(args));
++  }
+   return REARC_OK;
+ }
+ ReArcStatus ReArcTabGetExtensionState(uint64_t id, ReArcExtensionTabState* out) {
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_windows.h b/chrome/browser/rearc_bridge/rearc_extension_windows.h
+index e74441625e..dad1cf3cdb 100644
+--- a/chrome/browser/rearc_bridge/rearc_extension_windows.h
++++ b/chrome/browser/rearc_bridge/rearc_extension_windows.h
+@@ -4,10 +4,14 @@
+ #ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_WINDOWS_H_
+ #define CHROME_BROWSER_REARC_BRIDGE_REARC_EXTENSION_WINDOWS_H_
+ #include <cstdint>
++#include <optional>
+ #include <string>
++#include <vector>
+ #include "base/functional/callback.h"
+ #include "base/values.h"
++#include "chrome/common/extensions/api/tab_groups.h"
+ #include "chrome/common/extensions/api/tabs.h"
++#include "chrome/common/extensions/api/windows.h"
+ class Profile;
+ class GURL;
+ namespace extensions { class URLPatternSet; }
+@@ -23,5 +27,16 @@ base::ListValue QueryExtensionWindows(ExtensionFunction*, int window_id, bool po
+ void RequestExtensionTab(Profile*, const std::string& extension_id, const GURL&, bool active, uint64_t opener, int window_id, uint32_t kind, uint64_t tab_id, base::OnceCallback<void(content::WebContents*)>);
+ void RequestLinkOpen(uint64_t source_tab_id, content::WebContents*, const content::OpenURLParams&, base::OnceCallback<void(content::NavigationHandle&)>);
+ void ABICancelExtensionTabs(uint64_t tab_id, uint64_t profile_id);
++// ABI 1.50 extension_tab_groups: tab groups for registry tabs, kept in the
++// engine only (the host shows grouped tabs as ordinary tabs). A group lives in
++// one logical window and is removed with its last tab.
++int GroupExtensionTabs(ExtensionFunction*, const std::vector<int>& tab_ids, std::optional<int> group_id, std::optional<int> window_id, std::string* error);
++bool UngroupExtensionTabs(ExtensionFunction*, const std::vector<int>& tab_ids, std::string* error);
++std::optional<extensions::api::tab_groups::TabGroup> GetExtensionGroup(ExtensionFunction*, int group_id, std::string* error);
++base::ListValue QueryExtensionGroups(ExtensionFunction*, const extensions::api::tab_groups::Query::Params::QueryInfo&);
++std::optional<extensions::api::tab_groups::TabGroup> UpdateExtensionGroup(ExtensionFunction*, int group_id, const extensions::api::tab_groups::Update::Params::UpdateProperties&, std::string* error);
++// windows.update for a logical window: focus only. Responds through done with
++// the window, or an error.
++void UpdateExtensionWindow(ExtensionFunction*, int window_id, const extensions::api::windows::Update::Params::UpdateInfo&, base::OnceCallback<void(std::optional<base::DictValue>, std::string)> done);
+ }
+ #endif
+-- 
+2.54.0 (Apple Git-157)
+

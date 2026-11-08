@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.49** (major remains 1 for existing hosts), bridge **0.52.0**, compiled Chromium **156.0.8078.74**. Public header:
+ABI **1.50** (major remains 1 for existing hosts), bridge **0.53.0**, compiled Chromium **156.0.8078.74**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -1448,10 +1448,11 @@ active, selection, window, index, status, audible/muted, title/URL, discarded,
 no-group/no-split and normal window type are applied. No BrowserWindowInterface,
 TabInterface or WindowController is fabricated.
 
-Remaining: windows.update/remove, multi-URL window creation, popup/panel window
-types, geometry/state/incognito-profile creation, tabs.move/group/highlight/
-pin/mute/auto-discardable mutation, array remove, extension tab/window lifecycle
-events, action.openPopup and generic WindowController consumers. Current and
+Remaining: windows.remove, multi-URL window creation, panel window type,
+geometry/state/incognito-profile creation, tabs.move/highlight/pin/mute/
+auto-discardable mutation, array remove, window lifecycle events,
+action.openPopup and generic WindowController consumers. Tab groups, tab
+events, windows.update focus and popup windows came in 1.50 (below). Current and
 last-focused lookups use the focused active tab for the calling profile, then
 a deterministic active-tab fallback; last-focused is not separately retained
 when focus is cleared. Existing action toolbar/popups still use ABI 1.33.
@@ -2127,3 +2128,62 @@ Behaviour changes for every host (bridge 0.52.0):
   posted 1 ms after the worker's copy returns, so a host that asks for the
   next page from a page's callback no longer gets every page in one burst.
 - **An over-budget drain** continues in a task 1 ms later (above).
+
+## Extension tab groups (1.50)
+
+Patch `tab/070-extension-tab-groups`, bridge 0.53.0, feature
+`extension_tab_groups`. No new function or struct; no earlier struct changed
+(`engine/tests/check_abi150_imports.py` compares every 1.49 layout). It makes
+Claude in Chrome work: the extension anchors each session in a tab group
+(`tabs.group` on the side panel's tab, then `tabGroups.update` with its title
+and colour) and acts on the group's tabs through `chrome.debugger`.
+
+Groups live in the bridge, beside the 1.36 logical windows, for tabs the host
+has mapped with `ReArcTabSetExtensionWindow`. The host keeps no group model:
+it shows grouped tabs as ordinary tabs, because Arc shows no Chrome tab groups.
+
+| API | Behaviour |
+|---|---|
+| `tabs.group` | New group (in `createProperties.windowId`, or the first tab's window) or an existing `groupId`. Every tab must already be in that window: the host owns placement, so the engine never moves a tab. A new group takes Chromium's first unused colour (grey, blue, red, …) and no title. |
+| `tabs.ungroup` | Removes each tab from its group. |
+| `tabGroups.get`, `query`, `update` | As Chromium, `shared` always false. `query` filters by collapsed, colour, title pattern, window (−2 current) and shared. `collapsed` is stored and reported only. |
+| `tabGroups.move` | The group stays put: a move within its window succeeds unchanged, to another window is an error. |
+| `tabs` `groupId`, `tabs.query({groupId})` | The tab's group or −1. |
+
+A tab that the host moves to another window, unmaps (window 0) or closes
+leaves its group; the last tab out removes the group (`tabGroups.onRemoved`).
+Releasing a profile drops its groups without events. Group IDs are
+session-local, from 1.
+
+Events now reach extensions for mapped tabs (they had none before):
+`tabGroups.onCreated`, `onUpdated` (only when something changed), `onRemoved`;
+`tabs.onUpdated` with `groupId`, and, after `TabsEventRouter::TabEntry`,
+`status` on commit and on the first stop after it, `url`, `title` and
+`mutedInfo`; `tabs.onCreated` when the host first maps a tab;
+`tabs.onActivated` when a mapped tab becomes its window's active tab;
+`tabs.onRemoved` (`isWindowClosing` false) when a mapped tab closes. Each
+listener's tab object is built at dispatch from the tab's ID, with Chromium's
+permission scrubbing, so a lazy listener that wakes after the tab closed gets
+nothing.
+
+Window changes in the same patch:
+
+- `windows.update` with `focused: true` asks the host to activate the
+  window's active tab (an extension tab request of kind 3, which brings its
+  space forward) and answers with the window once the host replies. Already
+  focused, `focused: false` and `drawAttention` answer at once. Geometry and
+  any state but normal are errors.
+- `windows.create` accepts `type: "popup"` and ignores `left`, `top`,
+  `width` and `height`: the host opens it as it opens every extension window
+  (a Little Arc). Claude's sign-in and permission prompts use it.
+- `chrome://newtab` (and `chrome://new-tab-page`) in `tabs.create` and
+  `windows.create` becomes the host's blank tab (`about:blank`); the URL is
+  not admitted otherwise.
+
+Checked with Claude in Chrome 1.0.105 (Web Store ID, loaded unpacked with its
+own key) in a throwaway profile over DevTools, without signing in: the
+extension's own `createGroup` and `isolateTab` (the anchor), `tabs_context`,
+`tabs_create`, the MCP group in a new window, and its `computer` tool's
+screenshot, click, scroll and key all succeed; `navigate` and the permission
+manager need a signed-in account. `docs/QA-2026-11-07.md` has the manual check.
+
