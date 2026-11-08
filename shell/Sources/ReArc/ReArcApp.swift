@@ -40,6 +40,9 @@ struct ReArcApp: App {
         .defaultSize(width: 1000, height: 720)
         .commands {
             // The rest of the old ReArc menu's switches are in Settings (wave 35).
+            CommandGroup(replacing: .appInfo) {
+                Button("About ReArc") { AboutWindowController.shared.present() }
+            }
             CommandGroup(after: .appInfo) {
                 Button("Set ReArc as Default Browser…") { model.setAsDefaultBrowser() }
                 Button("Air Traffic Control…") { model.showAirTrafficControl() }

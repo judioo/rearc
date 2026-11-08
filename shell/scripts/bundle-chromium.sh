@@ -184,6 +184,8 @@ cp "$SHELL_DIR/Resources/ReArc.icns" "$APP/Contents/Resources/ReArc.icns"
 # Settings › Icon's alternates (AppIconChoice), sealed with the rest.
 rm -rf "$APP/Contents/Resources/AppIcons"
 cp -R "$SHELL_DIR/Resources/AppIcons" "$APP/Contents/Resources/AppIcons"
+# About ReArc's sting (media/out/deliver/rearc-sting-path, 720 px, plays once).
+cp "$SHELL_DIR/Resources/AboutSting.gif" "$APP/Contents/Resources/AboutSting.gif"
 plutil -replace CFBundleIconFile -string ReArc "$PLIST"
 plutil -remove CFBundleIconName "$PLIST" 2>/dev/null || true
 if [[ $DEV_MOCK_KEYCHAIN == 1 ]]; then

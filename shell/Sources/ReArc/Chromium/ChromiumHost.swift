@@ -232,6 +232,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private var settingsWindow: SettingsWindowController?
     private let menuKeyEquivalents = MenuKeyEquivalents()
     private var airTrafficControlWindow: NSWindow?
+    private var aboutWindow: AboutWindowController?
     /// One never-shown window, with no page or user state. Consumed once.
     private var preparedLittleArcWindow: NSWindow?
     private var terminating = false
@@ -630,6 +631,19 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         window.center()
         airTrafficControlWindow = window
         window.makeKeyAndOrderFront(nil)
+    }
+
+    /// ReArc › About ReArc. Its links open in a new tab of the frontmost browser window.
+    @MainActor
+    func presentAbout() {
+        guard let model, !terminating else { return }
+        if aboutWindow == nil {
+            aboutWindow = AboutWindowController { [weak self] url in
+                model.openInNewTab(url)
+                self?.browserWindows.first(where: \.isVisible)?.makeKeyAndOrderFront(nil)
+            }
+        }
+        aboutWindow?.present()
     }
 
     @MainActor
@@ -1038,6 +1052,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let target = menuTarget
 
         let app = NSMenu(title: "ReArc")
+        // Arc's order: About, then Settings.
+        app.addItem(target.item("About ReArc", "") { [weak self] in self?.presentAbout() })
+        app.addItem(.separator())
         // ReArc's own window; Chromium's settings pages open from its buttons.
         app.addItem(target.item("Settings…", ",") { model.showSettings() })
         if runtime.capabilities.navigationExtended {
