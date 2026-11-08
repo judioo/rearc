@@ -112,7 +112,7 @@ public final class UnavailableSyncEngine: SyncEngine, @unchecked Sendable {
 public final class MutationCoalescer: @unchecked Sendable {
     public let window: TimeInterval
     private let lock = NSLock()
-    private var pending: [SidebarJournalEntry] = []
+    private var pending = Squasher()
     private var flushWorkItem: DispatchWorkItem?
     private let queue: DispatchQueue
     private var deliver: (@Sendable ([SidebarJournalEntry]) -> Void)?
@@ -130,10 +130,12 @@ public final class MutationCoalescer: @unchecked Sendable {
 
     public func enqueue(_ entries: [SidebarJournalEntry]) {
         lock.lock()
+        // Each entry squashes into what is pending, which is squashed already:
+        // a burst (an import of thousands of rows) costs one step per entry,
+        // not a re-squash of everything pending per entry.
         for entry in entries {
-            pending.append(entry)
+            pending.add(entry)
         }
-        pending = Self.squash(pending)
         scheduleFlushLocked()
         lock.unlock()
     }
@@ -143,8 +145,8 @@ public final class MutationCoalescer: @unchecked Sendable {
         lock.lock()
         flushWorkItem?.cancel()
         flushWorkItem = nil
-        let batch = pending
-        pending = []
+        let batch = pending.entries
+        pending = Squasher()
         let deliver = deliver
         lock.unlock()
         if !batch.isEmpty {
@@ -161,83 +163,79 @@ public final class MutationCoalescer: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + window, execute: work)
     }
 
-    /// Squash consecutive moves (section or folder) of the same item; coalesce upserts.
+    /// Squash consecutive moves (section or folder) of the same item; coalesce
+    /// upserts; an insert and a later delete of the same item cancel out.
     public static func squash(_ entries: [SidebarJournalEntry]) -> [SidebarJournalEntry] {
-        var output: [SidebarJournalEntry] = []
-        for entry in entries {
+        var squasher = Squasher()
+        for entry in entries { squasher.add(entry) }
+        return squasher.entries
+    }
+
+    /// The squashed entries so far, with the indexes that let the next entry
+    /// squash in constant time.
+    struct Squasher {
+        private(set) var entries: [SidebarJournalEntry] = []
+        /// Each item's last move or folder placement.
+        private var lastMove: [UUID: Int] = [:]
+        private var lastUpsert: [UUID: Int] = [:]
+        /// Items whose insert is still pending (a later delete cancels it).
+        private var lastInsert: [UUID: Int] = [:]
+
+        mutating func add(_ entry: SidebarJournalEntry) {
             switch entry.mutation {
             case .moveItem(let id, let spaceID, let container, let sortRank):
-                if let lastIndex = output.lastIndex(where: { matchesMoveTarget($0, itemID: id) }) {
-                    let last = output[lastIndex]
-                    if case .moveItem = last.mutation {
-                        output[lastIndex] = SidebarJournalEntry(
-                            sequence: last.sequence,
-                            timestamp: entry.timestamp,
-                            deviceID: entry.deviceID,
-                            mutation: .moveItem(id: id, spaceID: spaceID, container: container, sortRank: sortRank)
-                        )
-                        continue
-                    }
+                if let i = lastMove[id], case .moveItem = entries[i].mutation {
+                    let last = entries[i]
+                    entries[i] = SidebarJournalEntry(sequence: last.sequence, timestamp: entry.timestamp, deviceID: entry.deviceID,
+                                                     mutation: .moveItem(id: id, spaceID: spaceID, container: container, sortRank: sortRank))
+                    return
                 }
-                output.append(entry)
+                lastMove[id] = entries.count
             case .placeItemInFolder(let id, _, _):
-                if let lastIndex = output.lastIndex(where: { matchesMoveTarget($0, itemID: id) }),
-                   case .placeItemInFolder = output[lastIndex].mutation {
-                    let last = output[lastIndex]
-                    output[lastIndex] = SidebarJournalEntry(
-                        sequence: last.sequence,
-                        timestamp: entry.timestamp,
-                        deviceID: entry.deviceID,
-                        mutation: entry.mutation
-                    )
-                    continue
+                if let i = lastMove[id], case .placeItemInFolder = entries[i].mutation {
+                    let last = entries[i]
+                    entries[i] = SidebarJournalEntry(sequence: last.sequence, timestamp: entry.timestamp, deviceID: entry.deviceID,
+                                                     mutation: entry.mutation)
+                    return
                 }
-                output.append(entry)
+                lastMove[id] = entries.count
             case .upsertItem(let id):
-                if let lastIndex = output.lastIndex(where: {
-                    if case .upsertItem(let other) = $0.mutation { return other == id }
-                    return false
-                }) {
-                    output[lastIndex] = entry
-                    continue
+                if let i = lastUpsert[id] {
+                    entries[i] = entry
+                    return
                 }
-                output.append(entry)
-            default:
-                output.append(entry)
-            }
-        }
-        return cancelCreateDeletePairs(output)
-    }
-
-    private static func matchesMoveTarget(_ entry: SidebarJournalEntry, itemID: UUID) -> Bool {
-        switch entry.mutation {
-        // Folder placements are moves too, so a section move never squashes across one.
-        case .moveItem(let id, _, _, _), .placeItemInFolder(let id, _, _): return id == itemID
-        default: return false
-        }
-    }
-
-    private static func cancelCreateDeletePairs(_ entries: [SidebarJournalEntry]) -> [SidebarJournalEntry] {
-        var inserted = Set<UUID>()
-        var output: [SidebarJournalEntry] = []
-        for entry in entries {
-            switch entry.mutation {
+                lastUpsert[id] = entries.count
             case .insertItem(let id, _, _, _):
-                inserted.insert(id)
-                output.append(entry)
-            case .deleteItem(let id) where inserted.contains(id):
-                inserted.remove(id)
-                if let insertIndex = output.lastIndex(where: {
-                    if case .insertItem(let other, _, _, _) = $0.mutation { return other == id }
-                    return false
-                }) {
-                    output.remove(at: insertIndex)
+                lastInsert[id] = entries.count
+            case .deleteItem(let id):
+                if let i = lastInsert[id] {
+                    // Created and deleted before either was sent: neither goes.
+                    entries.remove(at: i)
+                    reindex()
+                    lastInsert[id] = nil
+                    return
                 }
             default:
-                output.append(entry)
+                break
+            }
+            entries.append(entry)
+        }
+
+        /// After a removal shifts the entries (rare: an insert deleted in the same burst).
+        private mutating func reindex() {
+            lastMove = [:]
+            lastUpsert = [:]
+            let inserted = Set(lastInsert.keys)
+            lastInsert = [:]
+            for (i, entry) in entries.enumerated() {
+                switch entry.mutation {
+                case .moveItem(let id, _, _, _), .placeItemInFolder(let id, _, _): lastMove[id] = i
+                case .upsertItem(let id): lastUpsert[id] = i
+                case .insertItem(let id, _, _, _) where inserted.contains(id): lastInsert[id] = i
+                default: break
+                }
             }
         }
-        return output
     }
 }
 

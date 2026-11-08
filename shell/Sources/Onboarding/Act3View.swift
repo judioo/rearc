@@ -165,26 +165,43 @@ struct Act3ControlsView: View {
                 .sunriseControlsActive(controls != nil && frame.editor > 0.5)
             }
 
-            HStack(spacing: H * 0.03) {
-                if editing != nil, frame.editor > 0.5 {
-                    Text("Remove space")
+            // Editing a space: remove it, or close the editor. Only with no
+            // space chosen does the act's own Done appear (it moves on).
+            if let editing {
+                let name = editing.name.trimmingCharacters(in: .whitespaces)
+                let remove = name.isEmpty ? "Remove this space" : "Remove \(name) space"
+                HStack(spacing: H * 0.03) {
+                    Text(remove)
                         .font(.system(size: H * 0.017, weight: .medium))
                         .foregroundStyle(ink.opacity(0.55))
+                        .lineLimit(1)
                         .contentShape(Rectangle())
-                        .sunriseButton("Remove space") { controls?.remove() }
+                        .sunriseButton(remove) { controls?.remove() }
+                    Text("Done")
+                        .font(.system(size: H * 0.018, weight: .medium))
+                        .foregroundStyle(ink)
+                        .padding(.horizontal, H * 0.028).padding(.vertical, H * 0.010)
+                        .background(Capsule().fill(Color.white.opacity(0.7)))
+                        .overlay(Capsule().strokeBorder(ink.opacity(0.14), lineWidth: 1))
+                        .contentShape(Capsule())
+                        .sunriseButton("Done editing \(name.isEmpty ? "space" : name)") { controls?.select(nil) }
                 }
-                Text("Done")
-                    .font(.system(size: H * 0.019, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, H * 0.034).padding(.vertical, H * 0.012)
-                    .background(Capsule().fill(MarkPalette.blue.color))
-                    .shadow(color: MarkPalette.blue.color.opacity(0.25), radius: 14, y: 5)
-                    .contentShape(Capsule())
-                    .sunriseButton("Done") { controls?.done() }
+                .opacity(frame.done * frame.editor)
+                .position(x: layout.size.width / 2, y: layout.bottom)
+                .sunriseControlsActive(controls != nil && frame.done > 0.5 && frame.editor > 0.5)
             }
-            .opacity(frame.done)
-            .position(x: layout.size.width / 2, y: layout.bottom)
-            .sunriseControlsActive(controls != nil && frame.done > 0.5)
+
+            Text("Done")
+                .font(.system(size: H * 0.019, weight: .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, H * 0.034).padding(.vertical, H * 0.012)
+                .background(Capsule().fill(MarkPalette.blue.color))
+                .shadow(color: MarkPalette.blue.color.opacity(0.25), radius: 14, y: 5)
+                .contentShape(Capsule())
+                .sunriseButton("Done") { controls?.done() }
+                .opacity(frame.done * (1 - frame.editor))
+                .position(x: layout.size.width / 2, y: layout.bottom)
+                .sunriseControlsActive(controls != nil && frame.done > 0.5 && frame.editor < 0.5)
 
             if let controls, frame.done > 0.5 {
                 let r = layout.nodeRadius(slots: frame.slots)

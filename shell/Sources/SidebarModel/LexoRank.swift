@@ -11,15 +11,29 @@ public enum LexoRank: Equatable, Sendable {
     /// Midpoint rank for an empty list or seed value.
     public static let initial: String = "U"
 
-    /// Generates `count` evenly spaced ranks for migration from legacy array order.
+    /// Generates `count` evenly spaced ranks, all one width, for migration
+    /// from legacy array order and for imports. Any count stays in order
+    /// (an import's folder can hold thousands of bookmarks).
     public static func initialSequence(count: Int) -> [String] {
         guard count > 0 else { return [] }
         if count == 1 { return [initial] }
-        var result: [String] = [initial]
-        while result.count < count {
-            result.append(after(result.last))
+        let base = digits.count
+        var width = 1
+        var span = base
+        while span <= count, width < rebalanceLengthThreshold / 4 {
+            width += 1
+            span *= base
         }
-        return result
+        let step = Double(span) / Double(count + 1)
+        return (1 ... count).map { i in
+            var value = min(span - 1, max(1, Int((Double(i) * step).rounded())))
+            var chars = [Character](repeating: minDigit, count: width)
+            for position in stride(from: width - 1, through: 0, by: -1) {
+                chars[position] = digits[value % base]
+                value /= base
+            }
+            return String(chars)
+        }
     }
 
     /// Rank strictly after `rank`, or the first rank when `rank` is nil.
@@ -35,7 +49,8 @@ public enum LexoRank: Equatable, Sendable {
             chars[index] = minDigit
             index -= 1
         }
-        return String(repeating: String(minDigit), count: rank.count + 1) + initial
+        // Every digit is the last ("z", "zz"): a longer rank sorts after it.
+        return rank + initial
     }
 
     /// Rank strictly before `rank`, or the first rank when `rank` is nil.

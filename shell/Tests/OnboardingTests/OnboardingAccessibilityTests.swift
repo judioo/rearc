@@ -65,10 +65,13 @@ final class OnboardingAccessibilityTests: XCTestCase {
                                     done: { events.append("done") })
         let tree = try host(Act3ControlsView(frame: frame, arc: Act2Layout(size: size), layout: Act3Layout(size: size),
                                              controls: controls))
-        try press("Done", in: tree)
-        try press("Remove space", in: tree)
+        let name = try XCTUnwrap(frame.editing?.name)
+        // While a space is open its own Done closes it; the act's Done waits.
+        XCTAssertNil(element("Done", in: tree))
+        try press("Done editing \(name)", in: tree)
+        try press("Remove \(name) space", in: tree)
         try press("Add a space", in: tree)
-        XCTAssertEqual(events, ["done", "remove", "add"])
+        XCTAssertEqual(events, ["select none", "remove", "add"])
         for (i, colour) in ProfilePalette.colours.enumerated() {
             try press(colour.name, in: tree)
             XCTAssertEqual(events.last, "colour \(i)")
@@ -82,6 +85,23 @@ final class OnboardingAccessibilityTests: XCTestCase {
             try press(space.name.isEmpty ? "New space" : space.name, in: tree)
             XCTAssertEqual(events.last, "select \(space.id)")
         }
+    }
+
+    /// With no space open, only the act's Done shows, and it moves on.
+    func testActThreeDoneMovesOnOnlyWithNothingOpen() throws {
+        var log = Act3Log(start: 0, seeds: Act3Log.suggested(colour: MarkPalette.blue), imported: false)
+        log.events = [(0.5, .select(0)), (1.0, .select(nil))]
+        let frame = Act3Timeline.frame(log, Act3Timeline.ready + 2)
+        var events: [String] = []
+        let controls = Act3Controls(name: .constant(""), select: { events.append("select \($0.map(String.init) ?? "none")") },
+                                    colour: { _ in }, icon: { _ in }, add: {}, remove: { events.append("remove") },
+                                    done: { events.append("done") })
+        let tree = try host(Act3ControlsView(frame: frame, arc: Act2Layout(size: size), layout: Act3Layout(size: size),
+                                             controls: controls))
+        let name = try XCTUnwrap(frame.editing?.name)
+        XCTAssertNil(element("Remove \(name) space", in: tree))
+        try press("Done", in: tree)
+        XCTAssertEqual(events, ["done"])
     }
 
     /// Controls not yet faded in are neither pressable nor in VoiceOver's way.

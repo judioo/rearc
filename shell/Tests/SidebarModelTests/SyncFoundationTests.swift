@@ -19,6 +19,24 @@ final class LexoRankTests: XCTestCase {
         }
     }
 
+    /// An import's folder can hold thousands of rows; past 38 the sequence
+    /// used to wrap ("z" then "00U") and scramble the order.
+    func testLongSequencesStayInOrderAndShort() {
+        for count in [2, 5, 38, 39, 61, 62, 100, 3843, 3844, 20_000] {
+            let ranks = LexoRank.initialSequence(count: count)
+            XCTAssertEqual(ranks.count, count)
+            XCTAssertEqual(zip(ranks, ranks.dropFirst()).filter { $0 >= $1 }.count, 0, "\(count)")
+            XCTAssertFalse(LexoRank.needsRebalance(ranks), "\(count)")
+            XCTAssertNotNil(LexoRank.between(ranks[0], ranks[1]) as String?)
+        }
+    }
+
+    func testAfterTheLastDigitSortsAfter() {
+        for rank in ["z", "zz", "Uz", "U"] {
+            XCTAssertGreaterThan(LexoRank.after(rank), rank)
+        }
+    }
+
     func testRebalanceTriggersOnCollision() {
         let ranks = ["A", "A"]
         XCTAssertTrue(LexoRank.needsRebalance(ranks))

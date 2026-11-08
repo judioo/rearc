@@ -267,10 +267,17 @@ public struct Act2Layout {
     /// Past on the left: the trail runs from here to the apex.
     public static let trailStart = -156.0
 
+    /// The trail's nodes stay between these: below the bottom of the screen
+    /// past `lowestNode` (-150 sits on the bottom edge, which put a fifth
+    /// browser half off screen), and clear of your avatar past `highestNode`.
+    public static let lowestNode = -141.0
+    public static let highestNode = -104.0
+
     public func nodeAngle(_ i: Int, of n: Int) -> Double {
-        guard n > 1 else { return -126 }
-        let span = min(46.0, Double(n - 1) * 12)
-        return -150 + span * Double(i) / Double(n - 1) + (46 - span) / 2
+        let room = Self.highestNode - Self.lowestNode
+        guard n > 1 else { return Self.lowestNode + room / 2 }
+        let span = min(room, Double(n - 1) * 12)
+        return Self.lowestNode + (room - span) / 2 + span * Double(i) / Double(n - 1)
     }
 
     public func point(_ angle: Double, _ r: CGFloat? = nil) -> CGPoint {

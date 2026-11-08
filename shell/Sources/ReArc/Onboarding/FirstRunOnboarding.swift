@@ -107,8 +107,12 @@ final class FirstRunOnboarding: OnboardingHost {
             return
         }
         let plan = OnboardingImportPlan(sources: sources, categories: categories)
+        // History merges off the main thread too: each merge rebuilds the
+        // command bar's search index, seconds for several profiles.
+        let history = model?.visitHistory ?? VisitHistory()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let read = plan.read(applicationSupport: BrowserImportDiscovery.applicationSupport)
+            var read = plan.read(applicationSupport: BrowserImportDiscovery.applicationSupport)
+            read.mergeHistory(into: history)
             DispatchQueue.main.async {
                 guard let self, let model = self.model else { return }
                 let result = OnboardingImportPlan.apply(read, model: model, replacingFavorites: self.sampleFavoriteIDs)
@@ -188,6 +192,21 @@ struct OnboardingImportPlan: Sendable {
         var profiles: [(profile: ImportSourceProfile, bookmarks: [BookmarkNode]?, history: [VisitRecord]?)]
         /// In source order; the queue keeps the reinstallable ones, each once.
         var extensions: [(browser: ImportBrowser, extension: SourceExtension)] = []
+        /// Every profile's history merged into `historyBase` off the main
+        /// thread; `apply` takes it if the model's history is still the base.
+        var historyBase: VisitHistory?
+        var mergedHistory: VisitHistory?
+
+        var importedHistory: [VisitRecord] { profiles.flatMap { $0.history ?? [] } }
+
+        mutating func mergeHistory(into base: VisitHistory) {
+            let imported = importedHistory
+            guard !imported.isEmpty else { return }
+            var merged = base
+            merged.merge(imported)
+            historyBase = base
+            mergedHistory = merged
+        }
     }
 
     /// `arcDefaults`: Arc's preferences, read-only (a dictionary in tests).
@@ -280,11 +299,16 @@ struct OnboardingImportPlan: Sendable {
             if let bookmarks, let result = store.importBookmarks(bookmarks, spaceName: "\(profile.browser.name) – \(profile.name)", profileID: main) {
                 totals.bookmarks += result.tabs
             }
-            if let history, !history.isEmpty {
-                model.visitHistory.merge(history)
-                model.scheduleVisitHistorySave()
-                totals.pages += history.count
+            totals.pages += history?.count ?? 0
+        }
+        if totals.pages > 0 {
+            if let merged = read.mergedHistory, model.visitHistory == read.historyBase {
+                model.visitHistory = merged
+            } else {
+                // Merged once, every profile together, if it couldn't be done ahead.
+                model.visitHistory.merge(read.importedHistory)
             }
+            model.scheduleVisitHistorySave()
         }
         let queue = ExtensionReinstallQueue(read.extensions.map(\.extension), into: main)
         if !queue.isFinished {

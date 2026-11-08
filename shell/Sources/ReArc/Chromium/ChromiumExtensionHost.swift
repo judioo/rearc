@@ -179,8 +179,13 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
         let store = model.store
         let active = store.activeSpaceID
         let littleArcKey = model.keyLittleArcID
+        // Only tabs with an engine can be in a window. Imported spaces hold
+        // thousands of tabs without one; looking each up every 2 s cost a
+        // frame. Reading every engine also observes one being made.
+        let withEngines = Set(model.engineHost.allTabEngines().map(\.0))
         func bridgeTab(_ tab: Tab) -> UInt64? {
-            guard let engine = model.engineHost.engine(forTabID: tab.id, profileID: model.profileID(for: tab)) as? ChromiumEngine,
+            guard withEngines.contains(tab.id),
+                  let engine = model.engineHost.engine(forTabID: tab.id, profileID: model.profileID(for: tab)) as? ChromiumEngine,
                   engine.tabID != 0 else { return nil }
             return engine.tabID
         }

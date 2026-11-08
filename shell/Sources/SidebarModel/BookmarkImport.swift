@@ -133,23 +133,28 @@ extension SidebarStore {
         let name = spaceName.trimmingCharacters(in: .whitespacesAndNewlines)
         let space = addSpace(name: name.isEmpty ? "Imported" : name, theme: SpaceTheme.presets[spaces.count % SpaceTheme.presets.count],
                              iconName: "bookmark.fill", profileID: profileID)
+        // The whole tree is built first and set once, as the Arc import does:
+        // placing thousands of bookmarks a row at a time re-indexed the
+        // sidebar per row and froze the onboarding's import.
         var tabs = 0
-        func place(_ nodes: [BookmarkNode], folder: UUID?) {
-            for node in nodes {
+        let date = now()
+        func entries(_ nodes: [BookmarkNode]) -> [SidebarEntry] {
+            zip(nodes, LexoRank.initialSequence(count: nodes.count)).map { node, rank in
                 switch node {
                 case .link(let title, let url):
-                    let tab = addTab(kind: .pinned, title: title, url: url, in: space.id)
-                    if let folder {
-                        _ = moveItem(tab.id, to: .folder(folder), index: Int.max)
-                    }
                     tabs += 1
+                    return .tab(Tab(kind: .pinned, title: title, url: url, sortRank: rank, lastActiveAt: date))
                 case .folder(let title, let children):
-                    guard let created = createFolder(title: title, in: space.id, parentFolderID: folder) else { continue }
-                    place(children, folder: created.id)
+                    let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return .folder(SidebarFolder(title: name.isEmpty ? "New Folder" : name, children: entries(children), sortRank: rank))
                 }
             }
         }
-        place(nodes, folder: nil)
+        // A new space: its pinned section is empty.
+        let pinned = entries(nodes)
+        setSectionEntries(pinned, for: .pinned, spaceID: space.id)
+        journalImported(pinned, spaceID: space.id, container: .pinned)
+        notifyMutation()
         // Imported folders start closed, as a bookmarks bar does.
         setAllFoldersExpanded(false, in: space.id)
         return (space, tabs)

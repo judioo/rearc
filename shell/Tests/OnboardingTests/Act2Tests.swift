@@ -142,3 +142,29 @@ final class Act2Tests: XCTestCase {
         XCTAssertEqual(found.first?.stats, ImportStats(spaces: 2, tabs: 2, bookmarks: 3, pages: 0, passwords: 0, extensions: 1))
     }
 }
+
+/// Every browser on the trail, and its label, is on screen with room to spare.
+final class Act2TrailLayoutTests: XCTestCase {
+    func testEveryBrowserSitsOnScreen() {
+        for size in [CGSize(width: 1440, height: 900), CGSize(width: 1920, height: 1080), CGSize(width: 1024, height: 768), CGSize(width: 2000, height: 1293)] {
+            let layout = Act2Layout(size: size)
+            let H = size.height
+            for n in 1 ... 8 {
+                var previous: CGPoint?
+                for i in 0 ..< n {
+                    let p = layout.point(layout.nodeAngle(i, of: n))
+                    // The node, then its two-line label below its centre.
+                    XCTAssertLessThan(p.y + layout.nodeRadius, H * 0.955, "\(n) browsers, #\(i), \(size): above the bottom bar")
+                    XCTAssertLessThan(p.y + H * 0.0195, H * 0.955, "\(n) browsers, #\(i) label")
+                    XCTAssertGreaterThan(p.x - layout.nodeRadius - H * 0.16, 0, "\(n) browsers, #\(i) label inside the left edge")
+                    XCTAssertGreaterThan(hypot(p.x - layout.apex.x, p.y - layout.apex.y), layout.avatarRadius * 1.6 + layout.nodeRadius,
+                                         "\(n) browsers, #\(i) clear of you")
+                    if let previous, n <= 6 {
+                        XCTAssertGreaterThan(hypot(p.x - previous.x, p.y - previous.y), layout.nodeRadius * 2.4, "\(n) browsers apart")
+                    }
+                    previous = p
+                }
+            }
+        }
+    }
+}
