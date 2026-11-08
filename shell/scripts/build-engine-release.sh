@@ -77,6 +77,7 @@ GN_ARGS=(
   'is_chrome_branded=false' 'is_official_build=false'
   'use_system_xcode=true' 'use_remoteexec=false' 'use_siso=true'
   'chrome_pgo_phase=0' 'symbol_level=1' 'treat_warnings_as_errors=false'
+  'generate_about_credits=true'
   'is_debug=false' 'is_component_build=false' 'dcheck_always_on=false'
   'enable_dsyms=true' 'enable_stripping=true'
   "branding_file_path=\"$GENERATED_BRANDING\""

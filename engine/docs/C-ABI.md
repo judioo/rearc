@@ -2223,6 +2223,8 @@ screen, ordered back and never key.
 `ABIIsTrustedWebUI` predicate. The pinned macOS `AboutUI` only registers
 `ThemeSource` and `AboutUIHTMLSource`; it installs no message or Mojo handlers
 and needs no Browser or TabInterface. Credits HTML, CSS and JavaScript are
-compiled resources. Licence toggles and homepage anchors are ordinary DOM;
+compiled resources; the dev and release engine builds enable
+`generate_about_credits=true` so Chromium generates the real licences instead
+of its sample placeholder. Licence toggles and homepage anchors are ordinary DOM;
 the Print link invokes `window.print()` through the existing print delegate.
 Privileged evaluation and capture remain denied.
