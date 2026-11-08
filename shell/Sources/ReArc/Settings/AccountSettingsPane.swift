@@ -136,8 +136,13 @@ struct AccountSettingsPane: View {
                     }
                 } label: {
                     Image(systemName: "ellipsis")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 38, height: 24)
+                        .background(SettingsColors.button, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .contentShape(Rectangle())
                 }
                 .menuStyle(.button)
+                .buttonStyle(.plain)
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .accessibilityLabel("Account actions")

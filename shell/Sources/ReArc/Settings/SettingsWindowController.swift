@@ -22,6 +22,8 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
         window.toolbarStyle = .preference
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
+        // The toolbar sits on the window's own white, as Arc's, not on a grey title bar.
+        window.titlebarAppearsTransparent = true
         window.backgroundColor = NSColor(SettingsColors.background)
         super.init(window: window)
         let toolbar = NSToolbar(identifier: "ReArcSettings")
@@ -31,13 +33,15 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
         window.toolbar = toolbar
         window.setContentSize(NSSize(width: SettingsMetrics.windowSize.width, height: SettingsMetrics.contentHeight))
         fixSize()
-        // Only the position is remembered.
-        if !window.setFrameUsingName("ReArcSettings") { window.center() }
+        // Only the position is remembered (a launch on `REARC_DATA_DIR` keeps its own).
+        if !window.setFrameUsingName(Self.frameName) { window.center() }
         fixSize()
-        window.setFrameAutosaveName("ReArcSettings")
+        window.setFrameAutosaveName(Self.frameName)
         showPane()
         observePane()
     }
+
+    static let frameName = ShellDataLocation.isOverridden ? "ReArcSettings.isolated" : "ReArcSettings"
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }

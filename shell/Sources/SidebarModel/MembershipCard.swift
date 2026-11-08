@@ -485,7 +485,8 @@ public struct MembershipCardPalette: Equatable, Sendable {
     /// and an ink deep enough to read on cream.
     public static func themed(_ theme: SpaceColor) -> MembershipCardPalette {
         let base = OKLab(theme).lch
-        let hue = base.h, chroma = max(base.c, 0.06)
+        // A grey theme still makes a lively card.
+        let hue = base.h, chroma = max(base.c, 0.11)
         func stop(_ l: Double, _ c: Double, _ dh: Double = 0) -> SpaceColor {
             OKLCH(l: l, c: c, h: (hue + dh + 360).truncatingRemainder(dividingBy: 360)).gamutMapped(to: .sRGB).lab.linear.encoded
         }

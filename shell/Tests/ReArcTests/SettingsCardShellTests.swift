@@ -63,12 +63,10 @@ final class SettingsCardShellTests: XCTestCase {
         let model = makeModel()
         XCTAssertNil(model.membershipCard.card, "nothing read at init")
         model.membershipCard.loadInBackground()
-        let loaded = expectation(description: "loaded")
-        func poll() {
-            if model.membershipCard.card != nil { loaded.fulfill() } else { DispatchQueue.main.async(execute: poll) }
+        let deadline = Date().addingTimeInterval(2)
+        while model.membershipCard.card == nil, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         }
-        poll()
-        wait(for: [loaded], timeout: 2)
         XCTAssertEqual(model.membershipCard.card, card)
     }
 

@@ -32,6 +32,9 @@ struct SettingsPaneView: View {
         }
         .frame(width: SettingsMetrics.windowSize.width, height: SettingsMetrics.contentHeight, alignment: .top)
         .background(SettingsColors.background)
+        // Arc's 1 pt line under the toolbar.
+        .overlay(alignment: .top) { SettingsHairline() }
+        .buttonStyle(SettingsButtonStyle())
     }
 }
 
@@ -112,9 +115,7 @@ struct SettingsToggleRow: View {
 }
 
 private extension AutoArchiveThreshold {
-    static var picker: some View {
-        ForEach(AutoArchiveThreshold.allCases, id: \.self) { Text($0.title).tag($0) }
-    }
+    static var options: [(value: AutoArchiveThreshold, title: String)] { allCases.map { ($0, $0.title) } }
 }
 
 // MARK: General
@@ -135,11 +136,8 @@ struct GeneralSettingsPane: View {
             }
             SettingsGroup {
                 SettingsLabeledRow(label: "Space icons") {
-                    Picker("Space icons", selection: $model.spaceIconStyle) {
-                        ForEach(SpaceIconStyle.allCases, id: \.self) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden().fixedSize()
+                    SettingsPopUp(label: "Space icons", selection: $model.spaceIconStyle,
+                                  options: SpaceIconStyle.allCases.map { ($0, $0.title) })
                 }
                 SettingsLabeledRow(label: "Sidebar position", detail: "The traffic lights stay at the window's top left.") {
                     Picker("Sidebar position", selection: Binding(
@@ -153,14 +151,10 @@ struct GeneralSettingsPane: View {
                 }
                 SettingsLabeledRow(label: "Side panel position",
                                    detail: "Extension side panels. On the sidebar's side, the panel sits between the sidebar and the page.") {
-                    Picker("Side panel position", selection: Binding(
+                    SettingsPopUp(label: "Side panel position", selection: Binding(
                         get: { model.pendingSidePanelPosition ?? model.sidePanelPosition },
                         set: { model.setSidePanelPosition($0) }
-                    )) {
-                        ForEach(SidePanelPosition.allCases, id: \.self) { Text($0.title).tag($0) }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden().fixedSize()
+                    ), options: SidePanelPosition.allCases.map { ($0, $0.title) })
                 }
             }
             SettingsGroup {
@@ -335,13 +329,10 @@ struct ProfilesSettingsPane: View {
         if let search = model.activeSearchEngineSettings {
             SettingsGroup {
                 SettingsLabeledRow(label: "Search engine") {
-                    Picker("Search engine", selection: Binding(
+                    SettingsPopUp(label: "Search engine", selection: Binding(
                         get: { search.defaultEngine(for: profile.id) ?? "" },
                         set: { search.setDefaultEngine($0, for: profile.id) }
-                    )) {
-                        ForEach(search.engines(for: profile.id)) { Text($0.name).tag($0.id) }
-                    }
-                    .labelsHidden().fixedSize()
+                    ), options: search.engines(for: profile.id).map { ($0.id, $0.name) })
                     .disabled(!search.isEditable(for: profile.id))
                 }
                 if model.canOpenBrowserPage(.searchSettings) {
@@ -356,11 +347,10 @@ struct ProfilesSettingsPane: View {
         SettingsGroup {
             SettingsLabeledRow(label: "Archive tabs after",
                                info: "Today tabs you haven't opened in this long move to the Archive. Pinned tabs and Favorites stay. Each profile has its own setting.") {
-                Picker("Archive tabs after", selection: Binding(
+                SettingsPopUp(label: "Archive tabs after", selection: Binding(
                     get: { model.store.autoArchiveThreshold(for: profile.id) },
                     set: { model.store.setAutoArchiveThreshold($0, for: profile.id) }
-                )) { AutoArchiveThreshold.picker }
-                    .labelsHidden().fixedSize()
+                ), options: AutoArchiveThreshold.options)
             }
             if model.canOpenBrowserPage(.downloadSettings) {
                 SettingsLabeledRow(label: "Download location") { Button("Download Settings…") { open(.downloadSettings, in: profile) } }
@@ -416,8 +406,8 @@ struct LinksSettingsPane: View {
                                   isOn: Binding(get: { model.externalLinkDestination == .littleArc },
                                                 set: { model.externalLinkDestination = $0 ? .littleArc : .activeSpace }))
                 SettingsLabeledRow(label: "Archive Little Arcs after:") {
-                    Picker("Archive Little Arcs after", selection: $model.littleArcArchiveAfter) { AutoArchiveThreshold.picker }
-                        .labelsHidden().fixedSize()
+                    SettingsPopUp(label: "Archive Little Arcs after", selection: $model.littleArcArchiveAfter,
+                                  options: AutoArchiveThreshold.options)
                 }
             }
             SettingsHairline().padding(.vertical, 16)
@@ -448,7 +438,7 @@ private struct LittleArcHero: View {
         let theme = model.themeColor
         let space = model.store.activeSpace.name
         ZStack(alignment: .top) {
-            theme.opacity(0.55)
+            theme.opacity(0.8)
             VStack(spacing: 0) {
                 HStack(spacing: 8) {
                     HStack(spacing: 4) {
@@ -471,8 +461,8 @@ private struct LittleArcHero: View {
                 .padding(.horizontal, 8)
                 .frame(height: 24)
                 .background(.white.opacity(0.55))
-                LinearGradient(colors: [theme.opacity(0.35), theme.opacity(0.15)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                    .background(.white.opacity(0.6))
+                LinearGradient(colors: [theme.opacity(0.55), theme.opacity(0.3)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .background(.white.opacity(0.5))
             }
             .clipShape(UnevenRoundedRectangle(topLeadingRadius: 6, topTrailingRadius: 6, style: .continuous))
             .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
@@ -707,11 +697,12 @@ private struct ShortcutKeycap<Glyph: View>: View {
     }
 }
 
-/// The one-colour mark in the current foreground style.
+/// The Icon item's line glyph, in the current foreground style.
 private struct ReArcMarkGlyph: View {
     var body: some View {
         Canvas { context, size in
-            context.fill(Path(ReArcMark.paths(in: CGRect(origin: .zero, size: size)).mono), with: .foreground)
+            context.scaleBy(x: size.width / 20, y: size.height / 20)
+            context.fill(Path(ReArcMark.glyphPath()), with: .foreground)
         }
     }
 }
@@ -784,6 +775,15 @@ struct IconSettingsPane: View {
         }
     }
 
+    /// Some alternates fill their whole canvas where macOS icons keep a
+    /// margin; they are inset to the same tile size.
+    private static func isFullBleed(_ image: NSImage) -> Bool {
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let rep = Optional(NSBitmapImageRep(cgImage: cg)),
+              let colour = rep.colorAt(x: rep.pixelsWide / 40, y: rep.pixelsHigh / 2) else { return false }
+        return colour.alphaComponent > 0.5
+    }
+
     private func row(_ choice: AppIconChoice) -> some View {
         let current = model.appIcon == choice
         return Button { model.appIcon = choice } label: {
@@ -792,6 +792,7 @@ struct IconSettingsPane: View {
                 Group {
                     if let image = choice.image {
                         Image(nsImage: image).resizable().interpolation(.high)
+                            .padding(Self.isFullBleed(image) ? 6 : 0)
                     } else {
                         RoundedRectangle(cornerRadius: 14).fill(.quaternary)
                     }

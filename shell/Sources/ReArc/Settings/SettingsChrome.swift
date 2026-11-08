@@ -32,6 +32,60 @@ enum SettingsColors {
     static let tertiary = dynamic(light: NSColor(white: 0.59, alpha: 1), dark: NSColor(white: 0.55, alpha: 1))
     /// The light blue of a hovered link row and the selected profile.
     static let selection = Color.accentColor.opacity(0.11)
+    /// Arc's flat grey push buttons and pop-ups.
+    static let button = dynamic(light: NSColor(white: 0.922, alpha: 1), dark: NSColor(white: 1, alpha: 0.12))
+    static let buttonPressed = dynamic(light: NSColor(white: 0.86, alpha: 1), dark: NSColor(white: 1, alpha: 0.2))
+}
+
+/// Arc's push buttons: flat grey rounded rectangles, 24 pt tall, no border.
+struct SettingsButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13))
+            .lineLimit(1)
+            .padding(.horizontal, 12)
+            .frame(minHeight: 24)
+            .background(configuration.isPressed ? SettingsColors.buttonPressed : SettingsColors.button,
+                        in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .foregroundStyle(isEnabled ? Color.primary : Color.secondary.opacity(0.6))
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+}
+
+/// Arc's pop-up: the choice and ⌃⌄ on the same flat grey, a menu of the
+/// choices with a check on the current one.
+struct SettingsPopUp<Value: Hashable>: View {
+    let label: String
+    @Binding var selection: Value
+    let options: [(value: Value, title: String)]
+    var minWidth: CGFloat = 110
+
+    var body: some View {
+        Menu {
+            Picker(label, selection: $selection) {
+                ForEach(options, id: \.value) { Text($0.title).tag($0.value) }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } label: {
+            HStack(spacing: 8) {
+                Text(options.first { $0.value == selection }?.title ?? "——").font(.system(size: 13))
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold))
+            }
+            .padding(.horizontal, 10)
+            .frame(minWidth: minWidth, minHeight: 24)
+            .background(SettingsColors.button, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(label)
+    }
 }
 
 /// One pane: a scroll view as tall as the window's content, the boxes in a

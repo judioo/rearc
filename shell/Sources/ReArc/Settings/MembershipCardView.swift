@@ -172,13 +172,14 @@ struct MembershipCardView: View {
                 CardSunCell(ink: ink).frame(width: 13)
                 Rectangle().fill(ink).frame(width: 1)
                 Text(texts[min(frame.dateText, 2)])
-                    .padding(.horizontal, 7)
+                    .padding(.horizontal, 6)
                     .rotation3DEffect(.degrees(frame.flipAngle), axis: (x: 1, y: 0, z: 0), perspective: 0.6)
             }
             .font(.system(size: 8, weight: .bold))
             .foregroundStyle(ink)
             .frame(height: 15)
             .overlay(RoundedRectangle(cornerRadius: 1.5).strokeBorder(ink, lineWidth: 1))
+            .fixedSize()
         }
     }
 }
@@ -225,8 +226,9 @@ private struct CardWordmark: View {
                     .tracking(-0.3)
             }
             Text("REFOCUSED · RESTORED · REARC")
-                .font(.system(size: 4.6, weight: .semibold))
-                .tracking(0.4)
+                .font(.system(size: 4.2, weight: .semibold))
+                .tracking(0.1)
+                .fixedSize()
                 .foregroundStyle(ink.opacity(0.7))
         }
     }
@@ -305,7 +307,8 @@ private struct CardArt: View {
                                                    center: point, startRadius: 0, endRadius: radius))
             }
         }
-        .overlay(GrainView().blendMode(.overlay).opacity(0.35))
+        .blur(radius: 8, opaque: true)
+        .overlay(GrainView().blendMode(.overlay).opacity(0.07))
         .clipShape(MembershipCardShape(number: shape))
     }
 }
@@ -341,13 +344,13 @@ struct MembershipCardShape: Shape {
         var p = Path()
         switch number {
         case 2:
-            // The horizon's swell: a soft rise along the top, square below.
-            let shoulder = h * 0.24
-            p.move(to: CGPoint(x: 0, y: shoulder + r))
-            p.addQuadCurve(to: CGPoint(x: r, y: shoulder), control: CGPoint(x: 0, y: shoulder))
-            p.addCurve(to: CGPoint(x: w - r, y: shoulder), control1: CGPoint(x: w * 0.3, y: -h * 0.08),
-                       control2: CGPoint(x: w * 0.7, y: -h * 0.08))
-            p.addQuadCurve(to: CGPoint(x: w, y: shoulder + r), control: CGPoint(x: w, y: shoulder))
+            // The horizon's swell: the top rises in one smooth S from left to right.
+            let low = h * 0.3, high = h * 0.04
+            p.move(to: CGPoint(x: 0, y: h - r))
+            p.addLine(to: CGPoint(x: 0, y: low + r))
+            p.addQuadCurve(to: CGPoint(x: r, y: low), control: CGPoint(x: 0, y: low))
+            p.addCurve(to: CGPoint(x: w - r, y: high), control1: CGPoint(x: w * 0.55, y: low), control2: CGPoint(x: w * 0.45, y: high))
+            p.addQuadCurve(to: CGPoint(x: w, y: high + r), control: CGPoint(x: w, y: high))
             p.addLine(to: CGPoint(x: w, y: h - r))
             p.addQuadCurve(to: CGPoint(x: w - r, y: h), control: CGPoint(x: w, y: h))
             p.addLine(to: CGPoint(x: r, y: h))

@@ -57,13 +57,25 @@ enum ReArcMark {
         return Paths(sun: moved(unit.sun), navy: moved(unit.navy), blue: moved(unit.blue), deep: moved(unit.deep), mono: moved(unit.mono))
     }
 
-    /// The Icon toolbar item's glyph: the one-colour mark as a template image,
-    /// a little larger than its SVG box so it matches the SF Symbols beside it.
+    /// The Icon toolbar item's glyph: the mark redrawn in line, like the SF
+    /// Symbols beside it: the sun's ring rising behind the horizon's arc, with
+    /// the mark's gap between them. In a 20 pt box.
+    static func glyphPath() -> CGPath {
+        let horizon = CGPoint(x: 10, y: 21.5), radius: CGFloat = 11, gap: CGFloat = 2
+        let arc = CGMutablePath()
+        arc.addArc(center: horizon, radius: radius, startAngle: -152 * .pi / 180, endAngle: -28 * .pi / 180, clockwise: false)
+        let sun = CGPath(ellipseIn: CGRect(x: 10 - 4.4, y: 7.6 - 4.4, width: 8.8, height: 8.8), transform: nil)
+            .copy(strokingWithWidth: 1.5, lineCap: .round, lineJoin: .round, miterLimit: 4)
+        let clearance = CGPath(ellipseIn: CGRect(x: horizon.x - radius - gap, y: horizon.y - radius - gap,
+                                                 width: 2 * (radius + gap), height: 2 * (radius + gap)), transform: nil)
+        return sun.subtracting(clearance).union(arc.copy(strokingWithWidth: 1.8, lineCap: .round, lineJoin: .round, miterLimit: 4))
+    }
+
     static func templateImage(pointSize: CGFloat = 20) -> NSImage {
         let image = NSImage(size: NSSize(width: pointSize, height: pointSize), flipped: true) { rect in
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
-            let inset = rect.insetBy(dx: -rect.width * 0.12, dy: -rect.height * 0.12)
-            context.addPath(paths(in: inset).mono)
+            context.scaleBy(x: rect.width / 20, y: rect.height / 20)
+            context.addPath(glyphPath())
             context.setFillColor(NSColor.black.cgColor)
             context.fillPath()
             return true
