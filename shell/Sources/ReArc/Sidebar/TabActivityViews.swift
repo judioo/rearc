@@ -57,14 +57,23 @@ extension View {
     }
 
     /// A transient confirmation just inside the card's top-right corner,
-    /// over the toolbar strip (ARC-RECORDING-ANALYSIS.md §6).
-    func shellToast(_ toast: ShellToast?, choose: @escaping (Bool) -> Void = { _ in }) -> some View {
+    /// over the toolbar strip (ARC-RECORDING-ANALYSIS.md §6), or centred
+    /// `toolbarHeight` down, under the strip, covering no control.
+    func shellToast(_ toast: ShellToast?, toolbarHeight: CGFloat = 0, choose: @escaping (Bool) -> Void = { _ in }) -> some View {
         overlay(alignment: .topTrailing) {
-            if let toast {
+            if let toast, toast.placement == .corner {
                 ShellToastView(toast: toast, choose: choose)
                     .padding(.top, 5)
                     .padding(.trailing, 6)
                     .transition(.scale(scale: 0.5, anchor: .topTrailing).combined(with: .opacity))
+                    .id(toast.id)
+            }
+        }
+        .overlay(alignment: .top) {
+            if let toast, toast.placement == .belowToolbar {
+                ShellToastView(toast: toast, choose: choose)
+                    .padding(.top, toolbarHeight + 8)
+                    .transition(.scale(scale: 0.5, anchor: .top).combined(with: .opacity))
                     .id(toast.id)
             }
         }

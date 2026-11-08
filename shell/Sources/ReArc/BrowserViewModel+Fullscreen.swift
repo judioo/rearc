@@ -55,7 +55,7 @@ extension BrowserViewModel {
     }
 
     private func showFullscreenHint() {
-        showToast("To exit full screen, press esc", systemImage: "", keycaps: ["esc"], duration: 2.5)
+        showToast("To exit full screen, press esc", systemImage: "", keycaps: ["esc"], placement: .belowToolbar, duration: 2.5)
         fullscreenHintID = toast?.id
     }
 

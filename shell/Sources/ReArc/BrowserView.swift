@@ -462,7 +462,8 @@ struct BrowserView: View {
                     }
                 }
         }
-        .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil) { start in
+        .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil,
+                    toolbarHeight: showsCardToolbar ? CardToolbarView.height : 0) { start in
             if start { model.startPendingExtensionReinstall() } else { model.postponePendingExtensionReinstall() }
         }
         .clipShape(shape)

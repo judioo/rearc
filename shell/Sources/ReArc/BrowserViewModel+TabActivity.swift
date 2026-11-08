@@ -12,6 +12,14 @@ struct ShellToast: Equatable, Identifiable {
     /// Substrings of `message` drawn as keycaps ("⌘Z").
     var keycaps: [String] = []
     var action: Action?
+    var placement: Placement = .corner
+
+    /// The top-right corner over the toolbar strip, or centred under it.
+    /// The full-screen Esc hint takes the second: in the corner it covered
+    /// the site controls and split button (QA-2026-11-07 open issue 25).
+    enum Placement: Equatable {
+        case corner, belowToolbar
+    }
 
     enum Action: Equatable {
         /// Copied Current URL's trailing share button.
@@ -160,8 +168,8 @@ extension BrowserViewModel {
     /// Shows `message` for about 5 s. It scales in over a frame or two and
     /// out in one (§6).
     func showToast(_ message: String, systemImage: String, keycaps: [String] = [], action: ShellToast.Action? = nil,
-                   duration: TimeInterval = ShellToast.defaultDuration) {
-        let toast = ShellToast(message: message, systemImage: systemImage, keycaps: keycaps, action: action)
+                   placement: ShellToast.Placement = .corner, duration: TimeInterval = ShellToast.defaultDuration) {
+        let toast = ShellToast(message: message, systemImage: systemImage, keycaps: keycaps, action: action, placement: placement)
         withAnimation(ShellToast.inAnimation) { self.toast = toast }
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
             guard let self, self.toast?.id == toast.id else { return }
