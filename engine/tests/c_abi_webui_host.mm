@@ -20,7 +20,7 @@ static std::vector<std::string> pages = {
     "chrome://downloads/", "chrome://password-manager/",
     "chrome://password-manager/settings", "chrome://password-manager/checkup",
     "chrome://extensions/", "chrome://extensions/shortcuts",
-    "chrome://settings/content", "chrome://version/"};
+    "chrome://settings/content", "chrome://version/", "chrome://credits/"};
 static void navigate();
 static void shutdown_done(void*, ReArcStatus s, bool c) {
   assert(s == REARC_OK && !c); stopped = true;
@@ -95,6 +95,8 @@ static void check_page() {
       } else if (pages[index_].starts_with("chrome://extensions")) {
         tag = @"extensions-manager";
         body = @"await chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true}); await chrome.developerPrivate.getProfileConfiguration();";
+      } else if (pages[index_].starts_with("chrome://credits")) {
+        body = @"if(document.title!=='Credits'||document.querySelectorAll('.product').length<10)throw Error('missing licences'); const print=document.querySelector('#print-link'); if(print.hidden||typeof print.onclick!=='function')throw Error('credits JS'); const label=document.querySelector('.product label'); const input=label.querySelector('input'); const before=input.checked; label.click(); if(input.checked===before)throw Error('licence toggle'); const link=document.querySelector('.homepage a'); if(!/^https?:/.test(link.href))throw Error('homepage link'); const response=await fetch('/credits.css'); if(!response.ok||!response.headers.get('content-type').includes('text/css'))throw Error('credits CSS'); let printed=false; window.print=()=>{printed=true}; print.click(); if(!printed)throw Error('print link');";
       } else if (pages[index_].starts_with("chrome://settings")) {
         tag = @"settings-ui";
       }
@@ -131,8 +133,8 @@ static void navigate() {
 }
 static void installed(void*, ReArcStatus s, bool c) { assert(s == REARC_OK && !c); navigate(); }
 static void ready(void*, uint64_t profile) {
-  assert(ReArcEngineABIMinorVersion() >= 14 && ReArcEngineHasFeature("webui_daily_pages"));
-  for (const char* rejected : {"chrome://flags/", "chrome://crash/", "chrome://quit/", "chrome://restart/", "chrome://bookmarks/", "chrome-untrusted://history/", "chrome://history.evil/", "view-source:chrome://history/"}) {
+  assert(ReArcEngineABIMinorVersion() >= 52 && ReArcEngineHasFeature("webui_daily_pages") && ReArcEngineHasFeature("webui_credits"));
+  for (const char* rejected : {"chrome://flags/", "chrome://crash/", "chrome://quit/", "chrome://restart/", "chrome://bookmarks/", "chrome-untrusted://history/", "chrome://history.evil/", "chrome://credits.evil/", "chrome-untrusted://credits/", "view-source:chrome://credits/", "view-source:chrome://history/"}) {
     uint64_t bad = 123;
     assert(ReArcTabCreate(profile,1,rejected,&bad) == REARC_INVALID_URL && !bad);
   }

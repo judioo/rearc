@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.51** (major remains 1 for existing hosts), bridge **0.54.0**, compiled Chromium **156.0.8078.74**. Public header:
+ABI **1.52** (major remains 1 for existing hosts), bridge **0.55.0**, compiled Chromium **156.0.8078.74**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -104,9 +104,10 @@ Create and Navigate share the same valid UTF-8/GURL admission policy. The host
 is trusted browser UI: `data:` is admitted as a browser-initiated top-level
 navigation, `file:` uses Chromium local-file handling, and the audited hosts
 `chrome://settings`, `chrome://version`, `chrome://history`,
-`chrome://downloads`, `chrome://password-manager`, and `chrome://extensions`
-use Chromium WebUI. The four daily-use hosts require `webui_daily_pages`
-(ABI 1.14); the original two remain available to earlier hosts. Paths, queries
+`chrome://downloads`, `chrome://password-manager`, `chrome://extensions`,
+and `chrome://credits` use Chromium WebUI. The four daily-use hosts require `webui_daily_pages`
+(ABI 1.14); Credits requires `webui_credits` (ABI 1.52). The original two
+remain available to earlier hosts. Paths, queries
 and fragments stay under the same exact host. Other WebUI hosts are rejected
 until their browser-tab helper dependencies are audited. Settings
 omits pay-over-time controls when no autofill client exists; browser-window
@@ -2216,3 +2217,12 @@ events come only on change, the getter, scope 3's rejection and that scope 2
 of a page with a `#1f2023` top bar is that colour. Its window is far off
 screen, ordered back and never key.
 
+### Credits admission (ABI 1.52)
+
+`webui_credits` admits the exact `chrome://credits` host through the shared
+`ABIIsTrustedWebUI` predicate. The pinned macOS `AboutUI` only registers
+`ThemeSource` and `AboutUIHTMLSource`; it installs no message or Mojo handlers
+and needs no Browser or TabInterface. Credits HTML, CSS and JavaScript are
+compiled resources. Licence toggles and homepage anchors are ordinary DOM;
+the Print link invokes `window.print()` through the existing print delegate.
+Privileged evaluation and capture remain denied.

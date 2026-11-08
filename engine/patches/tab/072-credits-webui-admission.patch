@@ -1,0 +1,65 @@
+From 53c9eeebffceb8493c1bbd2c205a19e4396f81c0 Mon Sep 17 00:00:00 2001
+From: Judioo <contact@judioo.com>
+Date: Sun, 8 Nov 2026 23:37:07 +0400
+Subject: [PATCH] P-TAB-001 admit static Credits WebUI in browser-less tabs
+
+ABI 1.52 / bridge 0.55.0 advertises webui_credits through the shared trusted WebUI predicate. AboutUIHTMLSource has only static resource sources, no browser-dependent handlers. No upstream files changed.
+
+Last rebased: 2026-11-08 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Codex <noreply@openai.com>
+---
+ chrome/browser/rearc_bridge/rearc_engine_abi.h        | 2 +-
+ chrome/browser/rearc_bridge/rearc_engine_abi.mm       | 2 ++
+ chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm | 2 +-
+ 3 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 9cbf414b91..b84f1f6f13 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 51, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 52, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 355b393aeb..e66f307fea 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -544,6 +544,7 @@ bool ABIHasVisibilityIntent(uint64_t tab) {
+ bool ABIIsTrustedWebUI(const GURL& url) {
+   return url.SchemeIs("chrome") &&
+          (url.host() == "settings" || url.host() == "version" ||
++          url.host() == "credits" ||
+           url.host() == "history" || url.host() == "downloads" ||
+           url.host() == "password-manager" || url.host() == "extensions");
+ }
+@@ -574,6 +575,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "navigation" ||
+          std::string(feature) == "navigation_extended" ||
+          std::string(feature) == "webui_daily_pages" ||
++         std::string(feature) == "webui_credits" ||
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "history_query" ||
+          std::string(feature) == "search_autocomplete" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 631852082a..75562df1bd 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.54.0";
++  return "0.55.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+-- 
+2.54.0 (Apple Git-157)
+

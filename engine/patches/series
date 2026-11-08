@@ -77,6 +77,7 @@ chrome/007-chrome-browser-identity-headers.patch # P-BUILD-001 Web Store: Chrome
 tab/069-download-event-batches.patch          # P-TAB-001 ABI 1.49: download event batches with times; history slices and archived pages yield to the host's run loop
 tab/070-extension-tab-groups.patch            # P-TAB-001 ABI 1.50: extension tab groups, tab events, windows.update focus and popup windows on registry tabs
 tab/071-page-theme-color.patch                # P-TAB-001 ABI 1.51: page theme-color events and the top-edge snapshot (scope 2) for the toolbar colour
+tab/072-credits-webui-admission.patch          # P-TAB-001 ABI 1.52: static browser-less Credits page (webui_credits)
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:
