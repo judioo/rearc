@@ -95,7 +95,7 @@ private struct AboutView: View {
     private var attribution: AttributedString {
         var text = (try? AttributedString(markdown:
             "ReArc is made possible by the [Chromium](https://www.chromium.org) open source project, "
-            + "as well as other [open source software](https://github.com/judioo/rearc).")) ?? AttributedString()
+            + "Chromium's [open source software](chrome://credits), as well as other [open source software](https://github.com/judioo/rearc).")) ?? AttributedString()
         for run in text.runs where run.link != nil {
             text[run.range].underlineStyle = .single
         }

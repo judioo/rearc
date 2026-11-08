@@ -43,6 +43,17 @@ final class NavigationURLPolicyTests: XCTestCase {
         XCTAssertEqual(NavigationURLPolicy.webUIHosts(for: .dailyWebUI), [])
     }
 
+    func testCreditsNeedsItsOwnFeature() {
+        XCTAssertFalse(allows("chrome://credits", daily))
+        XCTAssertFalse(allows("chrome://credits", .creditsWebUI))
+        let credits = NavigationURLPolicy.EngineSchemes.chromium.union(.creditsWebUI)
+        XCTAssertTrue(allows("chrome://credits", credits))
+        XCTAssertFalse(allows("chrome://credits.evil", credits))
+        XCTAssertFalse(allows("chrome-untrusted://credits", credits))
+        XCTAssertEqual(BrowserInternalPage.credits.title, "Credits")
+        XCTAssertTrue(BrowserInternalPage.credits.isAvailable(engine: credits))
+    }
+
     func testViewSourceWrapsOneHTTPOrFileURL() {
         XCTAssertFalse(allows("view-source:https://example.com"))
         XCTAssertTrue(allows("view-source:https://example.com", .chromium))
@@ -71,10 +82,10 @@ final class NavigationURLPolicyTests: XCTestCase {
 
     func testBrowserPagesAreAdmittedWebUI() {
         for page in BrowserInternalPage.allCases {
-            let needsDaily = Self.dailyPages.contains(page)
+            let needsDaily = Self.dailyPages.contains(page) || page == .credits
             XCTAssertEqual(NavigationURLPolicy.allows(page.url, engine: .chromium), !needsDaily, page.rawValue)
-            XCTAssertTrue(NavigationURLPolicy.allows(page.url, engine: daily), page.rawValue)
-            XCTAssertTrue(page.isAvailable(engine: daily), page.rawValue)
+            XCTAssertTrue(NavigationURLPolicy.allows(page.url, engine: daily.union(.creditsWebUI)), page.rawValue)
+            XCTAssertTrue(page.isAvailable(engine: daily.union(.creditsWebUI)), page.rawValue)
             XCTAssertFalse(NavigationURLPolicy.allows(page.url), page.rawValue)
             XCTAssertFalse(page.isAvailable(engine: []), page.rawValue)
         }
@@ -97,7 +108,7 @@ final class NavigationURLPolicyTests: XCTestCase {
         XCTAssertFalse(webKitActions.contains(.openBrowserPage(.settings)))
         XCTAssertFalse(webKitActions.contains(.viewPageSource))
         for page in BrowserInternalPage.allCases {
-            XCTAssertEqual(chromiumActions.contains(.openBrowserPage(page)), !Self.dailyPages.contains(page), page.rawValue)
+            XCTAssertEqual(chromiumActions.contains(.openBrowserPage(page)), !Self.dailyPages.contains(page) && page != .credits, page.rawValue)
         }
         let dailyContext = CommandBarContext(
             store: store,
@@ -107,7 +118,7 @@ final class NavigationURLPolicyTests: XCTestCase {
         )
         let dailyActions = AppCommandRegistry.all(in: dailyContext).map(\.action)
         for page in BrowserInternalPage.allCases {
-            XCTAssertTrue(dailyActions.contains(.openBrowserPage(page)), page.rawValue)
+            XCTAssertEqual(dailyActions.contains(.openBrowserPage(page)), page != .credits, page.rawValue)
         }
         XCTAssertEqual(
             CommandBarSearch.results(for: ">downloads", in: store, navigationSchemes: daily).first?.commandAction,

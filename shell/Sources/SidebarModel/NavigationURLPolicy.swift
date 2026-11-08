@@ -18,6 +18,8 @@ public enum NavigationURLPolicy {
         /// `chrome://history`, `downloads`, `password-manager` and `extensions`
         /// (ABI 1.14); only meaningful together with `trustedWebUI`.
         public static let dailyWebUI = EngineSchemes(rawValue: 4)
+        /// Static Chromium licence page (`webui_credits`, ABI 1.52).
+        public static let creditsWebUI = EngineSchemes(rawValue: 8)
         /// The ABI 1.5 set; engines with `webui_daily_pages` add `dailyWebUI`.
         public static let chromium: EngineSchemes = [.trustedWebUI, .viewSource]
     }
@@ -31,7 +33,10 @@ public enum NavigationURLPolicy {
     /// Exact WebUI hosts admitted for `engine` (no prefix or wildcard match).
     public static func webUIHosts(for engine: EngineSchemes) -> Set<String> {
         guard engine.contains(.trustedWebUI) else { return [] }
-        return engine.contains(.dailyWebUI) ? trustedWebUIHosts.union(dailyWebUIHosts) : trustedWebUIHosts
+        var hosts = trustedWebUIHosts
+        if engine.contains(.dailyWebUI) { hosts.formUnion(dailyWebUIHosts) }
+        if engine.contains(.creditsWebUI) { hosts.insert("credits") }
+        return hosts
     }
 
     private static let baseSchemes: Set<String> = ["http", "https", "data", "file"]

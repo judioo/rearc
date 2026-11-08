@@ -29,6 +29,14 @@ final class ChromiumABI114CapabilitiesTests: XCTestCase {
         XCTAssertFalse(minor10.shutdownPendingCloses || minor10.osPermissionShutdown)
     }
 
+    func testCreditsRequiresMinorFlagAndNavigation() {
+        for (minor, missing, expected) in [(UInt32(51), "", false), (52, "webui_credits", false), (52, "navigation_extended", false), (52, "", true)] {
+            let capabilities = ChromiumCapabilities(abiMinorVersion: minor) { $0 != missing }
+            XCTAssertEqual(capabilities.webUICredits, expected)
+            XCTAssertEqual(BrowserInternalPage.credits.isAvailable(engine: capabilities.navigationSchemes), expected)
+        }
+    }
+
     func testAFlagIsNeededAsWellAsTheMinor() {
         let noDaily = ChromiumCapabilities(abiMinorVersion: 15) { $0 != "webui_daily_pages" }
         XCTAssertFalse(noDaily.webUIDailyPages)

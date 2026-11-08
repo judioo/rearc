@@ -3,7 +3,8 @@ import Foundation
 /// Chromium-owned pages the shell routes to instead of reimplementing them,
 /// where Arc shows Chrome's own pages. Settings and version need
 /// `trustedWebUI`; history, downloads, passwords and extensions need
-/// `dailyWebUI` as well (ABI 1.14 `webui_daily_pages`).
+/// `dailyWebUI` as well (ABI 1.14 `webui_daily_pages`). Credits requires
+/// `creditsWebUI` (ABI 1.52 `webui_credits`).
 public enum BrowserInternalPage: String, CaseIterable, Hashable, Sendable {
     case settings
     case privacy
@@ -11,6 +12,8 @@ public enum BrowserInternalPage: String, CaseIterable, Hashable, Sendable {
     case clearBrowsingData
     /// Chromium's Import Bookmarks and Settings dialog (Arc ARC_ImportFeature).
     case importData
+    /// Static licences page; requires `creditsWebUI` (ABI 1.52).
+    case credits
     case version
     case history
     case downloads
@@ -30,6 +33,7 @@ public enum BrowserInternalPage: String, CaseIterable, Hashable, Sendable {
         case .siteSettings: return URL(string: "chrome://settings/content")!
         case .clearBrowsingData: return URL(string: "chrome://settings/clearBrowserData")!
         case .importData: return URL(string: "chrome://settings/importData")!
+        case .credits: return URL(string: "chrome://credits")!
         case .version: return URL(string: "chrome://version")!
         case .history: return URL(string: "chrome://history/")!
         case .downloads: return URL(string: "chrome://downloads/")!
@@ -49,6 +53,7 @@ public enum BrowserInternalPage: String, CaseIterable, Hashable, Sendable {
         case .siteSettings: return "Site Settings"
         case .clearBrowsingData: return "Clear Browsing Data"
         case .importData: return "Import Browser Data"
+        case .credits: return "Credits"
         case .version: return "About Chromium Engine"
         case .history: return "History"
         case .downloads: return "Downloads"

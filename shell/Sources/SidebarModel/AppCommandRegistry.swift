@@ -756,6 +756,13 @@ public enum AppCommandRegistry {
                 action: .openBrowserPage(.importData)
             ),
             AppCommand(
+                id: "browser-credits",
+                title: "Credits",
+                keywords: ["credits", "licences", "licenses", "open source", "chromium"],
+                minQueryLength: 2,
+                action: .openBrowserPage(.credits)
+            ),
+            AppCommand(
                 id: "engine-version",
                 title: "About Chromium Engine",
                 keywords: ["version", "about", "chromium", "engine"],

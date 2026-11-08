@@ -19,6 +19,7 @@ struct ChromiumCapabilities: Equatable {
     static let osPermissionShutdownFeature = "os_permission_shutdown"
     static let shutdownPendingClosesFeature = "shutdown_pending_closes"
     static let profileDirectoryFeature = "profile_directory"
+    static let webUICreditsFeature = "webui_credits"
     static let webUIDailyPagesFeature = "webui_daily_pages"
     static let historyRecordingFeature = "history_recording"
     static let passwordAutofillFeature = "password_autofill"
@@ -75,6 +76,7 @@ struct ChromiumCapabilities: Equatable {
         shutdownPendingClosesFeature: 12,
         profileDirectoryFeature: 13,
         webUIDailyPagesFeature: 14,
+        webUICreditsFeature: 52,
         historyRecordingFeature: 15,
         passwordAutofillFeature: 15,
         findInPageFeature: 16,
@@ -142,6 +144,8 @@ struct ChromiumCapabilities: Equatable {
     var shutdownPendingCloses: Bool
     /// `ReArcProfileOpenDirectory`: open an existing profile directory in place; requires `profiles`.
     var profileDirectory: Bool
+    /// Static chrome://credits licence page; requires `navigationExtended`.
+    var webUICredits: Bool
     /// chrome://history, downloads, password-manager and extensions; requires `navigationExtended`.
     var webUIDailyPages: Bool
     /// Chromium's HistoryTabHelper records every non-OTR tab (chrome://history). No Swift call.
@@ -256,6 +260,7 @@ struct ChromiumCapabilities: Equatable {
         osPermissionShutdown = adopted(Self.osPermissionShutdownFeature)
         shutdownPendingCloses = adopted(Self.shutdownPendingClosesFeature)
         profileDirectory = profiles && adopted(Self.profileDirectoryFeature)
+        webUICredits = navigationExtended && adopted(Self.webUICreditsFeature)
         webUIDailyPages = navigationExtended && adopted(Self.webUIDailyPagesFeature)
         historyRecording = adopted(Self.historyRecordingFeature)
         passwordAutofill = adopted(Self.passwordAutofillFeature)
@@ -313,7 +318,10 @@ struct ChromiumCapabilities: Equatable {
 
     var navigationSchemes: NavigationURLPolicy.EngineSchemes {
         guard navigationExtended else { return [] }
-        return webUIDailyPages ? NavigationURLPolicy.EngineSchemes.chromium.union(.dailyWebUI) : .chromium
+        var schemes = NavigationURLPolicy.EngineSchemes.chromium
+        if webUIDailyPages { schemes.insert(.dailyWebUI) }
+        if webUICredits { schemes.insert(.creditsWebUI) }
+        return schemes
     }
 
     /// Keychain item the engine reads its Safe Storage key from.
@@ -337,6 +345,7 @@ struct ChromiumCapabilities: Equatable {
             (Self.shutdownPendingClosesFeature, shutdownPendingCloses),
             (Self.profileDirectoryFeature, profileDirectory),
             (Self.webUIDailyPagesFeature, webUIDailyPages),
+            (Self.webUICreditsFeature, webUICredits),
             (Self.historyRecordingFeature, historyRecording),
             (Self.passwordAutofillFeature, passwordAutofill),
             (Self.findInPageFeature, findInPage),
