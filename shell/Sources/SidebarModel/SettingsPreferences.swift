@@ -19,16 +19,24 @@ public enum SettingsPane: String, CaseIterable, Sendable {
         }
     }
 
+    /// The toolbar items' symbols, the closest to Arc's (SETTINGS.md §1). The
+    /// Icon item draws ReArc's own mark where it can; `app.badge` stands in.
     public var systemImage: String {
         switch self {
-        case .account: return "person.crop.circle"
+        case .account: return "person.crop.square.filled.and.at.rectangle"
         case .general: return "gearshape"
-        case .profiles: return "person.2"
-        case .links: return "link"
-        case .shortcuts: return "command"
+        case .profiles: return "person"
+        case .links: return "macwindow.on.rectangle"
+        case .shortcuts: return "keyboard"
         case .icon: return "app.badge"
         case .advanced: return "slider.horizontal.3"
         }
+    }
+
+    /// The toolbar label and window title: the account item is named after
+    /// the profile, as Arc's is after the account ("Akilu").
+    public func title(accountName: String) -> String {
+        self == .account && !accountName.isEmpty ? accountName : title
     }
 
     /// The window opens on the pane shown last.

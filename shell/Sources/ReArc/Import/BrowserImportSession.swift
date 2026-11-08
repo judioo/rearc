@@ -30,6 +30,9 @@ final class BrowserImportSession {
     var arcChoices = ArcImportChoices(spaceIDs: [])
     private(set) var arcSettings = ArcSettingsImport()
     var includeArcSettings = true
+    /// Arc's membership card (its title, colours and member-since date).
+    private(set) var arcCard: ArcMembershipCardImport?
+    var includeArcCard = true
 
     private(set) var details: [ImportSourceProfile.ID: ProfileDetail] = [:]
     var includeBookmarks = true
@@ -76,6 +79,7 @@ final class BrowserImportSession {
             var arc: ArcSidebarImport?
             var problem: String?
             var settings = ArcSettingsImport()
+            var card: ArcMembershipCardImport?
             if found.contains(where: { $0.browser == .arc && $0.sidebarFile != nil }) {
                 do {
                     arc = try ArcSidebarImport.load(from: root)
@@ -83,6 +87,7 @@ final class BrowserImportSession {
                     problem = "Arc's sidebar file could not be read."
                 }
                 settings = ArcSettingsImport.read(readDefaults())
+                card = ArcMembershipCardImport.load(from: root)
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -90,6 +95,7 @@ final class BrowserImportSession {
                 self.arc = arc
                 self.arcProblem = problem
                 self.arcSettings = settings
+                self.arcCard = card
                 if let arc, let store = self.model?.store { self.arcChoices = arc.defaultChoices(for: store) }
                 self.details = [:]
                 self.isDiscovering = false
@@ -149,7 +155,7 @@ final class BrowserImportSession {
         guard !isImporting, let selection else { return false }
         switch selection {
         case .arcSidebar:
-            return !arcSummary.isEmpty || (includeArcSettings && arcSettings.count > 0)
+            return !arcSummary.isEmpty || (includeArcSettings && arcSettings.count > 0) || (includeArcCard && arcCard != nil)
         case .profile(let profile):
             guard let detail = details[profile.id] else { return false }
             return (includeBookmarks && detail.inventory.bookmarks > 0)
@@ -170,7 +176,9 @@ final class BrowserImportSession {
         case .arcSidebar:
             guard let arc else { return }
             let summary = model.applyArcImport(arc, choices: arcChoices, settings: includeArcSettings ? arcSettings : nil)
-            result = BrowserImportSession.describe(summary, settings: includeArcSettings ? arcSettings.count : 0)
+            let card = includeArcCard ? arcCard : nil
+            if let card { model.importArcMembershipCard(card) }
+            result = BrowserImportSession.describe(summary, settings: includeArcSettings ? arcSettings.count : 0, card: card != nil)
             completion?()
         case .profile(let profile):
             guard let detail = details[profile.id] else { return }
@@ -203,7 +211,7 @@ final class BrowserImportSession {
         }
     }
 
-    static func describe(_ summary: ArcImportSummary, settings: Int) -> String {
+    static func describe(_ summary: ArcImportSummary, settings: Int, card: Bool = false) -> String {
         var parts: [String] = []
         func add(_ count: Int, _ noun: String) {
             if count > 0 { parts.append("\(count) \(noun)\(count == 1 ? "" : "s")") }
@@ -214,6 +222,7 @@ final class BrowserImportSession {
         add(summary.favorites, "favorite")
         add(summary.newProfiles, "new profile")
         add(settings, "setting")
+        if card { parts.append("your membership card") }
         return parts.isEmpty ? "Nothing was imported." : "Imported " + parts.joined(separator: ", ")
     }
 

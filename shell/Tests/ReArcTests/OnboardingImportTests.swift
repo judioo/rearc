@@ -191,6 +191,25 @@ final class OnboardingImportTests: XCTestCase {
         XCTAssertFalse(sample.contains { store.tab(withID: $0) != nil })
     }
 
+    // MARK: Membership card
+
+    func testArcsCardComesWithArcsSpacesAndActOnesNameGoesOnIt() throws {
+        try write(["title": "STATUESQUE HUNTER", "paletteNumber": 3, "shapeName": "Shape4"], "Arc/StorableMembershipCard.json")
+        try write(["session": ["user": ["name": "Akilu", "email": "x@example.invalid", "createdAt": 738_929_101.8]]], "Arc/StorableAuthState.json")
+        let skipped = makeModel()
+        _ = importForReal(sources(), [.bookmarks], model: skipped)
+        XCTAssertFalse(skipped.membershipCard.ensureLoaded().hasArcHistory, "no Arc spaces asked for, no card")
+        let model = makeModel()
+        _ = importForReal(sources(), [.spaces], model: model)
+        let card = model.membershipCard.ensureLoaded()
+        XCTAssertEqual(card.title, "STATUESQUE HUNTER")
+        XCTAssertEqual(card.shape, 4)
+        XCTAssertTrue(card.hasArcHistory)
+        XCTAssertEqual(model.membershipCardName, "Akilu", "Arc's name until Act 1 gives one")
+        model.recordOnboardingName("  Ada ")
+        XCTAssertEqual(model.membershipCardName, "Ada")
+    }
+
     // MARK: Extensions
 
     func testExtensionsAreQueuedForAfterTheSunriseAndSurviveARelaunch() throws {

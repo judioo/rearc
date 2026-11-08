@@ -4063,17 +4063,19 @@ extension ChromiumSelfTest {
         guard let settings = shell.settingsWindowForTesting else { throw Failure(description: "no Settings window") }
         let toolbar = settings.toolbar?.items.map(\.itemIdentifier.rawValue) ?? []
         try check(toolbar == SettingsPane.allCases.map(\.rawValue), "Settings toolbar \(toolbar)")
-        try check(settings.frame.width < 520, "Settings is \(settings.frame.width) pt wide, not about 400")
+        let account = settings.toolbar?.items.first?.label
+        try check(account == model.accountName, "the account item is labelled \(account ?? "nil"), not the profile's name")
         var heights: [String] = []
         for pane in SettingsPane.allCases {
             model.settingsPane = pane
-            try await wait("Settings pane \(pane.title)") {
-                settings.title == pane.title && settings.toolbar?.selectedItemIdentifier?.rawValue == pane.rawValue
+            let title = pane.title(accountName: model.accountName)
+            try await wait("Settings pane \(title)") {
+                settings.title == title && settings.toolbar?.selectedItemIdentifier?.rawValue == pane.rawValue
             }
             settings.contentView?.layoutSubtreeIfNeeded()
-            let height = settings.contentView?.fittingSize.height ?? 0
-            try check(height > 60, "the \(pane.title) pane laid out \(height) pt")
-            heights.append("\(pane.title) \(Int(height))")
+            // Arc's fixed 684 × 650 for every pane; long ones scroll inside.
+            try check(settings.frame.size == SettingsMetrics.windowSize, "the \(title) pane made the window \(settings.frame.size)")
+            heights.append("\(title) \(Int(settings.frame.width))×\(Int(settings.frame.height))")
         }
         // A switch and a shortcut, set as the panes set them.
         model.warnBeforeQuitting.toggle()

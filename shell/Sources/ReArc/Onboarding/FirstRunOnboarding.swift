@@ -127,6 +127,8 @@ final class FirstRunOnboarding: OnboardingHost {
         // The developer sample goes; the person's own spaces stay.
         let first = OnboardingApplier.apply(result, to: model.store, mainProfileID: main,
                                             replacing: sampleSpaceIDs, sampleFavorites: sampleFavoriteIDs)
+        // Act 1's name goes on the membership card.
+        model.recordOnboardingName(result.name)
         model.reconcileEngineOwnership()
         if let first { model.selectSpace(first) }
         model.openPageInNewTab(WelcomePage.write(name: result.name, colour: result.colour,
@@ -189,6 +191,8 @@ struct OnboardingImportPlan: Sendable {
         /// Only the chosen Arc profiles' spaces and favorites.
         var arc: ArcSidebarImport?
         var arcSettings: ArcSettingsImport?
+        /// Arc's membership card comes with its spaces.
+        var arcCard: ArcMembershipCardImport?
         var profiles: [(profile: ImportSourceProfile, bookmarks: [BookmarkNode]?, history: [VisitRecord]?)]
         /// In source order; the queue keeps the reinstallable ones, each once.
         var extensions: [(browser: ImportBrowser, extension: SourceExtension)] = []
@@ -216,9 +220,11 @@ struct OnboardingImportPlan: Sendable {
         let found = BrowserImportDiscovery.discover(in: root)
         var arc: ArcSidebarImport?
         var settings: ArcSettingsImport?
+        var card: ArcMembershipCardImport?
         if spaces, !arcDirectories.isEmpty {
             arc = (try? ArcSidebarImport.load(from: root))?.only(directories: arcDirectories)
             settings = ArcSettingsImport.read(arcDefaults())
+            card = ArcMembershipCardImport.load(from: root)
         }
         var profiles: [(ImportSourceProfile, [BookmarkNode]?, [VisitRecord]?)] = []
         var extensions: [(ImportBrowser, SourceExtension)] = []
@@ -232,7 +238,7 @@ struct OnboardingImportPlan: Sendable {
                 }
             }
         }
-        return Read(arc: arc, arcSettings: settings, profiles: profiles, extensions: extensions)
+        return Read(arc: arc, arcSettings: settings, arcCard: card, profiles: profiles, extensions: extensions)
     }
 
     static func bookmarks(_ profile: ImportSourceProfile) -> [BookmarkNode]? {
@@ -292,6 +298,7 @@ struct OnboardingImportPlan: Sendable {
             }
             let summary = store.importArcSidebar(arc, choices: arc.defaultChoices(for: store))
             if let settings = read.arcSettings { model.applyArcSettings(settings) }
+            if let card = read.arcCard { model.importArcMembershipCard(card) }
             totals.spaces = summary.spaces
             totals.tabs = summary.pinnedTabs + summary.todayTabs + summary.favorites
         }

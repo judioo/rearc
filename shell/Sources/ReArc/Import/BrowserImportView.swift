@@ -183,6 +183,9 @@ private struct ArcSidebarImportPane: View {
                     if session.arcSettings.count > 0 {
                         SettingsToggleRow(label: "Arc settings", detail: settingsDetail, isOn: $session.includeArcSettings)
                     }
+                    if let card = session.arcCard {
+                        SettingsToggleRow(label: "Membership card", detail: cardDetail(card), isOn: $session.includeArcCard)
+                    }
                 }
                 Section("Not imported") {
                     Text(droppedText(arc.export.dropped))
@@ -206,6 +209,14 @@ private struct ArcSidebarImportPane: View {
         if summary.todayTabs > 0 { parts.append("\(summary.todayTabs) Today tab\(summary.todayTabs == 1 ? "" : "s")") }
         if summary.newProfiles > 0 { parts.append("\(summary.newProfiles) new profile\(summary.newProfiles == 1 ? "" : "s")") }
         return parts.joined(separator: " · ")
+    }
+
+    /// Its title and member-since date: the card in Settings › Account.
+    private func cardDetail(_ card: ArcMembershipCardImport) -> String {
+        var parts: [String] = []
+        if let title = card.title { parts.append(title.capitalized) }
+        if let since = card.memberSince { parts.append("Arc since \(MembershipCardDates.format(since))") }
+        return parts.isEmpty ? "Settings › Account" : parts.joined(separator: ", ") + "; in Settings › Account"
     }
 
     private var settingsDetail: String {

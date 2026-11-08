@@ -9,15 +9,14 @@ struct SettingsCapabilities {
     var passwordLeakCheck: Binding<Bool>?
 }
 
-/// Wave 35: Arc's Settings window (ARC-RECORDING-2026-11-06 §6). One pane at a
-/// time, about 400 pt wide; the Chromium shell hosts it under an NSToolbar
+/// Arc's Settings window (FEATURE-SPECS/SETTINGS.md §11). One pane at a
+/// time in a fixed 684 × 562 pt content area under the toolbar; long panes
+/// scroll inside it. The Chromium shell hosts it under an NSToolbar
 /// (`SettingsWindowController`), the WebKit app in its `Settings` scene.
 struct SettingsPaneView: View {
     @Bindable var model: BrowserViewModel
     let pane: SettingsPane
     var capabilities = SettingsCapabilities()
-
-    static let width: CGFloat = 420
 
     var body: some View {
         Group {
@@ -31,8 +30,8 @@ struct SettingsPaneView: View {
             case .advanced: AdvancedSettingsPane(model: model, capabilities: capabilities)
             }
         }
-        .frame(width: Self.width)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: SettingsMetrics.windowSize.width, height: SettingsMetrics.contentHeight, alignment: .top)
+        .background(SettingsColors.background)
     }
 }
 
@@ -45,16 +44,17 @@ struct SettingsTabsView: View {
         TabView(selection: $model.settingsPane) {
             ForEach(SettingsPane.allCases, id: \.self) { pane in
                 SettingsPaneView(model: model, pane: pane)
-                    .tabItem { Label(pane.title, systemImage: pane.systemImage) }
+                    .tabItem { Label(pane.title(accountName: model.accountName), systemImage: pane.systemImage) }
                     .tag(pane)
             }
         }
     }
 }
 
-// MARK: Building blocks
+// MARK: Form rows (File › Import)
 
-/// A pane of Arc's grouped boxes: label on the left, control on the right.
+/// A grouped form: label on the left, control on the right. The Import
+/// window still uses these; Settings uses Arc's boxes (SettingsChrome).
 struct SettingsForm<Content: View>: View {
     @ViewBuilder var content: Content
 
@@ -111,114 +111,37 @@ struct SettingsToggleRow: View {
     }
 }
 
-/// Arc's coloured icon rows that open Chromium's own page.
-struct SettingsLinkRow: View {
-    let title: String
-    let systemImage: String
-    let color: Color
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 20, height: 20)
-                    .background(RoundedRectangle(cornerRadius: 5).fill(color))
-                Text(title)
-                Spacer()
-                Image(systemName: "arrow.right").foregroundStyle(.secondary)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
 private extension AutoArchiveThreshold {
     static var picker: some View {
         ForEach(AutoArchiveThreshold.allCases, id: \.self) { Text($0.title).tag($0) }
     }
 }
 
-// MARK: Account
-
-/// Sync Sidebar and its last-synced line. ReArc has no accounts, so no
-/// membership card (§6.3). A build without the iCloud entitlement says so.
-struct AccountSettingsPane: View {
-    let model: BrowserViewModel
-
-    var body: some View {
-        SettingsForm {
-            if let reason = model.syncUnavailableReason {
-                SettingsBox(title: "Sync Sidebar") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label(CloudKitSyncAvailability.unavailableMessage, systemImage: "icloud.slash")
-                        if reason != CloudKitSyncAvailability.unavailableMessage {
-                            Text(reason).font(.caption).foregroundStyle(.secondary)
-                        }
-                        Text("Sidebar changes stay on this Mac. Signing ReArc with an iCloud container is described in docs/ICLOUD-SETUP.md.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            } else {
-                available
-            }
-        }
-    }
-
-    private var available: some View {
-        let details = model.syncDetails ?? SyncStatusDetails(phase: .off)
-        let text = SyncSettingsPresentation(details: details, enabled: model.isSyncEnabled)
-        return SettingsBox(title: "Sync Sidebar") {
-            SettingsToggleRow(
-                label: "Sync Sidebar",
-                detail: "Spaces and their themes, Favorites, pinned tabs, folders, splits and Boosts, through iCloud. Today tabs and easels stay on this Mac.",
-                isOn: Binding(get: { model.isSyncEnabled }, set: { model.setSyncEnabled($0) })
-            )
-            HStack(spacing: 6) {
-                Circle().fill(text.errorText == nil && model.isSyncEnabled ? Color.green : Color.secondary)
-                    .frame(width: 7, height: 7)
-                Text("Last synced: \(text.lastSyncedText)").font(.callout)
-                Spacer()
-                Button("Sync Now") { model.syncNow() }.disabled(!text.canSyncNow).controlSize(.small)
-            }
-            SettingsRow(label: "Status") { Text(text.statusText).foregroundStyle(.secondary) }
-            SettingsRow(label: "iCloud account") { Text(text.accountText).foregroundStyle(.secondary) }
-            if let pending = text.pendingText {
-                SettingsRow(label: "Queued") { Text(pending).foregroundStyle(.secondary) }
-            }
-            if let error = text.errorText {
-                Text(error).font(.caption).foregroundStyle(.red)
-            }
-        }
-    }
-}
-
 // MARK: General
 
+/// Arc's General keeps Warn before quitting and Profile Settings…; its
+/// updater and Previews rows wait for those features. ReArc's own rows
+/// (default browser, the sidebar's look and sides) have their own box.
 struct GeneralSettingsPane: View {
     @Bindable var model: BrowserViewModel
 
     var body: some View {
-        SettingsForm {
-            SettingsBox {
-                SettingsToggleRow(label: "Warn before quitting", detail: "⌘Q asks first while windows are open.",
-                                  isOn: $model.warnBeforeQuitting)
-                SettingsRow(label: "Default browser") {
+        SettingsPage {
+            SettingsGroup {
+                SettingsSwitchRow(label: "Warn before quitting", isOn: $model.warnBeforeQuitting)
+                SettingsLabeledRow(label: "Default browser") {
                     Button("Set ReArc as Default…") { model.setAsDefaultBrowser() }
                 }
             }
-            SettingsBox {
-                SettingsRow(label: "Space icons") {
+            SettingsGroup {
+                SettingsLabeledRow(label: "Space icons") {
                     Picker("Space icons", selection: $model.spaceIconStyle) {
                         ForEach(SpaceIconStyle.allCases, id: \.self) { Text($0.title).tag($0) }
                     }
                     .pickerStyle(.menu)
                     .labelsHidden().fixedSize()
                 }
-                SettingsRow(label: "Sidebar position", detail: "The traffic lights stay at the window's top left.") {
+                SettingsLabeledRow(label: "Sidebar position", detail: "The traffic lights stay at the window's top left.") {
                     Picker("Sidebar position", selection: Binding(
                         get: { model.pendingSidebarSide ?? model.sidebarSide },
                         set: { model.setSidebarSide($0) }
@@ -228,8 +151,8 @@ struct GeneralSettingsPane: View {
                     .pickerStyle(.segmented)
                     .labelsHidden().fixedSize()
                 }
-                SettingsRow(label: "Side panel position",
-                            detail: "Extension side panels. On the sidebar's side, the panel sits between the sidebar and the page.") {
+                SettingsLabeledRow(label: "Side panel position",
+                                   detail: "Extension side panels. On the sidebar's side, the panel sits between the sidebar and the page.") {
                     Picker("Side panel position", selection: Binding(
                         get: { model.pendingSidePanelPosition ?? model.sidePanelPosition },
                         set: { model.setSidePanelPosition($0) }
@@ -240,8 +163,8 @@ struct GeneralSettingsPane: View {
                     .labelsHidden().fixedSize()
                 }
             }
-            SettingsBox {
-                SettingsRow(label: "Manage your default search engine, Auto-Archive, and downloads in Profile Settings.") {
+            SettingsGroup {
+                SettingsLabeledRow(label: "Manage your default search engine, Auto-Archive, and downloads in Profile Settings.") {
                     Button("Profile Settings…") { model.settingsPane = .profiles }
                 }
             }
@@ -251,6 +174,8 @@ struct GeneralSettingsPane: View {
 
 // MARK: Profiles
 
+/// Arc's two columns: the profile list on the left (205 pt), the selected
+/// profile's boxes on the right.
 struct ProfilesSettingsPane: View {
     @Bindable var model: BrowserViewModel
     @State private var editor: ProfileEditorRequest?
@@ -258,21 +183,25 @@ struct ProfilesSettingsPane: View {
     @State private var renaming: Profile.ID?
     @State private var renameDraft = ""
     @State private var deleting: Profile.ID?
+    @State private var showsLearnMore = false
+
+    private static let listWidth: CGFloat = 205
 
     private var selected: Profile? {
         model.store.profile(withID: selection ?? model.store.activeProfileID) ?? model.store.profiles.first
     }
 
     var body: some View {
-        SettingsForm {
-            SettingsBox {
-                Text("Profiles keep their own history, cookies, logins and extensions. Each has its own Spaces.")
-                    .font(.callout).foregroundStyle(.secondary)
+        SettingsPage {
+            intro
+            HStack(alignment: .top, spacing: 10) {
                 profileList
+                VStack(alignment: .leading, spacing: SettingsMetrics.boxSpacing) {
+                    if let profile = selected { profileSettings(profile) }
+                }
+                .frame(maxWidth: .infinity)
             }
-            if let profile = selected {
-                profileSettings(profile)
-            }
+            .padding(.top, 10)
         }
         .sheet(item: $editor) { request in
             ProfileEditorView(draft: request.draft, isCreating: request.profileID == nil) { draft in
@@ -303,6 +232,26 @@ struct ProfilesSettingsPane: View {
         }
     }
 
+    /// Arc's text; its "Learn more." opens the explanation here, not a web page.
+    private var intro: some View {
+        (Text("Profiles help keep your data separate across Spaces — like history, logins, cookies, and extensions. You can use any Profile across one or more Spaces. ")
+            + Text("[Learn more.](rearc-settings:profiles)"))
+            .font(.system(size: 13))
+            .fixedSize(horizontal: false, vertical: true)
+            .environment(\.openURL, OpenURLAction { _ in
+                showsLearnMore = true
+                return .handled
+            })
+            .popover(isPresented: $showsLearnMore, arrowEdge: .bottom) {
+                Text("Each profile has its own history, cookies, logins, passwords and extensions, and its own search engine and Archive setting. A space belongs to one profile: switching to it switches the profile. Pick a profile when you make a space, or change it in Edit Space.")
+                    .font(.callout)
+                    .frame(width: 300, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(14)
+            }
+            .padding(.horizontal, 2)
+    }
+
     private var deleteTitle: String {
         let name = deleting.flatMap { model.store.profile(withID: $0)?.name } ?? "Profile"
         return "Delete “\(name)”?"
@@ -310,49 +259,82 @@ struct ProfilesSettingsPane: View {
 
     private var profileList: some View {
         VStack(spacing: 0) {
-            List(selection: Binding(get: { selected?.id }, set: { selection = $0 })) {
-                ForEach(model.store.profiles) { profile in
-                    HStack(spacing: 8) {
-                        ProfileAvatarView(profile: profile, diameter: 20)
-                        Text(profile.name).lineLimit(1)
-                        Spacer()
-                        Text(model.spaceCountText(for: profile.id)).foregroundStyle(.secondary).font(.callout)
+            Text("Your Profiles")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(SettingsColors.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .frame(height: 28)
+                .accessibilityAddTraits(.isHeader)
+            SettingsHairline()
+            ScrollView {
+                VStack(spacing: 2) {
+                    ForEach(model.store.profiles) { profile in
+                        profileRow(profile)
                     }
-                    .tag(profile.id)
                 }
+                .padding(.horizontal, 15)
+                .padding(.vertical, 14)
             }
-            .listStyle(.bordered(alternatesRowBackgrounds: false))
-            .frame(height: min(CGFloat(model.store.profiles.count) * 28 + 8, 150))
+            SettingsHairline()
             HStack(spacing: 0) {
-                Button { editor = ProfileEditorRequest() } label: { Image(systemName: "plus") }
-                    .help("Add Profile")
-                Divider().frame(height: 14)
-                Button { deleting = selected?.id } label: { Image(systemName: "minus") }
-                    .disabled(model.store.profiles.count < 2)
-                    .help("Delete Profile")
-                Divider().frame(height: 14)
-                Button {
+                listButton("plus", help: "Add Profile") { editor = ProfileEditorRequest() }
+                Divider().frame(height: 18)
+                listButton("minus", help: model.store.profiles.count < 2 ? "The last profile can't be deleted." : "Delete Profile") {
+                    deleting = selected?.id
+                }
+                .disabled(model.store.profiles.count < 2)
+                Divider().frame(height: 18)
+                listButton("pencil", help: "Rename Profile") {
                     renameDraft = selected?.name ?? ""
                     renaming = selected?.id
-                } label: { Image(systemName: "pencil") }
-                    .help("Rename Profile")
+                }
                 Spacer()
             }
-            .buttonStyle(.borderless)
-            .padding(.vertical, 4)
+            .frame(height: 30)
         }
+        .frame(width: Self.listWidth, height: 445)
+        .background(SettingsColors.box, in: RoundedRectangle(cornerRadius: SettingsMetrics.boxRadius, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: SettingsMetrics.boxRadius, style: .continuous).strokeBorder(SettingsColors.border))
+    }
+
+    private func profileRow(_ profile: Profile) -> some View {
+        let isSelected = profile.id == selected?.id
+        return Button { selection = profile.id } label: {
+            HStack(spacing: 6) {
+                ProfileAvatarView(profile: profile, diameter: 16)
+                Text(profile.name).font(.system(size: 13)).lineLimit(1)
+                Spacer(minLength: 4)
+                Text(model.spaceCountText(for: profile.id)).font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 32)
+            .background(isSelected ? SettingsColors.selection : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private func listButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 13)).frame(width: 30, height: 26)
+        }
+        .buttonStyle(.borderless)
+        .help(help)
+        .accessibilityLabel(help)
     }
 
     @ViewBuilder
     private func profileSettings(_ profile: Profile) -> some View {
-        SettingsBox(title: "Appearance") {
-            SettingsRow(label: "Avatar and color") {
+        SettingsGroup {
+            SettingsLabeledRow(label: "Avatar and colour") {
                 Button("Edit…") { editor = ProfileEditorRequest(profile: profile) }
             }
         }
         if let search = model.activeSearchEngineSettings {
-            SettingsBox(title: profile.name) {
-                SettingsRow(label: "Search engine") {
+            SettingsGroup {
+                SettingsLabeledRow(label: "Search engine") {
                     Picker("Search engine", selection: Binding(
                         get: { search.defaultEngine(for: profile.id) ?? "" },
                         set: { search.setDefaultEngine($0, for: profile.id) }
@@ -363,16 +345,17 @@ struct ProfilesSettingsPane: View {
                     .disabled(!search.isEditable(for: profile.id))
                 }
                 if model.canOpenBrowserPage(.searchSettings) {
-                    SettingsRow(label: "Manage search") { Button("Search Settings…") { open(.searchSettings, in: profile) } }
+                    SettingsLabeledRow(label: "Manage search") { Button("Search Settings…") { open(.searchSettings, in: profile) } }
                 }
             }
         } else if model.canOpenBrowserPage(.searchSettings) {
-            SettingsBox(title: profile.name) {
-                SettingsRow(label: "Search engine") { Button("Search Settings…") { open(.searchSettings, in: profile) } }
+            SettingsGroup {
+                SettingsLabeledRow(label: "Search engine") { Button("Search Settings…") { open(.searchSettings, in: profile) } }
             }
         }
-        SettingsBox {
-            SettingsRow(label: "Archive tabs after", detail: "Today tabs you haven't opened in this long move to the Archive.") {
+        SettingsGroup {
+            SettingsLabeledRow(label: "Archive tabs after",
+                               info: "Today tabs you haven't opened in this long move to the Archive. Pinned tabs and Favorites stay. Each profile has its own setting.") {
                 Picker("Archive tabs after", selection: Binding(
                     get: { model.store.autoArchiveThreshold(for: profile.id) },
                     set: { model.store.setAutoArchiveThreshold($0, for: profile.id) }
@@ -380,22 +363,27 @@ struct ProfilesSettingsPane: View {
                     .labelsHidden().fixedSize()
             }
             if model.canOpenBrowserPage(.downloadSettings) {
-                SettingsRow(label: "Download location") { Button("Download Settings…") { open(.downloadSettings, in: profile) } }
+                SettingsLabeledRow(label: "Download location") { Button("Download Settings…") { open(.downloadSettings, in: profile) } }
             }
         }
+        // Arc's icons and colours.
         let dataRows: [(BrowserInternalPage, String, Color)] = [
-            (.privacy, "hand.raised.fill", .blue),
-            (.passwords, "key.fill", .gray),
-            (.payments, "creditcard.fill", .green),
-            (.notifications, "bell.fill", .red),
-            (.clearBrowsingData, "trash.fill", .orange),
+            (.privacy, "lock.fill", .blue),
+            (.passwords, "key.fill", .green),
+            (.payments, "creditcard.and.123", .yellow),
+            (.notifications, "bell.fill", .orange),
+            (.clearBrowsingData, "trash.fill", .red),
         ].filter { model.canOpenBrowserPage($0.0) }
         if !dataRows.isEmpty {
-            SettingsBox(title: "Your Data and Settings") {
+            SettingsHeader(title: "Your Data and Settings")
+            VStack(spacing: 2) {
                 ForEach(dataRows, id: \.0) { page, symbol, color in
                     SettingsLinkRow(title: page.title, systemImage: symbol, color: color) { open(page, in: profile) }
                 }
             }
+            .padding(.vertical, 5)
+            .background(SettingsColors.box, in: RoundedRectangle(cornerRadius: SettingsMetrics.boxRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: SettingsMetrics.boxRadius, style: .continuous).strokeBorder(SettingsColors.border))
         }
     }
 
@@ -408,38 +396,93 @@ struct ProfilesSettingsPane: View {
 
 // MARK: Links
 
+/// Little Arc and Peek, each introduced as in Arc, under ReArc's own hero.
 struct LinksSettingsPane: View {
     @Bindable var model: BrowserViewModel
 
     var body: some View {
-        SettingsForm {
-            SettingsBox(title: "Little Arc") {
-                SettingsToggleRow(label: "Open Little Arc when I press \(LittleArcHotkeyPreference.display) in any app",
+        SettingsPage(topPadding: 0) {
+            LittleArcHero(model: model)
+                .padding(.horizontal, -SettingsMetrics.margin)
+                .padding(.bottom, 22)
+            SettingsIntro(text: "Little Arc is a smaller, simpler ReArc window. It’s perfect for quick lookups and reading the links your friends send you.")
+                .padding(.bottom, 14)
+            SettingsGroup {
+                SettingsSwitchRow(label: "Open Little Arc when I press \(LittleArcHotkeyPreference.display) in any app",
                                   isOn: $model.isLittleArcHotkeyEnabled)
-                SettingsToggleRow(label: "… when clicking on links with ⌥⌘ held", isOn: $model.littleArcOnModifiedClick)
-                SettingsRow(label: "Links from other apps open in") {
-                    Picker("Links from other apps open in", selection: $model.externalLinkDestination) {
-                        ForEach(ExternalLinkDestination.allCases, id: \.self) { Text($0.menuTitle).tag($0) }
-                    }
-                    .labelsHidden().fixedSize()
-                }
-                SettingsRow(label: "Archive Little Arcs after") {
+                SettingsSwitchRow(label: "Open Little Arc when clicking on links with ⌥⌘ held", isOn: $model.littleArcOnModifiedClick)
+                SettingsSwitchRow(label: "Links from other apps open in Little Arc", detail: model.externalLinkDestination == .littleArc
+                                      ? nil : "Off: they open as a new tab in the current space.",
+                                  isOn: Binding(get: { model.externalLinkDestination == .littleArc },
+                                                set: { model.externalLinkDestination = $0 ? .littleArc : .activeSpace }))
+                SettingsLabeledRow(label: "Archive Little Arcs after:") {
                     Picker("Archive Little Arcs after", selection: $model.littleArcArchiveAfter) { AutoArchiveThreshold.picker }
                         .labelsHidden().fixedSize()
                 }
             }
-            SettingsBox(title: "Peek") {
-                SettingsToggleRow(label: "Open a Peek window when clicking on links with Shift held", isOn: $model.peekOnShiftClick)
-                SettingsToggleRow(label: "… when clicking on links to other sites",
-                                  detail: "Note: This only affects Favorites and Pinned tabs.",
+            SettingsHairline().padding(.vertical, 16)
+            SettingsIntro(text: "Peek is a way to preview a link without opening a new tab. It’s perfect for quickly looking at a link from an email, a news article, or a post.")
+                .padding(.bottom, 14)
+            SettingsGroup {
+                SettingsSwitchRow(label: "Open a Peek window when clicking on links with Shift held", isOn: $model.peekOnShiftClick)
+                SettingsSwitchRow(label: "Open a Peek window when clicking on links to other sites",
+                                  detail: "Note: This only affects Favorites and Pinned tabs", italicDetail: true,
                                   isOn: $model.automaticPeekEnabled)
             }
-            SettingsBox {
-                SettingsRow(label: "Choose where links open inside ReArc") {
+            SettingsGroup {
+                SettingsLabeledRow(label: "Choose where links open inside ReArc.",
+                                   info: "Air Traffic Control sends links from other apps to a space or a Little Arc of a profile, by site or by the app they come from.") {
                     Button("Air Traffic Control…") { model.showAirTrafficControl() }
                 }
             }
         }
+    }
+}
+
+/// ReArc's own Links hero, drawn here: a Little Arc window over the active
+/// space's theme, with a scalloped edge.
+private struct LittleArcHero: View {
+    let model: BrowserViewModel
+
+    var body: some View {
+        let theme = model.themeColor
+        let space = model.store.activeSpace.name
+        ZStack(alignment: .top) {
+            theme.opacity(0.55)
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    HStack(spacing: 4) {
+                        ForEach(0..<3, id: \.self) { _ in Circle().fill(.black.opacity(0.14)).frame(width: 6, height: 6) }
+                    }
+                    Text("☺ \(space)")
+                        .font(.system(size: 7, weight: .medium))
+                        .padding(.horizontal, 5).frame(height: 13)
+                        .background(.white.opacity(0.7), in: RoundedRectangle(cornerRadius: 3))
+                    Spacer()
+                    Label("rearc.net", systemImage: "lock.fill").labelStyle(.titleAndIcon)
+                        .font(.system(size: 7.5, weight: .medium))
+                    Spacer()
+                    Text("Open in \(space)  ⌘O")
+                        .font(.system(size: 7, weight: .medium))
+                        .padding(.horizontal, 6).frame(height: 15)
+                        .background(.white, in: RoundedRectangle(cornerRadius: 3))
+                }
+                .foregroundStyle(.black.opacity(0.6))
+                .padding(.horizontal, 8)
+                .frame(height: 24)
+                .background(.white.opacity(0.55))
+                LinearGradient(colors: [theme.opacity(0.35), theme.opacity(0.15)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .background(.white.opacity(0.6))
+            }
+            .clipShape(UnevenRoundedRectangle(topLeadingRadius: 6, topTrailingRadius: 6, style: .continuous))
+            .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+            .padding(.horizontal, 60)
+            .padding(.top, 47)
+        }
+        .frame(width: SettingsMetrics.windowSize.width, height: 135)
+        .clipShape(ScallopedBottom())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("A Little Arc window")
     }
 }
 
@@ -498,6 +541,9 @@ final class ShortcutRecorder {
     deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
 }
 
+/// Arc's layout: the "Start with the basics" pill, the searchable list in a
+/// 340 pt box on the left, ReArc's keycaps and the explanation on the right,
+/// Reset All and the ⋯ menu at the bottom right.
 struct ShortcutsSettingsPane: View {
     @Bindable var model: BrowserViewModel
     @State private var query = ""
@@ -521,47 +567,15 @@ struct ShortcutsSettingsPane: View {
     }
 
     var body: some View {
-        let rows = model.shortcutOverrides.rows(matching: query)
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Click a shortcut to record a new one. Delete clears it; Esc cancels.")
-                    .font(.callout).foregroundStyle(.secondary)
-                Spacer()
-                Button("Learn the Essential Shortcuts") { showingEssentials = true }
-                    .controlSize(.small)
-                    .popover(isPresented: $showingEssentials, arrowEdge: .bottom) { essentials }
+        VStack(spacing: 0) {
+            pill.padding(.top, 20)
+            HStack(alignment: .top, spacing: 16) {
+                list
+                sideCard
             }
-            TextField("Type a feature name or shortcut", text: $query)
-                .textFieldStyle(.roundedBorder)
-            Text("Default Shortcuts").font(.headline)
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(rows) { row in
-                        ShortcutListRowView(row: row, isRecording: recorder.recordingID == row.id,
-                                            refused: recorder.refused && recorder.recordingID == row.id) {
-                            recorder.recordingID == row.id ? recorder.stop() : recorder.start(row.id)
-                        } reset: {
-                            model.shortcutOverrides.reset(row.id)
-                        }
-                        Divider()
-                    }
-                    if rows.isEmpty {
-                        Text("No shortcuts match “\(query)”.").foregroundStyle(.secondary).padding()
-                    }
-                }
-            }
-            .frame(height: 340)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .quaternarySystemFill)))
-            HStack {
-                Text("Changes apply to the menu bar at once. When shortcuts conflict, the one earlier in the menu bar wins.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("Reset All Shortcuts") {
-                    recorder.stop()
-                    model.shortcutOverrides.resetAll()
-                }
-                .disabled(!model.shortcutOverrides.hasChanges)
-            }
+            .padding(.horizontal, SettingsMetrics.margin)
+            .padding(.top, 30)
+            .padding(.bottom, 26)
         }
         .onAppear {
             // The model does not hold the recorder: no cycle.
@@ -572,8 +586,133 @@ struct ShortcutsSettingsPane: View {
                 }
             }
         }
-        .padding(20)
         .onDisappear { recorder.stop() }
+    }
+
+    private var pill: some View {
+        HStack(spacing: 10) {
+            Text("Start with the basics").font(.system(size: 13))
+            Button { showingEssentials = true } label: {
+                Label("Learn the Essential Shortcuts", systemImage: "command.circle.fill")
+                    .font(.system(size: 13, weight: .medium))
+                    .padding(.horizontal, 10)
+                    .frame(height: 24)
+                    .foregroundStyle(.white)
+                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showingEssentials, arrowEdge: .bottom) { essentials }
+        }
+        .padding(.leading, 16).padding(.trailing, 6)
+        .frame(height: 36)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .shadow(color: .black.opacity(0.1), radius: 6, y: 2)
+    }
+
+    private var list: some View {
+        let rows = model.shortcutOverrides.rows(matching: query)
+        return VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Type a feature name or shortcut (like “Command”)", text: $query)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 40)
+            SettingsHairline()
+            Text("Default Shortcuts")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(SettingsColors.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .frame(height: 28)
+                .accessibilityAddTraits(.isHeader)
+            SettingsHairline()
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(rows) { row in
+                        ShortcutListRowView(row: row, isRecording: recorder.recordingID == row.id,
+                                            refused: recorder.refused && recorder.recordingID == row.id) {
+                            recorder.recordingID == row.id ? recorder.stop() : recorder.start(row.id)
+                        } reset: {
+                            model.shortcutOverrides.reset(row.id)
+                        }
+                        if row.id != rows.last?.id { SettingsHairline().padding(.horizontal, 24) }
+                    }
+                    if rows.isEmpty {
+                        Text("No shortcuts match “\(query)”.").foregroundStyle(.secondary).padding()
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+        }
+        .frame(width: 340)
+        .frame(maxHeight: .infinity)
+        .background(SettingsColors.box, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(SettingsColors.border))
+    }
+
+    private var sideCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 4) {
+                ShortcutKeycap { Image(systemName: "command").font(.system(size: 26, weight: .bold)) }
+                ShortcutKeycap { ReArcMarkGlyph().frame(width: 36, height: 36) }
+            }
+            .accessibilityHidden(true)
+            Text("Custom Shortcuts")
+                .font(.system(size: 14, weight: .bold))
+                .padding(.top, 30)
+            Text("Click a shortcut to record a new one; Delete clears it and Esc cancels. Changes reach the menu bar at once. When two clash, the one earlier in the menu bar wins.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 8)
+            Spacer()
+            HStack(spacing: 8) {
+                Button("Reset All Shortcuts") {
+                    recorder.stop()
+                    model.shortcutOverrides.resetAll()
+                }
+                .disabled(!model.shortcutOverrides.hasChanges)
+                Menu {
+                    Button("Extension Shortcuts…") { model.openPageInNewTab(URL(string: "chrome://extensions/shortcuts")!, title: "Extension Shortcuts") }
+                        .disabled(!model.canOpenBrowserPage(.extensions))
+                } label: {
+                    Image(systemName: "ellipsis")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .frame(width: 24, height: 24)
+                .background(Circle().strokeBorder(SettingsColors.border))
+                .accessibilityLabel("More")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+/// ReArc's keycap: a blue key with a lighter face.
+private struct ShortcutKeycap<Glyph: View>: View {
+    @ViewBuilder var glyph: Glyph
+
+    var body: some View {
+        glyph
+            .foregroundStyle(ReArcMark.blueColor)
+            .frame(width: 54, height: 50)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color(red: 0.86, green: 0.89, blue: 1)))
+            .padding(4)
+            .padding(.bottom, 3)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(ReArcMark.blueColor))
+    }
+}
+
+/// The one-colour mark in the current foreground style.
+private struct ReArcMarkGlyph: View {
+    var body: some View {
+        Canvas { context, size in
+            context.fill(Path(ReArcMark.paths(in: CGRect(origin: .zero, size: size)).mono), with: .foreground)
+        }
     }
 }
 
@@ -586,7 +725,7 @@ private struct ShortcutListRowView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(row.title).lineLimit(1)
+            Text(row.title).font(.system(size: 13)).lineLimit(1)
             if row.isCustomized {
                 Button(action: reset) { Image(systemName: "arrow.uturn.backward") }
                     .buttonStyle(.borderless).controlSize(.small)
@@ -597,61 +736,110 @@ private struct ShortcutListRowView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .help(row.conflicts.map(\.message).joined(separator: "\n"))
+                    .accessibilityLabel(row.conflicts.map(\.message).joined(separator: ". "))
             }
             Button(action: record) {
-                Text(isRecording ? (refused ? "Add ⌘, ⌃ or ⌥" : "Type shortcut…") : row.chipText)
-                    .font(.system(.callout, design: .rounded))
-                    .padding(.horizontal, 8).padding(.vertical, 2)
-                    .frame(minWidth: 54)
+                Text(isRecording ? (refused ? "Add ⌘, ⌃ or ⌥" : "Type…") : (row.chord == nil ? "---" : row.chipText))
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(row.chord == nil && !isRecording ? .secondary : .primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(width: 62, height: 26)
                     .background(RoundedRectangle(cornerRadius: 5).fill(Color(nsColor: .controlBackgroundColor)))
                     .overlay(RoundedRectangle(cornerRadius: 5)
-                        .strokeBorder(isRecording ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: isRecording ? 2 : 1))
+                        .strokeBorder(isRecording ? Color.accentColor : SettingsColors.border, lineWidth: isRecording ? 2 : 1))
             }
             .buttonStyle(.plain)
             .help(isRecording ? "Press the new shortcut" : "Click to record a new shortcut")
+            .accessibilityLabel("\(row.title): \(row.chord?.display ?? "no shortcut")")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 24)
+        .frame(height: 48)
     }
 }
 
 // MARK: Icon
 
+/// ReArc's app icons in Arc's rows: a radio, a 64 pt preview, the name and,
+/// on the current one, CURRENT ICON in the accent colour. None is locked.
 struct IconSettingsPane: View {
     @Bindable var model: BrowserViewModel
 
     var body: some View {
-        SettingsForm {
-            SettingsBox {
-                ForEach(AppIconChoice.available) { choice in
-                    Button { model.appIcon = choice } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: model.appIcon == choice ? "largecircle.fill.circle" : "circle")
-                                .foregroundStyle(model.appIcon == choice ? Color.accentColor : .secondary)
-                            if let image = choice.image {
-                                Image(nsImage: image).resizable().frame(width: 36, height: 36)
-                            }
-                            Text(choice.title)
-                            Spacer()
-                            if model.appIcon == choice {
-                                Text("CURRENT ICON").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-                            }
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+        SettingsPage {
+            let choices = AppIconChoice.available
+            VStack(spacing: 0) {
+                ForEach(choices) { choice in
+                    row(choice)
+                    if choice != choices.last { SettingsHairline().padding(.horizontal, 40) }
                 }
             }
-            Section {} footer: {
-                Text("The Dock shows the icon while ReArc is running. Finder and Launchpad keep the standard icon.")
-                    .font(.caption).foregroundStyle(.secondary)
+            .padding(.vertical, 8)
+            .background(SettingsColors.box, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(SettingsColors.border))
+            Text("The Dock shows the icon while ReArc is running. Finder and Launchpad keep the standard icon.")
+                .font(.system(size: 11))
+                .foregroundStyle(SettingsColors.tertiary)
+                .padding(.horizontal, SettingsMetrics.rowInset)
+        }
+    }
+
+    private func row(_ choice: AppIconChoice) -> some View {
+        let current = model.appIcon == choice
+        return Button { model.appIcon = choice } label: {
+            HStack(spacing: 0) {
+                RadioDot(isOn: current).padding(.leading, 16)
+                Group {
+                    if let image = choice.image {
+                        Image(nsImage: image).resizable().interpolation(.high)
+                    } else {
+                        RoundedRectangle(cornerRadius: 14).fill(.quaternary)
+                    }
+                }
+                .frame(width: 64, height: 64)
+                .padding(.leading, 26)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(choice.title).font(.system(size: 14, weight: .semibold))
+                    if current {
+                        Text("CURRENT ICON").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.accentColor)
+                    }
+                }
+                .padding(.leading, 14)
+                Spacer()
+            }
+            .frame(height: 81)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(choice.title)
+        .accessibilityAddTraits(current ? .isSelected : [])
+    }
+}
+
+/// Arc's radio: a grey ring, or the accent colour with a white ring inside.
+private struct RadioDot: View {
+    let isOn: Bool
+
+    var body: some View {
+        ZStack {
+            if isOn {
+                Circle().fill(Color.accentColor)
+                Circle().strokeBorder(.white, lineWidth: 2.5).padding(1.5)
+            } else {
+                Circle().strokeBorder(Color.secondary.opacity(0.5), lineWidth: 1.5)
             }
         }
+        .frame(width: 22, height: 22)
+        .accessibilityHidden(true)
     }
 }
 
 // MARK: Advanced
 
+/// Arc's three boxes with their coloured icons (SETTINGS.md §9). Rows Arc
+/// has for features ReArc doesn't (sounds, window dragging, Shared Quotes,
+/// theme data for sites) wait for them; ReArc's own rows join the box
+/// closest to them.
 struct AdvancedSettingsPane: View {
     @Bindable var model: BrowserViewModel
     let capabilities: SettingsCapabilities
@@ -659,38 +847,48 @@ struct AdvancedSettingsPane: View {
     @AppStorage(ReorderHapticsPreference.key) private var reorderHaptics = ReorderHapticsPreference.defaultValue
     @AppStorage(ToolbarPageColorPreference.key) private var matchesPageColor = ToolbarPageColorPreference.defaultValue
 
+    private func icon(_ symbol: String, _ color: Color) -> SettingsIconTile {
+        SettingsIconTile(systemImage: symbol, color: color)
+    }
+
     var body: some View {
-        SettingsForm {
-            SettingsBox {
-                SettingsToggleRow(label: "When opening ReArc, restore windows from previous session", isOn: $model.restoresWindows)
-                SettingsToggleRow(label: "Haptic feedback when reordering tabs", isOn: $reorderHaptics)
-                SettingsToggleRow(label: "Show URL in toolbar", detail: urlInToolbar
+        SettingsPage {
+            SettingsGroup {
+                SettingsSwitchRow(label: "Haptic feedback when reordering tabs", icon: icon("hand.tap.fill", .blue), isOn: $reorderHaptics)
+            }
+            SettingsGroup {
+                SettingsSwitchRow(label: "When opening ReArc, restore windows from previous session",
+                                  icon: icon("macwindow", .green), isOn: $model.restoresWindows)
+                if let leakCheck = capabilities.passwordLeakCheck {
+                    SettingsSwitchRow(label: "Warn if passwords are exposed in a data breach",
+                                      icon: icon("key.viewfinder", .green), isOn: leakCheck)
+                }
+                SettingsSwitchRow(label: "Show URL in toolbar", detail: urlInToolbar
                     ? "Back, forward, reload and the address sit in a strip at the top of the page."
                     : "Back, forward, reload and the address sit at the top of the sidebar.",
-                    isOn: $urlInToolbar)
-                SettingsToggleRow(label: "Match toolbar to website colours",
-                                  detail: "The toolbar takes the page's theme colour, or the colour along its top edge.",
-                                  isOn: $matchesPageColor)
+                    icon: icon("menubar.rectangle", .red), isOn: $urlInToolbar)
             }
-            SettingsBox {
+            SettingsGroup {
                 if capabilities.pictureInPicture {
-                    SettingsToggleRow(label: "Enable Picture in Picture when you leave a video tab", isOn: $model.automaticPictureInPicture)
+                    SettingsSwitchRow(label: "Enable Picture in Picture when you leave a video tab",
+                                      icon: icon("play.square", .purple), isOn: $model.automaticPictureInPicture)
                 }
-                SettingsToggleRow(label: "Play video in the sidebar", detail: "A video you leave plays above its sidebar strip instead of a floating window.",
-                                  isOn: $model.embedsVideoInSidebar)
-                SettingsToggleRow(label: "Enable Boosts on websites you visit", detail: "In every profile.",
+                SettingsSwitchRow(label: "Play video in the sidebar",
+                                  detail: "A video you leave plays above its sidebar strip instead of a floating window.",
+                                  icon: icon("play.rectangle.on.rectangle", .purple), isOn: $model.embedsVideoInSidebar)
+                SettingsSwitchRow(label: "Match toolbar to website colours",
+                                  detail: "The toolbar takes the page's theme colour, or the colour along its top edge.",
+                                  icon: icon("paintpalette.fill", .purple), isOn: $matchesPageColor)
+                SettingsSwitchRow(label: "Enable Boosts on websites you visit", detail: "In every profile.",
+                                  icon: icon("paintbrush.fill", .purple),
                                   isOn: Binding(get: { model.boostsEnabledInAllProfiles }, set: { model.boostsEnabledInAllProfiles = $0 }))
-                if let leakCheck = capabilities.passwordLeakCheck {
-                    SettingsToggleRow(label: "Warn if passwords are exposed in a data breach", isOn: leakCheck)
-                }
             }
             if model.canOpenBrowserPage(.settings) {
-                Section {} footer: {
-                    HStack {
-                        Spacer()
-                        Button("More Settings…") { model.openBrowserPage(.settings) }
-                    }
+                HStack {
+                    Button("More Settings…") { model.openBrowserPage(.settings) }
+                    Spacer()
                 }
+                .padding(.top, 12)
             }
         }
     }

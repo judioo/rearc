@@ -124,6 +124,49 @@ final class BrowserImportShellTests: XCTestCase {
         XCTAssertEqual(command?.isEnabled(in: context), true)
     }
 
+    /// Arc's card files beside its sidebar; the auth file with fields ReArc must not keep.
+    private func writeArcCard() throws {
+        try write(["title": "STATUESQUE HUNTER", "paletteNumber": 6, "shapeName": "Shape2",
+                   "backgroundBlobInfo": [10, 7, 9, 14, 7, 3, 9, 7, 4, 1, 4, 12, 14, 9, 7], "version": 1],
+                  "Arc/StorableMembershipCard.json")
+        try write(["session": ["accessToken": "secret-token", "user": ["id": "secret-id", "email": "someone@example.invalid",
+                                                                       "name": "Akilu", "createdAt": 738_929_101.8]]],
+                  "Arc/StorableAuthState.json")
+    }
+
+    func testArcsMembershipCardComesWithTheSidebarAndKeepsNoSecrets() throws {
+        try writeArcCard()
+        let model = makeModel()
+        let session = discoveredSession(model)
+        let card = try XCTUnwrap(session.arcCard)
+        XCTAssertEqual(card.title, "STATUESQUE HUNTER")
+        session.setSpace("S1", included: false)
+        session.arcChoices.includeFavorites = false
+        XCTAssertTrue(session.canImport, "the card alone is worth importing")
+        session.performImport()
+        let imported = model.membershipCard.ensureLoaded()
+        XCTAssertEqual(imported.title, "STATUESQUE HUNTER")
+        XCTAssertEqual(imported.arcName, "Akilu")
+        XCTAssertEqual(imported.arcPalette, 6)
+        XCTAssertFalse(imported.transitionShown)
+        XCTAssertTrue(session.result?.contains("membership card") == true)
+        let saved = expectation(description: "saved")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { saved.fulfill() }
+        wait(for: [saved], timeout: 2)
+        let file = try String(contentsOf: model.membershipCard.fileURL, encoding: .utf8)
+        for secret in ["secret-token", "secret-id", "someone@example.invalid"] { XCTAssertFalse(file.contains(secret)) }
+    }
+
+    func testUntickingTheCardLeavesItAlone() throws {
+        try writeArcCard()
+        let model = makeModel()
+        let before = model.membershipCard.ensureLoaded()
+        let session = discoveredSession(model)
+        session.includeArcCard = false
+        session.performImport()
+        XCTAssertEqual(model.membershipCard.card, before)
+    }
+
     func testDiscoveryListsArcsSidebarThenEachProfileAndPreselectsArc() {
         let session = discoveredSession(makeModel(), defaults: ["shouldWarnBeforeQuitting": false])
         XCTAssertEqual(session.sources.count, 2)

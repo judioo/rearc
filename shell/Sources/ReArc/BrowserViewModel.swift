@@ -490,6 +490,8 @@ final class BrowserViewModel {
 
     /// Cmd+F bar; targets one page at a time.
     let findBar = FindBarModel()
+    /// Settings › Account's membership card, next to the sidebar file.
+    let membershipCard: MembershipCardStore
     /// The sidebar's downloads tray (both engines).
     let downloads: DownloadsController
     /// Extension actions and pins (Chromium only; hidden on WebKit).
@@ -545,6 +547,7 @@ final class BrowserViewModel {
         let reinstallFile = Self.siblingFile(PendingExtensionReinstall.fileName, of: persistence.fileURL)
         self.pendingExtensionReinstallURL = reinstallFile
         self.pendingExtensionReinstall = PendingExtensionReinstall.load(from: reinstallFile)
+        self.membershipCard = MembershipCardStore(fileURL: Self.siblingFile(MembershipCard.fileName, of: persistence.fileURL))
         self.downloads = DownloadsController(fileURL: Self.siblingFile(DownloadListFile.fileName, of: persistence.fileURL), prepared: preparedStartup?.downloads,
                                              turnBudget: DownloadsController.appTurnBudget)
         engineHost.downloadCenter = downloads.webKit
@@ -598,6 +601,8 @@ final class BrowserViewModel {
         wireMediaKeyHandlers()
         runAutoArchive()
         startAutoArchiveTimer()
+        // The first launch with a card sets ReArc's start date.
+        membershipCard.loadInBackground()
         loadSelectedIfNeeded()
         if wasDeferred { restoreLittleArcWindowsIfNeeded() }
         MainActor.assumeIsolated { livePanel.track() }
