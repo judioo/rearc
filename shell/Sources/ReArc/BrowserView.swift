@@ -365,20 +365,11 @@ struct BrowserView: View {
 
     /// Shown while the focused tab is not at 100%; clicking resets it (Cmd+0).
     /// At the card's top right, so a sidebar or side panel beside it on the right moves it in.
+    /// A split draws it in the focused pane instead (`SplitContentView`).
     @ViewBuilder
     private var zoomBadge: some View {
-        if let engine = model.focusedEngine(in: windowID), !PageZoom.isDefault(engine.zoomFactor) {
-            Button("\(PageZoom.percent(engine.zoomFactor))%") { model.zoom(.reset) }
-                .buttonStyle(.plain)
-                .font(.caption.monospacedDigit().weight(.semibold))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(.ultraThinMaterial, in: Capsule())
-                // Over the page's top right, under the card's toolbar row (or a
-                // split pane's) so it covers neither the split nor site controls.
-                .padding(10)
-                .padding(.top, showsCardToolbar ? CardToolbarView.height : 0)
-                .help("Page zoom — click to reset to 100% (⌘0)")
+        if shownSplit == nil, let engine = model.focusedEngine(in: windowID) {
+            PageZoomBadge(engine: engine, topInset: showsCardToolbar ? CardToolbarView.height : 0)
         }
     }
 
@@ -672,6 +663,30 @@ struct SidebarEdgeHoverMonitor: NSViewRepresentable {
                       placement.dismissesPeek(x: x, windowWidth: width, dismissWidth: Double(parent.dismissWidth)) || !inside {
                 parent.onChange(false)
             }
+        }
+    }
+}
+
+/// The page's zoom while it is not at 100%; a click resets it (⌘0). Over the
+/// page's top right, under its toolbar row (`topInset`) so it covers neither
+/// the split nor the site controls button.
+struct PageZoomBadge: View {
+    let engine: any WebEngine
+    var topInset: CGFloat = 0
+
+    var body: some View {
+        if !PageZoom.isDefault(engine.zoomFactor) {
+            Button("\(PageZoom.percent(engine.zoomFactor))%") {
+                engine.setZoomFactor(PageZoom.factor(after: .reset, from: engine.zoomFactor))
+            }
+            .buttonStyle(.plain)
+            .font(.caption.monospacedDigit().weight(.semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.ultraThinMaterial, in: Capsule())
+            .padding(10)
+            .padding(.top, topInset)
+            .help("Page zoom — click to reset to 100% (⌘0)")
         }
     }
 }
