@@ -139,6 +139,7 @@ extension BrowserViewModel {
                 self.noteMouseDown(modifiers: event.modifierFlags)
                 return event
             }
+            if self.handleFullscreenEscape(event) { return nil }
             if self.handleTabSwitcherEvent(event) { return nil }
             if self.handleDownloadsTrayEscape(event) { return nil }
             if self.handleLibraryEscape(event, pageHasFocus: self.shortcutRouter.pageHasFocus(event)) { return nil }

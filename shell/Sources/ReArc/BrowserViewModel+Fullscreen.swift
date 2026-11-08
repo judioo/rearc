@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import SidebarModel
 
 /// HTML fullscreen on the shell's window (Chromium `html_fullscreen`, ABI
@@ -35,6 +35,7 @@ extension BrowserViewModel {
     func pageExitedFullscreen(engineTabID: UInt64) -> [HTMLFullscreenSession.Step] {
         guard let session = htmlFullscreen, session.engineTabID == engineTabID else { return [] }
         htmlFullscreen = nil
+        if toast?.id == fullscreenHintID { toast = nil }
         return session.pageExitSteps
     }
 
@@ -43,5 +44,48 @@ extension BrowserViewModel {
         guard let session = htmlFullscreen else { return [] }
         htmlFullscreen = nil
         return session.windowExitSteps
+    }
+}
+
+extension BrowserViewModel {
+    func nativeFullscreenChanged(_ fullscreen: Bool, window: NSWindow) {
+        let action = fullscreenEscapes[window.windowNumber, default: FullscreenEscape()].setFullscreen(fullscreen)
+        if action == .showHint { showFullscreenHint() }
+        if !fullscreen, toast?.id == fullscreenHintID { toast = nil }
+    }
+
+    private func showFullscreenHint() {
+        showToast("To exit full screen, press esc", systemImage: "", keycaps: ["esc"], duration: 2.5)
+        fullscreenHintID = toast?.id
+    }
+
+    /// Observes the first press without taking it away from AppKit or the page.
+    func handleFullscreenEscape(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown, event.keyCode == 53, !event.isARepeat,
+              let window = event.window else { return false }
+        let consumed = isCommandBarPresented || peekSession != nil || tabSwitcher != nil
+            || keyLittleArcID != nil || keyPrivateWindow != nil || window is NSPanel
+            || window.attachedSheet != nil || inlineRename != nil || pendingRename != nil
+            || renamingSplitID != nil || themePopoverSpaceID != nil || itemIconEditorID != nil
+            || spaceEditorID != nil || profileEditorRequest != nil || isAirTrafficControlPresented
+            || downloads.isTrayPresented || librarySection(in: store.keyWindowID) != nil
+            || (!shortcutRouter.pageHasFocus(event) && !findBar.isPresented)
+        let fullscreen = window.styleMask.contains(.fullScreen)
+        _ = fullscreenEscapes[window.windowNumber, default: FullscreenEscape()].setFullscreen(fullscreen)
+        let action = fullscreenEscapes[window.windowNumber, default: FullscreenEscape()]
+            .press(at: event.timestamp, consumed: consumed)
+        switch action {
+        case .none: return false
+        case .showHint:
+            showFullscreenHint()
+            return false
+        case .exit:
+            if let engine = focusedEngine as? PageFullscreenControlling, engine.isPageFullscreen {
+                engine.exitPageFullscreen()
+            } else {
+                window.toggleFullScreen(nil)
+            }
+            return true
+        }
     }
 }

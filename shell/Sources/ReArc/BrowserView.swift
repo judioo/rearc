@@ -22,6 +22,7 @@ struct BrowserView: View {
     @State private var pager = SpacePagerController()
     /// The sidebar item being dragged, if any (content edges then offer split drop zones).
     @State private var draggedItemID: UUID?
+    @State private var isNativeFullscreen = false
     @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
     @Environment(\.colorScheme) private var colorScheme
 
@@ -136,6 +137,12 @@ struct BrowserView: View {
             DragSessionEndMonitor(isActive: draggedItemID != nil) { draggedItemID = nil }
                 .frame(width: 0, height: 0)
         )
+        .background(WindowFullscreenReader { fullscreen, window in
+            model.nativeFullscreenChanged(fullscreen, window: window)
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { isNativeFullscreen = fullscreen }
+        }.frame(width: 0, height: 0))
         .background(
             WindowOcclusionReader { model.handleWindowOcclusion($0) }
                 .frame(width: 0, height: 0)
@@ -308,6 +315,10 @@ struct BrowserView: View {
         return model.themeColors.colors(for: id, theme: theme, dark: dark)
     }
 
+    private var pageCardLayout: PageCardLayout {
+        PageCardLayout(isNativeFullscreen: isNativeFullscreen, isPageFullscreen: isPageFullscreen)
+    }
+
     private var placement: SidebarPlacement { model.sidebarPlacement }
     private var sidePanelLayout: SidePanelLayout { model.sidePanelLayout }
 
@@ -409,11 +420,13 @@ struct BrowserView: View {
     /// corners: a different view tree would detach the page, which ends fullscreen.
     private var contentCard: some View {
         let fullscreen = isPageFullscreen
-        let radius: CGFloat = fullscreen ? 0 : Self.cardRadius
-        let inset: CGFloat = fullscreen ? 0 : Self.cardInset
+        let layout = pageCardLayout
+        let radius = CGFloat(layout.radius)
+        let inset = CGFloat(layout.inset)
         let showsToolbar = showsCardToolbar
         let placement = placement
-        let topInset = fullscreen || showsToolbar || placement.trafficLightsInSidebar ? inset : TrafficLightPositioner.cardClearance
+        let topInset = CGFloat(layout.topInset(showsToolbar: showsToolbar, trafficLightsInSidebar: placement.trafficLightsInSidebar,
+                                               trafficLightClearance: Double(TrafficLightPositioner.cardClearance)))
         let sidebarWidth = model.sidebarWidth(in: windowID)
         // The Library widening the sidebar moves the page without laying it out again.
         let growth = fullscreen ? nil : model.sidebarGrowth(in: windowID)
@@ -454,7 +467,7 @@ struct BrowserView: View {
         }
         .clipShape(shape)
         .background(shape.fill(splitCards ? .clear : cardFill))
-        .background(CardShadow(shape: shape).opacity(fullscreen ? 0 : 1))
+        .background(CardShadow(shape: shape).opacity(layout.showsDecoration ? 1 : 0))
         .overlay { LibrarySpacesOverlay(model: model, window: windowID) }
         .overlay(alignment: .topTrailing) { if !fullscreen { zoomBadge } }
         .padding(.top, topInset)
@@ -516,6 +529,7 @@ struct BrowserView: View {
                 split: split, model: model, accent: model.themeColor(in: windowID),
                 showsRows: SplitPaneToolbarLayout.showsRows(urlInToolbar: showsCardToolbar, pageFullscreen: isPageFullscreen),
                 showsCards: !isPageFullscreen, cardFill: cardFill,
+                cardLayout: pageCardLayout,
                 trafficLightsClearance: cardToolbarTrafficLightsClearance
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)

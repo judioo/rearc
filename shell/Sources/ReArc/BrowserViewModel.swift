@@ -295,6 +295,8 @@ final class BrowserViewModel {
     @ObservationIgnored var lastMouseDown: (modifiers: NSEvent.ModifierFlags, at: Date)?
     /// The confirmation toast over the page ("Copied Current URL"), cleared after a moment.
     var toast: ShellToast?
+    var fullscreenEscapes: [Int: FullscreenEscape] = [:]
+    var fullscreenHintID: UUID?
     @ObservationIgnored var lastCopiedLinkText: String?
     /// Copy URL's pasteboard (tests use a private one).
     @ObservationIgnored var linkPasteboard: NSPasteboard = .general

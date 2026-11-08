@@ -15,6 +15,7 @@ struct SplitContentView: View {
     /// Separate cards (off in HTML fullscreen: the page edge to edge).
     var showsCards = false
     var cardFill: Color = .clear
+    var cardLayout = PageCardLayout(isNativeFullscreen: false, isPageFullscreen: false)
     /// The top-left row clears the traffic lights with the sidebar on the right.
     var trafficLightsClearance: CGFloat = 0
     @Environment(\.sidebarWindow) private var window
@@ -66,7 +67,7 @@ struct SplitContentView: View {
 
     /// The gap between panes: the window background between two cards, or a
     /// thin rule edge to edge.
-    private var dividerThickness: CGFloat { showsCards ? BrowserView.cardInset : 5 }
+    private var dividerThickness: CGFloat { CGFloat(cardLayout.splitGap) }
 
     @ViewBuilder
     private func horizontalLayout(size: CGSize, tabs: [Tab], factors: [Double], layout: SplitPaneToolbarLayout) -> some View {
@@ -104,9 +105,9 @@ struct SplitContentView: View {
     @ViewBuilder
     private func pane(for tab: Tab, row: SplitPaneToolbarLayout.Row?, ringed: Bool) -> some View {
         let engine = model.engineHost.engine(for: tab, profileID: model.profileID(for: tab))
-        let radius: CGFloat = showsCards ? BrowserView.cardRadius : 0
+        let radius: CGFloat = showsCards ? CGFloat(cardLayout.radius) : 0
         let card = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        let focused = ringed && row?.isActive == true
+        let focused = ringed && row?.isActive == true && cardLayout.showsDecoration
         VStack(spacing: 0) {
             if showsRows, let row {
                 SplitPaneToolbarView(
@@ -120,7 +121,7 @@ struct SplitContentView: View {
         }
         .clipShape(card)
         .background(card.fill(showsCards ? cardFill : .clear))
-        .background(PaneCardShadow(radius: radius).opacity(showsCards ? 1 : 0))
+        .background(PaneCardShadow(radius: radius).opacity(showsCards && cardLayout.showsDecoration ? 1 : 0))
         .overlay(
             card.strokeBorder(focused ? accent.opacity(showsCards ? 0.8 : 0.45) : .clear, lineWidth: showsCards ? 1.5 : 2)
                 .allowsHitTesting(false)
