@@ -21,6 +21,8 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
     /// Engines whose actions the toolbar shows (refreshed on action events).
     private var shownEngines: [ObjectIdentifier: WeakEngine] = [:]
     private var lastScale: CGFloat = 2
+    /// Shown engines without a tab yet, asked again once they have one.
+    private var waitingForTab: [ObjectIdentifier: WeakEngine] = [:]
 
     private struct WeakEngine { weak var engine: ChromiumEngine? }
 
@@ -71,14 +73,32 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
     // MARK: Toolbar (ABI 1.33)
 
     func refreshActions(for engine: any WebEngine, scale: CGFloat) {
-        guard let chromium = engine as? ChromiumEngine, chromium.tabID != 0 else { return }
+        guard let chromium = engine as? ChromiumEngine else { return }
         lastScale = scale
         shownEngines = shownEngines.filter { $0.value.engine != nil }
         shownEngines[ObjectIdentifier(chromium)] = WeakEngine(engine: chromium)
+        guard chromium.tabID != 0 else { return refreshWhenTabExists(chromium) }
         let tab = chromium.tabID
         runtime.extensionActions(tab: tab, scale: Double(scale)) { [weak self, weak chromium] status, actions in
             guard let self, let chromium, status == .rearcOK, let actions, actions.tabID == chromium.tabID else { return }
             self.model?.extensions.setActions(actions.items, for: chromium)
+        }
+    }
+
+    /// A restored tab's toolbar asks before its engine has a tab (the profile
+    /// is still opening). It was never asked again, so an extension loaded
+    /// meanwhile stayed out of its site controls (QA 2026-11-08 #20).
+    private func refreshWhenTabExists(_ chromium: ChromiumEngine) {
+        let key = ObjectIdentifier(chromium)
+        waitingForTab = waitingForTab.filter { $0.value.engine != nil }
+        guard waitingForTab[key] == nil else { return }
+        waitingForTab[key] = WeakEngine(engine: chromium)
+        withObservationTracking { _ = chromium.tabID } onChange: { [weak self, weak chromium] in
+            DispatchQueue.main.async {
+                self?.waitingForTab[key] = nil
+                guard let self, let chromium else { return }
+                self.refreshActions(for: chromium, scale: self.lastScale)
+            }
         }
     }
 

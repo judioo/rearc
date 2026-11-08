@@ -125,6 +125,13 @@ struct SplitContentView: View {
             card.strokeBorder(focused ? accent.opacity(showsCards ? 0.8 : 0.45) : .clear, lineWidth: showsCards ? 1.5 : 2)
                 .allowsHitTesting(false)
         )
+        // The focused pane's zoom, under its own row (QA 2026-11-08 #22): on
+        // the whole card it sat under the last pane's row, whichever had focus.
+        .overlay(alignment: .topTrailing) {
+            if showsCards, row?.isActive == true {
+                PageZoomBadge(engine: engine, topInset: showsRows ? CardToolbarView.height : 0)
+            }
+        }
         .background(PaneClickMonitor { model.focusSplitPane(tab.id, in: split.id) })
     }
 

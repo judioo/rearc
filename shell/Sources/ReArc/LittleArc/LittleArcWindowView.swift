@@ -125,8 +125,14 @@ struct LittleArcWindowView: View {
         }
     }
 
+    /// The words on Open in: full text colour, which keeps 4.5:1 on the tinted
+    /// bar for any space. The space's name was once drawn in its theme colour,
+    /// unreadable on the default lavender (QA 2026-11-08 #19); the colour is
+    /// now a dot beside the name.
+    static let labelColor = NSColor.textColor
+
     /// Arc's "Open in <Space> ⌘O ⌄": the space of the last focused browser
-    /// window, in its theme colour, and a menu of the profile's other spaces.
+    /// window, with a dot in its theme colour, and a menu of the profile's other spaces.
     @ViewBuilder
     private func openInButton(for record: LittleArcWindow) -> some View {
         let target = model.store.littleArcTargetSpace(for: windowID)
@@ -136,10 +142,17 @@ struct LittleArcWindowView: View {
                 open(into: target?.id)
             } label: {
                 HStack(spacing: 4) {
-                    Text("Open in").foregroundStyle(.secondary)
+                    Text("Open in").foregroundStyle(Color(nsColor: Self.labelColor))
+                    if let theme = target?.theme {
+                        Circle()
+                            .fill(Color(red: theme.red, green: theme.green, blue: theme.blue))
+                            .overlay(Circle().strokeBorder(Color.primary.opacity(0.25), lineWidth: 0.5))
+                            .frame(width: 8, height: 8)
+                            .accessibilityHidden(true)
+                    }
                     Text(target?.name ?? "ReArc")
                         .fontWeight(.medium)
-                        .foregroundStyle(target.map { Color(red: $0.theme.red, green: $0.theme.green, blue: $0.theme.blue) } ?? .primary)
+                        .foregroundStyle(Color(nsColor: Self.labelColor))
                     Text("⌘O")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
