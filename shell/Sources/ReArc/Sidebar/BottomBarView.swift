@@ -431,13 +431,13 @@ private struct SpaceIconButton: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(circleInk)
             } else if let emoji = SpaceCircles.emoji(forSymbol: space.iconName) {
-                Text(emoji).font(.system(size: 12))
+                Text(emoji).font(.system(size: 10))
             } else if Space.isSymbolName(space.iconName) {
                 Image(systemName: space.iconName)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(circleInk)
             } else {
-                Text(space.iconName).font(.system(size: 12))
+                Text(space.iconName).font(.system(size: 10))
             }
             if isCurrent {
                 Circle().stroke(chrome.accent, lineWidth: SpaceCircles.ringWidth)
