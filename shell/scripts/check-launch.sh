@@ -34,6 +34,11 @@ probe() {
   done
   if ! grep -q "launch probe: ReArcEngineRun returned 0, shutdown ok" "$log" 2>/dev/null; then
     echo "check-launch: $name: the probe did not shut down cleanly within ${waited}s (log $log)" >&2
+    if grep -q "Teardown watchdog expired" "$log" 2>/dev/null; then
+      # Seen 2026-11-10: a firewall holding the network service's sockets stalls its exit.
+      echo "check-launch: $name: teardown watchdog fired; if a network filter (Little Snitch) is" \
+        "asking about this copy's helpers, the network service cannot exit: see RELEASE.md" >&2
+    fi
     failed=1
   fi
   kill "$opener" 2>/dev/null || true

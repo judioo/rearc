@@ -237,6 +237,19 @@ Size and launch, release vs a dev bundle of the same HEAD:
   `build-engine-release.sh --target-cpu=x64` into its own out dir. Lipo/universal packaging
   is not scripted.
 - No clean-machine test has been done yet. That needs the notarized build.
+- **Build into a normal folder, not an agent's `/private/tmp/claude-*` scratchpad.** On
+  2026-11-10 release candidate 481 failed `check-launch.sh` with "the probe did not shut down
+  cleanly" and `Teardown watchdog expired` in the probe log. The code was not at fault: the
+  same signed bundle passed once copied to `~/Library/Caches`. Copies of the shipped build 476
+  passed from `$TMPDIR`, `shell/dist` and a 303-character path, and failed the same way in the
+  scratchpad. In that tree Little Snitch
+  reported the helpers as having "no code signature", did not apply ReArc's existing rule,
+  and held the network service's connections behind a connection alert. DNS got no answer,
+  and at shutdown each `close()` of a held UDP socket blocked in the kernel content filter
+  for about 3 s. So the network process outlived the 10 s that
+  `BrowserProcessIOThread::ProcessHostCleanUp` waits for it, and the 10 s teardown watchdog
+  fired first. If the watchdog fires, look for a pending firewall alert and sample the
+  network-service helper before suspecting the engine.
 
 
 ## Sparkle updates (DMG distribution)
