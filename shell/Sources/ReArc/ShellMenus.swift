@@ -263,16 +263,22 @@ enum ShellMenus {
 
     /// View > Developer, Chromium with `devtools` (ABI 1.40): the page's
     /// DevTools, docked beside it (Arc's default) or in their own window.
+    /// Dockable frontends (ABI 1.54) dock from their own ⋮ menu, as in Chrome.
     static func developer(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
-        [[
+        var items = [
             ShellMenuItem("Developer Tools", "i", [.command, .option]) { model.toggleDevTools() },
             ShellMenuItem("Developer Tools", .function(12), [], alternate: true) { model.toggleDevTools() },
             // The frontend opens on its last panel: the ABI has no panel or inspect-mode choice.
             ShellMenuItem("Inspect Elements", "c", [.command, .option]) { model.showDevTools() },
             ShellMenuItem("JavaScript Console", "j", [.command, .option]) { model.showDevTools() },
-            ShellMenuItem("Open Developer Tools in a Window") { model.setDevToolsPlacement(.window) },
-            ShellMenuItem("Dock Developer Tools") { model.setDevToolsPlacement(.docked) },
-        ]]
+        ]
+        if !model.devToolsDockable {
+            items += [
+                ShellMenuItem("Open Developer Tools in a Window") { model.setDevToolsPlacement(.window) },
+                ShellMenuItem("Dock Developer Tools") { model.setDevToolsPlacement(.docked) },
+            ]
+        }
+        return [items]
     }
 
     /// Tabs menu: Arc's Tab Switcher (forward/backward), recent tabs first.

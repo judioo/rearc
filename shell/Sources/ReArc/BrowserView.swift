@@ -544,7 +544,15 @@ struct BrowserView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let tab = model.selectedTab(in: windowID) {
             let engine = model.engineHost.engine(for: tab, profileID: model.profileID(for: tab))
-            if let frontend = model.dockedDevTools(for: tab.id) {
+            if let inTab = model.devToolsInTab(for: tab.id) {
+                DevToolsInTabLayout(layout: inTab.layout, view: inTab.view) {
+                    engine.makeView()
+                        .id(tab.id)
+                        .pageStatus(engine.activity) { engine.reload() }
+                        .findBar(model.findBar, for: engine)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let frontend = model.dockedDevTools(for: tab.id) {
                 DevToolsDockedLayout(model: model, tabID: tab.id, frontend: frontend) {
                     engine.makeView()
                         .id(tab.id)

@@ -619,6 +619,13 @@ final class ChromiumRuntime {
     /// A frontend's created event; false closes it.
     var onDevToolsFrontendCreated: ((ChromiumTabEvent) -> Bool)?
     var onDevToolsFrontendClosed: ((UInt64) -> Void)?
+    /// Dockable frontends (ABI 1.54): their device-mode toolboxes (opener = the frontend), open until closed.
+    var devToolsToolboxes: Set<UInt64> = []
+    /// A toolbox's created event; false closes it.
+    var onDevToolsToolboxCreated: ((ChromiumTabEvent) -> Bool)?
+    var onDevToolsToolboxClosed: ((UInt64) -> Void)?
+    /// A dockable frontend's Dock side and page bounds.
+    var onDevToolsDock: ((ChromiumDevToolsDockEvent) -> Void)?
     /// The page menu's Inspect on this page.
     var onInspectRequested: ((ChromiumEngine) -> Void)?
     /// Client-certificate requests seen and replies sent, for logs and the self-test.
@@ -755,6 +762,8 @@ final class ChromiumRuntime {
         registerExtensionChannels(context: context)
         registerAutofillChannels(context: context)
         registerClientCertificateChannel(context: context)
+        // ABI 1.54: before any frontend opens, so every frontend can dock.
+        registerDevToolsDockChannel(context: context)
         // ABI 1.46: camera and microphone use for the call card, before any tab.
         registerMediaCaptureChannel(context: context)
         // ABI 1.47: extension side panel requests, before any tab.
@@ -1260,8 +1269,21 @@ final class ChromiumRuntime {
             }
             return
         }
+        if event.kind == .created, engines[event.tabID] == nil, devToolsFrontends.contains(event.openerTabID) {
+            // A frontend's device-mode toolbox: behind the page while the frontend is undocked.
+            devToolsToolboxes.insert(event.tabID)
+            if onDevToolsToolboxCreated?(event) != true {
+                ChromiumLog.info("closing DevTools toolbox \(event.tabID): no host")
+                devToolsToolboxes.remove(event.tabID)
+                forceCloseTab(event.tabID)
+            }
+            return
+        }
         if event.kind == .closed, devToolsFrontends.remove(event.tabID) != nil {
             onDevToolsFrontendClosed?(event.tabID)
+        }
+        if event.kind == .closed, devToolsToolboxes.remove(event.tabID) != nil {
+            onDevToolsToolboxClosed?(event.tabID)
         }
         if event.kind == .created, engines[event.tabID] == nil {
             let adopted = onAdoptedTab?(event) ?? false

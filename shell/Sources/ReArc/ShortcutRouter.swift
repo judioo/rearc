@@ -67,8 +67,9 @@ final class ShortcutRouter {
         }
     }
 
-    /// The page's verdict on a key it was given (Chromium, ABI 1.42).
-    func pageVerdict(keyCode: UInt16, modifiers: ShortcutModifiers, consumed: Bool) {
+    /// The page's verdict on a key it was given (Chromium, ABI 1.42). A DevTools
+    /// frontend's own shortcuts (⇧⌘D docks it, as in Chrome) never prompt.
+    func pageVerdict(keyCode: UInt16, modifiers: ShortcutModifiers, consumed: Bool, promptsAgain: Bool = true) {
         guard let index = pending.firstIndex(where: {
             $0.event.keyCode == keyCode && Self.modifiers(of: $0.event.modifierFlags) == modifiers
         }) else { return }
@@ -80,7 +81,10 @@ final class ShortcutRouter {
             let taken = performMenuKey(key.event)
             note("\(label) page passed, \(taken ? "ran" : "no menu item")")
         case .prompt:
-            guard let shortcut = key.shortcut else { return }
+            guard let shortcut = key.shortcut, promptsAgain else {
+                note("\(label) page consumed")
+                return
+            }
             arming.arm(shortcut.id)
             onPrompt?(shortcut)
             note("\(label) page consumed, prompt")

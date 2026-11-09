@@ -399,9 +399,11 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         if runtime.capabilities.keyEquivalentEvents {
             // A key the page did not take runs the menu's shortcut (ShortcutRouter).
             model.shortcutRouter.awaitsPageVerdicts = true
-            runtime.onKeyEquivalent = { [weak model] event in
+            runtime.onKeyEquivalent = { [weak self, weak model] event in
+                let devTools = self.map { $0.runtime.devToolsFrontends.contains(event.tabID) || $0.runtime.devToolsToolboxes.contains(event.tabID) } ?? false
                 model?.shortcutRouter.pageVerdict(
-                    keyCode: event.keyCode, modifiers: ShortcutRouter.modifiers(of: event.modifiers), consumed: event.consumed)
+                    keyCode: event.keyCode, modifiers: ShortcutRouter.modifiers(of: event.modifiers), consumed: event.consumed,
+                    promptsAgain: !devTools)
             }
         }
         runtime.onTerminateRequested = { [weak self, weak model] in

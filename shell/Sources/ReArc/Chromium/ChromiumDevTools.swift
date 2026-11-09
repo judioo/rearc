@@ -3,8 +3,28 @@ import AppKit
 import ReArcEngine
 import SidebarModel
 
-/// Hosted DevTools (ABI 1.40) and client-certificate selection (ABI 1.41).
-/// Follows "Shell adoption" in engine/docs/WAVE-18H-REPORT.md.
+/// Hosted DevTools (ABI 1.40), dockable since ABI 1.54, and client-certificate
+/// selection (ABI 1.41). Follows "Shell adoption" in engine/docs/WAVE-18H-REPORT.md
+/// and "Dockable DevTools" in engine/docs/C-ABI.md.
+
+/// A dockable frontend's Dock side and where it put the page (`ReArcDevToolsDockEvent`).
+struct ChromiumDevToolsDockEvent: Equatable {
+    var frontendTabID, targetTabID: UInt64
+    var layout: DevToolsDockLayout
+}
+
+private let devToolsDockCallback: ReArcDevToolsDockCallback = { context, event in
+    guard let e = event?.pointee else { return }
+    let copied = ChromiumDevToolsDockEvent(
+        frontendTabID: e.frontend_tab_id, targetTabID: e.target_tab_id,
+        layout: DevToolsDockLayout(
+            side: DevToolsDockSide(rawValue: e.dock_side) ?? .right, inTabTabID: e.in_tab_tab_id,
+            pageBounds: e.has_bounds ? CGRect(x: Int(e.x), y: Int(e.y), width: Int(e.width), height: Int(e.height)) : nil)
+    )
+    MainActor.assumeIsolated {
+        Unmanaged<ChromiumRuntime>.fromOpaque(context!).takeUnretainedValue().onDevToolsDock?(copied)
+    }
+}
 
 struct ChromiumClientCertificateEvent {
     var identity: ChromiumPromptIdentity
@@ -51,6 +71,20 @@ extension ChromiumRuntime {
         }
         ChromiumLog.info("devtools open target \(target) -> \(status.rearcName) frontend \(frontend)")
         return (status, frontend)
+    }
+
+    /// Frontends dock as in Chrome: the engine has the feature and its export.
+    var supportsDevToolsDocking: Bool {
+        capabilities.devToolsDocking && dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcEngineSetDevToolsDockCallback") != nil
+    }
+
+    /// Registered at `ready`, before any frontend opens: only frontends opened after it can dock.
+    func registerDevToolsDockChannel(context: UnsafeMutableRawPointer) {
+        guard supportsDevToolsDocking else { return }
+        typealias SetCallback = @convention(c) (ReArcDevToolsDockCallback?, UnsafeMutableRawPointer?) -> Void
+        let set = unsafeBitCast(dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcEngineSetDevToolsDockCallback")!,
+                                to: SetCallback.self)
+        set(devToolsDockCallback, context)
     }
 
     func takeExpectedDevToolsFrontend(_ event: ChromiumTabEvent) -> Bool {
@@ -105,6 +139,14 @@ final class ChromiumDevToolsHost: DevToolsOpening {
     func install() {
         guard runtime.capabilities.devTools, let model else { return }
         model.devToolsOpener = self
+        model.devToolsDockable = runtime.supportsDevToolsDocking
+        runtime.onDevToolsDock = { [weak model] event in
+            ChromiumLog.info("devtools dock frontend \(event.frontendTabID) side \(event.layout.side) in-tab \(event.layout.inTabTabID) "
+                + "page \(event.layout.pageBounds.map { "\($0)" } ?? "full")")
+            model?.devToolsDockChanged(frontendTabID: event.frontendTabID, layout: event.layout)
+        }
+        runtime.onDevToolsToolboxCreated = { [weak self] event in self?.adoptToolbox(event) ?? false }
+        runtime.onDevToolsToolboxClosed = { [weak model] toolbox in model?.devToolsToolboxClosed(toolbox) }
         runtime.onDevToolsFrontendCreated = { [weak self] event in self?.adopt(event) ?? false }
         runtime.onDevToolsFrontendClosed = { [weak model] frontend in model?.devToolsFrontendClosed(frontend) }
         runtime.onInspectRequested = { [weak model] page in
@@ -144,6 +186,18 @@ final class ChromiumDevToolsHost: DevToolsOpening {
                                       profileKey: target.profileKey, shellID: UUID(), role: .peek)
         model.attachDevTools(frontend, frontendTabID: event.tabID, for: tabID)
         return model.devToolsEngine(for: tabID) === frontend
+    }
+
+    /// The device-mode toolbox an undocked frontend opened, in its frontend's profile.
+    private func adoptToolbox(_ event: ChromiumTabEvent) -> Bool {
+        guard let model, let tabID = model.devTools.tab(forFrontend: event.openerTabID),
+              let frontend = model.devToolsEngine(for: tabID) as? ChromiumEngine else { return false }
+        let url = event.url.flatMap(URL.init(string:))
+            ?? URL(string: "devtools://devtools/bundled/device_mode_emulation_frame.html")!
+        let toolbox = ChromiumEngine(runtime: runtime, adopting: event, initialURL: url, context: frontend.profileContext,
+                                     profileKey: frontend.profileKey, shellID: UUID(), role: .peek)
+        model.attachDevToolsToolbox(toolbox, toolboxTabID: event.tabID, for: tabID)
+        return true
     }
 }
 #endif

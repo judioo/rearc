@@ -49,6 +49,7 @@ struct ChromiumCapabilities: Equatable {
     static let httpAuthFeature = "http_auth"
     static let linkOpenRequestsFeature = "link_open_requests"
     static let devToolsFeature = "devtools"
+    static let devToolsDockingFeature = "devtools_docking"
     static let clientCertificatesFeature = "client_certificates"
     static let keyEquivalentEventsFeature = "key_equivalent_events"
     static let pipEmbeddedFeature = "pip_embedded"
@@ -106,6 +107,7 @@ struct ChromiumCapabilities: Equatable {
         httpAuthFeature: 38,
         linkOpenRequestsFeature: 39,
         devToolsFeature: 40,
+        devToolsDockingFeature: 54,
         clientCertificatesFeature: 41,
         keyEquivalentEventsFeature: 42,
         pipEmbeddedFeature: 43,
@@ -205,6 +207,9 @@ struct ChromiumCapabilities: Equatable {
     var linkOpenRequests: Bool
     /// Registry-hosted bundled DevTools frontends (`ReArcTabOpenDevTools`).
     var devTools: Bool
+    /// Dockable frontends (`ReArcEngineSetDevToolsDockCallback`): Chrome's Dock side,
+    /// device toolbar and the frontend's own layout of the page; requires `devTools`.
+    var devToolsDocking: Bool
     /// TLS client-certificate selection (`ReArcEngineSetClientCertificateCallback`, `ReArcClientCertificateRespond`).
     var clientCertificates: Bool
     /// The page's verdict on each Command/Control key (`ReArcEngineSetKeyEquivalentCallback`):
@@ -293,6 +298,7 @@ struct ChromiumCapabilities: Equatable {
         httpAuth = adopted(Self.httpAuthFeature)
         linkOpenRequests = extensionWindows && adopted(Self.linkOpenRequestsFeature)
         devTools = adopted(Self.devToolsFeature)
+        devToolsDocking = devTools && adopted(Self.devToolsDockingFeature)
         clientCertificates = adopted(Self.clientCertificatesFeature)
         keyEquivalentEvents = adopted(Self.keyEquivalentEventsFeature)
         pipEmbedded = pictureInPicture && adopted(Self.pipEmbeddedFeature)
@@ -390,6 +396,7 @@ struct ChromiumCapabilities: Equatable {
             (Self.downloadEventBatchesFeature, downloadEventBatches),
             (Self.extensionTabGroupsFeature, extensionTabGroups),
             (Self.pageThemeColorFeature, pageThemeColor),
+            (Self.devToolsDockingFeature, devToolsDocking),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }

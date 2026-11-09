@@ -13,6 +13,8 @@ protocol DevToolsOpening: AnyObject {
 /// DevTools (Arc: View > Developer > Developer Tools, ⌥⌘I; the page menu's
 /// Inspect). The frontend is a tab the engine makes. It shows docked beside
 /// its page, Arc's default, or in its own window, and closes with its page.
+/// A dockable frontend (ABI 1.54) chooses that itself, as in Chrome: its ⋮
+/// menu's Dock side, ⌘⇧D, and the page bounds it reports.
 extension BrowserViewModel {
 
     var canOpenDevTools: Bool { devToolsOpener != nil }
@@ -73,7 +75,45 @@ extension BrowserViewModel {
         guard let session = devTools.close(for: tabID) else { return nil }
         if session.placement == .window { windowPresenter?.dismissDevToolsWindow(for: tabID) }
         devToolsEngines[tabID] = nil
+        // The engine closes the toolbox with its frontend.
+        devToolsToolboxes[tabID] = nil
         return session
+    }
+
+    /// A dockable frontend changed its Dock side or the page's bounds.
+    func devToolsDockChanged(frontendTabID: UInt64, layout: DevToolsDockLayout) {
+        let before = devTools.tab(forFrontend: frontendTabID).flatMap { devTools.session(for: $0)?.placement }
+        guard let tabID = devTools.setLayout(layout, forFrontend: frontendTabID),
+              let placement = devTools.session(for: tabID)?.placement, placement != before else { return }
+        if placement == .window {
+            windowPresenter?.presentDevToolsWindow(for: tabID)
+        } else {
+            windowPresenter?.dismissDevToolsWindow(for: tabID)
+        }
+    }
+
+    /// An undocked frontend's device-mode toolbox arrived.
+    func attachDevToolsToolbox(_ engine: any WebEngine, toolboxTabID: UInt64, for tabID: Tab.ID) {
+        guard devTools.session(for: tabID) != nil else { return }
+        devToolsToolboxes[tabID] = (toolboxTabID, engine)
+    }
+
+    func devToolsToolboxClosed(_ toolboxTabID: UInt64) {
+        guard let tabID = devToolsToolboxes.first(where: { $0.value.tabID == toolboxTabID })?.key else { return }
+        devToolsToolboxes[tabID] = nil
+    }
+
+    /// A dockable frontend's layout for `tabID`'s content area and the view
+    /// behind the page (the frontend docked, the toolbox undocked). Until the
+    /// frontend reports a side (Chrome waits for it), it sits behind the full page.
+    func devToolsInTab(for tabID: Tab.ID) -> (layout: DevToolsDockLayout, view: (any WebEngine)?)? {
+        guard devToolsDockable, let session = devTools.session(for: tabID) else { return nil }
+        let layout = session.layout ?? DevToolsDockLayout(side: .right, inTabTabID: session.frontendTabID)
+        let toolbox = devToolsToolboxes[tabID]
+        let view = layout.inTabTabID == session.frontendTabID ? devToolsEngines[tabID]
+            : toolbox?.tabID == layout.inTabTabID && layout.inTabTabID != 0 ? toolbox?.engine : nil
+        // Nothing behind the page (undocked, no toolbox yet): it fills the area, as in Chrome.
+        return view == nil ? (DevToolsDockLayout(side: layout.side, inTabTabID: 0), nil) : (layout, view)
     }
 
     /// Pops the selected tab's DevTools out to a window, or docks them back.
@@ -94,9 +134,9 @@ extension BrowserViewModel {
         closeDevTools(for: tabID)
     }
 
-    /// The docked frontend shown beside `tabID`'s page, if any.
+    /// The docked frontend shown beside `tabID`'s page, if any (not dockable).
     func dockedDevTools(for tabID: Tab.ID) -> (any WebEngine)? {
-        guard devTools.session(for: tabID)?.placement == .docked else { return nil }
+        guard !devToolsDockable, devTools.session(for: tabID)?.placement == .docked else { return nil }
         return devToolsEngines[tabID]
     }
 
@@ -159,12 +199,50 @@ struct DevToolsDockedLayout<Page: View>: View {
     }
 }
 
+/// A dockable frontend's content area, as Chrome's DevToolsContentsResizingStrategy
+/// lays it out: the in-tab view (frontend or toolbox) fills it, the page sits
+/// above at the frontend's bounds, and the frontend's own splitter resizes it.
+struct DevToolsInTabLayout<Page: View>: View {
+    let layout: DevToolsDockLayout
+    let view: (any WebEngine)?
+    @ViewBuilder var page: Page
+
+    var body: some View {
+        GeometryReader { geometry in
+            let frame = layout.pageFrame(in: geometry.size)
+            ZStack(alignment: .topLeading) {
+                if let view {
+                    view.makeView()
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                }
+                // A layout position, not a transform: the page's native view moves.
+                page
+                    .frame(width: frame.width, height: frame.height)
+                    .position(x: frame.midX, y: frame.midY)
+            }
+        }
+    }
+}
+
 /// A popped-out DevTools window's content.
 struct DevToolsWindowView: View {
     let model: BrowserViewModel
     let tabID: Tab.ID
 
     var body: some View {
+        VStack(spacing: 0) {
+            // A dockable frontend docks from its own ⋮ menu, as in Chrome.
+            if !model.devToolsDockable { header }
+            if let engine = model.devToolsEngine(for: tabID), model.devTools.session(for: tabID)?.placement == .window {
+                engine.makeView()
+            } else {
+                Color.clear
+            }
+        }
+        .frame(minWidth: 480, minHeight: 320)
+    }
+
+    private var header: some View {
         VStack(spacing: 0) {
             HStack {
                 Text(model.store.tab(withID: tabID)?.displayTitle ?? "Developer Tools")
@@ -178,12 +256,6 @@ struct DevToolsWindowView: View {
             .padding(.horizontal, 10)
             .frame(height: 28)
             Divider()
-            if let engine = model.devToolsEngine(for: tabID), model.devTools.session(for: tabID)?.placement == .window {
-                engine.makeView()
-            } else {
-                Color.clear
-            }
         }
-        .frame(minWidth: 480, minHeight: 320)
     }
 }

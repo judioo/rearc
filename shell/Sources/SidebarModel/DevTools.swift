@@ -8,11 +8,51 @@ public enum DevToolsPlacement: String, Equatable, Sendable {
     case window
 }
 
+/// Chrome's Dock side, as a dockable frontend reports it (Chromium ABI 1.54).
+public enum DevToolsDockSide: UInt32, Equatable, Sendable {
+    case undocked = 0, right, bottom, left
+}
+
+/// A dockable frontend's layout, as Chrome's DevToolsWindow keeps it: the
+/// frontend (docked) or its device-mode toolbox (undocked) fills the content
+/// area and the page sits above it at the bounds the frontend reports.
+public struct DevToolsDockLayout: Equatable, Sendable {
+    public var side: DevToolsDockSide
+    /// The engine tab behind the page; 0 while undocked without a toolbox.
+    public var inTabTabID: UInt64
+    /// The page's rect in that view, in points; nil until the frontend sends one.
+    public var pageBounds: CGRect?
+
+    public init(side: DevToolsDockSide, inTabTabID: UInt64, pageBounds: CGRect? = nil) {
+        self.side = side
+        self.inTabTabID = inTabTabID
+        self.pageBounds = pageBounds
+    }
+
+    /// Chrome's ApplyDevToolsContentsResizingStrategy: no bounds, or an empty
+    /// size off the origin, fill the area; an empty rect at the origin hides
+    /// the page; right and bottom docks keep DevTools' minimum size.
+    public func pageFrame(in container: CGSize) -> CGRect {
+        guard let bounds = pageBounds, (bounds.width > 0 && bounds.height > 0) || bounds.origin == .zero
+        else { return CGRect(origin: .zero, size: container) }
+        let left = min(bounds.minX, container.width), top = min(bounds.minY, container.height)
+        var width = min(bounds.width, container.width), height = min(bounds.height, container.height)
+        switch side {
+        case .right: width = min(width, max(0, container.width - 250))
+        case .bottom: height = min(height, max(0, container.height - 72))
+        case .left, .undocked: break
+        }
+        return CGRect(x: left, y: top, width: max(0, width), height: max(0, height))
+    }
+}
+
 /// One tab's DevTools frontend: the engine's frontend tab and where it shows.
 public struct DevToolsSession: Equatable, Sendable {
     /// The engine's frontend tab (Chromium registry ID); it closes when the page does.
     public var frontendTabID: UInt64
     public var placement: DevToolsPlacement
+    /// Set once a dockable frontend reports its layout; it then decides `placement`.
+    public var layout: DevToolsDockLayout?
 
     public init(frontendTabID: UInt64, placement: DevToolsPlacement = .docked) {
         self.frontendTabID = frontendTabID
@@ -45,6 +85,15 @@ public struct DevToolsSessions: Equatable, Sendable {
 
     public mutating func setPlacement(_ placement: DevToolsPlacement, for tabID: UUID) {
         sessions[tabID]?.placement = placement
+    }
+
+    /// A dockable frontend moved or resized the page; undocked means its own window.
+    @discardableResult
+    public mutating func setLayout(_ layout: DevToolsDockLayout, forFrontend frontendTabID: UInt64) -> UUID? {
+        guard let tab = tab(forFrontend: frontendTabID) else { return nil }
+        sessions[tab]?.layout = layout
+        sessions[tab]?.placement = layout.side == .undocked ? .window : .docked
+        return tab
     }
 
     public mutating func setDockFraction(_ fraction: Double) {

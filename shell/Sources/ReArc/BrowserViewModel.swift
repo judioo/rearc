@@ -478,6 +478,10 @@ final class BrowserViewModel {
     @ObservationIgnored var devToolsPending: Set<Tab.ID> = []
     /// Set by the Chromium shell when the engine hosts DevTools (ABI 1.40).
     @ObservationIgnored weak var devToolsOpener: DevToolsOpening?
+    /// Frontends dock as in Chrome and lay out the page themselves (ABI 1.54).
+    @ObservationIgnored var devToolsDockable = false
+    /// Undocked frontends' device-mode toolboxes, per sidebar tab.
+    @ObservationIgnored var devToolsToolboxes: [Tab.ID: (tabID: UInt64, engine: any WebEngine)] = [:]
     var boostSessionApplyByTab: [Tab.ID: BoostSessionApplyMap] = [:]
     var lastPickedSnapshotByTab: [Tab.ID: PickedElementSnapshot] = [:]
     var boostSelectorFingerprintByTab: [Tab.ID: BoostSelectorFingerprint] = [:]

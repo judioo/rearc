@@ -3497,7 +3497,7 @@ extension ChromiumSelfTest {
         model.selectTab(tab.id)
         try check(model.toggleDevTools() == nil, "⌥⌘I refused on tab A")
         try await wait("the docked DevTools frontend attached", timeout: 20) {
-            (model.dockedDevTools(for: tab.id) as? ChromiumEngine)?.attachmentID != nil
+            (model.devToolsEngine(for: tab.id) as? ChromiumEngine)?.attachmentID != nil
         }
         let frontend = try XCTUnwrapValue(model.devToolsEngine(for: tab.id) as? ChromiumEngine, "the frontend engine")
         try await wait("the bundled frontend loaded", timeout: 20) {
@@ -3506,21 +3506,32 @@ extension ChromiumSelfTest {
         try check(frontend.engineProfileID == engine.engineProfileID && frontend.leaseHolder?.window === window,
                   "frontend profile \(frontend.engineProfileID) window \(String(describing: frontend.leaseHolder?.window))")
         try check(!store.displayTabs().contains { $0.url.scheme == "devtools" }, "the frontend became a sidebar tab")
-        model.setDevToolsPlacement(.window)
-        try await wait("DevTools in their own window", timeout: 10) {
-            guard let own = shell.window(forDevTools: tab.id) else { return false }
-            return frontend.leaseHolder?.window === own
-        }
-        model.setDevToolsPlacement(.docked)
-        try await wait("DevTools docked again", timeout: 10) {
-            shell.window(forDevTools: tab.id) == nil && frontend.leaseHolder?.window === window
+        var placement = "it moves to its own window and back"
+        if model.devToolsDockable {
+            // ABI 1.54: the frontend docks itself (its ⋮ menu); the shell follows its reports.
+            try await wait("the frontend reported its Dock side", timeout: 20) {
+                model.devTools.session(for: tab.id)?.layout?.pageBounds != nil
+            }
+            let layout = try XCTUnwrapValue(model.devTools.session(for: tab.id)?.layout, "the dock layout")
+            try check(layout.side == .undocked || frontend.leaseHolder?.window === window, "docked frontend outside the window")
+            placement = "it reported Dock side \(layout.side) with the page at \(layout.pageBounds.map { "\($0)" } ?? "-")"
+        } else {
+            model.setDevToolsPlacement(.window)
+            try await wait("DevTools in their own window", timeout: 10) {
+                guard let own = shell.window(forDevTools: tab.id) else { return false }
+                return frontend.leaseHolder?.window === own
+            }
+            model.setDevToolsPlacement(.docked)
+            try await wait("DevTools docked again", timeout: 10) {
+                shell.window(forDevTools: tab.id) == nil && frontend.leaseHolder?.window === window
+            }
         }
         let frontendTab = frontend.tabID
         model.toggleDevTools()
         try await wait("⌥⌘I closed the frontend tab", timeout: 10) { !runtime.devToolsFrontends.contains(frontendTab) }
         try check(model.devTools.session(for: tab.id) == nil && engine.tabID != 0, "the page went with its DevTools")
         log("PASS DevTools (ABI 1.40): ⌥⌘I opens the bundled frontend docked beside tab A (same engine profile, not a sidebar tab), "
-            + "it moves to its own window and back, and ⌥⌘I closes it while the page stays")
+            + "\(placement), and ⌥⌘I closes it while the page stays")
 
         // Inspect from the page menu on another tab; closing that page closes its frontend.
         let target = model.openInNewTab(URL(string: "\(base)/a")!)
