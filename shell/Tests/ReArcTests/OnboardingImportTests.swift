@@ -218,7 +218,7 @@ final class OnboardingImportTests: XCTestCase {
         let pending = try XCTUnwrap(model.pendingExtensionReinstall)
         XCTAssertEqual(pending.queue.items.map(\.name), ["Tab Notes", "Reader"])
         XCTAssertEqual(Set(pending.queue.items.map(\.profileID)), [model.store.activeProfileID])
-        XCTAssertEqual(pending.title, "Reinstall 2 extensions from Arc and Google Chrome")
+        XCTAssertEqual(pending.title, "Install 2 extensions from Arc and Google Chrome")
         XCTAssertEqual(outcome.totals.extensions, pending.queue.items.count)
         let tabs = model.store.spaces.flatMap { SidebarTree.tabs(model.store.content(for: $0.id).allLeaves) }
         XCTAssertFalse(tabs.contains { $0.url.host() == "chromewebstore.google.com" }, "no store page opens under the sunrise")
@@ -236,37 +236,30 @@ final class OnboardingImportTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: data.appendingPathComponent(PendingExtensionReinstall.fileName).path))
     }
 
-    func testTheBrowserOffersStartOrLaterOnceTheSunriseIsOver() throws {
+    func testTheBrowserStartsWithoutPresentingTheImporterOrAConsentSheet() throws {
         let model = makeModel()
         _ = importForReal(sources(), [.extensions], model: model)
-        let onboarding = FirstRunOnboarding(kind: .firstRun, model: model) { [] }
-        onboarding.onboardingFinished()
-        XCTAssertEqual(model.toast?.message, "Reinstall 2 extensions from Arc and Google Chrome")
-        XCTAssertEqual(model.toast?.action, .reinstallExtensions)
-        model.postponePendingExtensionReinstall()
-        XCTAssertNil(model.toast)
-        XCTAssertNotNil(model.pendingExtensionReinstall, "Later keeps it")
-
-        let quiet = makeModel()
-        quiet.setPendingExtensionReinstall(nil)
-        FirstRunOnboarding(kind: .firstRun, model: quiet) { [] }.onboardingFinished()
-        XCTAssertNil(quiet.toast, "nothing queued, nothing offered")
+        FirstRunOnboarding(kind: .firstRun, model: model) { [] }.onboardingFinished()
+        XCTAssertNotNil(model.extensionReinstallSession)
+        XCTAssertFalse(model.isExtensionReinstallPresented)
+        XCTAssertNil(model.browserImportWindow)
+        // The WebKit test engine exposes store links only when requested.
+        model.startPendingExtensionReinstall()
+        XCTAssertTrue(model.isExtensionReinstallPresented)
+        XCTAssertNil(model.browserImportWindow)
     }
 
-    func testStartStepsThroughTheQueueAndSavesEachStep() throws {
+    func testTerminalResultsSurviveRelaunchWithoutAnotherInstall() throws {
         let model = makeModel()
         _ = importForReal(sources(), [.extensions], model: model)
+        var pending = try XCTUnwrap(model.pendingExtensionReinstall)
+        pending.results = Dictionary(uniqueKeysWithValues: pending.queue.items.map { ($0.key, .init(status: 0, reason: "")) })
         let file = data.appendingPathComponent(PendingExtensionReinstall.fileName)
-        let session = BrowserImportSession(model: model, applicationSupport: root, arcDefaults: { [:] })
-        session.resumeReinstall(try XCTUnwrap(model.pendingExtensionReinstall).queue)
-        XCTAssertEqual(session.reinstall?.progressText, "1 of 2")
-        session.nextExtension()
-        XCTAssertEqual(PendingExtensionReinstall.load(from: file)?.queue.current?.name, "Reader")
-        XCTAssertEqual(model.pendingExtensionReinstall?.title, "Reinstall 1 extension from Arc and Google Chrome")
-        session.stopReinstall()
-        XCTAssertNil(session.reinstall)
-        XCTAssertNil(model.pendingExtensionReinstall, "Stop is done with it")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        PendingExtensionReinstall.save(pending, to: file)
+        XCTAssertTrue(try XCTUnwrap(PendingExtensionReinstall.load(from: file)).outstandingItems.isEmpty)
+        XCTAssertEqual(PendingExtensionReinstall.read(from: file)?.results, pending.results)
+        model.queueExtensionReinstall(pending.queue, from: pending.from)
+        XCTAssertTrue(try XCTUnwrap(model.pendingExtensionReinstall).outstandingItems.isEmpty)
     }
 
     func testTheCommandBarOffersTheQueueUntilItIsDone() throws {
@@ -276,7 +269,7 @@ final class OnboardingImportTests: XCTestCase {
         XCTAssertNil(AppCommandRegistry.all(in: context()).first { $0.id == "reinstall-extensions" })
         _ = importForReal(sources(), [.extensions], model: model)
         let command = try XCTUnwrap(AppCommandRegistry.all(in: context()).first { $0.id == "reinstall-extensions" })
-        XCTAssertEqual(command.title, "Reinstall 2 extensions from Arc and Google Chrome…")
+        XCTAssertEqual(command.title, "Install 2 extensions from Arc and Google Chrome…")
         XCTAssertEqual(command.action, .reinstallExtensions)
         XCTAssertTrue(command.isEnabled(in: context()))
         model.setPendingExtensionReinstall(nil)
@@ -287,7 +280,7 @@ final class OnboardingImportTests: XCTestCase {
         let html = WelcomePage.html(name: "", colour: MarkPalette.sun, spaces: 1,
                                     imported: ImportStats(spaces: 1, tabs: 3, extensions: 2))
         XCTAssertTrue(html.contains("1 space  ·  3 tabs came with you."))
-        XCTAssertTrue(html.contains("2 extensions are queued to reinstall from the Chrome Web Store."))
+        XCTAssertTrue(html.contains("2 extensions are installing from the Chrome Web Store."))
         XCTAssertFalse(WelcomePage.html(name: "", colour: MarkPalette.sun, spaces: 1, imported: ImportStats(extensions: 1))
             .contains("came with you"))
     }

@@ -90,7 +90,7 @@ extension ShellToast {
 /// a thin border and a soft shadow; keycaps as chips, then the action.
 struct ShellToastView: View {
     let toast: ShellToast
-    /// A choice toast's Start (true) or Later (false).
+    /// Opens import details (true) or dismisses the toast (false).
     var choose: (Bool) -> Void = { _ in }
     @Environment(\.themeChrome) private var chrome
     @State private var shareAnchor: NSView?
@@ -140,8 +140,7 @@ struct ShellToastView: View {
                 .accessibilityLabel("Share copied link")
             }
             if toast.action == .reinstallExtensions {
-                toastButton("Later") { choose(false) }
-                toastButton("Start", prominent: true) { choose(true) }
+                toastButton("Details", prominent: true) { choose(true) }
             }
         }
         .padding(.leading, 10)

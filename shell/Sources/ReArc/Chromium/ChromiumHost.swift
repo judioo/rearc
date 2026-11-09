@@ -327,6 +327,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         } else {
             adopt(model)
         }
+        model.installPendingExtensions()
         model.presentAirTrafficControl = { [weak self] in self?.presentAirTrafficControl() }
         model.presentSettings = { [weak self] pane in MainActor.assumeIsolated { self?.presentSettings(pane) } }
         model.onShortcutOverridesChanged = { [weak self, weak model] in

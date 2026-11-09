@@ -213,7 +213,7 @@ final class BrowserImportShellTests: XCTestCase {
         XCTAssertEqual(model.store.content(for: model.store.activeSpaceID).pinnedLeaves.count, 1)
         XCTAssertNotNil(model.visitHistory.record(for: URL(string: "https://weather.example.org/")!))
         XCTAssertTrue(session.result?.hasPrefix("1 bookmark in Google Chrome – Everyday · 1 history page") == true, session.result ?? "")
-        XCTAssertNil(session.reinstall, "WebKit cannot reinstall extensions")
+        XCTAssertNil(model.pendingExtensionReinstall?.queue, "WebKit cannot reinstall extensions")
         XCTAssertEqual(model.webKitSearchPreference?.providerID, SearchProvider.bing.id, "Chrome's search engine, matched by name")
     }
 
@@ -225,4 +225,16 @@ final class BrowserImportShellTests: XCTestCase {
         XCTAssertEqual(model.store.activeProfileID, other.id)
         XCTAssertEqual(model.store.selectedTab?.url.absoluteString, "https://chromewebstore.google.com/detail/abcdefghijklmnopabcdefghijklmnop")
     }
+    func testImportedArcSourceHasNothingLeftToImport() {
+        let model = makeModel()
+        let session = discoveredSession(model)
+        XCTAssertTrue(session.canImport)
+        session.performImport()
+        let count = model.store.spaces.count
+        XCTAssertTrue(session.arcSummary.isEmpty)
+        XCTAssertFalse(session.canImport)
+        session.performImport()
+        XCTAssertEqual(model.store.spaces.count, count)
+    }
+
 }

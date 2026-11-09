@@ -2,35 +2,49 @@ import Foundation
 import SidebarModel
 import SwiftUI
 
-/// Extensions the onboarding queued to reinstall (PROFILE-IMPORT §3.3).
-/// The onboarding is a full-screen takeover, so no store page opens during
-/// it: once the browser is shown a toast offers Start and Later, and Start
-/// steps through the Import window's footer. Kept beside the sidebar file,
-/// so Later survives a relaunch; the command bar offers it until it is done.
+/// Background import work and terminal outcomes, saved beside the sidebar.
 struct PendingExtensionReinstall: Codable, Equatable {
     static let fileName = "extension-reinstall.json"
+
+    struct Result: Codable, Equatable {
+        var status: Int32
+        var reason: String
+        var succeeded: Bool { status == 0 || status == 1 }
+        var unavailable: Bool { ExtensionConsolidation.unavailable(status: status) }
+    }
+
+    var skipped: [ExtensionConsolidation.Skipped]? = nil
+    var results: [String: Result]? = nil
+    var outstandingItems: [ExtensionReinstallQueue.Item] {
+        Array(queue.items.dropFirst(queue.position)).filter { $0.enabledByDefault != false && results?[$0.key] == nil }
+    }
 
     var queue: ExtensionReinstallQueue
     /// "Arc", "Arc and Chrome": the browsers they came from.
     var from: String
 
-    /// "Reinstall 9 extensions from Arc"
+    /// Command bar label while work remains, then its saved details.
     var title: String {
-        let n = queue.remaining
-        return "Reinstall \(n) extension\(n == 1 ? "" : "s") from \(from)"
+        let n = outstandingItems.count
+        if n == 0 { return "Extension import details" }
+        return "Install \(n) extension\(n == 1 ? "" : "s") from \(from)"
     }
 
-    /// Nil when the file is missing or unreadable, or the queue is done.
+    /// Completed results remain available for the command bar's details.
     static func load(from url: URL) -> PendingExtensionReinstall? {
-        guard let data = try? Data(contentsOf: url),
-              let pending = try? JSONDecoder().decode(PendingExtensionReinstall.self, from: data),
-              !pending.queue.isFinished else { return nil }
+        guard let pending = read(from: url),
+              !pending.queue.isFinished || !(pending.skipped ?? []).isEmpty else { return nil }
         return pending
     }
 
-    /// Writes `pending`, or removes the file when it is nil or finished.
+    static func read(from url: URL) -> PendingExtensionReinstall? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(Self.self, from: data)
+    }
+
+    /// Writes pending work and outcomes atomically; nil explicitly clears it.
     static func save(_ pending: PendingExtensionReinstall?, to url: URL) {
-        guard let pending, !pending.queue.isFinished else {
+        guard let pending else {
             try? FileManager.default.removeItem(at: url)
             return
         }
@@ -45,30 +59,58 @@ struct PendingExtensionReinstall: Codable, Equatable {
 
 extension BrowserViewModel {
     /// Queues them (replacing any earlier queue) and saves it; nothing opens.
-    func queueExtensionReinstall(_ queue: ExtensionReinstallQueue, from: String) {
-        setPendingExtensionReinstall(queue.isFinished ? nil : PendingExtensionReinstall(queue: queue, from: from))
+    func queueExtensionReinstall(_ queue: ExtensionReinstallQueue, from: String, skipped: [ExtensionConsolidation.Skipped] = []) {
+        var pending = PendingExtensionReinstall(skipped: skipped, queue: queue, from: from)
+        // Retain terminal outcomes when a manual import repeats the same IDs.
+        pending.results = PendingExtensionReinstall.read(from: pendingExtensionReinstallURL)?.results
+        setPendingExtensionReinstall(pending)
     }
 
     func setPendingExtensionReinstall(_ pending: PendingExtensionReinstall?) {
-        let pending = pending.flatMap { $0.queue.isFinished ? nil : $0 }
+        let pending = pending.flatMap { $0.queue.isFinished && ($0.skipped ?? []).isEmpty ? nil : $0 }
         pendingExtensionReinstall = pending
         PendingExtensionReinstall.save(pending, to: pendingExtensionReinstallURL)
     }
 
-    /// The browser is shown: "Reinstall 9 extensions from Arc", Start or Later.
-    /// Letting the toast go is Later.
+    /// Onboarding's import is the consent; no second decision interrupts it.
     func offerPendingExtensionReinstall() {
-        guard let pending = pendingExtensionReinstall else { return }
-        showToast(pending.title, systemImage: "puzzlepiece.extension", action: .reinstallExtensions,
-                  duration: ShellToast.choiceDuration)
+        installPendingExtensions()
     }
 
-    /// Start: the Import window's footer steps through the queue.
+    func installPendingExtensions() {
+        guard let pending = pendingExtensionReinstall, !pending.outstandingItems.isEmpty,
+              extensionReinstallSession?.isInstalling != true, !isReconcilingExtensionInventory else { return }
+        if pending.queue.items.contains(where: { $0.enabledByDefault == nil }) {
+            isReconcilingExtensionInventory = true
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let inventory = BrowserImportDiscovery.discover().flatMap(\.profiles)
+                    .flatMap { ExtensionInventoryReader.read(profile: $0.url) }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.isReconcilingExtensionInventory = false
+                    guard self.pendingExtensionReinstall == pending else { return }
+                    var refreshed = pending
+                    refreshed.skipped = (refreshed.skipped ?? []) + refreshed.queue.reconcileLegacyInventory(inventory)
+                    self.setPendingExtensionReinstall(refreshed)
+                    self.installPendingExtensions()
+                }
+            }
+            return
+        }
+        let session = ExtensionReinstallSession(model: self, pending: pending)
+        extensionReinstallSession = session
+        session.install()
+    }
+
+    /// Details never open the full importer or start another installation.
     func startPendingExtensionReinstall() {
-        guard let pending = pendingExtensionReinstall else { return }
         dismissToast()
-        showBrowserImport()
-        browserImportWindow?.session.resumeReinstall(pending.queue)
+        if extensionReinstallSession == nil {
+            let pending = pendingExtensionReinstall ?? PendingExtensionReinstall.read(from: pendingExtensionReinstallURL)
+            guard let pending else { return }
+            extensionReinstallSession = ExtensionReinstallSession(model: self, pending: pending)
+        }
+        isExtensionReinstallPresented = true
     }
 
     /// Later: it stays queued, in the command bar.

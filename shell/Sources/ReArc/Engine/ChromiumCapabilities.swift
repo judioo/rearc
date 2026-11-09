@@ -19,6 +19,7 @@ struct ChromiumCapabilities: Equatable {
     static let osPermissionShutdownFeature = "os_permission_shutdown"
     static let shutdownPendingClosesFeature = "shutdown_pending_closes"
     static let profileDirectoryFeature = "profile_directory"
+    static let extensionBulkInstallFeature = "extension_bulk_install"
     static let webUICreditsFeature = "webui_credits"
     static let webUIDailyPagesFeature = "webui_daily_pages"
     static let historyRecordingFeature = "history_recording"
@@ -77,6 +78,7 @@ struct ChromiumCapabilities: Equatable {
         profileDirectoryFeature: 13,
         webUIDailyPagesFeature: 14,
         webUICreditsFeature: 52,
+        extensionBulkInstallFeature: 53,
         historyRecordingFeature: 15,
         passwordAutofillFeature: 15,
         findInPageFeature: 16,
@@ -238,6 +240,7 @@ struct ChromiumCapabilities: Equatable {
     var extensionTabGroups: Bool
     /// Theme-colour events and the top-edge snapshot for the toolbar colour
     /// (`ReArcEngineSetThemeColorCallback`, snapshot scope 2).
+    var extensionBulkInstall: Bool
     var pageThemeColor: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
@@ -252,6 +255,7 @@ struct ChromiumCapabilities: Equatable {
         scriptEvaluation = adopted(Self.scriptEvaluationFeature)
         mediaMetadataSnapshot = adopted(Self.mediaMetadataSnapshotFeature)
         profiles = adopted(Self.profilesFeature)
+        extensionBulkInstall = profiles && adopted(Self.extensionBulkInstallFeature)
         profileOffTheRecord = profiles && adopted(Self.profileOffTheRecordFeature)
         scriptEvaluationIdentity = scriptEvaluation && adopted(Self.scriptEvaluationIdentityFeature)
         pageZoom = adopted(Self.pageZoomFeature)
@@ -346,6 +350,7 @@ struct ChromiumCapabilities: Equatable {
             (Self.profileDirectoryFeature, profileDirectory),
             (Self.webUIDailyPagesFeature, webUIDailyPages),
             (Self.webUICreditsFeature, webUICredits),
+            (Self.extensionBulkInstallFeature, extensionBulkInstall),
             (Self.historyRecordingFeature, historyRecording),
             (Self.passwordAutofillFeature, passwordAutofill),
             (Self.findInPageFeature, findInPage),

@@ -187,6 +187,9 @@ final class BrowserViewModel {
     /// File › Import from Arc, Chrome or Brave… (both engines).
     @ObservationIgnored var browserImportWindow: BrowserImportWindowController?
     /// Extensions the onboarding queued to reinstall (PendingExtensionReinstall).
+    var isReconcilingExtensionInventory = false
+    var isExtensionReinstallPresented = false
+    var extensionReinstallSession: ExtensionReinstallSession?
     var pendingExtensionReinstall: PendingExtensionReinstall?
     @ObservationIgnored let pendingExtensionReinstallURL: URL
     /// Bumped by the Site Controls command; the key window's URL field opens its panel.

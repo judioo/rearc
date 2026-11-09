@@ -283,7 +283,7 @@ struct OnboardingImportPlan: Sendable {
     }
 
     /// Into the store, quietly (no toasts: the onboarding is the feedback).
-    /// Extensions are only queued: their store pages wait for the browser.
+    /// Extensions install in the background when the browser is revealed.
     /// `replacingFavorites` (the sample's) go before Arc's favorites come
     /// in, so none of Arc's is skipped as already there and then cleared.
     @MainActor
@@ -317,11 +317,12 @@ struct OnboardingImportPlan: Sendable {
             }
             model.scheduleVisitHistorySave()
         }
-        let queue = ExtensionReinstallQueue(read.extensions.map(\.extension), into: main)
-        if !queue.isFinished {
+        let consolidation = ExtensionConsolidation(read.extensions.map(\.extension))
+        let queue = ExtensionReinstallQueue(consolidation.candidates, into: main)
+        if !queue.isFinished || !consolidation.skipped.isEmpty {
             var from: [String] = []
             for (browser, item) in read.extensions where item.canReinstall && !from.contains(browser.name) { from.append(browser.name) }
-            model.queueExtensionReinstall(queue, from: ListFormatter.localizedString(byJoining: from))
+            model.queueExtensionReinstall(queue, from: ListFormatter.localizedString(byJoining: from), skipped: consolidation.skipped)
             totals.extensions = queue.items.count
         }
         let created = store.spaces.filter { !before.contains($0.id) }

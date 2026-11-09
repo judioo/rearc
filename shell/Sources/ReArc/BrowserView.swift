@@ -256,6 +256,14 @@ struct BrowserView: View {
                 SpaceEditorView(model: model, spaceID: id)
             }
         }
+        .sheet(isPresented: Binding(
+            get: { model.isExtensionReinstallPresented && isKeyWindowSheetOwner },
+            set: { model.isExtensionReinstallPresented = $0 }
+        )) {
+            if let session = model.extensionReinstallSession {
+                ExtensionReinstallView(session: session)
+            }
+        }
         .modifier(SidebarPersonalizationSheets(model: model, isOwner: isKeyWindowSheetOwner))
         .alert(model.pendingRename?.alertTitle ?? "Rename", isPresented: Binding(
             get: { model.pendingRename != nil },

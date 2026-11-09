@@ -46,11 +46,8 @@ final class BrowserImportSession {
 
     private(set) var isImporting = false
     /// The last import's outcome, shown under the buttons.
+    private var importedArcExtras = false
     private(set) var result: String?
-    /// Extensions waiting to be reinstalled, one store page at a time.
-    var reinstall: ExtensionReinstallQueue?
-    /// The queue is the onboarding's, so each step is saved for a relaunch.
-    private(set) var reinstallIsPending = false
 
     @ObservationIgnored let applicationSupport: URL
     /// Arc's preferences, read-only (a dictionary in tests).
@@ -140,7 +137,11 @@ final class BrowserImportSession {
         }
     }
 
-    var arcSummary: ArcImportSummary { arc?.summary(for: arcChoices) ?? ArcImportSummary() }
+    var arcSummary: ArcImportSummary {
+        guard let arc else { return ArcImportSummary() }
+        guard let model else { return arc.summary(for: arcChoices) }
+        return model.store.remainingArcImport(arc, choices: arcChoices)
+    }
 
     func setSpace(_ id: String, included: Bool) {
         if included { arcChoices.spaceIDs.insert(id) } else { arcChoices.spaceIDs.remove(id) }
@@ -155,7 +156,12 @@ final class BrowserImportSession {
         guard !isImporting, let selection else { return false }
         switch selection {
         case .arcSidebar:
-            return !arcSummary.isEmpty || (includeArcSettings && arcSettings.count > 0) || (includeArcCard && arcCard != nil)
+            let hasImportedSpaces = model?.store.spaces.contains { space in
+                arc?.export.spaces.contains { "\($0.profile.directory):\($0.id)" == space.arcSourceID } == true
+            } == true
+            let extras = !importedArcExtras && !hasImportedSpaces &&
+                ((includeArcSettings && arcSettings.count > 0) || (includeArcCard && arcCard != nil))
+            return !arcSummary.isEmpty || extras
         case .profile(let profile):
             guard let detail = details[profile.id] else { return false }
             return (includeBookmarks && detail.inventory.bookmarks > 0)
@@ -178,6 +184,7 @@ final class BrowserImportSession {
             let summary = model.applyArcImport(arc, choices: arcChoices, settings: includeArcSettings ? arcSettings : nil)
             let card = includeArcCard ? arcCard : nil
             if let card { model.importArcMembershipCard(card) }
+            importedArcExtras = true
             result = BrowserImportSession.describe(summary, settings: includeArcSettings ? arcSettings.count : 0, card: card != nil)
             completion?()
         case .profile(let profile):
@@ -199,9 +206,9 @@ final class BrowserImportSession {
                     var lines = model.applyChromiumImport(from: profile, bookmarks: bookmarks, history: history,
                                                           searchEngine: engine, into: target)
                     if let queue, !queue.isFinished {
-                        self.reinstall = queue
-                        self.reinstallIsPending = false
-                        lines.append("\(queue.items.count) extension\(queue.items.count == 1 ? "" : "s") to reinstall")
+                        model.queueExtensionReinstall(queue, from: profile.browser.name, skipped: ExtensionConsolidation(chosenExtensions(detail)).skipped)
+                        model.installPendingExtensions()
+                        lines.append("\(queue.items.count) extension\(queue.items.count == 1 ? "" : "s") installing in the background")
                     }
                     self.result = lines.isEmpty ? "Nothing was imported." : lines.joined(separator: " · ")
                     self.isImporting = false
@@ -226,42 +233,8 @@ final class BrowserImportSession {
         return parts.isEmpty ? "Nothing was imported." : "Imported " + parts.joined(separator: ", ")
     }
 
-    // MARK: Extension reinstall
+    // Extension installs continue independently of the Import window.
 
-    /// Opens the current extension's store page (or chrome://extensions and
-    /// its folder, for an unpacked one) in a space of the target profile.
-    func openCurrentExtension() {
-        guard let item = reinstall?.current, let model else { return }
-        model.openExtensionForReinstall(item)
-    }
-
-    func nextExtension() {
-        reinstall?.advance()
-        if reinstall?.isFinished == true { reinstall = nil }
-        savePendingReinstall()
-    }
-
-    func stopReinstall() {
-        reinstall = nil
-        savePendingReinstall()
-    }
-
-    /// The onboarding's queue, from the toast's Start or the command bar.
-    func resumeReinstall(_ queue: ExtensionReinstallQueue) {
-        reinstall = queue.isFinished ? nil : queue
-        reinstallIsPending = reinstall != nil
-    }
-
-    /// Next and Stop move the saved queue along: Stop is done with it.
-    private func savePendingReinstall() {
-        guard reinstallIsPending, let model else { return }
-        if let reinstall, let pending = model.pendingExtensionReinstall {
-            model.setPendingExtensionReinstall(PendingExtensionReinstall(queue: reinstall, from: pending.from))
-        } else {
-            model.setPendingExtensionReinstall(nil)
-            reinstallIsPending = false
-        }
-    }
 }
 
 extension BrowserViewModel {
@@ -322,7 +295,7 @@ extension BrowserViewModel {
         return lines
     }
 
-    /// One reinstall step, in a space of the item's profile.
+    /// Failure fallback, in a space of the item's profile.
     func openExtensionForReinstall(_ item: ExtensionReinstallQueue.Item) {
         if store.activeProfileID != item.profileID { store.selectProfile(item.profileID) }
         switch item.origin {

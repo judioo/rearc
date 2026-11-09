@@ -124,18 +124,12 @@ struct BrowserImportView: View {
 
     private var footer: some View {
         HStack(spacing: 12) {
-            if let queue = session.reinstall, let item = queue.current {
-                Image(systemName: "puzzlepiece.extension")
-                Text("Reinstall \(item.name) (\(queue.progressText ?? ""))").lineLimit(1)
-                Button(item.origin == .webStore ? "Open in Web Store" : "Load Unpacked…") { session.openCurrentExtension() }
-                Button("Next") { session.nextExtension() }
-                Button("Stop") { session.stopReinstall() }
-            } else if let result = session.result {
+            if let result = session.result {
                 Label(result, systemImage: "checkmark.circle").foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer()
             if session.isImporting { ProgressView().controlSize(.small) }
-            Button("Import") { session.performImport() }
+            Button(!session.canImport && session.arc != nil && session.arcSummary.isEmpty && session.selection == .arcSidebar ? "Imported" : "Import") { session.performImport() }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!session.canImport)
         }
@@ -342,7 +336,7 @@ private struct ChromiumProfileImportPane: View {
 
     private var extensionsDetail: String {
         guard session.canReinstallExtensions else { return "Reinstalling extensions needs the Chromium engine" }
-        return "Reinstalled one by one from the Chrome Web Store; their settings stay in \(profile.browser.name)"
+        return "Installed from the Chrome Web Store; their settings stay in \(profile.browser.name)"
     }
 
     private func extensionNote(_ item: SourceExtension) -> String {
