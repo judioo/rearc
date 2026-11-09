@@ -165,7 +165,7 @@ cp -R "$SPARKLE" "$APP/Contents/Frameworks/Sparkle.framework"
 PLIST="$APP/Contents/Info.plist"
 if [[ $CONFIG == release ]]; then
   plutil -replace ReArcRelease -bool YES "$PLIST"
-  plutil -replace SUFeedURL -string "${REARC_APPCAST_URL:-https://rearc.net/updates/appcast.xml}" "$PLIST"
+  plutil -replace SUFeedURL -string "${REARC_APPCAST_URL:-https://rearc.imara.ae/updates/appcast.xml}" "$PLIST"
   plutil -replace SUPublicEDKey -string "$(tr -d '[:space:]' <"$SHELL_DIR/scripts/release/sparkle-public-key.txt")" "$PLIST"
   for key in SUEnableAutomaticChecks SUAllowsAutomaticUpdates SUAutomaticallyUpdate; do
     plutil -replace "$key" -bool YES "$PLIST"

@@ -247,12 +247,13 @@ Sparkle dependency. Only bundles stamped `ReArcRelease = YES` by `bundle-chromiu
 App Store as a Developer ID signed, notarized DMG.
 
 Release packaging stamps `SUFeedURL` from `REARC_APPCAST_URL` (default
-`https://rearc.net/updates/appcast.xml`), `SUPublicEDKey` from
+`https://rearc.imara.ae/updates/appcast.xml`, the alpha host), `SUPublicEDKey` from
 `shell/scripts/release/sparkle-public-key.txt`, automatic checks/download/install defaults
-on, and a daily (86400 second) check interval. **rearc.net is not live yet**: provision
-HTTPS hosting before distributing, or set `REARC_APPCAST_URL` at build time. The download
-URL prefix for generated enclosures is `REARC_UPDATE_DOWNLOAD_URL` (default
-`https://rearc.net/updates/`); set both when using another host.
+on, and a daily (86400 second) check interval. The feed URL is fixed in each build, so
+installed copies only ever look there: keep serving `appcast.xml` at that address, or ship
+an update whose `SUFeedURL` points at the new host before moving (for example to
+rearc.net). The download URL prefix for generated enclosures is `REARC_UPDATE_DOWNLOAD_URL`
+(default `https://rearc.imara.ae/updates/`); set both when using another host.
 
 Sparkle compares appcast `sparkle:version` against **CFBundleVersion**, the increasing
 commit count; `sparkle:shortVersionString` is display only. Keep release history linear

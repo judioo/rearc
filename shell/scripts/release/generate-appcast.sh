@@ -10,6 +10,6 @@ PUBLIC_KEY="$TOOLS/generate_keys"
 EXPECTED="$(tr -d '[:space:]' <"$(dirname "$0")/sparkle-public-key.txt")"
 ACTUAL="$("$PUBLIC_KEY" --account ReArc -p)"
 [[ $ACTUAL == "$EXPECTED" ]] || { echo 'Keychain ReArc public key does not match the shipped key' >&2; exit 1; }
-ARGS=(--account ReArc --download-url-prefix "${REARC_UPDATE_DOWNLOAD_URL:-https://rearc.net/updates/}")
+ARGS=(--account ReArc --download-url-prefix "${REARC_UPDATE_DOWNLOAD_URL:-https://rearc.imara.ae/updates/}")
 [[ -z $CHANNEL ]] || ARGS+=(--channel "$CHANNEL")
 "$TOOLS/generate_appcast" "${ARGS[@]}" "$DIR"
