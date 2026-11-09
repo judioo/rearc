@@ -149,6 +149,10 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
     static let rowViewID = NSUserInterfaceItemIdentifier("SidebarListRow")
     /// Larger changes (a Clear, a space's first load) reload all rows at once.
     static let animatedChangeLimit = 24
+    /// Arc's folder disclosure (2026-11-09 recording, 60 fps): children
+    /// slide down and fade in over about 11 frames, and fold away in about 6.
+    static let expandDuration: TimeInterval = 0.18
+    static let collapseDuration: TimeInterval = 0.1
 
     init(model: BrowserViewModel, spaceID: Space.ID, context: SidebarListCellContext) {
         self.model = model
@@ -298,7 +302,7 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
     func press(_ id: UUID, kind: SidebarOutlineNode.Kind) {
         switch kind {
         case .folder:
-            withAnimation(.easeInOut(duration: 0.15)) { model.store.toggleFolderExpanded(id) }
+            model.store.toggleFolderExpanded(id)
         default:
             model.selectTab(id)
         }
@@ -361,13 +365,13 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
             return
         }
         // Small changes keep the other rows' cells where they are (a drag's
-        // source cell among them). Folder children fade while the table opens
-        // or closes their height over Arc's roughly 0.22 s ease.
+        // source cell among them). Folder children slide out from under their
+        // folder and fade, opening or closing the rows' height as Arc does.
         let animate = animated && !reduceMotion && table.window != nil
         let insertion: NSTableView.AnimationOptions = animate ? [.effectFade, .slideDown] : []
         let removal: NSTableView.AnimationOptions = animate ? [.effectFade, .slideUp] : []
         NSAnimationContext.runAnimationGroup { animation in
-            animation.duration = animate ? 0.22 : 0
+            animation.duration = animate ? (diff.inserted.isEmpty ? Self.collapseDuration : Self.expandDuration) : 0
             animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             table.beginUpdates()
             rows = new

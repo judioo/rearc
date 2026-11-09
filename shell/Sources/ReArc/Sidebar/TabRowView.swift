@@ -136,10 +136,13 @@ struct TabRowView<Menu: View>: View {
                         onClose()
                     }
                 } label: {
+                    // Arc: a 22 pt rounded chip under the glyph; the dash is wider than the ✕.
                     Image(systemName: closeKind.buttonSymbol)
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: closeKind == .unloadPinned ? 12 : 9, weight: .bold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 16, height: 16)
+                        .frame(width: 22, height: 22)
+                        .background(chrome.title.opacity(0.07), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .padding(.trailing, -3)
                 }
                 .buttonStyle(.plain)
                 .help("\(closeKind.buttonLabel) ⌘W")

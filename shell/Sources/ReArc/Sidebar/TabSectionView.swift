@@ -106,6 +106,8 @@ struct SidebarEntryRow: View, Equatable {
                 folder: folder,
                 isExpanded: model.store.isFolderExpanded(folder.id),
                 isDropTarget: isDropInto,
+                holdsOpenTabs: model.folderHoldsOpenTab(folder.id),
+                onCloseFolder: { model.closeFolderTabs(folder.id) },
                 rename: SidebarRowRename(row: folder.id, model: model),
                 onToggle: { model.store.toggleFolderExpanded(folder.id) }
             ) {

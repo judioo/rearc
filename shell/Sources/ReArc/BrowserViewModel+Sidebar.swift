@@ -28,7 +28,7 @@ enum TabCloseKind: Equatable {
     /// A favorite is unloaded and stays in the strip.
     case unloadFavorite
 
-    /// Pinned rows unload without removing the saved sidebar item.
+    /// The row button's tooltip, in Arc's words for Today and pinned rows.
     var buttonLabel: String {
         switch self {
         case .archive: "Archive this tab"
@@ -37,6 +37,7 @@ enum TabCloseKind: Equatable {
         }
     }
 
+    /// Arc draws "—" on a pinned row (the row stays) and ✕ elsewhere.
     var buttonSymbol: String {
         self == .unloadPinned ? "minus" : "xmark"
     }
@@ -144,6 +145,22 @@ extension BrowserViewModel {
         case .favorite: return .unloadFavorite
         case .pinned where store.splitContaining(tabID: id) == nil: return .unloadPinned
         default: return .archive
+        }
+    }
+
+    /// Whether a tab inside the folder (nested folders included) has a live
+    /// page: Arc then draws dots in the folder glyph and offers Close This Folder.
+    func folderHoldsOpenTab(_ id: SidebarFolder.ID) -> Bool {
+        guard case .folder(let folder) = store.entry(withID: id) else { return false }
+        return SidebarTree.tabs(folder.children).contains { canUnloadTab($0.id) }
+    }
+
+    /// Arc's Close This Folder: each open tab inside goes back to its saved
+    /// URL, unloaded, as its own "—" would; the folder and its rows stay.
+    func closeFolderTabs(_ id: SidebarFolder.ID) {
+        guard case .folder(let folder) = store.entry(withID: id) else { return }
+        for tab in SidebarTree.tabs(folder.children) where canUnloadTab(tab.id) && closeKind(of: tab.id) == .unloadPinned {
+            unloadPinnedTab(tab.id)
         }
     }
 

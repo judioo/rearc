@@ -65,11 +65,13 @@ final class Wave19ShellTests: XCTestCase {
         }
         model.loadSelectedIfNeeded()
         XCTAssertNotNil(engine(model, first.id))
+        XCTAssertTrue(model.folderHoldsOpenTab(folder.id))
 
         model.closeSelectedTab()
         XCTAssertNil(model.store.selectedItemID)
         XCTAssertNil(engine(model, sibling.id), "no sibling loaded")
         XCTAssertNil(engine(model, other.id), "no other folder's pin loaded")
+        XCTAssertFalse(model.folderHoldsOpenTab(folder.id))
         let rows = SidebarOutlineRow.rows(model.store.outline(for: model.store.activeSpaceID).pinned,
                                           expanded: model.store.expandedFolderIDs, selected: model.store.selectedItemID)
         XCTAssertFalse(rows.contains { $0.id == first.id }, "the collapsed folder shows no child row")
@@ -97,6 +99,28 @@ final class Wave19ShellTests: XCTestCase {
         model.selectTab(next.id)
         model.closeSelectedTab()
         XCTAssertEqual(model.store.selectedItemID, pinned.id, "an open pin is an open tab")
+    }
+
+    /// Close This Folder unloads the folder's open tabs and keeps them pinned.
+    func testCloseThisFolderUnloadsItsOpenTabs() throws {
+        var a: Tab!
+        var b: Tab!
+        var folder: SidebarFolder!
+        let model = makeModel { store in
+            a = store.addTab(kind: .pinned, title: "A", url: URL(string: "https://a.test")!)
+            b = store.addTab(kind: .pinned, title: "B", url: URL(string: "https://b.test")!)
+            folder = store.createFolder(containing: [a.id, b.id])
+        }
+        model.selectTab(b.id)
+        model.selectTab(a.id)
+        XCTAssertNotNil(engine(model, a.id))
+        XCTAssertNotNil(engine(model, b.id))
+        model.closeFolderTabs(folder.id)
+        XCTAssertFalse(model.canUnloadTab(a.id))
+        XCTAssertFalse(model.canUnloadTab(b.id))
+        XCTAssertNil(model.store.selectedItemID)
+        XCTAssertEqual(model.store.parentFolderID(of: a.id), folder.id)
+        XCTAssertEqual(model.store.parentFolderID(of: b.id), folder.id)
     }
 
     func testResetLoadsTheSavedURLAndCommandsAreGated() throws {

@@ -130,10 +130,7 @@ final class SidebarPlainRowCell: NSView {
             } else {
                 switch kind {
                 case .folder:
-                    let symbol = state.isExpanded ? SidebarFolderGlyph.open
-                        : NSImage(systemSymbolName: "folder", accessibilityDescription: nil)?
-                            .withSymbolConfiguration(.init(pointSize: 17, weight: .medium))
-                    icon.image = symbol
+                    icon.image = SidebarFolderGlyph.image(isOpen: state.isExpanded, holdsOpenTabs: state.holdsOpenTabs)
                     icon.imageScaling = .scaleNone
                     icon.contentTintColor = NSColor(chrome.accent)
                     icon.layer?.cornerRadius = 0
@@ -446,6 +443,7 @@ struct PlainRowState: Equatable {
     var isUnloaded = false
     var isUnread = false
     var isExpanded = false
+    var holdsOpenTabs = false
     /// Something only the SwiftUI row draws (a loading ring, a crash glyph,
     /// an audio or Picture in Picture badge, the rename hint), or a rename
     /// field that keeps focus wherever the pointer goes.
@@ -474,6 +472,7 @@ struct PlainRowState: Equatable {
             state.title = folder.title
             state.customIcon = folder.customIcon
             state.isExpanded = model.store.isFolderExpanded(folder.id)
+            state.holdsOpenTabs = model.folderHoldsOpenTab(folder.id)
             state.needsHosting = model.inlineRename(forRow: folder.id) != nil || model.itemIconEditorID == folder.id
         case .split, .easel, nil:
             // Not a row the plain cell draws: the SwiftUI row takes over.
@@ -485,6 +484,7 @@ struct PlainRowState: Equatable {
     static func == (a: PlainRowState, b: PlainRowState) -> Bool {
         a.title == b.title && a.customIcon == b.customIcon && a.favicon === b.favicon && a.token == b.token && a.isSelected == b.isSelected
             && a.isUnloaded == b.isUnloaded && a.isUnread == b.isUnread && a.isExpanded == b.isExpanded
+            && a.holdsOpenTabs == b.holdsOpenTabs
             && a.needsHosting == b.needsHosting && a.chrome == b.chrome
     }
 }
