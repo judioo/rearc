@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.52** (major remains 1 for existing hosts), bridge **0.55.0**, compiled Chromium **156.0.8078.74**. Public header:
+ABI **1.53** (major remains 1 for existing hosts), bridge **0.56.0**, compiled Chromium **156.0.8078.74**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -2228,3 +2228,43 @@ compiled resources; the dev and release engine builds enable
 of its sample placeholder. Licence toggles and homepage anchors are ordinary DOM;
 the Print link invokes `window.print()` through the existing print delegate.
 Privileged evaluation and capture remain denied.
+
+### Approved extension imports (ABI 1.53)
+
+Patch `tab/073-bulk-extension-install`, bridge 0.56.0, advertises
+`extension_bulk_install`. `ReArcProfileInstallExtensions(profile, ids, count,
+callback, context)` copies and validates up to 512 unique Web Store IDs.
+`ReArcProfileLoadUnpackedExtension(profile, absolute_path, callback, context)`
+loads one developer extension through `UnpackedInstaller`. Both require a
+registered persistent profile and the host's prior import consent. No external
+extension preferences or JSON installation mechanism is used.
+
+Callbacks are deferred to the host drain, once per input, in completion order:
+`(context, id, result, reason, completed, total)`. Strings are borrowed through
+the callback; `completed == total` releases the host's context. Non-OK synchronous
+returns produce no callbacks. Results: 0 installed, 1 already installed,
+2 not in store (metadata HTTP 404/410), 3 failed with reason, 4 unavailable
+(retired manifest, policy, blocklist or unmet requirements). Network failures
+remain failures, never evidence that a listing has been removed.
+
+Only one operation per profile is admitted. Store batches run up to three
+installers concurrently, skip already registered IDs, fetch metadata, reject
+MV2, and check Chromium's blocklist and management policy before downloading.
+`WebstoreStandaloneInstaller` creates Chromium's strict manifest-matching
+no-prompt `InstallApproval`, then invokes `WebstoreInstaller` with its normal
+CRX signature and policy checks. The shell substitutes import consent only
+for the per-extension prompt and suppresses post-install bubbles. Explicit
+profile close and engine shutdown return BUSY while work is active.
+
+Small upstream seams preserve HTTP status on metadata failure and propagate
+store download 204/404/410 through an appended installer result. Existing
+metadata consumers retain their default behavior; enum values are appended.
+Transport errors remain distinct from removed or unavailable listings.
+The shell dynamically resolves both optional exports after checking ABI minor,
+feature and profile support. Older engines keep store links in import details.
+
+Run `python3 engine/tests/run_bulk_extensions.py` after building. This harness
+opens no windows and uses temporary profiles, a mock keychain and loopback
+metadata, exercising unpacked success/failure, already-installed, removed
+listings, HTTP failure, retired manifests, deferred completion, concurrency,
+and close/shutdown guards. It never contacts the real Chrome Web Store.

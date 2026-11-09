@@ -78,6 +78,7 @@ tab/069-download-event-batches.patch          # P-TAB-001 ABI 1.49: download eve
 tab/070-extension-tab-groups.patch            # P-TAB-001 ABI 1.50: extension tab groups, tab events, windows.update focus and popup windows on registry tabs
 tab/071-page-theme-color.patch                # P-TAB-001 ABI 1.51: page theme-color events and the top-edge snapshot (scope 2) for the toolbar colour
 tab/072-credits-webui-admission.patch          # P-TAB-001 ABI 1.52: static browser-less Credits page (webui_credits)
+tab/073-bulk-extension-install.patch            # P-TAB-001 ABI 1.53: approved bulk store installs and unpacked loading
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:

@@ -1,0 +1,427 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 approved bulk extension imports (ABI 1.53)
+
+Bridge 0.56.0. Add profile-scoped WebstoreStandaloneInstaller batches and
+UnpackedInstaller loads. ReArc's import consent replaces only the prompt;
+Chromium retains manifest matching, signature, blocklist and policy checks.
+Keep HTTP not-found/no-update distinct from transport errors. All upstream
+seams are additive, preserving other installer consumers.
+
+Last rebased: 2026-11-09 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 52, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 53, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -139,6 +139,22 @@
+ // Each OTR call creates a unique in-memory profile under a persistent parent.
+ typedef void (*ReArcProfileCallback)(void* context, ReArcStatus status,
+                                      uint64_t profile_id, bool off_the_record);
++// ABI 1.53, extension_bulk_install. Calling either function affirms that the
++// host obtained consent for these extensions. Main thread, persistent profiles
++// only. At most one operation per profile; at most three store installs at once.
++// Each input receives exactly one deferred callback, in completion order. The
++// borrowed strings live through that callback. Non-OK return: no callbacks.
++// result: 0 installed, 1 already installed, 2 not in store, 3 failed,
++// 4 unavailable (unsupported manifest, blocklist or management policy).
++// completed is 1...total; completed == total ends the operation/context lifetime.
++typedef void (*ReArcExtensionInstallCallback)(void* context, const char* id,
++    int32_t result, const char* reason, uint32_t completed, uint32_t total);
++REARC_ENGINE_EXPORT ReArcStatus ReArcProfileInstallExtensions(uint64_t profile_id,
++    const char* const* ids, uint32_t count,
++    ReArcExtensionInstallCallback callback, void* context);
++REARC_ENGINE_EXPORT ReArcStatus ReArcProfileLoadUnpackedExtension(uint64_t profile_id,
++    const char* path, ReArcExtensionInstallCallback callback, void* context);
++
+ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileOpen(
+     const char* name, ReArcProfileCallback completion, void* context);
+ // Open an existing direct-child profile directory, e.g. "Default", in place.
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -16,6 +16,15 @@
+ #include <vector>
+ 
+ #include "base/check.h"
++#include "chrome/browser/extensions/webstore_standalone_installer.h"
++#include "extensions/browser/extension_registry.h"
++#include "extensions/browser/extension_system.h"
++#include "extensions/browser/extensions_browser_client.h"
++#include "extensions/browser/management_policy.h"
++#include "extensions/browser/blocklist.h"
++#include "extensions/browser/unpacked_installer.h"
++#include "extensions/common/extension.h"
++#include "components/crx_file/id_util.h"
+ #include "base/files/file_enumerator.h"
+ #include "base/files/file_util.h"
+ #include "base/task/thread_pool.h"
+@@ -365,6 +374,126 @@
+ bool CancelTerminate(void*) {
+   return true;
+ }
++
++std::set<uint64_t>& ExtensionInstallProfiles() {
++  static base::NoDestructor<std::set<uint64_t>> profiles;
++  return *profiles;
++}
++
++// Metadata, signature, policy and blocklist checks remain Chromium's. The
++// shell's consent replaces only the install prompt and post-install bubble.
++class ApprovedStoreInstaller : public extensions::WebstoreStandaloneInstaller {
++ public:
++  ApprovedStoreInstaller(const std::string& id, Profile* profile, Callback done)
++      : WebstoreStandaloneInstaller(id, profile, std::move(done)),
++        contents_(content::WebContents::Create(
++            content::WebContents::CreateParams(profile))) {}
++ private:
++  ~ApprovedStoreInstaller() override = default;
++  void OnManifestParsed() override {
++    auto extension = GetLocalizedExtensionForDisplay();
++    if (!extension || extension->manifest_version() < 3) {
++      CompleteInstall(extensions::webstore_install::INVALID_MANIFEST,
++                      "This extension requires a retired manifest version.");
++      return;
++    }
++    auto* blocklist = extensions::ExtensionsBrowserClient::Get()->GetBlocklist(profile());
++    blocklist->IsBlocklisted(id(), base::BindOnce(
++        [](ApprovedStoreInstaller* self, scoped_refptr<const extensions::Extension> extension,
++           extensions::BlocklistState state) {
++          if (state != extensions::NOT_BLOCKLISTED && state != extensions::BLOCKLISTED_UNKNOWN) {
++            self->CompleteInstall(extensions::webstore_install::BLOCKLISTED,
++                                  "This extension is on Chromium's blocklist.");
++            return;
++          }
++          extensions::ExtensionSystem::Get(self->profile())->management_policy()->UserMayInstall(
++              extension, base::BindOnce([](ApprovedStoreInstaller* self,
++                  extensions::ManagementPolicy::Decision decision) {
++                if (!decision.allowed) {
++                  self->CompleteInstall(extensions::webstore_install::BLOCKED_BY_POLICY,
++                                        base::UTF16ToUTF8(decision.error));
++                } else {
++                  self->ProceedWithInstallPrompt();
++                }
++              }, base::Unretained(self)));
++        }, base::Unretained(this), extension));
++  }
++  bool CheckRequestorAlive() const override { return true; }
++  bool ShouldShowPostInstallUI() const override { return false; }
++  content::WebContents* GetWebContents() const override { return contents_.get(); }
++  std::unique_ptr<extensions::InstallPromptData> CreateInstallPrompt() const override {
++    return nullptr;
++  }
++  void OnWebstoreRequestFailureWithStatus(const std::string& id, int status) override {
++    if (status == 404 || status == 410) {
++      // Preserve Chromium's cleanup, including the metadata fetcher's lifetime.
++      missing_ = true;
++    }
++    static_cast<extensions::WebstoreDataFetcherDelegate*>(this)->OnWebstoreRequestFailure(id);
++  }
++ public:
++  bool missing() const { return missing_; }
++ private:
++  bool missing_ = false;
++  std::unique_ptr<content::WebContents> contents_;
++};
++
++struct ExtensionInstallBatch : base::RefCounted<ExtensionInstallBatch> {
++  uint64_t profile_id;
++  std::vector<std::string> ids;
++  size_t next = 0;
++  uint32_t completed = 0;
++  int active = 0;
++  ReArcExtensionInstallCallback callback;
++  raw_ptr<void> context;
++
++  void Finish(std::string id, int result, std::string reason) {
++    --active;
++    ++completed;
++    if (completed == ids.size()) ExtensionInstallProfiles().erase(profile_id);
++    // Deliver before pumping so callbacks are ordered and context has a clear
++    // terminal boundary. Reentrancy cannot start a second batch until terminal.
++    callback(context, id.c_str(), result, reason.c_str(), completed, ids.size());
++    Pump();
++  }
++  void Pump() {
++    auto* profile = FindBridgeProfile(profile_id);
++    while (active < 3 && next < ids.size()) {
++      std::string id = ids[next++];
++      ++active;
++      if (extensions::ExtensionRegistry::Get(profile)->GetExtensionById(
++              id, extensions::ExtensionRegistry::EVERYTHING)) {
++        ABIPost(base::BindOnce(&ExtensionInstallBatch::Finish,
++                              base::RetainedRef(this), id, 1, std::string()));
++        continue;
++      }
++      // The installer owns itself until completion. Capture a non-owning
++      // pointer only for inspecting its HTTP result inside that completion.
++      auto* installer = new ApprovedStoreInstaller(id, profile,
++          base::BindOnce([](scoped_refptr<ExtensionInstallBatch> batch,
++                            std::string id, bool success,
++                            const std::string& error,
++                            extensions::webstore_install::Result result) {
++            bool unavailable = result == extensions::webstore_install::BLOCKLISTED ||
++                result == extensions::webstore_install::BLOCKED_BY_POLICY ||
++                result == extensions::webstore_install::NOT_PERMITTED ||
++                result == extensions::webstore_install::INVALID_MANIFEST ||
++                result == extensions::webstore_install::REQUIREMENT_VIOLATIONS;
++            batch->StoreDone(std::move(id), success, error, unavailable, result == extensions::webstore_install::ITEM_NOT_FOUND);
++          }, base::WrapRefCounted(this), id));
++      installers[id] = installer;
++      installer->BeginInstall();
++    }
++  }
++  void StoreDone(std::string id, bool success, std::string error, bool unavailable, bool not_found) {
++    bool missing = not_found || installers.at(id)->missing();
++    installers.erase(id);
++    ABIPost(base::BindOnce(&ExtensionInstallBatch::Finish,
++        base::RetainedRef(this), std::move(id), success ? 0 : missing ? 2 : unavailable ? 4 : 3,
++        std::move(error)));
++  }
++  std::map<std::string, ApprovedStoreInstaller*> installers;
++};
+ 
+ ReArcStatus Available() {
+   auto& a = ABI::Get();
+@@ -576,6 +705,7 @@
+          std::string(feature) == "navigation_extended" ||
+          std::string(feature) == "webui_daily_pages" ||
+          std::string(feature) == "webui_credits" ||
++         std::string(feature) == "extension_bulk_install" ||
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "history_query" ||
+          std::string(feature) == "search_autocomplete" ||
+@@ -752,6 +882,7 @@
+   if (!a.ready) {
+     return REARC_ENGINE_NOT_READY;
+   }
++  if (!rearc::ExtensionInstallProfiles().empty()) return REARC_BUSY;
+   // Snapshot the bridge's live IDs without exposing pointers across tasks.
+   a.shutdown_tabs.clear();
+   // Id allocation is monotonic, but the registry owns the authoritative set.
+@@ -776,6 +907,66 @@
+   a.ContinueShutdown();
+   return REARC_OK;
+ }
++ReArcStatus ReArcProfileInstallExtensions(uint64_t profile_id,
++    const char* const* ids, uint32_t count,
++    ReArcExtensionInstallCallback callback, void* context) {
++  CHECK([NSThread isMainThread]);
++  if (auto status = rearc::Available()) return status;
++  if (!ids || !count || count > 512 || !callback) return REARC_INVALID_ARGUMENT;
++  auto* profile = rearc::FindBridgeProfile(profile_id);
++  if (!profile) return REARC_PROFILE_NOT_FOUND;
++  if (profile->IsOffTheRecord()) return REARC_INVALID_ARGUMENT;
++  if (ABI::Get().closing_profile == profile_id ||
++      rearc::ExtensionInstallProfiles().contains(profile_id)) return REARC_BUSY;
++  std::set<std::string> seen;
++  auto batch = base::MakeRefCounted<rearc::ExtensionInstallBatch>();
++  for (uint32_t i = 0; i < count; ++i) {
++    if (!ids[i] || !crx_file::id_util::IdIsValid(ids[i]) ||
++        !seen.insert(ids[i]).second) return REARC_INVALID_ARGUMENT;
++    batch->ids.emplace_back(ids[i]);
++  }
++  batch->profile_id = profile_id;
++  batch->callback = callback;
++  batch->context = context;
++  rearc::ExtensionInstallProfiles().insert(profile_id);
++  rearc::ABIPost(base::BindOnce(&rearc::ExtensionInstallBatch::Pump, batch));
++  return REARC_OK;
++}
++
++ReArcStatus ReArcProfileLoadUnpackedExtension(uint64_t profile_id,
++    const char* path, ReArcExtensionInstallCallback callback, void* context) {
++  CHECK([NSThread isMainThread]);
++  if (auto status = rearc::Available()) return status;
++  if (!path || !base::FilePath(path).IsAbsolute() || !callback)
++    return REARC_INVALID_ARGUMENT;
++  auto* profile = rearc::FindBridgeProfile(profile_id);
++  if (!profile) return REARC_PROFILE_NOT_FOUND;
++  if (profile->IsOffTheRecord()) return REARC_INVALID_ARGUMENT;
++  if (ABI::Get().closing_profile == profile_id ||
++      rearc::ExtensionInstallProfiles().contains(profile_id)) return REARC_BUSY;
++  rearc::ExtensionInstallProfiles().insert(profile_id);
++  rearc::ABIPost(base::BindOnce([](uint64_t profile_id, base::FilePath path,
++      ReArcExtensionInstallCallback callback, void* context) {
++    auto installer = extensions::UnpackedInstaller::Create(
++        rearc::FindBridgeProfile(profile_id));
++    installer->set_completion_callback(base::BindOnce(
++        [](uint64_t profile_id, ReArcExtensionInstallCallback callback,
++           void* context, const extensions::Extension* extension,
++           const base::FilePath&, const std::u16string& error) {
++          std::string id = extension ? extension->id() : "";
++          rearc::ABIPost(base::BindOnce([](uint64_t profile_id,
++              ReArcExtensionInstallCallback callback, void* context,
++              std::string id, std::string error) {
++            rearc::ExtensionInstallProfiles().erase(profile_id);
++            callback(context, id.c_str(), error.empty() ? 0 : 3,
++                     error.c_str(), 1, 1);
++          }, profile_id, callback, context, id, base::UTF16ToUTF8(error)));
++        }, profile_id, callback, context));
++    installer->Load(path);
++  }, profile_id, base::FilePath(path), callback, context));
++  return REARC_OK;
++}
++
+ ReArcStatus ReArcProfileOpen(const char* name, ReArcProfileCallback completion,
+                                void* context) {
+   if (auto status = rearc::Available()) return status;
+@@ -832,6 +1023,7 @@
+   auto& a = ABI::Get();
+   if (!rearc::FindBridgeProfile(id)) return REARC_PROFILE_NOT_FOUND;
+   if (id == rearc::DefaultBridgeProfileId()) return REARC_INVALID_STATE;
++  if (rearc::ExtensionInstallProfiles().contains(id)) return REARC_BUSY;
+   if (a.closing_profile || !a.profile_opens.empty() ||
+       rearc::BridgeProfileHasChildren(id)) return REARC_BUSY;
+   a.profile_tabs.clear();
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.55.0";
++  return "0.56.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/extensions/browser/webstore_data_fetcher_delegate.h b/extensions/browser/webstore_data_fetcher_delegate.h
+--- a/extensions/browser/webstore_data_fetcher_delegate.h
++++ b/extensions/browser/webstore_data_fetcher_delegate.h
+@@ -19,6 +19,11 @@
+  public:
+   // Invoked when the web store data request failed.
+   virtual void OnWebstoreRequestFailure(const std::string& extension_id) = 0;
++
++  virtual void OnWebstoreRequestFailureWithStatus(const std::string& id,
++                                                int http_status) {
++    OnWebstoreRequestFailure(id);
++  }
+ 
+   // Invoked when the web store response parsing is successful after the new
+   // item snippet API is called to retrieve the extension's webstore data.
+diff --git a/extensions/browser/webstore_data_fetcher.cc b/extensions/browser/webstore_data_fetcher.cc
+--- a/extensions/browser/webstore_data_fetcher.cc
++++ b/extensions/browser/webstore_data_fetcher.cc
+@@ -167,7 +167,9 @@
+ void WebstoreDataFetcher::OnFetchItemSnippetResponseReceived(
+     std::optional<std::string> response_body) {
+   if (!response_body) {
+-    delegate_->OnWebstoreRequestFailure(id_);
++    const auto* info = simple_url_loader_->ResponseInfo();
++    delegate_->OnWebstoreRequestFailureWithStatus(
++        id_, info && info->headers ? info->headers->response_code() : 0);
+     return;
+   }
+ 
+diff --git a/extensions/browser/webstore_installer.h b/extensions/browser/webstore_installer.h
+--- a/extensions/browser/webstore_installer.h
++++ b/extensions/browser/webstore_installer.h
+@@ -65,7 +65,8 @@
+     FAILURE_REASON_CANCELLED,
+     FAILURE_REASON_DEPENDENCY_NOT_FOUND,
+     FAILURE_REASON_DEPENDENCY_NOT_SHARED_MODULE,
+-    FAILURE_REASON_OTHER
++    FAILURE_REASON_OTHER,
++    FAILURE_REASON_NOT_FOUND
+   };
+ 
+   using SuccessCallback = base::OnceCallback<void(const std::string&)>;
+diff --git a/extensions/browser/webstore_install_result.h b/extensions/browser/webstore_install_result.h
+--- a/extensions/browser/webstore_install_result.h
++++ b/extensions/browser/webstore_install_result.h
+@@ -75,9 +75,11 @@
+   // A launch of the same extension is in progress.
+   LAUNCH_IN_PROGRESS,
+ 
++  ITEM_NOT_FOUND,
++
+   // The final (and unused) result type for enum verification.
+   // New results should go above this entry, and this entry should be updated.
+-  RESULT_LAST = LAUNCH_IN_PROGRESS,
++  RESULT_LAST = ITEM_NOT_FOUND,
+ };
+ 
+ }  // namespace webstore_install
+diff --git a/chrome/browser/extensions/webstore_standalone_installer.cc b/chrome/browser/extensions/webstore_standalone_installer.cc
+--- a/chrome/browser/extensions/webstore_standalone_installer.cc
++++ b/chrome/browser/extensions/webstore_standalone_installer.cc
+@@ -320,6 +320,9 @@
+ 
+   webstore_install::Result install_result = webstore_install::OTHER_ERROR;
+   switch (reason) {
++    case WebstoreInstaller::FAILURE_REASON_NOT_FOUND:
++      install_result = webstore_install::ITEM_NOT_FOUND;
++      break;
+     case WebstoreInstaller::FAILURE_REASON_CANCELLED:
+       install_result = webstore_install::USER_CANCELLED;
+       break;
+diff --git a/extensions/browser/webstore_installer.cc b/extensions/browser/webstore_installer.cc
+--- a/extensions/browser/webstore_installer.cc
++++ b/extensions/browser/webstore_installer.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "extensions/browser/webstore_installer.h"
++#include "net/http/http_response_headers.h"
+ 
+ #include <stddef.h>
+ #include <stdint.h>
+@@ -356,16 +357,27 @@
+   }
+ }
+ 
++namespace {
++WebstoreInstaller::FailureReason StoreDownloadFailure(const DownloadItem* item) {
++  const auto* headers = item ? item->GetResponseHeaders().get() : nullptr;
++  const int status = headers ? headers->response_code() : 0;
++  // Store redirect requests return 204 when no installable item is available.
++  return status == 204 || status == 404 || status == 410
++      ? WebstoreInstaller::FAILURE_REASON_NOT_FOUND
++      : WebstoreInstaller::FAILURE_REASON_OTHER;
++}
++}  // namespace
++
+ void WebstoreInstaller::OnDownloadStarted(
+     const ExtensionId& extension_id,
+     DownloadItem* item,
+     download::DownloadInterruptReason interrupt_reason) {
+   if (!item || interrupt_reason != download::DOWNLOAD_INTERRUPT_REASON_NONE) {
++    const auto reason = StoreDownloadFailure(item);
+     if (item) {
+       item->Remove();
+     }
+-    ReportFailure(download::DownloadInterruptReasonToString(interrupt_reason),
+-                  FAILURE_REASON_OTHER);
++    ReportFailure(download::DownloadInterruptReasonToString(interrupt_reason), reason);
+     return;
+   }
+ 
+@@ -427,7 +439,7 @@
+     case DownloadItem::INTERRUPTED:
+       ReportFailure(
+           GetErrorMessageForDownloadInterrupt(download->GetLastReason()),
+-          FAILURE_REASON_OTHER);
++          StoreDownloadFailure(download));
+       break;
+     case DownloadItem::COMPLETE:
+       // Stop the progress timer if it's running.
+@@ -436,7 +448,7 @@
+       // Only wait for other notifications if the download is really
+       // an extension.
+       if (!util::IsExtensionDownload(*download)) {
+-        ReportFailure(kInvalidDownloadError, FAILURE_REASON_OTHER);
++        ReportFailure(kInvalidDownloadError, StoreDownloadFailure(download));
+         return;
+       }
+ 
