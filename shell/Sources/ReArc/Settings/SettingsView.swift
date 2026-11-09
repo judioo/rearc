@@ -134,6 +134,9 @@ struct GeneralSettingsPane: View {
                     Button("Set ReArc as Default…") { model.setAsDefaultBrowser() }
                 }
             }
+            #if REARC_CHROMIUM
+            if AppUpdater.shared.isEnabled { UpdateSettingsSection() }
+            #endif
             SettingsGroup {
                 SettingsLabeledRow(label: "Space icons") {
                     SettingsPopUp(label: "Space icons", selection: $model.spaceIconStyle,

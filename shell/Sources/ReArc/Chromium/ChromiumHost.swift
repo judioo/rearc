@@ -1062,6 +1062,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let app = NSMenu(title: "ReArc")
         // Arc's order: About, then Settings.
         app.addItem(target.item("About ReArc", "") { [weak self] in self?.presentAbout() })
+        if let updates = AppUpdater.shared.makeMenuItem() { app.addItem(updates) }
         app.addItem(.separator())
         // ReArc's own window; Chromium's settings pages open from its buttons.
         app.addItem(target.item("Settings…", ",") { model.showSettings() })

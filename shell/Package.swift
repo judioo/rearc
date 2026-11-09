@@ -10,9 +10,14 @@ import PackageDescription
 let chromiumOut = Context.environment["REARC_CHROMIUM_OUT"]
 let engineInclude = Context.environment["REARC_ENGINE_INCLUDE"]
 
+var packageDependencies: [Package.Dependency] = []
+var reArcDependencies: [Target.Dependency] = ["SidebarModel", "Onboarding"]
+
 var reArcSwiftSettings: [SwiftSetting] = []
 var reArcLinkerSettings: [LinkerSetting] = []
 if let chromiumOut, let engineInclude {
+    packageDependencies = [.package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1")]
+    reArcDependencies.append(.product(name: "Sparkle", package: "Sparkle"))
     reArcSwiftSettings = [
         .define("REARC_CHROMIUM"),
         .unsafeFlags(["-I", engineInclude]),
@@ -38,6 +43,7 @@ let package = Package(
         .executable(name: "arc-vs-rearc", targets: ["ArcBench"]),
         .executable(name: "sunrise", targets: ["SunrisePrototype"]),
     ],
+    dependencies: packageDependencies,
     targets: [
         // Pure-Swift model layer: no SwiftUI/AppKit/WebKit imports.
         .target(name: "SidebarModel"),
@@ -45,7 +51,7 @@ let package = Package(
         // the WebEngine protocol.
         .executableTarget(
             name: "ReArc",
-            dependencies: ["SidebarModel", "Onboarding"],
+            dependencies: reArcDependencies,
             swiftSettings: reArcSwiftSettings,
             linkerSettings: reArcLinkerSettings
         ),
