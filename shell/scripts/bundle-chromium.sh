@@ -178,6 +178,8 @@ fi
 plutil -replace CFBundleExecutable -string ReArc "$PLIST"
 plutil -replace CFBundleName -string ReArc "$PLIST"
 plutil -replace CFBundleDisplayName -string ReArc "$PLIST"
+# Match Package.swift so generated appcasts cannot offer this shell to older macOS.
+plutil -replace LSMinimumSystemVersion -string 14.0.0 "$PLIST"
 # The principal class stays Chromium's BrowserCrApplication, whose +initialize needs the
 # command line only ChromeMain sets up, so this bundle must never start the WebKit path.
 # Launches without an engine choice (Finder, the Dock, `open`, links from other apps)

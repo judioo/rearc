@@ -90,7 +90,7 @@ PLIST="$APP/Contents/Info.plist"
 # 3. Version stamp (RELEASE.md, "Versioning"). The engine framework keeps its own version.
 MARKETING="$(tr -d '[:space:]' <"$LIVE_SHELL/scripts/release/VERSION")"
 [[ $MARKETING =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "scripts/release/VERSION must be MAJOR.MINOR.PATCH"
-BUILD_NUMBER="$(git -C "$REPO" rev-list --count HEAD)"
+BUILD_NUMBER="$(git -C "$REPO" rev-list --count "$REVISION")"
 ENGINE_VERSION="$(plutil -extract CFBundleShortVersionString raw "$OUT/Chromium.app/Contents/Info.plist")"
 OVERLAY="$(git -C "$REPO/engine/chromium/src" rev-parse HEAD)"
 plutil -replace CFBundleShortVersionString -string "$MARKETING" "$PLIST"
