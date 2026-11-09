@@ -26,7 +26,7 @@ final class BrowserViewModel {
     let easelStore = EaselDocumentStore()
     let captureFileStore = CaptureFileStore()
     let faviconStore: FaviconStore
-    private let persistence: SidebarFilePersistence
+    let persistence: SidebarFilePersistence
     private let syncPipeline: SyncOutboundPipeline
     let syncEngine: SyncEngine
     private(set) var syncStatus: SyncEngineStatus = .local
@@ -507,8 +507,9 @@ final class BrowserViewModel {
     let sitePermissions: SitePermissionsController
     /// Command-bar visit history, saved next to the sidebar file.
     var visitHistory: VisitHistory
-    /// No sidebar file yet: the sample store stands in until the onboarding
-    /// replaces it (Onboarding/FirstRunOnboarding.swift).
+    /// No sidebar file yet, or an onboarding that never finished: the empty
+    /// starter stands in until the onboarding makes the person's spaces
+    /// (Onboarding/FirstRunOnboarding.swift).
     let isFirstRun: Bool
     @ObservationIgnored let historyFileURL: URL?
     @ObservationIgnored var historySaveWorkItem: DispatchWorkItem?
@@ -547,7 +548,7 @@ final class BrowserViewModel {
             ?? FaviconStore(directory: persistence.fileURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
         self.store = store ?? SidebarFilePersistence.loadStore(persistence: persistence)
         self.sidebarRecoveredFromCorruption = persistence.loadOutcome == .recoveredFromCorruptFile
-        self.isFirstRun = persistence.loadOutcome == .missingFile
+        self.isFirstRun = persistence.isFirstRun
         let historyFile = Self.siblingFile(VisitHistoryFile.fileName, of: persistence.fileURL)
         self.historyFileURL = historyFile
         self.visitHistory = preparedStartup?.history ?? VisitHistoryFile.load(from: historyFile)
@@ -593,6 +594,17 @@ final class BrowserViewModel {
         }
         startupDeferred = deferStartup
         if !deferStartup { finishStartup() }
+    }
+
+    /// A first run's onboarding is starting: until it finishes, every launch is a first run.
+    func beginFirstRunOnboarding() { persistence.beginOnboarding() }
+
+    /// The first run's onboarding completed or was skipped. The sidebar is
+    /// written first: a skipped first run may not have changed it yet, and
+    /// without the file the next launch would be a first run again.
+    func finishFirstRunOnboarding() {
+        persistence.flush()
+        persistence.finishOnboarding()
     }
 
     /// The cached sidebar can render before page/profile creation, archive,

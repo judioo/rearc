@@ -72,7 +72,7 @@ final class WebKitAppDelegate: NSObject, NSApplicationDelegate {
     func startOnboardingIfNeeded() {
         guard !checkedFirstRun, let model else { return }
         checkedFirstRun = true
-        if let kind = FirstRunOnboarding.kind(isFirstRun: model.isFirstRun) { run(kind) }
+        if let kind = FirstRunOnboarding.forLaunch(model) { run(kind) }
     }
 
     @MainActor

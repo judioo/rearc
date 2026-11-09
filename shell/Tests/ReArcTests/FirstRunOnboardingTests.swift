@@ -17,6 +17,123 @@ final class FirstRunOnboardingTests: XCTestCase {
         XCTAssertTrue(FirstRunOnboarding.isAutomated(["rearc", EngineLaunchOptions.benchFlag + "=ui"]))
     }
 
+    private var data: URL!
+
+    override func setUp() {
+        super.setUp()
+        data = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-first-run-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(at: data)
+        super.tearDown()
+    }
+
+    private var sidebarFile: URL { data.appendingPathComponent("sidebar.json") }
+    private var marker: URL { SidebarFilePersistence(fileURL: sidebarFile).onboardingMarkerURL }
+
+    /// A launch on `data`, the store loaded as the app loads it.
+    private func launch() -> BrowserViewModel {
+        let model = BrowserViewModel(persistence: SidebarFilePersistence(fileURL: sidebarFile, debounceInterval: 0.01),
+                                     syncEngine: LocalSyncEngine(), faviconStore: FaviconStore(directory: nil))
+        model.tabUnloadDefaults = UserDefaults(suiteName: "rearc-first-run-\(UUID().uuidString)")!
+        return model
+    }
+
+    private func quit(_ model: BrowserViewModel) {
+        model.store.addTab(kind: .today, title: "Mid-onboarding", url: URL(string: "https://example.com")!)
+        model.persistence.flush()
+        model.persistence.stop()
+    }
+
+    func testAFirstRunHasNoSampleContent() {
+        let model = launch()
+        XCTAssertTrue(model.isFirstRun)
+        XCTAssertEqual(model.store.spaces.count, 1)
+        XCTAssertTrue(model.store.displayTabs().isEmpty)
+        XCTAssertTrue(model.store.profiles.allSatisfy { model.store.favorites(in: $0.id).isEmpty })
+        XCTAssertNil(model.store.selectedItemID)
+        XCTAssertEqual(FirstRunOnboarding.forLaunch(model, arguments: [], automated: false), .firstRun)
+    }
+
+    func testAnInterruptedOnboardingIsAFirstRunAgain() {
+        let first = launch()
+        XCTAssertEqual(FirstRunOnboarding.forLaunch(first, arguments: [], automated: false), .firstRun)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "marked before the onboarding changes anything")
+        quit(first)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sidebarFile.path), "the sidebar is saved meanwhile")
+
+        let second = launch()
+        XCTAssertTrue(second.isFirstRun)
+        XCTAssertEqual(FirstRunOnboarding.forLaunch(second, arguments: [], automated: false), .firstRun)
+        // Its end, as the sunrise reports it.
+        FirstRunOnboarding(kind: .firstRun, model: second) { [] }.onboardingFinished()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        quit(second)
+
+        let third = launch()
+        XCTAssertFalse(third.isFirstRun)
+        XCTAssertNil(FirstRunOnboarding.forLaunch(third, arguments: [], automated: false))
+    }
+
+    func testOnboardLaterLeavesItAFirstRun() {
+        let model = launch()
+        XCTAssertEqual(FirstRunOnboarding.forLaunch(model, arguments: [], automated: false), .firstRun)
+        FirstRunOnboarding(kind: .firstRun, model: model) { [] }.onboardingDeferred()
+        quit(model)
+        XCTAssertTrue(launch().isFirstRun)
+    }
+
+    func testAnExistingSidebarWithoutTheMarkerIsNotOnboarded() {
+        let persistence = SidebarFilePersistence(fileURL: sidebarFile)
+        persistence.start(autoSave: SidebarStore.sample())
+        persistence.flush()
+        persistence.stop()
+
+        let model = launch()
+        XCTAssertFalse(model.isFirstRun)
+        XCTAssertNil(FirstRunOnboarding.forLaunch(model, arguments: [], automated: false))
+        XCTAssertEqual(FirstRunOnboarding.forLaunch(model, arguments: ["--onboarding"], automated: false), .rehearsal,
+                       "--onboarding only rehearses")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertFalse(launch().isFirstRun)
+    }
+
+    func testSkippingTheOnboardingLeavesOneEmptySpace() {
+        let model = launch()
+        XCTAssertNil(FirstRunOnboarding.forLaunch(model, arguments: ["--no-onboarding"], automated: false))
+        XCTAssertEqual(model.store.spaces.count, 1)
+        XCTAssertTrue(model.store.displayTabs().isEmpty)
+        XCTAssertTrue(model.store.profiles.allSatisfy { model.store.favorites(in: $0.id).isEmpty })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        // Nothing changed the starter; it is saved all the same.
+        model.persistence.stop()
+        let relaunch = launch()
+        XCTAssertFalse(relaunch.isFirstRun, "skipped is over")
+        XCTAssertEqual(relaunch.store.spaces.count, 1)
+        XCTAssertTrue(relaunch.store.displayTabs().isEmpty)
+    }
+
+    func testSkippingAnInterruptedOnboardingEndsTheFirstRun() {
+        let first = launch()
+        _ = FirstRunOnboarding.forLaunch(first, arguments: [], automated: false)
+        quit(first)
+        let second = launch()
+        XCTAssertNil(FirstRunOnboarding.forLaunch(second, arguments: ["--no-onboarding"], automated: false))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertFalse(launch().isFirstRun)
+    }
+
+    func testAutomatedLaunchesLeaveTheMarkerAlone() {
+        let model = launch()
+        XCTAssertNil(FirstRunOnboarding.forLaunch(model, arguments: [EngineLaunchOptions.selfTestFlag], automated: true))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        let interrupted = launch()
+        _ = FirstRunOnboarding.forLaunch(interrupted, arguments: [], automated: false)
+        XCTAssertNil(FirstRunOnboarding.forLaunch(interrupted, arguments: [], automated: true))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+    }
+
     func testTheSampleGivesWayToYourChoices() throws {
         let store = SidebarStore.sample()
         let main = store.activeProfileID
@@ -34,7 +151,7 @@ final class FirstRunOnboardingTests: XCTestCase {
             removedHostIDs: [archive.id.uuidString])
 
         let first = OnboardingApplier.apply(result, to: store, mainProfileID: main,
-                                            replacing: sampleSpaces, sampleFavorites: sampleFavorites)
+                                            replacing: sampleSpaces, starterFavorites: sampleFavorites)
 
         XCTAssertEqual(first, reading.id)
         XCTAssertEqual(store.spaces.map(\.name), ["Books", "Side project"], "sample and removed spaces are gone")
@@ -52,7 +169,7 @@ final class FirstRunOnboardingTests: XCTestCase {
         let store = SidebarStore.sample()
         let before = store.spaces.map(\.id)
         OnboardingApplier.apply(OnboardingResult(name: "", colour: MarkPalette.sun, spaces: [], removedHostIDs: []),
-                                to: store, mainProfileID: store.activeProfileID, replacing: before, sampleFavorites: [])
+                                to: store, mainProfileID: store.activeProfileID, replacing: before, starterFavorites: [])
         XCTAssertEqual(store.spaces.map(\.id), before)
     }
 

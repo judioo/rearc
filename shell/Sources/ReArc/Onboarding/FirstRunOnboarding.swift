@@ -3,7 +3,8 @@ import Onboarding
 import SidebarModel
 
 /// The sunrise onboarding inside ReArc (shell/Sources/Onboarding). On a
-/// first run — no sidebar file yet — it takes over the screen before the
+/// first run — no sidebar file yet, or an onboarding a quit or crash cut
+/// short (`SidebarFilePersistence.onboardingMarkerURL`) — it takes over the screen before the
 /// browser is seen, imports for real when asked, names and colours the main
 /// profile, shapes the spaces, and then lets go over the real window, which
 /// it has put exactly where the drawn one formed.
@@ -11,7 +12,8 @@ import SidebarModel
 /// `--onboarding` forces it on an existing install as a rehearsal: the
 /// same flow, nothing imported or changed. For a real first run on a test
 /// install, launch with `REARC_DATA_DIR` set to an empty folder.
-/// `--no-onboarding` skips it.
+/// `--no-onboarding` skips it, and the first run is over on the starter's
+/// one empty space; "Onboard later" leaves it a first run.
 @MainActor
 final class FirstRunOnboarding: OnboardingHost {
     enum Kind: Equatable { case firstRun, rehearsal, replay }
@@ -39,15 +41,34 @@ final class FirstRunOnboarding: OnboardingHost {
         return isFirstRun ? .firstRun : nil
     }
 
+    /// At launch, for `model`. A first run is marked before the onboarding
+    /// can change anything, so a quit or crash leaves the next launch a first
+    /// run too; one this launch skips (`--no-onboarding`) is over. Automated
+    /// launches leave the marker alone.
+    static func forLaunch(_ model: BrowserViewModel, arguments: [String] = CommandLine.arguments) -> Kind? {
+        forLaunch(model, arguments: arguments, automated: isAutomated(arguments))
+    }
+
+    static func forLaunch(_ model: BrowserViewModel, arguments: [String], automated: Bool) -> Kind? {
+        let kind = kind(isFirstRun: model.isFirstRun, arguments: arguments, automated: automated)
+        if kind == .firstRun {
+            model.beginFirstRunOnboarding()
+        } else if model.isFirstRun, !automated {
+            model.finishFirstRunOnboarding()
+        }
+        return kind
+    }
+
     let kind: Kind
     private weak var model: BrowserViewModel?
     private let browserWindows: () -> [NSWindow]
     private var takeover: SunriseTakeover?
     private var hidden: [NSWindow] = []
-    /// The developer sample's spaces and favorites, cleared once the
-    /// person's own are in (first run only).
-    private var sampleSpaceIDs: [Space.ID] = []
-    private var sampleFavoriteIDs: [Tab.ID] = []
+    /// The untouched starter's space and favorites, cleared once the
+    /// person's own are in (first run only). A sidebar sync adopted, or one an
+    /// interrupted onboarding left changed, is kept.
+    private var starterSpaceIDs: [Space.ID] = []
+    private var starterFavoriteIDs: [Tab.ID] = []
     private var mainProfileID: Profile.ID?
     private var outcome: OnboardingImportOutcome?
     private var onDone: (() -> Void)?
@@ -70,8 +91,10 @@ final class FirstRunOnboarding: OnboardingHost {
         }
         if applies {
             mainProfileID = model.store.activeProfileID
-            sampleSpaceIDs = model.store.spaces.map(\.id)
-            sampleFavoriteIDs = model.store.profiles.flatMap { model.store.favorites(in: $0.id).map(\.id) }
+            if SidebarSyncProjection.isPristine(model.store.makeSnapshot()) {
+                starterSpaceIDs = model.store.spaces.map(\.id)
+                starterFavoriteIDs = model.store.profiles.flatMap { model.store.favorites(in: $0.id).map(\.id) }
+            }
         }
         let takeover = SunriseTakeover(host: self, mode: kind == .replay ? .replay : .firstRun)
         self.takeover = takeover
@@ -115,7 +138,7 @@ final class FirstRunOnboarding: OnboardingHost {
             read.mergeHistory(into: history)
             DispatchQueue.main.async {
                 guard let self, let model = self.model else { return }
-                let result = OnboardingImportPlan.apply(read, model: model, replacingFavorites: self.sampleFavoriteIDs)
+                let result = OnboardingImportPlan.apply(read, model: model, replacingFavorites: self.starterFavoriteIDs)
                 self.outcome = result
                 done(result)
             }
@@ -124,9 +147,9 @@ final class FirstRunOnboarding: OnboardingHost {
 
     func apply(_ result: OnboardingResult) {
         guard applies, let model, let main = mainProfileID else { return }
-        // The developer sample goes; the person's own spaces stay.
+        // The starter goes; the person's own spaces stay.
         let first = OnboardingApplier.apply(result, to: model.store, mainProfileID: main,
-                                            replacing: sampleSpaceIDs, sampleFavorites: sampleFavoriteIDs)
+                                            replacing: starterSpaceIDs, starterFavorites: starterFavoriteIDs)
         // Act 1's name goes on the membership card.
         model.recordOnboardingName(result.name)
         model.reconcileEngineOwnership()
@@ -159,8 +182,22 @@ final class FirstRunOnboarding: OnboardingHost {
         // the takeover here clears; without this the clear overlay stays on top.
         takeover?.dismiss()
         takeover = nil
-        // No store page opened over the sunrise; now the browser is here.
-        if applies { model?.offerPendingExtensionReinstall() }
+        if applies {
+            model?.finishFirstRunOnboarding()
+            // No store page opened over the sunrise; now the browser is here.
+            model?.offerPendingExtensionReinstall()
+        }
+        onDone?()
+    }
+
+    /// "Onboard later": the browser comes back on the starter, and the next
+    /// launch is still a first run.
+    func onboardingDeferred() {
+        for window in hidden where !window.isVisible { window.orderFront(nil) }
+        hidden.first?.makeKeyAndOrderFront(nil)
+        hidden = []
+        takeover?.dismiss()
+        takeover = nil
         onDone?()
     }
 }
@@ -284,17 +321,17 @@ struct OnboardingImportPlan: Sendable {
 
     /// Into the store, quietly (no toasts: the onboarding is the feedback).
     /// Extensions install in the background when the browser is revealed.
-    /// `replacingFavorites` (the sample's) go before Arc's favorites come
+    /// `replacingFavorites` (the starter's) go before Arc's favorites come
     /// in, so none of Arc's is skipped as already there and then cleared.
     @MainActor
-    static func apply(_ read: Read, model: BrowserViewModel, replacingFavorites sample: [Tab.ID] = []) -> OnboardingImportOutcome {
+    static func apply(_ read: Read, model: BrowserViewModel, replacingFavorites starter: [Tab.ID] = []) -> OnboardingImportOutcome {
         let store = model.store
         let before = Set(store.spaces.map(\.id))
         let main = store.activeProfileID
         var totals = ImportStats()
         if let arc = read.arc {
             if arc.favoritesToImport() > 0 {
-                for id in sample where store.tab(withID: id) != nil { store.closeTab(id) }
+                for id in starter where store.tab(withID: id) != nil { store.closeTab(id) }
             }
             let summary = store.importArcSidebar(arc, choices: arc.defaultChoices(for: store))
             if let settings = read.arcSettings { model.applyArcSettings(settings) }
@@ -342,7 +379,7 @@ enum OnboardingApplier {
     /// Returns the first space, to select.
     @discardableResult
     static func apply(_ result: OnboardingResult, to store: SidebarStore, mainProfileID main: Profile.ID,
-                      replacing replaceable: [Space.ID], sampleFavorites: [Tab.ID]) -> Space.ID? {
+                      replacing replaceable: [Space.ID], starterFavorites: [Tab.ID]) -> Space.ID? {
         let theme = { (c: RGBA) in SpaceTheme(red: c.r, green: c.g, blue: c.b) }
         if !result.name.isEmpty { _ = store.renameProfile(main, to: result.name) }
         if let index = store.profiles.firstIndex(where: { $0.id == main }) {
@@ -364,10 +401,10 @@ enum OnboardingApplier {
         for hostID in result.removedHostIDs {
             if let id = UUID(uuidString: hostID), !kept.contains(id) { _ = store.removeSpace(id) }
         }
-        // The sample goes once there is something of the person's to keep.
+        // The starter goes once there is something of the person's to keep.
         if !kept.isEmpty {
             for id in replaceable where !kept.contains(id) { _ = store.removeSpace(id) }
-            for id in sampleFavorites where store.tab(withID: id) != nil { store.closeTab(id) }
+            for id in starterFavorites where store.tab(withID: id) != nil { store.closeTab(id) }
         }
         return kept.first
     }

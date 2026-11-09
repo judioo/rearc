@@ -163,7 +163,7 @@ private final class ChromiumShellStartup {
             return
         }
         // A first run opens on the sunrise, not on the browser.
-        if FirstRunOnboarding.kind(isFirstRun: prepared.sidebar.outcome == .missingFile) != nil { return }
+        if FirstRunOnboarding.kind(isFirstRun: prepared.sidebar.isFirstRun) != nil { return }
         let model = ChromiumShell.makeModel(runtime: runtime, prepared: prepared)
         earlyModel = model
         shell.presentCachedWindow(model: model)
@@ -428,7 +428,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         // The launch window's saved siblings open behind it once the engine is up.
         DispatchQueue.main.async { [weak self] in self?.restoreOtherSessionWindows() }
         // In this same turn, so the first window is put away before it is ever drawn.
-        if let kind = FirstRunOnboarding.kind(isFirstRun: model.isFirstRun) { runOnboarding(kind) }
+        if let kind = FirstRunOnboarding.forLaunch(model) { runOnboarding(kind) }
         ExternalLinkRouter.shared.attach(model)
         ExternalLinkRouter.shared.release()
         NotificationCenter.default.addObserver(
