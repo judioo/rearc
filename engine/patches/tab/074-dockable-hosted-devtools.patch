@@ -1,0 +1,421 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 dockable hosted DevTools (ABI 1.54)
+
+Bridge 0.57.0, feature devtools_docking. With a dock callback set, hosted
+frontends open with can_dock=true as DevToolsWindow::GetDevToolsURL does, so
+the frontend shows Dock side, the device toolbar and toggle-dock. setIsDocked
+and setInspectedPageBounds reach the host with the side Chromium's
+DevToolsSettings reads from the profile's currentDockState preference, which
+the frontend persists itself. As DevToolsWindow, the undocked frontend's
+device-mode toolbox (device_mode_emulation_frame.html) is marked at
+WebContentsCreated, kept rendering, adopted as a locked registry tab,
+replaced when a reloaded frontend opens a new one, and closed with its
+frontend. No upstream file changes; without a callback the
+frontend URL and behaviour are tab/058's.
+
+Last rebased: 2026-11-09 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 9799411502..9a5c828b66 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -31,6 +31,7 @@ _ReArcStatusName
+ _ReArcEngineSetClientCertificateCallback
+ _ReArcClientCertificateRespond
+ _ReArcTabOpenDevTools
++_ReArcEngineSetDevToolsDockCallback
+ _ReArcEngineSetKeyEquivalentCallback
+ _ReArcTabGetMediaActions
+ _ReArcEngineSetVideoOverlayCallback
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 3cea8f03f6..b9b8811de5 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -38,6 +38,7 @@ _ReArcStatusName
+ _ReArcEngineSetClientCertificateCallback
+ _ReArcClientCertificateRespond
+ _ReArcTabOpenDevTools
++_ReArcEngineSetDevToolsDockCallback
+ _ReArcEngineSetKeyEquivalentCallback
+ _ReArcTabGetMediaActions
+ _ReArcEngineSetVideoOverlayCallback
+diff --git a/chrome/browser/rearc_bridge/rearc_devtools.cc b/chrome/browser/rearc_bridge/rearc_devtools.cc
+index 99cfb45f72..1fd17ed76e 100644
+--- a/chrome/browser/rearc_bridge/rearc_devtools.cc
++++ b/chrome/browser/rearc_bridge/rearc_devtools.cc
+@@ -4,9 +4,14 @@
+ #include "chrome/browser/rearc_bridge/rearc_devtools.h"
+ 
+ #include <pthread.h>
++#include <cstring>
+ #include <memory>
++#include <string>
+ #include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
+ #include "chrome/browser/devtools/devtools_availability_checker.h"
++#include "chrome/browser/devtools/devtools_settings.h"
+ #include "chrome/browser/devtools/devtools_ui_bindings.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/rearc_bridge/close_controller.h"
+@@ -24,11 +29,19 @@
+ #include "extensions/browser/view_type_utils.h"
+ #include "extensions/common/mojom/view_type.mojom.h"
+ #include "ui/base/page_transition_types.h"
++#include "ui/gfx/geometry/rect.h"
+ 
+ namespace rearc {
+ namespace {
+ constexpr char kFrontend[] =
+     "devtools://devtools/bundled/devtools_app.html?targetType=tab&panel=elements";
++// DevToolsWindow::GetDevToolsURL's flag and WebContentsCreated's toolbox page.
++constexpr char kCanDock[] = "&can_dock=true";
++constexpr char kToolboxPage[] = "device_mode_emulation_frame.html";
++ReArcDevToolsDockCallback dock_callback = nullptr;
++void* dock_context = nullptr;
++void SetDocked(uint64_t frontend, bool docked);
++void SetPageBounds(uint64_t frontend, const gfx::Rect& bounds);
+ 
+ // No Browser, DevToolsWindow or native window ownership. IDs are resolved at
+ // use, so no target pointer can outlive its registry session.
+@@ -54,9 +67,9 @@ class HostedDelegate : public DevToolsUIBindings::Delegate {
+   // Every auxiliary embedder operation is refused before dispatch by hosted
+   // bindings. Safe delegates remain explicit even for unused operations.
+   void Inspect(scoped_refptr<content::DevToolsAgentHost>) override {}
+-  void SetInspectedPageBounds(const gfx::Rect&) override {}
++  void SetInspectedPageBounds(const gfx::Rect& rect) override { SetPageBounds(frontend_, rect); }
+   void InspectElementCompleted() override {}
+-  void SetIsDocked(bool) override {}
++  void SetIsDocked(bool docked) override { SetDocked(frontend_, docked); }
+   void OpenInNewTab(const std::string&) override {}
+   void OpenSearchResultsInNewTab(const std::string&) override {}
+   void SetWhitelistedShortcuts(const std::string&) override {}
+@@ -86,6 +99,15 @@ class TargetWatch : public content::WebContentsObserver {
+ class HostedFrontend : public content::WebContentsObserver,
+                        public content::WebContentsUserData<HostedFrontend> {
+  public:
++  // Docking state as DevToolsWindow keeps it (is_docked_, the contents
++  // resizing strategy's bounds, toolbox_web_contents_), posted to the host.
++  bool docked = true, has_bounds = false;
++  gfx::Rect bounds;
++  uint64_t toolbox = 0;
++  uint64_t frontend() const { return frontend_; }
++  uint64_t target() const { return target_; }
++  const GURL& url() const { return url_; }
++  void WebContentsDestroyed() override { ForceCloseTab(toolbox); }
+   void Configure(DevToolsUIBindings* bindings) {
+     bindings->SetHostedMode();
+     bindings->SetDelegate(new HostedDelegate(frontend_, target_));
+@@ -95,17 +117,82 @@ class HostedFrontend : public content::WebContentsObserver,
+   }
+  private:
+   friend class content::WebContentsUserData<HostedFrontend>;
+-  HostedFrontend(content::WebContents* contents, uint64_t frontend, uint64_t target)
++  HostedFrontend(content::WebContents* contents, uint64_t frontend, uint64_t target, const GURL& url)
+       : content::WebContentsObserver(contents),
+         content::WebContentsUserData<HostedFrontend>(*contents),
+-        frontend_(frontend), target_(target),
++        frontend_(frontend), target_(target), url_(url),
+         target_watch_(TabRegistry::Get().FindSession(target)->web_contents(), frontend) {}
+   const uint64_t frontend_, target_;
++  const GURL url_;
+   TargetWatch target_watch_;
+   WEB_CONTENTS_USER_DATA_KEY_DECL();
+ };
+ WEB_CONTENTS_USER_DATA_KEY_IMPL(HostedFrontend);
+ 
++// The device-mode toolbox an undocked frontend opens (DevToolsWindow's
++// toolbox_web_contents_): the inspected page shows inside it in the host's
++// window. Marked at creation, before its bindings exist; adopted by the host.
++class HostedToolbox : public content::WebContentsUserData<HostedToolbox> {
++ public:
++  const uint64_t frontend;
++  const GURL url;
++  base::ScopedClosureRunner capture;
++ private:
++  friend class content::WebContentsUserData<HostedToolbox>;
++  HostedToolbox(content::WebContents* contents, uint64_t frontend, const GURL& url)
++      : content::WebContentsUserData<HostedToolbox>(*contents), frontend(frontend), url(url) {}
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(HostedToolbox);
++
++HostedFrontend* FindFrontend(uint64_t id) {
++  auto* session = TabRegistry::Get().FindSession(id);
++  return session ? HostedFrontend::FromWebContents(session->web_contents()) : nullptr;
++}
++
++void PublishDock(HostedFrontend* hosted) {
++  if (!dock_callback) return;
++  ReArcDevToolsDockEvent event{};
++  event.frontend_tab_id = hosted->frontend();
++  event.target_tab_id = hosted->target();
++  if (hosted->docked) {
++    event.in_tab_tab_id = hosted->frontend();
++    // DevToolsWindow::SetInspectedPageBounds: the side is the profile's pref.
++    switch (DevToolsSettings::GetDockSide(Profile::FromBrowserContext(
++        hosted->web_contents()->GetBrowserContext()))) {
++      case devtools::DockSide::kRight: event.dock_side = 1; break;
++      case devtools::DockSide::kBottom: event.dock_side = 2; break;
++      case devtools::DockSide::kLeft: event.dock_side = 3; break;
++      case devtools::DockSide::kNone: event.dock_side = 1; break;
++    }
++  } else if (TabRegistry::Get().FindSession(hosted->toolbox)) {
++    event.in_tab_tab_id = hosted->toolbox;
++  }
++  event.has_bounds = hosted->has_bounds;
++  event.x = hosted->bounds.x();
++  event.y = hosted->bounds.y();
++  event.width = hosted->bounds.width();
++  event.height = hosted->bounds.height();
++  ABIPost(base::BindOnce([](ReArcDevToolsDockEvent e) {
++    if (dock_callback && FindFrontend(e.frontend_tab_id)) dock_callback(dock_context, &e);
++  }, event));
++}
++
++void SetDocked(uint64_t frontend, bool docked) {
++  if (auto* hosted = FindFrontend(frontend)) {
++    hosted->docked = docked;
++    PublishDock(hosted);
++  }
++}
++
++void SetPageBounds(uint64_t frontend, const gfx::Rect& bounds) {
++  auto* hosted = FindFrontend(frontend);
++  if (!hosted || (hosted->has_bounds && hosted->bounds == bounds)) return;
++  hosted->has_bounds = true;
++  hosted->bounds = bounds;
++  PublishDock(hosted);
++}
++
+ class FrontendNavigation : public content::NavigationThrottle {
+  public:
+   explicit FrontendNavigation(content::NavigationThrottleRegistry& registry)
+@@ -117,10 +204,13 @@ class FrontendNavigation : public content::NavigationThrottle {
+  private:
+   ThrottleCheckResult Check() {
+     const auto& url = navigation_handle()->GetURL();
+-    if (IsHostedDevTools(navigation_handle()->GetWebContents())) {
++    auto* contents = navigation_handle()->GetWebContents();
++    if (IsHostedDevTools(contents)) {
+       // No remote/custom frontend; this contents can only reload its bundled
+       // app. Same-document hash changes retain the same origin/bindings.
+-      return url.GetWithoutRef() == GURL(kFrontend) ? PROCEED : CANCEL_AND_IGNORE;
++      auto* toolbox = HostedToolbox::FromWebContents(contents);
++      const GURL& app = toolbox ? toolbox->url : HostedFrontend::FromWebContents(contents)->url();
++      return url.GetWithoutRef() == app ? PROCEED : CANCEL_AND_IGNORE;
+     }
+     return url.SchemeIs("devtools") ||
+                    (url.SchemeIs("chrome") && url.host() == "devtools")
+@@ -131,14 +221,64 @@ class FrontendNavigation : public content::NavigationThrottle {
+ 
+ void ConfigureHostedDevToolsBindings(DevToolsUIBindings* bindings) {
+   if (auto* hosted = HostedFrontend::FromWebContents(bindings->web_contents())) hosted->Configure(bindings);
++  // The toolbox is never attached: its frontend scripts it through the opener.
++  if (HostedToolbox::FromWebContents(bindings->web_contents())) {
++    bindings->SetHostedMode();
++    bindings->SetDelegate(new HostedDelegate(0, 0));
++  }
+ }
+ 
+ bool IsHostedDevTools(const content::WebContents* contents) {
+-  return contents && HostedFrontend::FromWebContents(contents);
++  return contents && (HostedFrontend::FromWebContents(contents) || HostedToolbox::FromWebContents(contents));
++}
++
++void HostedDevToolsContentsCreated(content::WebContents* source, const GURL& target_url,
++                                   content::WebContents* contents) {
++  auto* hosted = HostedFrontend::FromWebContents(source);
++  if (!hosted || hosted->url().spec().find(kCanDock) == std::string::npos) return;
++  // DevToolsWindow::WebContentsCreated: only the toolbox page of this very
++  // frontend (AdvancedApp opens its own URL with the page swapped).
++  std::string toolbox = hosted->url().spec();
++  toolbox.replace(toolbox.find("devtools_app.html"), strlen("devtools_app.html"), kToolboxPage);
++  if (target_url.GetWithoutRef() != GURL(toolbox)) return;
++  HostedToolbox::CreateForWebContents(contents, hosted->frontend(), GURL(toolbox));
++  // As DevToolsWindow: keep rendering while the page covers the toolbox.
++  HostedToolbox::FromWebContents(contents)->capture = contents->IncrementCapturerCount(
++      gfx::Size(), /*stay_hidden=*/false, /*stay_awake=*/false, /*is_activity=*/true);
++}
++
++bool AdoptHostedDevToolsToolbox(content::WebContents* source, std::unique_ptr<content::WebContents>& contents) {
++  auto* hosted = HostedFrontend::FromWebContents(source);
++  auto* toolbox = contents ? HostedToolbox::FromWebContents(contents.get()) : nullptr;
++  auto* frontend = TabRegistry::Get().FindSession(hosted ? hosted->frontend() : 0);
++  if (!toolbox || !frontend || toolbox->frontend != hosted->frontend()) return false;
++  // As DevToolsWindow::WebContentsCreated: a reloaded frontend's new toolbox replaces the old one.
++  ForceCloseTab(hosted->toolbox);
++  TabSession::CreateArgs args;
++  args.browser_context = source->GetBrowserContext();
++  args.space_id = frontend->space_id();
++  args.order_index = frontend->order_index();
++  const GURL url = toolbox->url;
++  hosted->toolbox = TabRegistry::Get().AdoptSession(args, std::move(contents));
++  TabEvent event;
++  event.kind = TabEventKind::kTabCreated;
++  event.tab_id = hosted->toolbox;
++  event.space_id = args.space_id;
++  event.opener_tab_id = hosted->frontend();
++  event.disposition = TabDisposition::kPopup;
++  event.url = url.spec();
++  EmitTabEvent(std::move(event));
++  ABIInitializeTab(hosted->toolbox);
++  PublishDock(hosted);
++  return true;
+ }
+ 
+ void AddHostedDevToolsNavigationThrottle(content::NavigationThrottleRegistry& registry) {
+   auto* contents = registry.GetNavigationHandle().GetWebContents();
++  if (IsHostedDevTools(contents)) {
++    registry.AddThrottle(std::make_unique<FrontendNavigation>(registry));
++    return;
++  }
+   for (uint64_t id : TabRegistry::Get().SessionIds()) {
+     if (TabRegistry::Get().FindSession(id)->web_contents() == contents) {
+       registry.AddThrottle(std::make_unique<FrontendNavigation>(registry));
+@@ -158,7 +298,7 @@ ReArcStatus ReArcTabOpenDevTools(uint64_t target_tab_id, uint64_t* frontend_tab_
+   if (rearc::IsHostedDevTools(inspected)) return REARC_UNSUPPORTED;
+   auto* profile = Profile::FromBrowserContext(inspected->GetBrowserContext());
+   if (!IsInspectionAllowed(profile, inspected)) return REARC_UNSUPPORTED;
+-  const GURL url(rearc::kFrontend);
++  const GURL url(std::string(rearc::kFrontend) + (rearc::dock_callback ? rearc::kCanDock : ""));
+   content::WebContents::CreateParams params(profile,
+       content::SiteInstance::CreateForURL(profile, url));
+   params.initially_hidden = true;
+@@ -170,7 +310,7 @@ ReArcStatus ReArcTabOpenDevTools(uint64_t target_tab_id, uint64_t* frontend_tab_
+   args.order_index = target->order_index();
+   auto* raw = contents.get();
+   const uint64_t id = rearc::TabRegistry::Get().AdoptSession(args, std::move(contents));
+-  rearc::HostedFrontend::CreateForWebContents(raw, id, target_tab_id);
++  rearc::HostedFrontend::CreateForWebContents(raw, id, target_tab_id, url);
+   rearc::TabEvent event;
+   event.kind = rearc::TabEventKind::kTabCreated;
+   event.tab_id = id;
+@@ -185,3 +325,9 @@ ReArcStatus ReArcTabOpenDevTools(uint64_t target_tab_id, uint64_t* frontend_tab_
+   *frontend_tab_id = id;
+   return REARC_OK;
+ }
++
++void ReArcEngineSetDevToolsDockCallback(ReArcDevToolsDockCallback callback, void* context) {
++  CHECK(pthread_main_np());
++  rearc::dock_callback = callback;
++  rearc::dock_context = context;
++}
+diff --git a/chrome/browser/rearc_bridge/rearc_devtools.h b/chrome/browser/rearc_bridge/rearc_devtools.h
+index d76974b04c..518b9b3d43 100644
+--- a/chrome/browser/rearc_bridge/rearc_devtools.h
++++ b/chrome/browser/rearc_bridge/rearc_devtools.h
+@@ -3,7 +3,9 @@
+ // found in the LICENSE file.
+ #ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_DEVTOOLS_H_
+ #define CHROME_BROWSER_REARC_BRIDGE_REARC_DEVTOOLS_H_
++#include <memory>
+ class DevToolsUIBindings;
++class GURL;
+ namespace content {
+ class WebContents;
+ class NavigationThrottleRegistry;
+@@ -12,5 +14,11 @@ namespace rearc {
+ void ConfigureHostedDevToolsBindings(DevToolsUIBindings*);
+ bool IsHostedDevTools(const content::WebContents* contents);
+ void AddHostedDevToolsNavigationThrottle(content::NavigationThrottleRegistry&);
++// A dockable frontend's device-mode toolbox (devtools_docking, ABI 1.54):
++// marked from WebContentsCreated, adopted as a registry tab from AddNewContents.
++void HostedDevToolsContentsCreated(content::WebContents* source, const GURL& target_url,
++                                   content::WebContents* contents);
++bool AdoptHostedDevToolsToolbox(content::WebContents* source,
++                                std::unique_ptr<content::WebContents>& contents);
+ }
+ #endif
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 108ea34d29..c99830ecb0 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 53, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 54, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -1397,6 +1397,29 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcClientCertificateRespond(uint64_t request_i
+ // No nested DevTools, remote targets, workspace/disk save or new windows.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabOpenDevTools(uint64_t target_tab_id, uint64_t* frontend_tab_id);
+ 
++// Dockable DevTools (devtools_docking, ABI 1.54). While a callback is set,
++// ReArcTabOpenDevTools opens frontends with can_dock=true, as Chrome's
++// DevToolsWindow does: the frontend offers Dock side and the device toolbar,
++// persists its side in the profile's DevTools preferences (currentDockState)
++// and reports its layout here on every setIsDocked and bounds change.
++// Docked (dock_side 1 right, 2 bottom, 3 left): the host lays in_tab_tab_id
++// (the frontend) over the whole content area and the inspected page above it
++// at the bounds, applying DevToolsContentsResizingStrategy (no bounds yet, or
++// an empty size off the origin: the full area; empty at the origin: hidden).
++// Undocked (0): the frontend goes in its own window; in_tab_tab_id is the
++// device-mode toolbox the frontend opens (0 until then), laid out the same
++// way. The toolbox is a registry tab created with opener = the frontend,
++// popup disposition; it closes with its frontend. Bounds are in DIP of the
++// in-tab view. Null callback: later opens are not dockable, no events.
++typedef struct ReArcDevToolsDockEvent {
++  uint64_t frontend_tab_id, target_tab_id, in_tab_tab_id;
++  uint32_t dock_side;
++  bool has_bounds;
++  int32_t x, y, width, height;
++} ReArcDevToolsDockEvent;
++typedef void (*ReArcDevToolsDockCallback)(void* context, const ReArcDevToolsDockEvent* event);
++REARC_ENGINE_EXPORT void ReArcEngineSetDevToolsDockCallback(ReArcDevToolsDockCallback callback, void* context);
++
+ // Modifier/context-menu link opens (link_open_requests, ABI 1.39).
+ // Separate event layout; ABI 1.36 extension requests are unchanged. HTTP(S)
+ // OpenURLFromTab only: 1 foreground, 2 background, 4 window, 5 split view.
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 182367e2c5..b78800a26c 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -705,6 +705,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "navigation_extended" ||
+          std::string(feature) == "webui_daily_pages" ||
+          std::string(feature) == "webui_credits" ||
++         std::string(feature) == "devtools_docking" ||
+          std::string(feature) == "extension_bulk_install" ||
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "history_query" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 097854f94d..adc2115dc1 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.56.0";
++  return "0.57.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 25487f52a0..48271215b9 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -95,7 +95,8 @@ content::WebContents* ReArcTabDelegate::AddNewContents(
+     bool user_gesture,
+     bool* was_blocked) {
+   if (IsHostedDevTools(source)) {
+-    if (was_blocked) *was_blocked = true;
++    const bool toolbox = AdoptHostedDevToolsToolbox(source, new_contents);
++    if (was_blocked) *was_blocked = !toolbox;
+     return nullptr;
+   }
+   // Chromium retains navigation/opener policy. Popup bounds are deliberately
+@@ -252,6 +253,7 @@ void ReArcTabDelegate::WebContentsCreated(
+   // Mirrors Browser::WebContentsCreated: renderer driver bindings for the new
+   // frame must find their factories. Unadopted contents die with helpers.
+   AttachBrowserlessTabHelpers(new_contents);
++  HostedDevToolsContentsCreated(source_contents, target_url, new_contents);
+ }
+ 
+ void ReArcTabDelegate::ResizeDueToAutoResize(content::WebContents* source,

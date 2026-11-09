@@ -79,6 +79,7 @@ tab/070-extension-tab-groups.patch            # P-TAB-001 ABI 1.50: extension ta
 tab/071-page-theme-color.patch                # P-TAB-001 ABI 1.51: page theme-color events and the top-edge snapshot (scope 2) for the toolbar colour
 tab/072-credits-webui-admission.patch          # P-TAB-001 ABI 1.52: static browser-less Credits page (webui_credits)
 tab/073-bulk-extension-install.patch            # P-TAB-001 ABI 1.53: approved bulk store installs and unpacked loading
+tab/074-dockable-hosted-devtools.patch          # P-TAB-001 ABI 1.54: dockable hosted DevTools, dock side and device-mode toolbox
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:

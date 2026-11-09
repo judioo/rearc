@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.53** (major remains 1 for existing hosts), bridge **0.56.0**, compiled Chromium **156.0.8078.74**. Public header:
+ABI **1.54** (major remains 1 for existing hosts), bridge **0.57.0**, compiled Chromium **156.0.8078.74**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -2268,3 +2268,49 @@ opens no windows and uses temporary profiles, a mock keychain and loopback
 metadata, exercising unpacked success/failure, already-installed, removed
 listings, HTTP failure, retired manifests, deferred completion, concurrency,
 and close/shutdown guards. It never contacts the real Chrome Web Store.
+
+### Dockable DevTools (ABI 1.54)
+
+Patch `tab/074-dockable-hosted-devtools`, bridge 0.57.0, advertises
+`devtools_docking`. `ReArcEngineSetDevToolsDockCallback(callback, context)`
+opts in: frontends opened while it is set carry `can_dock=true`, as
+`DevToolsWindow::GetDevToolsURL` adds it, so the frontend's menu offers Dock
+side (right, bottom, left, undocked), the device toolbar (⌘⇧M) and
+toggle-dock (⌘⇧D). Without a callback the URL and behaviour stay 1.40's.
+
+The frontend persists the side itself (`currentDockState` in the profile's
+DevTools preferences) and calls `setIsDocked` on load and on every change,
+then `setInspectedPageBounds`. Each posts a `ReArcDevToolsDockEvent`:
+`frontend_tab_id`, `target_tab_id`, `in_tab_tab_id`, `dock_side` (0 undocked,
+1 right, 2 bottom, 3 left, read with `DevToolsSettings::GetDockSide`),
+`has_bounds` and the bounds in DIP. Docked, `in_tab_tab_id` is the frontend:
+the host lays it over the whole content area and the inspected page above it
+at the bounds (Chrome's `ApplyDevToolsContentsResizingStrategy`). Undocked,
+the frontend goes in its own window and `in_tab_tab_id` is the device-mode
+toolbox, laid out the same way (0 until the frontend opens it). Before the
+first event the frontend has not chosen a side; Chrome does not show it yet.
+
+The toolbox (`device_mode_emulation_frame.html` with the frontend's query) is
+recognised in `WebContentsCreated`, before its WebUI bindings exist, so they
+are hosted and never attached. It is adopted as a registry tab (created event
+with opener = frontend, popup disposition), kept rendering with a capturer
+count as `DevToolsWindow` does, locked to its URL like the frontend, and
+force-closed with it. Only the frontend's own toolbox is adopted; a reloaded
+frontend's new toolbox replaces (force-closes) the old one, as in Chrome.
+
+Run `python3 engine/tests/run_devtools_docking.py` after building. The views
+sit in a transparent borderless window ordered in far off screen without
+activation, so no input is posted and focus never moves. It proves the
+non-dockable default, `can_dock`, the registered device-toolbar and
+toggle-dock actions with their shortcuts, right/left/bottom/undocked
+round-trips with bounds, responsive emulation (`screen.width` 375) docked
+and undocked, toolbox replacement after a frontend reload, toggle-dock
+returning to the last side, the toolbox closing with its frontend, and, in a
+second run on the same profile, the persisted side. Mobile device emulation
+is avoided there only because a debug-only Blink DCHECK
+(`scrollable_area.cc`, `BlinkControlsOverlayVisibility`) fires on Mac when a
+mobile-emulated page resizes; release builds have DCHECKs off.
+
+The shell (dockable engines only) drops its own docked pane, "Dock to Page"
+strip and dock menu items: Chrome's ⋮ › Dock side drives placement, and the
+frontend's splitter resizes the page. Older engines keep the 1.40 shell pane.
