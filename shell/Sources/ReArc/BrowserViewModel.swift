@@ -571,6 +571,9 @@ final class BrowserViewModel {
             self?.syncPipeline.handleJournalEntry(entry)
         }
         engineHost.linkRouter = self
+        // A close or unload never hands the selection to a saved pin or
+        // favorite without a live page: selecting it would load it.
+        self.store.isTabOpen = { [weak self] id in self?.canUnloadTab(id) ?? false }
         shortcutRouter.binding = { [weak self] key, modifiers in
             (self?.shortcutOverrides ?? ShortcutOverrides()).binding(for: key, modifiers: modifiers)
         }

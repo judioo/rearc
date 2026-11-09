@@ -46,6 +46,59 @@ final class Wave19ShellTests: XCTestCase {
         XCTAssertNil(model.store.tab(withID: pinned.id), "Delete Tab removes it")
     }
 
+    /// The user's 2026-11-09 recording: "—" on the open pin of a collapsed
+    /// folder loaded the next pin, then the next folder's, so the row never
+    /// went away. Arc unloads it and goes to the empty state.
+    func testClosingAPinInACollapsedFolderLoadsNoOtherPin() throws {
+        var first: Tab!
+        var sibling: Tab!
+        var other: Tab!
+        var folder: SidebarFolder!
+        let model = makeModel { store in
+            first = store.addTab(kind: .pinned, title: "A", url: URL(string: "https://a.test")!)
+            sibling = store.addTab(kind: .pinned, title: "B", url: URL(string: "https://b.test")!)
+            folder = store.createFolder(containing: [first.id, sibling.id])
+            other = store.addTab(kind: .pinned, title: "C", url: URL(string: "https://c.test")!)
+            store.createFolder(containing: [other.id])
+            store.setFolderExpanded(folder.id, false)
+            store.selectTab(first.id)
+        }
+        model.loadSelectedIfNeeded()
+        XCTAssertNotNil(engine(model, first.id))
+
+        model.closeSelectedTab()
+        XCTAssertNil(model.store.selectedItemID)
+        XCTAssertNil(engine(model, sibling.id), "no sibling loaded")
+        XCTAssertNil(engine(model, other.id), "no other folder's pin loaded")
+        let rows = SidebarOutlineRow.rows(model.store.outline(for: model.store.activeSpaceID).pinned,
+                                          expanded: model.store.expandedFolderIDs, selected: model.store.selectedItemID)
+        XCTAssertFalse(rows.contains { $0.id == first.id }, "the collapsed folder shows no child row")
+        model.closeSelectedTab()
+        XCTAssertNil(engine(model, sibling.id), "⌘W with nothing selected loads nothing")
+    }
+
+    /// Closing the last Today tab goes to the empty state rather than load a
+    /// saved pin; a pin with a live page can take the selection.
+    func testClosingTheLastTodayTabLoadsNoSavedPin() throws {
+        var pinned: Tab!
+        var today: Tab!
+        let model = makeModel { store in
+            pinned = store.addTab(kind: .pinned, title: "P", url: URL(string: "https://p.test")!)
+            today = store.addTab(kind: .today, title: "T", url: URL(string: "https://t.test")!)
+            store.selectTab(today.id)
+        }
+        model.loadSelectedIfNeeded()
+        model.closeSelectedTab()
+        XCTAssertNil(model.store.selectedItemID)
+        XCTAssertNil(engine(model, pinned.id))
+
+        model.selectTab(pinned.id)
+        let next = model.store.addTab(kind: .today, title: "T2", url: URL(string: "https://t2.test")!)
+        model.selectTab(next.id)
+        model.closeSelectedTab()
+        XCTAssertEqual(model.store.selectedItemID, pinned.id, "an open pin is an open tab")
+    }
+
     func testResetLoadsTheSavedURLAndCommandsAreGated() throws {
         var pinned: Tab!
         let model = makeModel { store in

@@ -110,6 +110,11 @@ public final class SidebarStore {
     public var autoPiPPolicy = AutoPiPPolicyState()
     /// Clock for last-active stamps and archive times (tests inject a fixed date).
     @ObservationIgnored public var now: () -> Date = { Date() }
+    /// Whether a pinned or favorite tab has a page open. Only open ones can
+    /// take the selection when the selected item closes: Arc goes to the
+    /// empty state rather than load a saved pin (ARC-RECORDING-2026-11-06).
+    /// The shell answers from its engines; on its own the model counts all.
+    @ObservationIgnored public var isTabOpen: (Tab.ID) -> Bool = { _ in true }
     private var selectionBySpace: [Space.ID: UUID] {
         didSet { refreshSelectionObservers() }
     }
@@ -690,8 +695,7 @@ public final class SidebarStore {
         if selectedItemID == id {
             let ordered = displayEntries()
             let index = ordered.firstIndex(where: { $0.id == id }) ?? 0
-            let others = ordered.filter { $0.id != id }
-            selectedItemID = others.isEmpty ? nil : others[min(index, others.count - 1)].id
+            selectedItemID = closeSuccessor(in: ordered.filter { $0.id != id }, at: index)
             notifyMutation()
         }
         return true
@@ -1651,15 +1655,22 @@ public final class SidebarStore {
 
     func reconcileSelectionAfterRemoval(removedID: UUID, priorIndex: Int?) {
         if selectedItemID == removedID {
-            let remaining = displayEntries()
-            if remaining.isEmpty {
-                selectedItemID = nil
-            } else if let priorIndex {
-                selectedItemID = remaining[min(priorIndex, remaining.count - 1)].id
-            } else {
-                selectedItemID = remaining.first?.id
-            }
+            selectedItemID = closeSuccessor(in: displayEntries(), at: priorIndex ?? 0)
         }
+    }
+
+    /// The row that takes the selection from a closed or unloaded one: the
+    /// next open row from its position, else the previous, else none.
+    /// `entries` no longer holds the closed row; `index` is where it was.
+    func closeSuccessor(in entries: [SidebarEntry], at index: Int) -> UUID? {
+        let start = min(max(index, 0), entries.count)
+        let after = entries[start...].first(where: isOpenSuccessor)
+        return (after ?? entries[..<start].last(where: isOpenSuccessor))?.id
+    }
+
+    private func isOpenSuccessor(_ entry: SidebarEntry) -> Bool {
+        guard case .tab(let tab) = entry, tab.kind != .today else { return true }
+        return isTabOpen(tab.id)
     }
 
     private func advanceSelection(by delta: Int) {

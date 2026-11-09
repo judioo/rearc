@@ -140,6 +140,72 @@ final class Wave19SidebarTests: XCTestCase {
         XCTAssertEqual(store.selectedItemID, pin.id)
     }
 
+    func testClosingLastTodayTabNeverSelectsASavedPin() throws {
+        let store = makeStore()
+        let loose = store.addTab(kind: .pinned, title: "Loose", url: url("https://loose.test"))
+        let inFolder = store.addTab(kind: .pinned, title: "In folder", url: url("https://folder.test"))
+        let folder = try XCTUnwrap(store.createFolder(containing: [inFolder.id]))
+        store.setFolderExpanded(folder.id, false)
+        var open: Set<Tab.ID> = []
+        store.isTabOpen = { open.contains($0) }
+        let today = store.addTab(kind: .today, title: "T", url: url("https://t.test"))
+        store.selectTab(today.id)
+
+        store.closeTab(today.id)
+        XCTAssertNil(store.selectedItemID, "Arc goes to the empty state, it does not load a pin")
+
+        // A pin with a live page is an open tab and can take the selection.
+        open = [inFolder.id]
+        let second = store.addTab(kind: .today, title: "T2", url: url("https://t2.test"))
+        store.selectTab(second.id)
+        store.closeTab(second.id)
+        XCTAssertEqual(store.selectedItemID, inFolder.id)
+        XCTAssertNotEqual(store.selectedItemID, loose.id)
+    }
+
+    func testClosingTodayTabStillMovesToTheNextTodayTab() {
+        let store = makeStore()
+        store.addTab(kind: .pinned, title: "Pin", url: url("https://pin.test"))
+        store.isTabOpen = { _ in false }
+        let older = store.addTab(kind: .today, title: "Older", url: url("https://older.test"))
+        let middle = store.addTab(kind: .today, title: "Middle", url: url("https://middle.test"))
+        let newer = store.addTab(kind: .today, title: "Newer", url: url("https://newer.test"))
+        store.selectTab(middle.id)
+        store.closeTab(middle.id)
+        XCTAssertEqual(store.selectedItemID, older.id, "the row below takes its place")
+        store.closeTab(older.id)
+        XCTAssertEqual(store.selectedItemID, newer.id, "the last row falls back to the one above")
+        XCTAssertNotNil(store.archivedTabs.first { $0.id == middle.id }, "Today closes archive")
+    }
+
+    func testUnloadingAFavoriteSkipsSavedPinsAndArchivingDoesToo() throws {
+        let store = makeStore()
+        let favorite = store.addTab(kind: .favorite, title: "Fav", url: url("https://fav.test"))
+        let pin = store.addTab(kind: .pinned, title: "Pin", url: url("https://pin.test"))
+        store.isTabOpen = { _ in false }
+        store.selectTab(favorite.id)
+        XCTAssertTrue(store.unloadFavorite(favorite.id))
+        XCTAssertNil(store.selectedItemID)
+
+        let today = store.addTab(kind: .today, title: "T", url: url("https://t.test"))
+        store.selectTab(today.id)
+        store.archiveTab(today.id, reason: .auto)
+        XCTAssertNil(store.selectedItemID)
+        XCTAssertNotNil(store.tab(withID: pin.id))
+    }
+
+    func testUnloadingAPinIgnoresOpenSiblingsInItsFolder() throws {
+        let store = makeStore()
+        let a = store.addTab(kind: .pinned, title: "A", url: url("https://a.test"))
+        let b = store.addTab(kind: .pinned, title: "B", url: url("https://b.test"))
+        let folder = try XCTUnwrap(store.createFolder(containing: [a.id, b.id]))
+        store.setFolderExpanded(folder.id, false)
+        store.isTabOpen = { _ in true }
+        store.selectTab(a.id)
+        XCTAssertTrue(store.unloadPinnedTab(a.id))
+        XCTAssertNil(store.selectedItemID, "Close and Keep Pinned deselects; it does not walk the folder")
+    }
+
     func testResetAllPinnedTabsAndMakeCurrentSaved() {
         let store = makeStore()
         let a = store.addTab(kind: .pinned, title: "A", url: url("https://a.test"))

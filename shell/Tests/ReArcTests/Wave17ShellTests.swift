@@ -129,8 +129,15 @@ final class Wave17ShellTests: XCTestCase {
         model.closeSelectedTab()
         XCTAssertEqual(model.store.favorites.map(\.id), [favorite.id], "the favorite stays")
         XCTAssertNil(model.engineHost.engine(forTabID: favorite.id, profileID: model.store.activeProfileID), "engine unloaded")
-        XCTAssertEqual(model.store.selectedItemID, pinned.id)
+        // The pin never had a page: it does not take the selection (and load).
+        XCTAssertNil(model.store.selectedItemID)
+        XCTAssertNil(model.engineHost.engine(forTabID: pinned.id, profileID: model.store.activeProfileID))
         XCTAssertTrue(model.store.closedTabStack.records.isEmpty)
+        // With a live page the pin is an open tab and takes it.
+        model.selectTab(pinned.id)
+        model.selectTab(favorite.id)
+        model.closeSelectedTab()
+        XCTAssertEqual(model.store.selectedItemID, pinned.id)
         model.removeFavorite(favorite.id)
         XCTAssertTrue(model.store.favorites.isEmpty)
     }
