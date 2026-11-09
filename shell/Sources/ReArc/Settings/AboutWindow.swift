@@ -29,6 +29,9 @@ final class AboutWindowController: NSWindowController {
         window.isMovableByWindowBackground = true
         super.init(window: window)
         let hosting = NSHostingView(rootView: AboutView(sting: sting, openLink: openLink))
+        // The sting runs under the transparent title bar, behind the close
+        // button, and the window is exactly as tall as the view.
+        hosting.safeAreaRegions = []
         window.contentView = hosting
         window.setContentSize(hosting.fittingSize)
         window.center()
@@ -61,7 +64,7 @@ enum AboutInfo {
     }
 }
 
-private struct AboutView: View {
+struct AboutView: View {
     let sting: AboutStingView
     let openLink: (URL) -> Void
 
@@ -90,8 +93,6 @@ private struct AboutView: View {
         }
         .frame(width: AboutWindowController.width)
         .background(Color(nsColor: .windowBackgroundColor))
-        // The sting runs under the transparent title bar, behind the close button.
-        .ignoresSafeArea(.container, edges: .top)
     }
 
     private var attribution: AttributedString {

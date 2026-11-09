@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import ReArc
 
@@ -31,5 +32,7 @@ final class AboutWindowLayoutTests: XCTestCase {
         XCTAssertTrue(sting.clipsToBounds)
         XCTAssertEqual(sting.convert(sting.bounds, to: nil).maxY, content.bounds.height, accuracy: 0.5,
                        "the sting starts at the window's top edge, under the title bar")
+        let alone = NSHostingView(rootView: AboutView(sting: AboutStingView(), openLink: { _ in })).fittingSize
+        XCTAssertEqual(content.bounds.height, alone.height, accuracy: 0.5, "no empty band under the text")
     }
 }
