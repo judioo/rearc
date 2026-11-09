@@ -1,0 +1,102 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 load the undocked DevTools toolbox page (ABI 1.54)
+
+tab/074 adopts the undocked frontend's device-mode toolbox, but its page
+never loaded. The frontend opens it with window.open, and the toolbox's
+renderer forks that devtools:// navigation to the browser through
+OpenURLFromTab, which ReArcTabDelegate dropped for every hosted DevTools
+contents. With no device_mode_emulation_frame.html, the frontend had
+nowhere to show the device toolbar (⌘⇧M only flipped its icon), and it
+never reported the undocked page bounds, so the page kept its docked rect.
+As Chrome's DevToolsToolboxDelegate::OpenURLFromTab, the toolbox now loads
+devtools:// URLs in place; tab/074's FrontendNavigation throttle still
+admits only its own page. Frontends still open nothing. No ABI change.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/rearc_bridge/rearc_devtools.cc b/chrome/browser/rearc_bridge/rearc_devtools.cc
+index 1fd17ed76e..a0185c5a44 100644
+--- a/chrome/browser/rearc_bridge/rearc_devtools.cc
++++ b/chrome/browser/rearc_bridge/rearc_devtools.cc
+@@ -22,10 +22,12 @@
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
+ #include "content/public/browser/navigation_throttle.h"
++#include "content/public/browser/page_navigator.h"
+ #include "content/public/browser/site_instance.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_observer.h"
+ #include "content/public/browser/web_contents_user_data.h"
++#include "content/public/common/url_constants.h"
+ #include "extensions/browser/view_type_utils.h"
+ #include "extensions/common/mojom/view_type.mojom.h"
+ #include "ui/base/page_transition_types.h"
+@@ -273,6 +275,22 @@ bool AdoptHostedDevToolsToolbox(content::WebContents* source, std::unique_ptr<co
+   return true;
+ }
+ 
++content::WebContents* OpenHostedDevToolsURL(
++    content::WebContents* source, const content::OpenURLParams& params,
++    base::OnceCallback<void(content::NavigationHandle&)> navigation_handle_callback) {
++  // DevToolsToolboxDelegate::OpenURLFromTab: the renderer forks the toolbox's
++  // devtools:// navigations, its first one included, to the browser. Load
++  // them in place; FrontendNavigation admits only the toolbox page. A
++  // frontend opens nothing.
++  if (!HostedToolbox::FromWebContents(source) || !params.url.SchemeIs(content::kChromeDevToolsScheme)) {
++    return nullptr;
++  }
++  base::WeakPtr<content::NavigationHandle> navigation_handle =
++      source->GetController().LoadURLWithParams(content::NavigationController::LoadURLParams(params));
++  if (navigation_handle_callback && navigation_handle) std::move(navigation_handle_callback).Run(*navigation_handle);
++  return source;
++}
++
+ void AddHostedDevToolsNavigationThrottle(content::NavigationThrottleRegistry& registry) {
+   auto* contents = registry.GetNavigationHandle().GetWebContents();
+   if (IsHostedDevTools(contents)) {
+diff --git a/chrome/browser/rearc_bridge/rearc_devtools.h b/chrome/browser/rearc_bridge/rearc_devtools.h
+index 518b9b3d43..c9eb926f0d 100644
+--- a/chrome/browser/rearc_bridge/rearc_devtools.h
++++ b/chrome/browser/rearc_bridge/rearc_devtools.h
+@@ -4,10 +4,13 @@
+ #ifndef CHROME_BROWSER_REARC_BRIDGE_REARC_DEVTOOLS_H_
+ #define CHROME_BROWSER_REARC_BRIDGE_REARC_DEVTOOLS_H_
+ #include <memory>
++#include "base/functional/callback_forward.h"
+ class DevToolsUIBindings;
+ class GURL;
+ namespace content {
+ class WebContents;
++class NavigationHandle;
++struct OpenURLParams;
+ class NavigationThrottleRegistry;
+ }
+ namespace rearc {
+@@ -20,5 +23,10 @@ void HostedDevToolsContentsCreated(content::WebContents* source, const GURL& tar
+                                    content::WebContents* contents);
+ bool AdoptHostedDevToolsToolbox(content::WebContents* source,
+                                 std::unique_ptr<content::WebContents>& contents);
++// The toolbox's own devtools:// navigations, which its renderer forks to the
++// browser; nullptr for anything else a hosted frontend or toolbox opens.
++content::WebContents* OpenHostedDevToolsURL(
++    content::WebContents* source, const content::OpenURLParams& params,
++    base::OnceCallback<void(content::NavigationHandle&)> navigation_handle_callback);
+ }
+ #endif
+diff --git a/chrome/browser/rearc_bridge/tab_delegate.cc b/chrome/browser/rearc_bridge/tab_delegate.cc
+index 48271215b9..8f51b0df70 100644
+--- a/chrome/browser/rearc_bridge/tab_delegate.cc
++++ b/chrome/browser/rearc_bridge/tab_delegate.cc
+@@ -45,7 +45,9 @@ content::WebContents* ReArcTabDelegate::OpenURLFromTab(
+     const content::OpenURLParams& params,
+     base::OnceCallback<void(content::NavigationHandle&)>
+         navigation_handle_callback) {
+-  if (IsHostedDevTools(source)) return nullptr;
++  if (IsHostedDevTools(source)) {
++    return OpenHostedDevToolsURL(source, params, std::move(navigation_handle_callback));
++  }
+   switch (params.disposition) {
+     case WindowOpenDisposition::CURRENT_TAB: {
+       // Real same-tab routing from day one, following the minimal-embedder

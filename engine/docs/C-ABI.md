@@ -2298,13 +2298,22 @@ count as `DevToolsWindow` does, locked to its URL like the frontend, and
 force-closed with it. Only the frontend's own toolbox is adopted; a reloaded
 frontend's new toolbox replaces (force-closes) the old one, as in Chrome.
 
+The toolbox's renderer forks its own `devtools://` navigation, the first one
+included, to the browser through `OpenURLFromTab`. Patch
+`tab/076-devtools-toolbox-navigation` loads it in place, as Chrome's
+`DevToolsToolboxDelegate` does. Before 076 it was dropped: the toolbox stayed
+blank, the undocked device toolbar had nowhere to show, and the page kept its
+docked bounds. A frontend's own `OpenURLFromTab` still opens nothing.
+
 Run `python3 engine/tests/run_devtools_docking.py` after building. The views
 sit in a transparent borderless window ordered in far off screen without
 activation, so no input is posted and focus never moves. It proves the
 non-dockable default, `can_dock`, the registered device-toolbar and
 toggle-dock actions with their shortcuts, right/left/bottom/undocked
 round-trips with bounds, responsive emulation (`screen.width` 375) docked
-and undocked, toolbox replacement after a frontend reload, toggle-dock
+and undocked, the toolbox committing its page, the device-mode action
+undocked (the page fills the toolbox with it off and sits below the device
+toolbar with it on), toolbox replacement after a frontend reload, toggle-dock
 returning to the last side, the toolbox closing with its frontend, and, in a
 second run on the same profile, the persisted side. Mobile device emulation
 is avoided there only because a debug-only Blink DCHECK

@@ -5,7 +5,9 @@
 // it, can_dock=true, the device toolbar and toggle-dock actions exist, every
 // side round-trips through setIsDocked, device emulation reaches the page
 // docked and undocked (through the adopted toolbox), and the toolbox closes
-// with its frontend. Phase 1 (same profile): the last side persisted.
+// with its frontend; undocked, the toolbox loads its page, the device-mode
+// action shows and hides the device toolbar there and the page fills the
+// toolbox without it. Phase 1 (same profile): the last side persisted.
 #import <AppKit/AppKit.h>
 #include "rearc_engine_abi.h"
 #include <assert.h>
@@ -23,6 +25,7 @@ static std::set<uint64_t> closed;
 static std::vector<ReArcDevToolsDockEvent> docks;
 static std::string base,front_url;
 static bool stopped,started,second;
+static std::set<uint64_t> loaded_toolboxes;
 static NSURLSessionWebSocketTask* ws;
 static int seq;
 static std::function<void(NSDictionary*)> reply;
@@ -61,22 +64,39 @@ static void reloaded(int tries=400);
 static void closing(){
  assert(ReArcTabClose(front,false,[](void*,ReArcStatus s,bool c){assert(!s&&!c);after(500,[]{assert(closed.contains(front)&&!closed.contains(target));if(toolbox){assert(closed.contains(toolbox));puts("DOCK toolbox closes with its frontend PASS");}shutdown();});},nullptr)==0);
 }
+static void toggle_device_mode(std::function<void()> f){evaluate(@"(async()=>{const UI=await import('./ui/legacy/legacy.js');await UI.ActionRegistry.ActionRegistry.instance().getAction('emulation.toggle-device-mode').execute();return 1})()",[f](id){f();});}
+static void wait_toolbox_loaded(std::function<void()> f,int tries=200){
+ if(loaded_toolboxes.contains(toolbox)){puts("DOCK toolbox loads device_mode_emulation_frame.html PASS");f();return;}
+ if(!tries){fprintf(stderr,"DOCK toolbox %llu never committed its page\n",toolbox);abort();}
+ after(50,[f,tries]{wait_toolbox_loaded(f,tries-1);});
+}
+static bool fills_toolbox(const ReArcDevToolsDockEvent& d){return d.dock_side==0&&d.in_tab_tab_id==toolbox&&d.has_bounds&&d.x==0&&d.y==0&&d.width==1000&&d.height==500;}
+// Device mode on in the toolbox: its toolbar sits above the page.
+static bool device_mode_in_toolbox(const ReArcDevToolsDockEvent& d){return d.dock_side==0&&d.in_tab_tab_id==toolbox&&d.has_bounds&&d.y>0&&d.width>0&&d.width<=1000&&d.height>0&&d.height<500;}
 static void undocked(){
  // Chrome's toolbox: opened by the frontend, adopted with opener = frontend.
+ // Its page must load (the renderer forks it through OpenURLFromTab), or
+ // the device toolbar has nowhere to show and the page keeps its docked
+ // bounds. Device mode is still on from the bottom dock.
  wait_dock("undocked",[](auto& d){return d.dock_side==0&&toolbox&&d.in_tab_tab_id==toolbox;},[]{
-  wait_dock("undocked page bounds",[](auto& d){return d.dock_side==0&&d.in_tab_tab_id==toolbox&&d.has_bounds&&d.width>0;},[]{
-   evaluate(kEmulate,[](id w){NSLog(@"EMULATE %@",w);assert([w isKindOfClass:NSNumber.class]&&[w intValue]==375);puts("DOCK device emulation reaches the page undocked PASS");
-    // A reloaded frontend opens a new toolbox; it replaces the old one, as in DevToolsWindow.
-    assert(ReArcTabReload(front,false)==REARC_OK);reloaded();});});});
+  wait_toolbox_loaded([]{
+   wait_dock("undocked device mode shows in the toolbox",device_mode_in_toolbox,[]{
+    // The device-mode action is ⌘⇧M and the toolbar's device icon.
+    toggle_device_mode([]{wait_dock("undocked device mode off: the page fills the toolbox",fills_toolbox,[]{
+     toggle_device_mode([]{wait_dock("undocked device mode back on",device_mode_in_toolbox,[]{
+      evaluate(kEmulate,[](id w){NSLog(@"EMULATE %@",w);assert([w isKindOfClass:NSNumber.class]&&[w intValue]==375);puts("DOCK device emulation reaches the page undocked PASS");
+       wait_dock("undocked 375px responsive bounds",[](auto& d){return device_mode_in_toolbox(d)&&d.width==375;},[]{
+        // A reloaded frontend opens a new toolbox; it replaces the old one, as in DevToolsWindow.
+        assert(ReArcTabReload(front,false)==REARC_OK);reloaded();});});});});});});});});});
 }
 static void reloaded(int tries){
  if(!(replaced&&closed.contains(replaced))){assert(tries);after(50,[tries]{reloaded(tries-1);});return;}
  puts("DOCK reloaded frontend's toolbox replaces the old one PASS");
- wait_dock("undocked after reload",[](auto& d){return d.dock_side==0&&d.in_tab_tab_id==toolbox&&d.has_bounds;},[]{
+ wait_dock("undocked after reload",[](auto& d){return d.dock_side==0&&d.in_tab_tab_id==toolbox&&d.has_bounds;},[]{wait_toolbox_loaded([]{
     evaluate(@"(async()=>{const UI=await import('./ui/legacy/legacy.js');const a=UI.ActionRegistry.ActionRegistry.instance();for(let n=0;n<200&&!a.hasAction('main.toggle-dock');++n)await new Promise(r=>setTimeout(r,50));return 1})()",[](id){
     // ⌘⇧D's action: back to the last docked side.
     evaluate(@"(async()=>{const UI=await import('./ui/legacy/legacy.js');await UI.ActionRegistry.ActionRegistry.instance().getAction('main.toggle-dock').execute();return 1})()",[](id){
-     wait_dock("toggle-dock back to bottom",[](auto& d){return d.dock_side==2&&d.in_tab_tab_id==front;},[]{side(@"left",[]{wait_dock("left again",[](auto& d){return d.dock_side==3;},closing);});});});});});
+     wait_dock("toggle-dock back to bottom",[](auto& d){return d.dock_side==2&&d.in_tab_tab_id==front;},[]{side(@"left",[]{wait_dock("left again",[](auto& d){return d.dock_side==3;},closing);});});});});});});
 }
 static void prove(){
  connect_front([]{evaluate(@R"JS((async()=>{
@@ -105,6 +125,7 @@ static void event(void*,const ReArcTabEvent* e){
  assert(!e->is_crashed);if(e->kind==2){closed.insert(e->tab_id);return;}
  if(e->kind==0&&e->opener_tab_id==front&&front){assert(!replaced);replaced=toolbox;toolbox=e->tab_id;assert(std::string(e->url).rfind("devtools://devtools/bundled/device_mode_emulation_frame.html",0)==0);attach(toolbox);puts("DOCK toolbox adopted as a registry tab PASS");}
  if(e->kind==0&&e->opener_tab_id==target)front_url=e->url?e->url:"";
+ if(e->kind==3&&e->tab_id==toolbox&&toolbox&&e->url&&std::string(e->url).rfind("devtools://devtools/bundled/device_mode_emulation_frame.html",0)==0)loaded_toolboxes.insert(e->tab_id);
  if(e->tab_id==target&&e->kind==1&&(e->changes&2)&&std::string(e->title)=="devtools-ready"&&!started){started=true;
   uint64_t plain=0;assert(ReArcTabOpenDevTools(target,&plain)==0&&plain);
   assert(ReArcTabClose(plain,true,[](void*,ReArcStatus s,bool){assert(!s);assert(front_url.rfind("devtools://devtools/bundled/devtools_app.html",0)==0&&front_url.find("can_dock")==std::string::npos);

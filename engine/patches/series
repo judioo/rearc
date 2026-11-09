@@ -81,6 +81,7 @@ tab/072-credits-webui-admission.patch          # P-TAB-001 ABI 1.52: static brow
 tab/073-bulk-extension-install.patch            # P-TAB-001 ABI 1.53: approved bulk store installs and unpacked loading
 tab/074-dockable-hosted-devtools.patch          # P-TAB-001 ABI 1.54: dockable hosted DevTools, dock side and device-mode toolbox
 tab/075-bulk-extension-exports.patch            # P-TAB-001 ABI 1.53 follow-up: list tab/073's exports for the release framework
+tab/076-devtools-toolbox-navigation.patch      # P-TAB-001 ABI 1.54 follow-up: the undocked DevTools toolbox loads its page (device toolbar, page bounds)
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:
