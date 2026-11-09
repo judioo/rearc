@@ -446,6 +446,10 @@ public struct ExtensionTabRequest: Identifiable, Equatable, Sendable {
 public enum ExtensionTabPlacement: Equatable, Sendable {
     /// A new blank tab in this space (the engine then loads the extension's URL).
     case newTab(space: UUID)
+    /// A new Today tab at the bottom of this space, not selected, whatever
+    /// the request asked: an extension an import is installing quietly
+    /// (`QuietExtensionInstalls`) opening its welcome page.
+    case backgroundTab(space: UUID)
     /// windows.create: a Little Arc window, its own logical window.
     case littleArc
     /// Select this existing tab and answer with it.
@@ -461,8 +465,14 @@ public enum ExtensionTabPlacement: Equatable, Sendable {
         currentSpace: UUID?,
         windowSpace: UUID?,
         spaces: [UUID],
+        quiet: Bool = false,
         profileMatches: (UUID) -> Bool
     ) -> ExtensionTabPlacement {
+        if quiet, request.kind == .createTab || request.kind == .optionsPage {
+            let placed = resolve(request, currentSpace: currentSpace, windowSpace: windowSpace, spaces: spaces, profileMatches: profileMatches)
+            if case .newTab(let space) = placed { return .backgroundTab(space: space) }
+            return placed
+        }
         switch request.kind {
         case .activate:
             return request.tabID == 0 ? .decline("no tab to activate") : .activate(tab: request.tabID)
@@ -519,4 +529,34 @@ public enum LinkOpenPlacement: Equatable, Sendable {
 
     /// Dispositions 1, 4 and 5 must answer with a tab that is active in its window.
     public var isActive: Bool { self != .backgroundTab }
+}
+
+/// Extensions an import's bulk install is adding. Like Chrome's installs
+/// from sync they install without asking, and the pages they open from
+/// `runtime.onInstalled` (welcome, "getting started") must not take the
+/// window: while an extension installs, and for `grace` after, its new tabs
+/// open in the background (`ExtensionTabPlacement.backgroundTab`).
+public struct QuietExtensionInstalls: Equatable, Sendable {
+    /// `onInstalled` runs once the extension's service worker starts, a
+    /// moment after the engine reports it installed.
+    public static let grace: TimeInterval = 120
+    /// The longest a store download may run before it is treated as done.
+    public static let installing: TimeInterval = 30 * 60
+
+    private var until: [String: Date] = [:]
+
+    public init() {}
+
+    public mutating func begin(_ ids: [String], at now: Date = Date()) {
+        for id in ids { until[id] = now.addingTimeInterval(Self.installing) }
+    }
+
+    public mutating func finished(_ id: String, at now: Date = Date()) {
+        until[id] = now.addingTimeInterval(Self.grace)
+    }
+
+    public func isQuiet(_ id: String, at now: Date = Date()) -> Bool {
+        guard !id.isEmpty, let end = until[id] else { return false }
+        return now < end
+    }
 }

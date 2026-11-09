@@ -637,6 +637,20 @@ public final class SidebarStore {
         }
     }
 
+    /// A Today tab below the space's others, where tabs nobody opened by
+    /// hand collect (an import's extensions' welcome pages); not selected.
+    @discardableResult
+    public func appendTodayTab(title: String, url: URL, in spaceID: Space.ID? = nil) -> Tab {
+        let id = spaceID ?? activeSpaceID
+        var content = contentBySpace[id] ?? SpaceContent()
+        let rank = rankForNewItem(in: content.today, atIndex: content.today.count)
+        let tab = Tab(kind: .today, title: title, url: url, sortRank: rank, lastActiveAt: now())
+        content.today.append(.tab(tab))
+        contentBySpace[id] = content
+        notifyMutation(.insertItem(id: tab.id, spaceID: id, container: .unpinned, sortRank: rank))
+        return tab
+    }
+
     /// Removes a tab and records it for ⇧⌘T. Pinned and Today tabs also go to
     /// the archive (Arc keywords for Archive Tab include "Close"); a favorite
     /// is deleted (`unloadFavorite` is the Cmd+W path for favorites).

@@ -316,6 +316,10 @@ public struct Space: Identifiable, Hashable, Codable {
     public var arcSourceID: String? = nil
     public var arcImportedItemIDs: Set<UUID>? = nil
     public var arcItemMapping: [UUID: UUID]? = nil
+    /// The browser profile whose bookmarks made this space
+    /// (`ImportSourceProfile.id`, "chrome/Default"): a second import of that
+    /// profile adds only its new bookmarks here instead of another space.
+    public var bookmarkSourceID: String? = nil
     public var name: String
     public var theme: SpaceTheme
     /// SF Symbol name used as the space's glyph in the switcher.
@@ -358,7 +362,7 @@ public struct Space: Identifiable, Hashable, Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case arcSourceID, arcImportedItemIDs, arcItemMapping
+        case arcSourceID, arcImportedItemIDs, arcItemMapping, bookmarkSourceID
         case id, name, theme, iconName
         case pinnedContainerID, unpinnedContainerID, unpinnedShared
         case profileID, sortRank, boostsEnabled
@@ -369,6 +373,7 @@ public struct Space: Identifiable, Hashable, Codable {
         arcItemMapping = try c.decodeIfPresent([UUID: UUID].self, forKey: .arcItemMapping)
         arcSourceID = try c.decodeIfPresent(String.self, forKey: .arcSourceID)
         arcImportedItemIDs = try c.decodeIfPresent(Set<UUID>.self, forKey: .arcImportedItemIDs)
+        bookmarkSourceID = try c.decodeIfPresent(String.self, forKey: .bookmarkSourceID)
         id = try c.decode(UUID.self, forKey: .id)
         name = try c.decode(String.self, forKey: .name)
         theme = try c.decode(SpaceTheme.self, forKey: .theme)
@@ -387,6 +392,7 @@ public struct Space: Identifiable, Hashable, Codable {
         try c.encodeIfPresent(arcItemMapping, forKey: .arcItemMapping)
         try c.encodeIfPresent(arcSourceID, forKey: .arcSourceID)
         try c.encodeIfPresent(arcImportedItemIDs, forKey: .arcImportedItemIDs)
+        try c.encodeIfPresent(bookmarkSourceID, forKey: .bookmarkSourceID)
         try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
         try c.encode(theme, forKey: .theme)

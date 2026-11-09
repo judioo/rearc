@@ -63,11 +63,47 @@ public final class SidebarFilePersistence: SidebarPersisting {
     /// No sidebar yet, or one an unfinished onboarding left.
     public var isFirstRun: Bool { loadOutcome == .missingFile || onboardingPending }
 
-    /// Written before the onboarding can change the store.
-    public func beginOnboarding() {
+    /// The untouched starter an onboarding replaces, kept in the marker so
+    /// a launch that resumes an interrupted onboarding still knows which
+    /// space was the starter once the import has made the sidebar no longer
+    /// look like one.
+    public struct OnboardingStarter: Codable, Equatable, Sendable {
+        public var spaceIDs: [UUID]
+        public var favoriteIDs: [UUID]
+        /// Every row the starter held: a starter space with any other row
+        /// ("Onboard later", then browsing) is the person's now, and stays.
+        public var itemIDs: [UUID]
+
+        public init(spaceIDs: [UUID] = [], favoriteIDs: [UUID] = [], itemIDs: [UUID] = []) {
+            self.spaceIDs = spaceIDs
+            self.favoriteIDs = favoriteIDs
+            self.itemIDs = itemIDs
+        }
+
+        enum CodingKeys: String, CodingKey { case spaceIDs, favoriteIDs, itemIDs }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            spaceIDs = try c.decodeIfPresent([UUID].self, forKey: .spaceIDs) ?? []
+            favoriteIDs = try c.decodeIfPresent([UUID].self, forKey: .favoriteIDs) ?? []
+            itemIDs = try c.decodeIfPresent([UUID].self, forKey: .itemIDs) ?? []
+        }
+    }
+
+    /// Written before the onboarding can change the store; a marker already
+    /// there (an interrupted onboarding) keeps the starter it recorded.
+    public func beginOnboarding(starter: OnboardingStarter = OnboardingStarter()) {
         guard !FileManager.default.fileExists(atPath: onboardingMarkerURL.path) else { return }
         try? FileManager.default.createDirectory(at: onboardingMarkerURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? Data().write(to: onboardingMarkerURL, options: [.atomic])
+        let data = (try? JSONEncoder().encode(starter)) ?? Data()
+        try? data.write(to: onboardingMarkerURL, options: [.atomic])
+    }
+
+    /// The starter `beginOnboarding` recorded; nil without a marker, or for
+    /// one written by builds that recorded none (empty).
+    public var onboardingStarter: OnboardingStarter? {
+        guard let data = try? Data(contentsOf: onboardingMarkerURL), !data.isEmpty else { return nil }
+        return try? JSONDecoder().decode(OnboardingStarter.self, from: data)
     }
 
     /// Completed or skipped: the next launch opens the browser.

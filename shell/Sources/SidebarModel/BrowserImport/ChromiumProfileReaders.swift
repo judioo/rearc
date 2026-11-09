@@ -90,13 +90,16 @@ public enum ChromiumHistoryReader {
     }
 
     /// Visible pages, for the import preview; nil when it cannot be read.
-    public static func pageCount(_ url: URL) -> Int? {
+    /// With `after`, only pages visited since (`ImportLedger.historyThrough`;
+    /// a microsecond of slack absorbs the round trip through `Date`).
+    public static func pageCount(_ url: URL, after: Date? = nil) -> Int? {
         guard FileManager.default.fileExists(atPath: url.path),
               let snapshot = try? SQLiteSnapshot(copying: url) else { return nil }
         defer { snapshot.remove() }
+        let since = after.map { " AND last_visit_time > \(chromiumTime($0) + 1)" } ?? ""
         return try? withDatabase(snapshot.url) { db in
             var count = 0
-            try query(db, "SELECT COUNT(*) FROM urls WHERE hidden = 0 AND visit_count > 0") { row in
+            try query(db, "SELECT COUNT(*) FROM urls WHERE hidden = 0 AND visit_count > 0" + since) { row in
                 count = Int(sqlite3_column_int64(row, 0))
                 return false
             }

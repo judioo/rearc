@@ -144,9 +144,10 @@ public struct ExtensionReinstallQueue: Equatable, Codable, Sendable {
     public private(set) var position = 0
 
     /// The ones that can be reinstalled, each once (the same extension can
-    /// come from more than one source profile).
-    public init(_ extensions: [SourceExtension], into profileID: Profile.ID) {
-        items = ExtensionConsolidation(extensions).candidates
+    /// come from more than one source profile), less those `installedIDs`
+    /// says the ReArc profile has already.
+    public init(_ extensions: [SourceExtension], into profileID: Profile.ID, installedIDs: Set<String> = []) {
+        items = ExtensionConsolidation(extensions, installedIDs: installedIDs).candidates
             .map { Item(id: $0.id, name: $0.name, origin: $0.origin, profileID: profileID, enabledByDefault: $0.isEnabled) }
     }
 
