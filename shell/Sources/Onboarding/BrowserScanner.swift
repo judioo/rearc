@@ -48,18 +48,25 @@ public struct ImportSource: Equatable, Identifiable, Sendable {
     /// The extensions `stats.extensions` counts, by id, so one installed in
     /// two profiles counts once; empty when only the count is known.
     public var extensionIDs: [String]
+    /// Arc's bookmarks copy its sidebar, so `stats.bookmarks` counts only
+    /// the ones its spaces don't bring; this is the count when its spaces
+    /// stay behind (nil: the same).
+    public var bookmarksWithoutSpaces: Int?
 
     public init(browser: String, directory: String, profile: String, colour: RGBA, stats: ImportStats, spaces: [SpaceSeed] = [],
-                extensionIDs: [String] = []) {
+                extensionIDs: [String] = [], bookmarksWithoutSpaces: Int? = nil) {
         self.browser = browser; self.directory = directory; self.profile = profile; self.colour = colour; self.stats = stats
-        self.spaces = spaces; self.extensionIDs = extensionIDs
+        self.spaces = spaces; self.extensionIDs = extensionIDs; self.bookmarksWithoutSpaces = bookmarksWithoutSpaces
     }
 
     /// What `sources` bring in `categories`: Act 2's line, and the host's
     /// rehearsal, from the same sum. Passwords never come over.
     public static func totals(_ sources: [ImportSource], categories: [ImportCategory]) -> ImportStats {
         var sum = sources.map(\.stats).reduce(ImportStats(), +)
-        if !categories.contains(.spaces) { sum.spaces = 0; sum.tabs = 0 }
+        if !categories.contains(.spaces) {
+            sum.spaces = 0; sum.tabs = 0
+            sum.bookmarks = sources.reduce(0) { $0 + ($1.bookmarksWithoutSpaces ?? $1.stats.bookmarks) }
+        }
         if !categories.contains(.bookmarks) { sum.bookmarks = 0 }
         if !categories.contains(.history) { sum.pages = 0 }
         sum.passwords = 0

@@ -2,6 +2,13 @@ import Foundation
 import SidebarModel
 import SwiftUI
 
+/// An install toast that waits while the sunrise covers the browser.
+struct HeldExtensionToast: Equatable {
+    var message: String
+    var action: ShellToast.Action?
+    var duration: TimeInterval
+}
+
 /// Background import work and terminal outcomes, saved beside the sidebar.
 struct PendingExtensionReinstall: Codable, Equatable {
     static let fileName = "extension-reinstall.json"
@@ -77,7 +84,35 @@ extension BrowserViewModel {
         installPendingExtensions()
     }
 
+    /// The sunrise covers the browser: nothing installs, and progress and
+    /// results wait for `releaseExtensionFeedback`.
+    func holdExtensionFeedback() {
+        extensionFeedbackHeld = true
+    }
+
+    /// The browser is on screen: the latest install toast held back shows
+    /// now, with its full time (a result rather than stale progress).
+    func releaseExtensionFeedback() {
+        guard extensionFeedbackHeld else { return }
+        extensionFeedbackHeld = false
+        if let held = heldExtensionToast {
+            heldExtensionToast = nil
+            showToast(held.message, systemImage: "puzzlepiece.extension", action: held.action, duration: held.duration)
+        }
+    }
+
+    /// Install progress and results: shown, or held while the sunrise is up.
+    func showExtensionToast(_ message: String, action: ShellToast.Action? = nil, duration: TimeInterval = ShellToast.defaultDuration) {
+        let toast = HeldExtensionToast(message: message, action: action, duration: duration)
+        if extensionFeedbackHeld {
+            heldExtensionToast = toast
+        } else {
+            showToast(toast.message, systemImage: "puzzlepiece.extension", action: toast.action, duration: toast.duration)
+        }
+    }
+
     func installPendingExtensions() {
+        guard !extensionFeedbackHeld else { return }
         guard let pending = pendingExtensionReinstall, !pending.outstandingItems.isEmpty,
               extensionReinstallSession?.isInstalling != true, !isReconcilingExtensionInventory else { return }
         if pending.queue.items.contains(where: { $0.enabledByDefault == nil }) {

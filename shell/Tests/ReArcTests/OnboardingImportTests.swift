@@ -284,4 +284,207 @@ final class OnboardingImportTests: XCTestCase {
         XCTAssertFalse(WelcomePage.html(name: "", colour: MarkPalette.sun, spaces: 1, imported: ImportStats(extensions: 1))
             .contains("came with you"))
     }
+
+    // MARK: Importing again (QA-483)
+
+    /// A model on the data folder's own sidebar file (the starter when there is none), as a launch makes it.
+    private func launch() -> BrowserViewModel {
+        let model = BrowserViewModel(
+            persistence: SidebarFilePersistence(fileURL: data.appendingPathComponent("sidebar.json")),
+            syncEngine: LocalSyncEngine(),
+            faviconStore: FaviconStore(directory: nil)
+        )
+        model.tabUnloadDefaults = UserDefaults(suiteName: "rearc-onboarding-\(UUID().uuidString)")!
+        model.externalLinkDefaults = UserDefaults(suiteName: "rearc-onboarding-links-\(UUID().uuidString)")!
+        return model
+    }
+
+    /// Arc's own Chromium bookmarks: its sidebar's two pinned tabs, as Arc writes them.
+    private func writeArcBookmarksMirroringItsSidebar() throws {
+        try write(["roots": ["bookmark_bar": ["type": "folder", "children": [
+            ["type": "folder", "name": "Studio", "children": [
+                ["type": "url", "name": "Notes", "url": "https://notes.example.com/"],
+                ["type": "url", "name": "Plans", "url": "https://plans.example.com"],
+            ]],
+        ]]]], "Arc/User Data/Default/Bookmarks")
+    }
+
+    private func spaceNames(_ model: BrowserViewModel) -> [String] { model.store.spaces.map(\.name) }
+
+    /// B1: the bookmarks space Arc's own bookmarks would make is a copy of its sidebar.
+    func testArcsOwnBookmarksDoNotMakeASpaceBesideItsSidebar() throws {
+        try writeArcBookmarksMirroringItsSidebar()
+        let found = sources()
+        XCTAssertEqual(found[0].stats.bookmarks, 0, "Act 2 does not count the copies")
+        XCTAssertEqual(found[0].bookmarksWithoutSpaces, 2)
+        var log = Act2Log(start: 0, sources: found, offered: ImportCategory.allCases)
+        let model = makeModel()
+        let outcome = importForReal(found, ImportCategory.allCases, model: model)
+        XCTAssertEqual(outcome.totals, log.totals(at: 0))
+        XCTAssertFalse(spaceNames(model).contains("Arc – Personal"))
+        XCTAssertEqual(outcome.spaces.map(\.name), ["Studio", "Google Chrome – Everyday"])
+
+        // Without Arc's spaces its bookmarks are its own, and come.
+        log.categories = [(0, .spaces)]
+        let bookmarksOnly = makeModel()
+        let alone = importForReal(found, [.bookmarks, .history, .extensions], model: bookmarksOnly)
+        XCTAssertEqual(alone.totals, log.totals(at: 0))
+        XCTAssertTrue(spaceNames(bookmarksOnly).contains("Arc – Personal"))
+    }
+
+    /// B3: killed after the import, relaunched, the onboarding run again from the top.
+    func testAResumedOnboardingReusesWhatTheInterruptedOneBrought() throws {
+        try writeArcBookmarksMirroringItsSidebar()
+        let first = launch()
+        let starter = try XCTUnwrap(first.store.spaces.first).id
+        let profile = first.store.activeProfileID
+        XCTAssertEqual(FirstRunOnboarding.forLaunch(first, arguments: [], automated: false), .firstRun)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: data.appendingPathComponent("sidebar.json").path),
+                      "the starter is saved before anything else, so its profile (and engine folder) are the ones a relaunch uses")
+        let once = importForReal(sources(), ImportCategory.allCases, model: first)
+        first.persistence.flush()
+        let spaces = spaceNames(first)
+
+        let resumed = launch()
+        XCTAssertTrue(resumed.isFirstRun)
+        XCTAssertEqual(resumed.store.activeProfileID, profile, "no second profile")
+        XCTAssertEqual(resumed.onboardingStarter.spaceIDs, [starter], "the marker still knows the starter")
+        XCTAssertEqual(FirstRunOnboarding.forLaunch(resumed, arguments: [], automated: false), .firstRun)
+        let again = importForReal(sources(), ImportCategory.allCases, model: resumed)
+        XCTAssertEqual(spaceNames(resumed), spaces, "nothing imported twice")
+        XCTAssertEqual(again.totals, once.totals, "the same counts as one uninterrupted run")
+        XCTAssertEqual(again.spaces.map(\.hostID), once.spaces.map(\.hostID), "Act 3 gets every imported space")
+
+        let result = OnboardingResult(name: "Ada", colour: MarkPalette.sun,
+                                      spaces: again.spaces.map { OnboardingSpace(hostID: $0.hostID, name: $0.name, icon: $0.icon, colour: $0.colour) },
+                                      removedHostIDs: [])
+        let starterNow = resumed.onboardingStarter
+        OnboardingApplier.apply(result, to: resumed.store, mainProfileID: profile,
+                                replacing: starterNow.spaceIDs, starterFavorites: starterNow.favoriteIDs)
+        XCTAssertNil(resumed.store.space(withID: starter), "the untouched starter goes")
+        XCTAssertEqual(spaceNames(resumed), ["Studio", "Google Chrome – Everyday"])
+        XCTAssertTrue(WelcomePage.html(name: "Ada", colour: MarkPalette.sun, spaces: result.spaces.count, imported: again.totals)
+            .contains("Your profile and 2 spaces are ready."))
+    }
+
+    func testAStarterThePersonUsedIsNotReplaced() throws {
+        let first = launch()
+        let starter = try XCTUnwrap(first.store.spaces.first).id
+        _ = FirstRunOnboarding.forLaunch(first, arguments: [], automated: false)
+        // "Onboard later", then browsing.
+        first.store.addTab(kind: .today, title: "Mine", url: URL(string: "https://mine.example.com/")!, in: starter)
+        first.persistence.flush()
+        XCTAssertEqual(launch().onboardingStarter.spaceIDs, [])
+    }
+
+    /// B2: File › Import of the same Chrome profile, twice.
+    func testImportingAProfileAgainBringsNothingAndSaysImported() throws {
+        let model = makeModel()
+        let session = BrowserImportSession(model: model, applicationSupport: root, arcDefaults: { [:] })
+        let discovered = expectation(description: "discovered")
+        session.discover { discovered.fulfill() }
+        wait(for: [discovered], timeout: 10)
+        let chrome = try XCTUnwrap(session.sources.compactMap { source -> ImportSourceProfile? in
+            if case .profile(let p) = source, p.browser == .chrome { return p }
+            return nil
+        }.first)
+        func select() throws -> BrowserImportSession.ProfileDetail {
+            session.selection = .profile(chrome)
+            let deadline = Date().addingTimeInterval(10)
+            while session.detail(for: chrome) == nil, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+            return try XCTUnwrap(session.detail(for: chrome))
+        }
+        var detail = try select()
+        XCTAssertTrue(session.canImport)
+        XCTAssertEqual(session.bookmarkPlan(for: chrome, detail).newLinks, 2)
+        XCTAssertEqual(detail.newHistoryPages, 2)
+        let imported = expectation(description: "imported")
+        session.performImport { imported.fulfill() }
+        wait(for: [imported], timeout: 10)
+        let spaces = spaceNames(model)
+        let pages = model.visitHistory.records.count
+
+        detail = try select()
+        XCTAssertTrue(session.bookmarkPlan(for: chrome, detail).isEmpty)
+        XCTAssertEqual(detail.newHistoryPages, 0)
+        XCTAssertFalse(session.canImport, "nothing new: Import is off")
+        XCTAssertTrue(session.isUpToDate, "and reads Imported")
+        session.performImport()
+        XCTAssertEqual(spaceNames(model), spaces)
+        XCTAssertEqual(model.visitHistory.records.count, pages)
+        XCTAssertEqual(spaces.filter { $0 == "Google Chrome – Everyday" }.count, 1)
+    }
+
+    /// B2: extensions installed by the first import are not queued, or counted, again.
+    func testInstalledExtensionsAreNotQueuedAgain() throws {
+        let model = makeModel()
+        _ = importForReal(sources(), [.extensions], model: model)
+        var pending = try XCTUnwrap(model.pendingExtensionReinstall)
+        pending.results = Dictionary(uniqueKeysWithValues: pending.queue.items.map { ($0.key, .init(status: 0, reason: "")) })
+        model.setPendingExtensionReinstall(pending)
+        let main = model.store.activeProfileID
+        let installed = model.installedExtensionsReader()(main)
+        XCTAssertEqual(installed, [Self.notesID, Self.readerID])
+
+        let recounted = OnboardingImportPlan.counted(BrowserScanner.scan(applicationSupport: root), applicationSupport: root,
+                                                     extensions: true, installedIDs: installed)
+        XCTAssertEqual(recounted.map(\.stats.extensions), [0, 0])
+        var read = OnboardingImportPlan(sources: sources(), categories: [.extensions]).read(applicationSupport: root, arcDefaults: { [:] })
+        read.installedExtensionIDs = installed
+        let outcome = OnboardingImportPlan.apply(read, model: model)
+        XCTAssertEqual(outcome.totals.extensions, 0, "\"0 installing\", not 2")
+        XCTAssertTrue(try XCTUnwrap(model.pendingExtensionReinstall).outstandingItems.isEmpty)
+        XCTAssertEqual(Set(try XCTUnwrap(model.pendingExtensionReinstall).skipped?.filter { $0.reason == "already installed" }.map(\.id) ?? []),
+                       [Self.notesID, Self.readerID])
+    }
+
+    /// B4: under the sunrise nothing installs and no install toast plays; it shows once the browser is back.
+    func testInstallToastsWaitForTheBrowser() throws {
+        let model = makeModel()
+        _ = importForReal(sources(), [.extensions], model: model)
+        let onboarding = FirstRunOnboarding(kind: .firstRun, model: model) { [] }
+        onboarding.start()
+        XCTAssertTrue(model.extensionFeedbackHeld)
+        model.installPendingExtensions()
+        XCTAssertNil(model.extensionReinstallSession, "nothing installs under the sunrise")
+        model.showExtensionToast("Installing extensions… 1 of 2", duration: 3600)
+        model.showExtensionToast("2 extensions installed")
+        XCTAssertNil(model.toast, "held, not played unseen")
+
+        onboarding.onboardingFinished()
+        XCTAssertFalse(model.extensionFeedbackHeld)
+        XCTAssertNotNil(model.extensionReinstallSession, "installs start with the browser on screen")
+        XCTAssertNil(model.heldExtensionToast)
+    }
+
+    func testAHeldResultShowsWhenReleased() {
+        let model = makeModel()
+        model.holdExtensionFeedback()
+        model.showExtensionToast("Installing extensions… 1 of 18", duration: 3600)
+        model.showExtensionToast("18 extensions installed")
+        XCTAssertNil(model.toast)
+        model.releaseExtensionFeedback()
+        XCTAssertEqual(model.toast?.message, "18 extensions installed", "the latest, the result")
+        model.showExtensionToast("Installing extensions… 1 of 2", duration: 3600)
+        XCTAssertEqual(model.toast?.message, "Installing extensions… 1 of 2", "not held once the browser is back")
+    }
+
+    /// B10: after Spaces & Sidebar came over, the pane says so instead of "0 spaces".
+    func testSpacesAndSidebarSaysWhatCameOver() throws {
+        let model = makeModel()
+        let session = BrowserImportSession(model: model, applicationSupport: root, arcDefaults: { [:] })
+        let discovered = expectation(description: "discovered")
+        session.discover { discovered.fulfill() }
+        wait(for: [discovered], timeout: 10)
+        session.selection = .arcSidebar
+        XCTAssertEqual(session.arcHeadline, "1 space · 2 pinned tabs · 1 favorite")
+        let arcSpace = try XCTUnwrap(session.arc?.export.spaces.first)
+        XCTAssertFalse(session.isImported(arcSpace))
+        session.performImport()
+        XCTAssertTrue(session.arcSummary.isEmpty)
+        XCTAssertTrue(session.isImported(arcSpace))
+        XCTAssertEqual(session.arcHeadline, "1 space · 2 pinned tabs imported")
+        XCTAssertTrue(session.isUpToDate)
+        XCTAssertFalse(session.canImport)
+    }
 }

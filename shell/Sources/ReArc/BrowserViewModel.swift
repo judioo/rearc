@@ -191,6 +191,13 @@ final class BrowserViewModel {
     var isExtensionReinstallPresented = false
     var extensionReinstallSession: ExtensionReinstallSession?
     var pendingExtensionReinstall: PendingExtensionReinstall?
+    /// Under the sunrise nothing installs, and install progress and its
+    /// result wait (`holdExtensionFeedback`): a toast under the takeover is
+    /// never seen.
+    @ObservationIgnored var extensionFeedbackHeld = false
+    @ObservationIgnored var heldExtensionToast: HeldExtensionToast?
+    /// An import's extensions, whose own tabs open in the background.
+    @ObservationIgnored var quietExtensionInstalls = QuietExtensionInstalls()
     @ObservationIgnored let pendingExtensionReinstallURL: URL
     /// Bumped by the Site Controls command; the key window's URL field opens its panel.
     var siteControlCenterRequest = 0
@@ -597,8 +604,49 @@ final class BrowserViewModel {
         if !deferStartup { finishStartup() }
     }
 
-    /// A first run's onboarding is starting: until it finishes, every launch is a first run.
-    func beginFirstRunOnboarding() { persistence.beginOnboarding() }
+    /// A first run's onboarding is starting: until it finishes, every launch
+    /// is a first run. The marker records the untouched starter, and the
+    /// starter is saved now: a launch killed before its first edit would
+    /// otherwise make a new starter, with a new profile, and leave the
+    /// engine folder the first one opened unused.
+    func beginFirstRunOnboarding() {
+        persistence.beginOnboarding(starter: pristineStarter())
+        persistence.flush()
+    }
+
+    /// The sidebar as the starter (or an older build's sample) left it; empty once it changed.
+    private func pristineStarter() -> SidebarFilePersistence.OnboardingStarter {
+        guard SidebarSyncProjection.isPristine(store.makeSnapshot()) else { return SidebarFilePersistence.OnboardingStarter() }
+        return SidebarFilePersistence.OnboardingStarter(
+            spaceIDs: store.spaces.map(\.id),
+            favoriteIDs: store.profiles.flatMap { store.favorites(in: $0.id).map(\.id) },
+            itemIDs: store.spaces.flatMap { space in Self.rowIDs(store.content(for: space.id)) })
+    }
+
+    private static func rowIDs(_ content: SidebarStore.SpaceContent) -> [UUID] {
+        func ids(_ entries: [SidebarEntry]) -> [UUID] {
+            entries.flatMap { entry -> [UUID] in
+                switch entry {
+                case .folder(let folder): return [folder.id] + ids(folder.children)
+                case .split(let split): return [split.id] + split.tabs.map(\.id)
+                default: return [entry.id]
+                }
+            }
+        }
+        return ids(content.pinned) + ids(content.today)
+    }
+
+    /// The starter an onboarding (perhaps an interrupted one) replaces, as
+    /// far as it is still here.
+    var onboardingStarter: SidebarFilePersistence.OnboardingStarter {
+        var starter = persistence.onboardingStarter ?? pristineStarter()
+        let rows = Set(starter.itemIDs)
+        starter.spaceIDs = starter.spaceIDs.filter { id in
+            store.space(withID: id) != nil && Self.rowIDs(store.content(for: id)).allSatisfy(rows.contains)
+        }
+        starter.favoriteIDs = starter.favoriteIDs.filter { store.tab(withID: $0) != nil }
+        return starter
+    }
 
     /// The first run's onboarding completed or was skipped. The sidebar is
     /// written first: a skipped first run may not have changed it yet, and

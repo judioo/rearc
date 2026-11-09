@@ -327,7 +327,6 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         } else {
             adopt(model)
         }
-        model.installPendingExtensions()
         model.presentAirTrafficControl = { [weak self] in self?.presentAirTrafficControl() }
         model.presentSettings = { [weak self] pane in MainActor.assumeIsolated { self?.presentSettings(pane) } }
         model.onShortcutOverridesChanged = { [weak self, weak model] in
@@ -429,6 +428,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         DispatchQueue.main.async { [weak self] in self?.restoreOtherSessionWindows() }
         // In this same turn, so the first window is put away before it is ever drawn.
         if let kind = FirstRunOnboarding.forLaunch(model) { runOnboarding(kind) }
+        // After the onboarding has started: a resumed first run's queue waits
+        // under the sunrise (`holdExtensionFeedback`) instead of installing there.
+        model.installPendingExtensions()
         ExternalLinkRouter.shared.attach(model)
         ExternalLinkRouter.shared.release()
         NotificationCenter.default.addObserver(

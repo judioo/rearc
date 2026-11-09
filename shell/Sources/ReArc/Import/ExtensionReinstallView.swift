@@ -52,7 +52,7 @@ final class ExtensionReinstallSession {
         guard !isInstalling, !hasFinished else { return }
         guard supportsBulkInstall else {
             // Older engines retain the queue and expose store links on demand.
-            model?.showToast("Extensions are ready in the Chrome Web Store", systemImage: "puzzlepiece.extension", action: .reinstallExtensions)
+            model?.showExtensionToast("Extensions are ready in the Chrome Web Store", action: .reinstallExtensions)
             return
         }
         let chosen = pending.outstandingItems
@@ -70,11 +70,10 @@ final class ExtensionReinstallSession {
         guard let first = remaining.first else {
             isInstalling = false
             hasFinished = true
-            model?.dismissToast()
-            var message = "\(installed) extensions installed"
+            var message = "\(installed) extension\(installed == 1 ? "" : "s") installed"
             if !failures.isEmpty { message += ". \(failures.count) couldn't be installed" }
             if !unavailable.isEmpty { message += ". \(unavailable.count) not available" }
-            model?.showToast(message, systemImage: "puzzlepiece.extension", action: failures.isEmpty && unavailable.isEmpty ? nil : .reinstallExtensions)
+            model?.showExtensionToast(message, action: failures.isEmpty && unavailable.isEmpty ? nil : .reinstallExtensions)
             return
         }
         #if REARC_CHROMIUM
@@ -89,6 +88,8 @@ final class ExtensionReinstallSession {
         } else {
             group = [first]
         }
+        // Their welcome pages open in the background (QuietExtensionInstalls).
+        model?.quietExtensionInstalls.begin(group.map(\.id))
         runtime.installExtensions(group) { [self] item, status, reason, done in
             record(item, status: status, reason: reason)
             if done { run(Array(remaining.dropFirst(group.count))) }
@@ -97,6 +98,7 @@ final class ExtensionReinstallSession {
     }
 
     private func record(_ item: ExtensionReinstallQueue.Item, status: Int32, reason: String) {
+        model?.quietExtensionInstalls.finished(item.id)
         if pending.results == nil { pending.results = [:] }
         pending.results?[item.key] = .init(status: status, reason: reason)
         if status == 1 {
@@ -111,7 +113,7 @@ final class ExtensionReinstallSession {
     }
 
     private func progress() {
-        model?.showToast("Installing extensions… \(completed) of \(total)", systemImage: "puzzlepiece.extension", duration: 3600)
+        model?.showExtensionToast("Installing extensions… \(completed) of \(total)", duration: 3600)
     }
 }
 

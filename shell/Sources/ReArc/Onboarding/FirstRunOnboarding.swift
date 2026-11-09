@@ -65,8 +65,10 @@ final class FirstRunOnboarding: OnboardingHost {
     private var takeover: SunriseTakeover?
     private var hidden: [NSWindow] = []
     /// The untouched starter's space and favorites, cleared once the
-    /// person's own are in (first run only). A sidebar sync adopted, or one an
-    /// interrupted onboarding left changed, is kept.
+    /// person's own are in (first run only). Recorded in the onboarding
+    /// marker when the first run began, so an onboarding resumed after a quit
+    /// or crash still replaces it, though its import made the sidebar no
+    /// longer look like a starter. A sidebar sync adopted is kept.
     private var starterSpaceIDs: [Space.ID] = []
     private var starterFavoriteIDs: [Tab.ID] = []
     private var mainProfileID: Profile.ID?
@@ -91,10 +93,11 @@ final class FirstRunOnboarding: OnboardingHost {
         }
         if applies {
             mainProfileID = model.store.activeProfileID
-            if SidebarSyncProjection.isPristine(model.store.makeSnapshot()) {
-                starterSpaceIDs = model.store.spaces.map(\.id)
-                starterFavoriteIDs = model.store.profiles.flatMap { model.store.favorites(in: $0.id).map(\.id) }
-            }
+            let starter = model.onboardingStarter
+            starterSpaceIDs = starter.spaceIDs
+            starterFavoriteIDs = starter.favoriteIDs
+            // Nothing installs, and no install toast plays, under the sunrise.
+            model.holdExtensionFeedback()
         }
         let takeover = SunriseTakeover(host: self, mode: kind == .replay ? .replay : .firstRun)
         self.takeover = takeover
@@ -115,9 +118,12 @@ final class FirstRunOnboarding: OnboardingHost {
 
     func discoverSources(_ done: @escaping ([ImportSource]) -> Void) {
         let extensions = canReinstallExtensions
+        let installed = model?.installedExtensionsReader()
+        let main = model?.store.activeProfileID
         DispatchQueue.global(qos: .userInitiated).async {
             let found = OnboardingImportPlan.counted(BrowserScanner.scan(), applicationSupport: BrowserImportDiscovery.applicationSupport,
-                                                     extensions: extensions)
+                                                     extensions: extensions,
+                                                     installedIDs: main.flatMap { id in installed?(id) } ?? [])
             DispatchQueue.main.async { done(found) }
         }
     }
@@ -133,9 +139,13 @@ final class FirstRunOnboarding: OnboardingHost {
         // History merges off the main thread too: each merge rebuilds the
         // command bar's search index, seconds for several profiles.
         let history = model?.visitHistory ?? VisitHistory()
+        let installed = model?.installedExtensionsReader()
+        let main = mainProfileID
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var read = plan.read(applicationSupport: BrowserImportDiscovery.applicationSupport)
             read.mergeHistory(into: history)
+            // An interrupted onboarding may have installed some already.
+            if plan.extensions, let installed, let main { read.installedExtensionIDs = installed(main) }
             DispatchQueue.main.async {
                 guard let self, let model = self.model else { return }
                 let result = OnboardingImportPlan.apply(read, model: model, replacingFavorites: self.starterFavoriteIDs)
@@ -184,7 +194,8 @@ final class FirstRunOnboarding: OnboardingHost {
         takeover = nil
         if applies {
             model?.finishFirstRunOnboarding()
-            // No store page opened over the sunrise; now the browser is here.
+            // The browser is on screen: installs start, and their toasts show.
+            model?.releaseExtensionFeedback()
             model?.offerPendingExtensionReinstall()
         }
         onDone?()
@@ -198,6 +209,11 @@ final class FirstRunOnboarding: OnboardingHost {
         hidden = []
         takeover?.dismiss()
         takeover = nil
+        if applies {
+            // What an earlier, interrupted import queued goes on as it would have.
+            model?.releaseExtensionFeedback()
+            model?.installPendingExtensions()
+        }
         onDone?()
     }
 }
@@ -237,6 +253,8 @@ struct OnboardingImportPlan: Sendable {
         /// thread; `apply` takes it if the model's history is still the base.
         var historyBase: VisitHistory?
         var mergedHistory: VisitHistory?
+        /// Already in the main profile; never queued again.
+        var installedExtensionIDs: Set<String> = []
 
         var importedHistory: [VisitRecord] { profiles.flatMap { $0.history ?? [] } }
 
@@ -292,7 +310,12 @@ struct OnboardingImportPlan: Sendable {
     /// the reinstall queue would take them, by id. The scanner's password
     /// count stays, only to say they stay behind. A source with nothing to
     /// bring is left out.
-    static func counted(_ sources: [ImportSource], applicationSupport root: URL, extensions: Bool) -> [ImportSource] {
+    /// Arc's bookmarks count only what its spaces don't already bring
+    /// (`BookmarkImportPlan.arcMirrorNewShare`); `bookmarksWithoutSpaces`
+    /// keeps the full count for when its spaces stay behind. `installedIDs`:
+    /// extensions the main profile already has, which don't count.
+    static func counted(_ sources: [ImportSource], applicationSupport root: URL, extensions: Bool,
+                        installedIDs: Set<String> = []) -> [ImportSource] {
         let profiles = BrowserImportDiscovery.discover(in: root).flatMap(\.profiles)
         let arc = sources.contains { $0.browser == "Arc" } ? try? ArcSidebarImport.load(from: root) : nil
         return sources.compactMap { source in
@@ -305,14 +328,21 @@ struct OnboardingImportPlan: Sendable {
             }
             if let browser = ImportBrowser(rawValue: source.browser.lowercased()),
                let profile = profiles.first(where: { $0.browser == browser && $0.directory == source.directory }) {
-                stats.bookmarks = bookmarks(profile)?.reduce(0) { $0 + $1.linkCount } ?? 0
+                let nodes = bookmarks(profile) ?? []
+                stats.bookmarks = nodes.reduce(0) { $0 + $1.linkCount }
+                if browser == .arc, let arc = arc?.only(directories: [source.directory]), !arc.export.spaces.isEmpty {
+                    counted.bookmarksWithoutSpaces = stats.bookmarks
+                    stats.bookmarks = BookmarkImportPlan.make(nodes, known: arc.bookmarkKeys(directory: source.directory),
+                                                              mirrorsArcSidebar: true).newLinks
+                }
                 stats.pages = history(profile)?.count ?? 0
                 if extensions {
-                    counted.extensionIDs = ExtensionReinstallQueue(ExtensionInventoryReader.read(profile: profile.url), into: UUID()).items.map(\.id)
+                    counted.extensionIDs = ExtensionReinstallQueue(ExtensionInventoryReader.read(profile: profile.url), into: UUID(),
+                                                                   installedIDs: installedIDs).items.map(\.id)
                     stats.extensions = counted.extensionIDs.count
                 }
             }
-            guard stats != ImportStats() else { return nil }
+            guard stats != ImportStats() || (counted.bookmarksWithoutSpaces ?? 0) > 0 else { return nil }
             stats.passwords = source.stats.passwords
             counted.stats = stats
             return counted
@@ -323,27 +353,47 @@ struct OnboardingImportPlan: Sendable {
     /// Extensions install in the background when the browser is revealed.
     /// `replacingFavorites` (the starter's) go before Arc's favorites come
     /// in, so none of Arc's is skipped as already there and then cleared.
+    ///
+    /// Run again on what an interrupted onboarding brought, it brings only
+    /// what is missing (each import's ledger: Arc's source IDs, a bookmark
+    /// space's `bookmarkSourceID`, the history ledger, installed extensions)
+    /// and reports as a single run would: Act 3 gets every space the import
+    /// holds, not only the ones made this time, and the totals count the
+    /// sources, as Act 2's line (`counted`) does.
     @MainActor
     static func apply(_ read: Read, model: BrowserViewModel, replacingFavorites starter: [Tab.ID] = []) -> OnboardingImportOutcome {
         let store = model.store
         let before = Set(store.spaces.map(\.id))
         let main = store.activeProfileID
         var totals = ImportStats()
+        var brought = Set<Space.ID>()
         if let arc = read.arc {
             if arc.favoritesToImport() > 0 {
                 for id in starter where store.tab(withID: id) != nil { store.closeTab(id) }
             }
-            let summary = store.importArcSidebar(arc, choices: arc.defaultChoices(for: store))
+            store.importArcSidebar(arc, choices: arc.defaultChoices(for: store))
             if let settings = read.arcSettings { model.applyArcSettings(settings) }
             if let card = read.arcCard { model.importArcMembershipCard(card) }
-            totals.spaces = summary.spaces
-            totals.tabs = summary.pinnedTabs + summary.todayTabs + summary.favorites
+            let sourceIDs = Set(arc.export.spaces.map { "\($0.profile.directory):\($0.id)" })
+            brought.formUnion(store.spaces.filter { $0.arcSourceID.map(sourceIDs.contains) == true }.map(\.id))
+            totals.spaces = arc.export.spaces.count
+            totals.tabs = arc.export.spaces.reduce(0) { $0 + $1.pinnedTabCount } + arc.favoritesToImport()
         }
         for (profile, bookmarks, history) in read.profiles {
-            if let bookmarks, let result = store.importBookmarks(bookmarks, spaceName: "\(profile.browser.name) – \(profile.name)", profileID: main) {
-                totals.bookmarks += result.tabs
+            if let bookmarks {
+                // Arc's own bookmarks copy the sidebar just imported: they add a space only if enough is new.
+                store.importBookmarks(bookmarks, spaceName: "\(profile.browser.name) – \(profile.name)", profileID: main,
+                                      sourceID: profile.id, arcProfileDirectory: profile.browser == .arc ? profile.directory : nil)
+                if let space = store.spaces.first(where: { $0.profileID == main && $0.bookmarkSourceID == profile.id }) {
+                    brought.insert(space.id)
+                    let held = store.bookmarkKeys(in: space.id)
+                    totals.bookmarks += Set(bookmarks.flatMap(\.linkKeys)).intersection(held).count
+                }
             }
-            totals.pages += history?.count ?? 0
+            if let history, !history.isEmpty {
+                totals.pages += history.count
+                model.recordImportedHistory(history, from: profile.id)
+            }
         }
         if totals.pages > 0 {
             if let merged = read.mergedHistory, model.visitHistory == read.historyBase {
@@ -354,7 +404,7 @@ struct OnboardingImportPlan: Sendable {
             }
             model.scheduleVisitHistorySave()
         }
-        let consolidation = ExtensionConsolidation(read.extensions.map(\.extension))
+        let consolidation = ExtensionConsolidation(read.extensions.map(\.extension), installedIDs: read.installedExtensionIDs)
         let queue = ExtensionReinstallQueue(consolidation.candidates, into: main)
         if !queue.isFinished || !consolidation.skipped.isEmpty {
             var from: [String] = []
@@ -362,15 +412,25 @@ struct OnboardingImportPlan: Sendable {
             model.queueExtensionReinstall(queue, from: ListFormatter.localizedString(byJoining: from), skipped: consolidation.skipped)
             totals.extensions = queue.items.count
         }
-        let created = store.spaces.filter { !before.contains($0.id) }
+        brought.formUnion(store.spaces.filter { !before.contains($0.id) }.map(\.id))
         model.loadSelectedIfNeeded()
-        let seeds = created.map { space in
+        let seeds = store.spaces.filter { brought.contains($0.id) }.map { space in
             SpaceSeed(name: space.name, icon: space.iconName,
                       colour: RGBA(space.theme.red, space.theme.green, space.theme.blue),
                       profile: space.profileID == main ? nil : store.profile(withID: space.profileID)?.name,
                       hostID: space.id.uuidString)
         }
         return OnboardingImportOutcome(totals: totals, spaces: seeds)
+    }
+}
+
+extension BookmarkNode {
+    /// Its links' `BookmarkImportPlan.key`s.
+    var linkKeys: [String] {
+        switch self {
+        case .link(_, let url): return [BookmarkImportPlan.key(url)]
+        case .folder(_, let children): return children.flatMap(\.linkKeys)
+        }
     }
 }
 
