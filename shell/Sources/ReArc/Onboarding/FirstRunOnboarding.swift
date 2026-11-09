@@ -164,8 +164,10 @@ final class FirstRunOnboarding: OnboardingHost {
         model.recordOnboardingName(result.name)
         model.reconcileEngineOwnership()
         if let first { model.selectSpace(first) }
+        // The sidebar's own count: Act 3 shows at most `Act3Timeline.maxSpaces`,
+        // and the spaces past those stay as they came.
         model.openPageInNewTab(WelcomePage.write(name: result.name, colour: result.colour,
-                                                 spaces: result.spaces.count, imported: outcome?.totals),
+                                                 spaces: model.store.spaces.count, imported: outcome?.totals),
                                title: "Welcome to ReArc")
     }
 
