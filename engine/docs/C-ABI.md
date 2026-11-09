@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.54** (major remains 1 for existing hosts), bridge **0.57.0**, compiled Chromium **156.0.8078.74**. Public header:
+ABI **1.55** (major remains 1 for existing hosts), bridge **0.58.0**, compiled Chromium **156.0.8078.74**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -2323,3 +2323,18 @@ mobile-emulated page resizes; release builds have DCHECKs off.
 The shell (dockable engines only) drops its own docked pane, "Dock to Page"
 strip and dock menu items: Chrome's ⋮ › Dock side drives placement, and the
 frontend's splitter resizes the page. Older engines keep the 1.40 shell pane.
+
+### Extension tabs in the background (ABI 1.55)
+
+Patch `tab/077-extension-background-tabs`, bridge 0.58.0, advertises
+`extension_background_tabs`. `ReArcExtensionTabRequestRespondInBackground(request,
+tab)` answers a tab request (1.36) as `ReArcExtensionTabRequestRespond` does,
+except that a request with `active` set may be answered with a tab that is not
+its logical window's active one. The engine loads the extension's URL there and
+the extension's `tabs.Tab` reports `active: false`. Every other check stays:
+the tab must be open, mapped, in the request's profile and in the requested
+window. The shell uses it only for extensions an import is installing, so
+their welcome pages collect as unselected Today tabs instead of taking the
+window. Chrome installs synced extensions silently (`PendingExtensionManager::
+AddFromSync`, no prompt or bubble) but has no such rule for the tabs they open
+from `runtime.onInstalled`: those open, and take the window, as any `tabs.create`.

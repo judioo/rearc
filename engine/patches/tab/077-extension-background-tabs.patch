@@ -1,0 +1,114 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 extension tabs answered in the background (ABI 1.55)
+
+Bridge 0.58.0. Add ReArcExtensionTabRequestRespondInBackground, feature
+extension_background_tabs: an active tabs.create or options-page request may
+be answered with a tab its window does not show, so an import's bulk install
+leaves each new extension's welcome page unselected. Chrome's sync installs
+are silent too, but the tabs those extensions open still take the window.
+ReArcExtensionTabRequestRespond keeps its active-tab check.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -163,6 +163,7 @@
+ _ReArcTabGetExtensionState
+ _ReArcEngineSetExtensionTabRequestCallback
+ _ReArcExtensionTabRequestRespond
++_ReArcExtensionTabRequestRespondInBackground
+ _ReArcEngineSetAutofillSaveCallback
+ _ReArcAutofillSaveRespond
+ _ReArcEngineSetHttpAuthCallback
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -174,6 +174,7 @@
+ _ReArcTabGetExtensionState
+ _ReArcEngineSetExtensionTabRequestCallback
+ _ReArcExtensionTabRequestRespond
++_ReArcExtensionTabRequestRespondInBackground
+ _ReArcEngineSetAutofillSaveCallback
+ _ReArcAutofillSaveRespond
+ _ReArcEngineSetHttpAuthCallback
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 54, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 55, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -1194,6 +1194,11 @@
+ typedef void (*ReArcExtensionTabRequestCallback)(void*, const ReArcExtensionTabRequest*);
+ REARC_ENGINE_EXPORT void ReArcEngineSetExtensionTabRequestCallback(ReArcExtensionTabRequestCallback, void* context);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcExtensionTabRequestRespond(uint64_t request_id, uint64_t tab_id);
++// ABI 1.55, extension_background_tabs. As ReArcExtensionTabRequestRespond, but
++// an active request may be answered with a tab that is not its window's active
++// one: the host opened it in the background (an import's quiet install). The
++// extension's tab says active false.
++REARC_ENGINE_EXPORT ReArcStatus ReArcExtensionTabRequestRespondInBackground(uint64_t request_id, uint64_t tab_id);
+ 
+ // Extension side panels (extension_side_panels, ABI 1.47). chrome.sidePanel
+ // without Chrome's side panel UI: the host shows a panel beside the page as a
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -707,6 +707,7 @@
+          std::string(feature) == "webui_credits" ||
+          std::string(feature) == "devtools_docking" ||
+          std::string(feature) == "extension_bulk_install" ||
++         std::string(feature) == "extension_background_tabs" ||
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "history_query" ||
+          std::string(feature) == "search_autocomplete" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.57.0";
++  return "0.58.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_windows.cc b/chrome/browser/rearc_bridge/rearc_extension_windows.cc
+--- a/chrome/browser/rearc_bridge/rearc_extension_windows.cc
++++ b/chrome/browser/rearc_bridge/rearc_extension_windows.cc
+@@ -465,7 +465,7 @@
+   ++rearc::epoch; rearc::host = cb; rearc::context = ctx;
+ }
+ namespace {
+-ReArcStatus RespondCreation(uint64_t id, uint64_t tab, bool link) {
++ReArcStatus RespondCreation(uint64_t id, uint64_t tab, bool link, bool background = false) {
+   CHECK(pthread_main_np()); auto it = rearc::Requests().find(id); if (it == rearc::Requests().end() || static_cast<bool>(it->second.link) != link) return REARC_NOT_FOUND;
+   if (tab) {
+     rearc::TabSession* s; if (auto status = rearc::ABICheckTab(tab,&s)) return status;
+@@ -476,7 +476,7 @@
+         (!s->web_contents()->GetLastCommittedURL().is_empty() && !s->web_contents()->GetLastCommittedURL().IsAboutBlank()) ||
+         (!s->web_contents()->GetVisibleURL().is_empty() && !s->web_contents()->GetVisibleURL().IsAboutBlank()))) return REARC_INVALID_STATE;
+     if (s->profile_id() != e.profile_id) return REARC_INVALID_ARGUMENT;
+-    if ((e.tab_id && e.tab_id != tab) || (e.window_id > 0 && e.window_id != state->second.window) || (e.active && !state->second.active)) return REARC_INVALID_STATE;
++    if ((e.tab_id && e.tab_id != tab) || (e.window_id > 0 && e.window_id != state->second.window) || (e.active && !background && !state->second.active)) return REARC_INVALID_STATE;
+   }
+   if (tab && (link || it->second.event.kind != 3)) {
+     // The host's about:blank creation may still have a queued initial load.
+@@ -520,6 +520,9 @@
+ ReArcStatus ReArcExtensionTabRequestRespond(uint64_t id, uint64_t tab) {
+   return RespondCreation(id,tab,false);
+ }
++ReArcStatus ReArcExtensionTabRequestRespondInBackground(uint64_t id, uint64_t tab) {
++  return RespondCreation(id,tab,false,true);
++}
+ void ReArcEngineSetLinkOpenCallback(ReArcLinkOpenCallback cb,void* ctx) {
+   CHECK(pthread_main_np());
+   std::vector<uint64_t> ids;
