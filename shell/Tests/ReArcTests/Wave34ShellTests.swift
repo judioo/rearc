@@ -40,7 +40,9 @@ final class Wave34ShellTests: XCTestCase {
         XCTAssertEqual(model.closeKind(of: pinned.id), .unloadPinned)
         XCTAssertEqual(model.closeKind(of: favorite.id), .unloadFavorite)
         XCTAssertEqual(TabCloseKind.archive.buttonLabel, "Archive this tab", "Arc's tooltip on a Today row")
-        XCTAssertEqual(TabCloseKind.unloadPinned.buttonLabel, "Close tab")
+        XCTAssertEqual(TabCloseKind.unloadPinned.buttonLabel, "Close and Keep Pinned")
+        XCTAssertEqual(TabCloseKind.unloadPinned.buttonSymbol, "minus")
+        XCTAssertEqual(TabCloseKind.archive.buttonSymbol, "xmark")
         XCTAssertEqual(TabCloseKind.unloadFavorite.buttonLabel, "Close tab")
 
         model.selectTab(today.id)

@@ -130,8 +130,9 @@ final class SidebarPlainRowCell: NSView {
             } else {
                 switch kind {
                 case .folder:
-                    let symbol = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)?
-                        .withSymbolConfiguration(.init(pointSize: 17, weight: .medium))
+                    let symbol = state.isExpanded ? SidebarFolderGlyph.open
+                        : NSImage(systemSymbolName: "folder", accessibilityDescription: nil)?
+                            .withSymbolConfiguration(.init(pointSize: 17, weight: .medium))
                     icon.image = symbol
                     icon.imageScaling = .scaleNone
                     icon.contentTintColor = NSColor(chrome.accent)

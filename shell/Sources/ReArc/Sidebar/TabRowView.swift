@@ -136,13 +136,13 @@ struct TabRowView<Menu: View>: View {
                         onClose()
                     }
                 } label: {
-                    Image(systemName: "xmark")
+                    Image(systemName: closeKind.buttonSymbol)
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.secondary)
                         .frame(width: 16, height: 16)
                 }
                 .buttonStyle(.plain)
-                .help("\(closeKind.buttonLabel)  ⌘W\n⌥-click to unsplit when in a split")
+                .help("\(closeKind.buttonLabel) ⌘W")
                 .accessibilityLabel(closeKind.buttonLabel)
             }
         }

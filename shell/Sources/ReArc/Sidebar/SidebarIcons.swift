@@ -59,6 +59,38 @@ struct SpaceIconView: View {
     }
 }
 
+/// Arc's expanded outline folder: SF Symbols has no open-folder glyph.
+/// Shared by plain AppKit cells and the hosted SwiftUI row.
+enum SidebarFolderGlyph {
+    static let open: NSImage = {
+        let image = NSImage(size: NSSize(width: 20, height: 17), flipped: false) { _ in
+            NSColor.black.setStroke()
+            let back = NSBezierPath()
+            back.move(to: NSPoint(x: 3, y: 3))
+            back.line(to: NSPoint(x: 1.5, y: 13))
+            back.line(to: NSPoint(x: 7, y: 13))
+            back.line(to: NSPoint(x: 9, y: 11))
+            back.line(to: NSPoint(x: 17, y: 11))
+            back.line(to: NSPoint(x: 17, y: 9))
+            back.lineWidth = 1.2
+            back.lineJoinStyle = .round
+            back.stroke()
+            let front = NSBezierPath()
+            front.move(to: NSPoint(x: 3, y: 3))
+            front.line(to: NSPoint(x: 6, y: 9))
+            front.line(to: NSPoint(x: 19, y: 9))
+            front.line(to: NSPoint(x: 16, y: 3))
+            front.close()
+            front.lineWidth = 1.2
+            front.lineJoinStyle = .round
+            front.stroke()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+}
+
 /// A folder row as Arc draws it (THEMES.md §4.6): an outline `folder` glyph
 /// in the theme accent and a 14 pt semibold title, with no disclosure
 /// chevron and no child count. Click toggles.
@@ -73,10 +105,17 @@ struct FolderRowView<Menu: View>: View {
 
     @State private var isHovering = false
     @Environment(\.themeChrome) private var chrome
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: SidebarMetrics.iconToText - 1.5) {
-            SidebarGlyphView(icon: folder.customIcon, fallback: "folder", size: 17)
+            Group {
+                if isExpanded, folder.customIcon == nil {
+                    Image(nsImage: SidebarFolderGlyph.open)
+                } else {
+                    SidebarGlyphView(icon: folder.customIcon, fallback: "folder", size: 17)
+                }
+            }
                 .foregroundStyle(chrome.accent)
                 .frame(width: SidebarMetrics.iconSize + 3, height: SidebarMetrics.iconSize + 3)
                 .padding(.leading, -1.5)
@@ -102,7 +141,7 @@ struct FolderRowView<Menu: View>: View {
         .padding(.vertical, (SidebarMetrics.rowPitch - SidebarMetrics.rowHeight) / 2)
         // Off while renaming, so clicks in the field place the caret.
         .gesture(TapGesture().onEnded {
-            withAnimation(.easeInOut(duration: 0.15)) { onToggle() }
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.22)) { onToggle() }
         }, including: rename == nil ? .all : .subviews)
         .onHover { isHovering = $0 }
         .contextMenu { menu() }

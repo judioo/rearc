@@ -361,17 +361,18 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
             return
         }
         // Small changes keep the other rows' cells where they are (a drag's
-        // source cell among them). Folder toggles and drops ran in a 0.15 s
-        // ease-in-out SwiftUI animation; the table moves its rows the same way.
+        // source cell among them). Folder children fade while the table opens
+        // or closes their height over Arc's roughly 0.22 s ease.
         let animate = animated && !reduceMotion && table.window != nil
-        let effect: NSTableView.AnimationOptions = animate ? .effectFade : []
+        let insertion: NSTableView.AnimationOptions = animate ? [.effectFade, .slideDown] : []
+        let removal: NSTableView.AnimationOptions = animate ? [.effectFade, .slideUp] : []
         NSAnimationContext.runAnimationGroup { animation in
-            animation.duration = animate ? 0.15 : 0
+            animation.duration = animate ? 0.22 : 0
             animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             table.beginUpdates()
             rows = new
-            if !diff.removed.isEmpty { table.removeRows(at: diff.removed, withAnimation: effect) }
-            if !diff.inserted.isEmpty { table.insertRows(at: diff.inserted, withAnimation: effect) }
+            if !diff.removed.isEmpty { table.removeRows(at: diff.removed, withAnimation: removal) }
+            if !diff.inserted.isEmpty { table.insertRows(at: diff.inserted, withAnimation: insertion) }
             table.endUpdates()
         }
         if !diff.reloaded.isEmpty {

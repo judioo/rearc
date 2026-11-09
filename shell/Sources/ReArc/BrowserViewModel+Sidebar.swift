@@ -28,11 +28,17 @@ enum TabCloseKind: Equatable {
     /// A favorite is unloaded and stays in the strip.
     case unloadFavorite
 
-    /// The ✕ button's label. "Archive this tab" is Arc's tooltip on a Today
-    /// row; the recording did not capture Arc's pinned wording, so pinned
-    /// and favorite rows use a plain "Close tab".
+    /// Pinned rows unload without removing the saved sidebar item.
     var buttonLabel: String {
-        self == .archive ? "Archive this tab" : "Close tab"
+        switch self {
+        case .archive: "Archive this tab"
+        case .unloadPinned: "Close and Keep Pinned"
+        case .unloadFavorite: "Close tab"
+        }
+    }
+
+    var buttonSymbol: String {
+        self == .unloadPinned ? "minus" : "xmark"
     }
 
     /// The ⌘W item: Arc's Shortcuts list names it "Archive Tab".
