@@ -90,6 +90,8 @@ private struct AboutView: View {
         }
         .frame(width: AboutWindowController.width)
         .background(Color(nsColor: .windowBackgroundColor))
+        // The sting runs under the transparent title bar, behind the close button.
+        .ignoresSafeArea(.container, edges: .top)
     }
 
     private var attribution: AttributedString {

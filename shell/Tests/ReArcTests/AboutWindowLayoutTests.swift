@@ -29,5 +29,7 @@ final class AboutWindowLayoutTests: XCTestCase {
         // Version, engine, copyright and the credits paragraph need more than 100 points below the band.
         XCTAssertGreaterThan(content.bounds.height - band, 100, "the text has its own room below the sting")
         XCTAssertTrue(sting.clipsToBounds)
+        XCTAssertEqual(sting.convert(sting.bounds, to: nil).maxY, content.bounds.height, accuracy: 0.5,
+                       "the sting starts at the window's top edge, under the title bar")
     }
 }
