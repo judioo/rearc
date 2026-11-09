@@ -76,6 +76,7 @@ xattr -cr "$APP"
 expected_macho() {
   case "${1#"$APP/"}" in
     Contents/MacOS/ReArc) ;;
+    Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle|Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate|Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater|Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer|Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader) ;;
     "Contents/Frameworks/Chromium Framework.framework/Versions/$VERSION/Chromium Framework") ;;
     "Contents/Frameworks/Chromium Framework.framework/Versions/$VERSION/Libraries/"*.dylib) ;;
     "Contents/Frameworks/Chromium Framework.framework/Versions/$VERSION/Helpers/"*) ;;
@@ -113,6 +114,16 @@ for helper in "$FW_DIR/Helpers/"*; do
 done
 sign "$FRAMEWORK"
 
+# Sparkle's sandbox-off signing recipe: no sandbox service Info.plist opt-ins,
+# and no inherited development entitlements. Sign the retained XPC services too.
+SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+if [[ -d $SPARKLE ]]; then
+  for code in XPCServices/Installer.xpc XPCServices/Downloader.xpc Autoupdate Updater.app; do
+    sign "$SPARKLE/Versions/B/$code" --options runtime
+  done
+  sign "$SPARKLE" --options runtime
+fi
+
 ENTITLEMENTS="$(mktemp "${TMPDIR:-/tmp}/rearc-release-entitlements.XXXXXX")"
 trap 'rm -f "$ENTITLEMENTS"' EXIT
 if [[ -n $REARC_ICLOUD_CONTAINER ]]; then
@@ -132,6 +143,10 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 problems=0
 for path in "${signed[@]}"; do
   info="$(codesign -dvv "$path" 2>&1)"
+  entitlements="$(codesign -d --entitlements - --xml "$path" 2>/dev/null || true)"
+  if grep -q 'com.apple.security.get-task-allow' <<<"$entitlements"; then
+    echo "  forbidden get-task-allow entitlement: $path" >&2; problems=1
+  fi
   team="$(sed -n 's/^TeamIdentifier=//p' <<<"$info")"
   [[ $team == "$TEAM_ID" ]] || { echo "  team '$team' != $TEAM_ID: $path" >&2; problems=1; }
   if [[ ${REARC_TIMESTAMP:-} != none ]] && ! grep -q '^Timestamp=' <<<"$info"; then

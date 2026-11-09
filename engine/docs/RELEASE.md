@@ -233,7 +233,152 @@ Size and launch, release vs a dev bundle of the same HEAD:
 
 ## Known limits
 
-- No auto-update (no Sparkle or Keystone integration) and no universal (x64) build: run
+- No universal (x64) build: run
   `build-engine-release.sh --target-cpu=x64` into its own out dir. Lipo/universal packaging
   is not scripted.
 - No clean-machine test has been done yet. That needs the notarized build.
+
+
+## Sparkle updates (DMG distribution)
+
+The Chromium shell pins Sparkle **2.10.1** exactly in SwiftPM. WebKit builds have no
+Sparkle dependency. Only bundles stamped `ReArcRelease = YES` by `bundle-chromium.sh
+--release` start the updater or show its menu/settings. ReArc ships outside the Mac
+App Store as a Developer ID signed, notarized DMG.
+
+Release packaging stamps `SUFeedURL` from `REARC_APPCAST_URL` (default
+`https://rearc.net/updates/appcast.xml`), `SUPublicEDKey` from
+`shell/scripts/release/sparkle-public-key.txt`, automatic checks/download/install defaults
+on, and a daily (86400 second) check interval. **rearc.net is not live yet**: provision
+HTTPS hosting before distributing, or set `REARC_APPCAST_URL` at build time. The download
+URL prefix for generated enclosures is `REARC_UPDATE_DOWNLOAD_URL` (default
+`https://rearc.net/updates/`); set both when using another host.
+
+Sparkle compares appcast `sparkle:version` against **CFBundleVersion**, the increasing
+commit count; `sparkle:shortVersionString` is display only. Keep release history linear
+and never reuse a build number. Rollback means rebuilding the old code with a **higher
+build number**, then publishing it as a new release, never serving a downgrade.
+
+### Keychain and preparing archives
+
+The EdDSA private key was created with Sparkle's `generate_keys --account ReArc`. It lives
+only in this Mac's login Keychain; `generate_keys --account ReArc` reuses it. To retrieve
+only the public key, use `generate_keys --account ReArc -p`. Never use `-x`, put private
+key material in files/environment variables, or commit it. Losing this Keychain item
+requires planning a key rotation before signing further updates.
+
+Download the [2.10.1 distribution](https://github.com/sparkle-project/Sparkle/releases/tag/2.10.1)
+and set `REARC_SPARKLE_TOOLS` to its `bin` directory. The helper verifies that the
+Keychain public key matches the committed public key before generating signatures.
+
+```sh
+# Local development signing verification, no launch and no notarization:
+REARC_SPARKLE_TOOLS=/path/to/Sparkle-2.10.1/bin \
+  shell/scripts/release.sh --dist /tmp/rearc-release --no-verify \
+  --appcast /tmp/rearc-updates --channel beta
+
+# Distribution, ONLY after Developer ID + notary profile setup:
+REARC_SPARKLE_TOOLS=/path/to/Sparkle-2.10.1/bin \
+  shell/scripts/release.sh --dist /path/to/release --notarize \
+  --appcast /path/to/update-archives
+```
+
+`--appcast DIR` implies `--dmg`, copies a version/build-named DMG into the persistent
+archive directory, then runs `generate_appcast --account ReArc`. Keep this directory
+outside `--dist`, which packaging replaces. `--channel beta` affects newly generated
+items; stable releases omit it. No command uploads. `--notarize` first notarizes/staples
+the app, makes the DMG, notarizes/staples the DMG, then generates the appcast. Any failure
+stops the pipeline. Without that flag, notarization is never attempted. If notarizing
+manually, finish it before generating the appcast: stapling changes the signed archive.
+For example, after `notarize.sh /path/ReArc.dmg` succeeds, copy that final DMG into the
+archives directory and run `shell/scripts/release/generate-appcast.sh DIR [beta]`.
+
+Upload the final DMG, appcast.xml, release notes and generated delta files to their HTTPS
+locations yourself. Do not upload `old_updates/`. The Apple Development test artifacts
+are not distributable: obtain a Developer ID Application certificate and configure
+`rearc-notary` (or `REARC_NOTARY_PROFILE`) first.
+
+### Appcast policy examples
+
+Use the following XML within an RSS feed declaring
+`xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"`. Let
+`generate_appcast` produce real enclosure signatures and lengths; the placeholders below
+must be replaced. Each example below is an independent item policy, not a combined policy.
+See Sparkle's [publishing guide](https://sparkle-project.org/documentation/publishing/).
+
+A normal item (build 500, display version 0.2.0):
+
+```xml
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>ReArc</title>
+    <item>
+      <title>ReArc 0.2.0</title>
+      <sparkle:version>500</sparkle:version>
+      <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+      <pubDate>Mon, 09 Nov 2026 12:00:00 +0000</pubDate>
+      <enclosure url="https://rearc.net/updates/ReArc-0.2.0-500.dmg"
+                 sparkle:edSignature="REPLACE_WITH_GENERATED_SIGNATURE"
+                 length="REPLACE_WITH_BYTE_LENGTH" type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>
+```
+
+Add one of these directly under `<item>` (alongside version/enclosure):
+
+```xml
+<!-- Critical for every older build: prompt promptly; no Skip button. -->
+<sparkle:criticalUpdate/>
+```
+
+```xml
+<!-- Critical only for installed builds below 450 (exclusive). -->
+<sparkle:criticalUpdate sparkle:version="450"/>
+```
+
+```xml
+<!-- Installed builds below 450 require the update UI, even with auto-download on. -->
+<sparkle:minimumAutoupdateVersion>450</sparkle:minimumAutoupdateVersion>
+```
+
+```xml
+<!-- Seen by users who enable Receive beta updates (stable remains eligible too). -->
+<sparkle:channel>beta</sparkle:channel>
+```
+
+```xml
+<!-- Seven rollout groups, one day between groups; pubDate is required. -->
+<pubDate>Mon, 09 Nov 2026 12:00:00 +0000</pubDate>
+<sparkle:phasedRolloutInterval>86400</sparkle:phasedRolloutInterval>
+```
+
+```xml
+<!-- Show a website action instead of installing, for all installed builds. -->
+<sparkle:informationalUpdate/>
+<link>https://rearc.net/updates/important-notice</link>
+```
+
+```xml
+<!-- Informational only for builds below 450; other builds can install enclosure. -->
+<sparkle:informationalUpdate>
+  <sparkle:belowVersion>450</sparkle:belowVersion>
+</sparkle:informationalUpdate>
+<link>https://rearc.net/updates/important-notice</link>
+```
+
+Critical updates bypass phased rollout; manual checks also bypass rollout. Critical does
+not forcibly terminate the browser or defeat user consent: Sparkle removes skipping and
+uses prominent reminders. ReArc defers ordinary scheduled update alerts to the menu's
+“Update Available…” / “1 update” badge, but leaves critical alerts to Sparkle. Automatic
+downloads install on quit when eligible; Sparkle may remind a long-running app after its
+impatient interval. `minimumAutoupdateVersion` requires UI below the threshold; it does
+not establish a minimum supported build or force installation. Beta opt-in is stored in
+UserDefaults and supplied by `allowedChannels(for:)` on subsequent checks.
+
+Signing follows Sparkle's [manual signing recipe](https://sparkle-project.org/documentation/sandboxing/):
+Installer.xpc, Downloader.xpc, Autoupdate, Updater.app, then Sparkle.framework, all with
+hardened runtime and secure timestamps and no inherited development entitlements. Both
+XPC services remain sealed but their sandbox-only opt-in keys are unset (ReArc is not
+sandboxed). The release signer rejects `get-task-allow`, unexpected executables, missing
+team/timestamps/runtime flags, and finishes with `codesign --verify --deep --strict`.

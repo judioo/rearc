@@ -157,7 +157,24 @@ cp "$BIN" "$APP/Contents/MacOS/ReArc"
 for res in "$(dirname "$BIN")"/*.bundle; do
   [[ -d $res ]] && cp -R "$res" "$APP/Contents/Resources/"
 done
+# SwiftPM provides the pinned binary artifact for Chromium builds in both configurations.
+SPARKLE="$(dirname "$BIN")/Sparkle.framework"
+[[ -d $SPARKLE ]] || SPARKLE="$(find "$SCRATCH/artifacts" -type d -name Sparkle.framework -print -quit)"
+[[ -d $SPARKLE ]] || die "Sparkle.framework missing from SwiftPM artifacts"
+cp -R "$SPARKLE" "$APP/Contents/Frameworks/Sparkle.framework"
 PLIST="$APP/Contents/Info.plist"
+if [[ $CONFIG == release ]]; then
+  plutil -replace ReArcRelease -bool YES "$PLIST"
+  plutil -replace SUFeedURL -string "${REARC_APPCAST_URL:-https://rearc.net/updates/appcast.xml}" "$PLIST"
+  plutil -replace SUPublicEDKey -string "$(tr -d '[:space:]' <"$SHELL_DIR/scripts/release/sparkle-public-key.txt")" "$PLIST"
+  for key in SUEnableAutomaticChecks SUAllowsAutomaticUpdates SUAutomaticallyUpdate; do
+    plutil -replace "$key" -bool YES "$PLIST"
+  done
+  plutil -replace SUScheduledCheckInterval -integer 86400 "$PLIST"
+else
+  plutil -remove ReArcRelease "$PLIST" 2>/dev/null || true
+fi
+
 plutil -replace CFBundleExecutable -string ReArc "$PLIST"
 plutil -replace CFBundleName -string ReArc "$PLIST"
 plutil -replace CFBundleDisplayName -string ReArc "$PLIST"
@@ -244,6 +261,7 @@ check_deps() {
   while read -r dep; do
     case "$dep" in
       @rpath/Chromium\ Framework.framework/*) [[ -e "$APP/Contents/Frameworks/${dep#@rpath/}" ]] || { echo "unresolved $dep (from $image)"; missing=1; } ;;
+      @rpath/Sparkle.framework/*) [[ -e "$APP/Contents/Frameworks/${dep#@rpath/}" ]] || { echo "unresolved $dep (from $image)"; missing=1; } ;;
       @rpath/*) local leaf="${dep#@rpath/}"
         [[ -e "$DIST/$leaf" || -e "$FW_VERSION_DIR/Libraries/$leaf" ]] || { echo "unresolved $dep (from $image)"; missing=1; } ;;
     esac

@@ -3,7 +3,7 @@
 # (scripts/build-engine-release.sh): release shell build, bundle, version stamp, nested
 # hardened-runtime signing (scripts/sign-release.sh), dSYMs, then verification: a
 # LaunchServices launch to ready (scripts/check-launch.sh) and the self-test against the real
-# Keychain. Optionally a signed DMG (scripts/make-dmg.sh). Never notarizes (scripts/notarize.sh).
+# Keychain. Optionally a signed DMG (scripts/make-dmg.sh). Notarization is opt-in (--notarize).
 # Docs: engine/docs/RELEASE.md.
 #
 # Usage: scripts/release.sh [--engine-out DIR] [--dist DIR] [--worktree] [--no-verify] [--dmg]
@@ -12,6 +12,9 @@
 #   --worktree        build the shell from the working tree instead of the committed HEAD;
 #                     the version is then marked "-dirty" when shell/ has local changes
 #   --no-verify       skip the launch check and self-test
+#   --appcast DIR     make DMG and generate signed appcast locally in DIR (no upload)
+#   --channel beta    tag new appcast entries beta (requires --appcast)
+#   --notarize        notarize app before DMG and DMG before appcast (opt-in)
 #   --dmg             also make the signed DMG
 #   --selftest-timeout SECONDS  watchdog for the self-test (default 300)
 # Signing settings: see sign-release.sh (REARC_RELEASE_IDENTITY, REARC_TEAM_ID, iCloud).
@@ -25,6 +28,9 @@ DIST="$SHELL_DIR/dist/release"
 FROM_HEAD=1
 VERIFY=1
 DMG=0
+APPCAST=""
+CHANNEL=""
+NOTARIZE=0
 SELFTEST_TIMEOUT=300
 die() { echo "release: $*" >&2; exit 1; }
 while [[ $# -gt 0 ]]; do
@@ -34,12 +40,17 @@ while [[ $# -gt 0 ]]; do
     --worktree) FROM_HEAD=0 ;;
     --no-verify) VERIFY=0 ;;
     --dmg) DMG=1 ;;
+    --appcast) mkdir -p "$2"; APPCAST="$(cd "$2" && pwd)"; DMG=1; shift ;;
+    --channel) CHANNEL="$2"; [[ $CHANNEL == beta ]] || die "only --channel beta is supported"; shift ;;
+    --notarize) NOTARIZE=1 ;;
     --selftest-timeout) SELFTEST_TIMEOUT="$2"; shift ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
 done
+[[ -z $CHANNEL || -n $APPCAST ]] || die "--channel requires --appcast DIR"
+[[ -z $APPCAST || $APPCAST != "$DIST" && $APPCAST != "$DIST/"* ]] || die "appcast archives must live outside the dist directory (which is replaced)"
 [[ $DIST != "$SHELL_DIR/dist/icloud"* && $DIST != "$SHELL_DIR/dist/chromium"* ]] \
   || die "refusing to write $DIST (development bundles live there)"
 [[ -d "$OUT/Chromium.app" ]] || die "no release engine at $OUT (scripts/build-engine-release.sh)"
@@ -128,7 +139,17 @@ if [[ $VERIFY == 1 ]]; then
   echo "==> self-test passed in $((SECONDS - t0))s"
 fi
 
-# 6. Optional DMG.
+# 6. Optional notarization, DMG and local appcast. Never uploads.
+if [[ $NOTARIZE == 1 ]]; then "$SHELL_DIR/scripts/notarize.sh" "$APP"; fi
 if [[ $DMG == 1 ]]; then
   "$SHELL_DIR/scripts/make-dmg.sh" "$APP"
+fi
+
+if [[ $NOTARIZE == 1 && $DMG == 1 ]]; then
+  "$SHELL_DIR/scripts/notarize.sh" "$DIST/ReArc-$MARKETING.dmg"
+fi
+if [[ -n $APPCAST ]]; then
+  # The versioned archive name prevents marketing-version repeats overwriting old builds.
+  cp "$DIST/ReArc-$MARKETING.dmg" "$APPCAST/ReArc-$MARKETING-$BUILD_NUMBER.dmg"
+  "$SHELL_DIR/scripts/release/generate-appcast.sh" "$APPCAST" "$CHANNEL"
 fi
