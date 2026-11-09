@@ -223,9 +223,16 @@ final class BrowserImportSession {
         if included { arcChoices.spaceIDs.insert(id) } else { arcChoices.spaceIDs.remove(id) }
     }
 
-    /// Extensions the queue would reinstall from this profile; never one the target profile has.
+    /// Extensions the queue would reinstall from this profile: the queue's
+    /// own candidates (never one off in the source, a component or a retired
+    /// one, `ExtensionConsolidation`), less the unticked and those the target
+    /// profile has.
     func chosenExtensions(_ detail: ProfileDetail) -> [SourceExtension] {
-        detail.extensions.filter { $0.canReinstall && !skippedExtensions.contains($0.id) && !detail.installedExtensionIDs.contains($0.id) }
+        installableExtensions(detail).filter { !skippedExtensions.contains($0.id) }
+    }
+
+    func installableExtensions(_ detail: ProfileDetail) -> [SourceExtension] {
+        ExtensionConsolidation(detail.extensions, installedIDs: detail.installedExtensionIDs).candidates
     }
 
     /// Nothing left to bring from the selection: the button reads Imported.

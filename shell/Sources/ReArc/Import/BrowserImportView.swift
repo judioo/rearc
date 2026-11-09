@@ -328,9 +328,11 @@ private struct ChromiumProfileImportPane: View {
             Section {
                 SettingsToggleRow(label: "Extensions", detail: extensionsDetail, isOn: $session.includeExtensions)
                     .disabled(!session.canReinstallExtensions)
+                let installable = Set(session.installableExtensions(detail).map(\.id))
                 ForEach(detail.extensions) { item in
                     let installed = detail.installedExtensionIDs.contains(item.id)
-                    Toggle(isOn: Binding(get: { item.canReinstall && !installed && !session.skippedExtensions.contains(item.id) },
+                    let eligible = installable.contains(item.id)
+                    Toggle(isOn: Binding(get: { eligible && !session.skippedExtensions.contains(item.id) },
                                          set: { if $0 { session.skippedExtensions.remove(item.id) } else { session.skippedExtensions.insert(item.id) } })) {
                         HStack {
                             Text(item.name)
@@ -339,7 +341,7 @@ private struct ChromiumProfileImportPane: View {
                             Text(installed ? "installed" : extensionNote(item)).font(.callout).foregroundStyle(.secondary)
                         }
                     }
-                    .disabled(installed || !item.canReinstall || !session.includeExtensions || !session.canReinstallExtensions)
+                    .disabled(!eligible || !session.includeExtensions || !session.canReinstallExtensions)
                 }
             }
         }

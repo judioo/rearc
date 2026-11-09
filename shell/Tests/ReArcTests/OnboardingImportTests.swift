@@ -487,4 +487,18 @@ final class OnboardingImportTests: XCTestCase {
         XCTAssertTrue(session.isUpToDate)
         XCTAssertFalse(session.canImport)
     }
+
+    /// B2: an extension off in the source, or already installed, keeps Import off.
+    func testOnlyExtensionsTheQueueWouldTakeKeepImportOn() throws {
+        let session = BrowserImportSession(model: makeModel(), applicationSupport: root, arcDefaults: { [:] })
+        func ext(_ id: String, enabled: Bool) -> SourceExtension {
+            SourceExtension(id: id, name: id, version: "1", isEnabled: enabled, isPinned: false, isTheme: false, origin: .webStore)
+        }
+        var detail = BrowserImportSession.ProfileDetail(inventory: ImportSourceInventory(), extensions: [
+            ext(Self.notesID, enabled: true), ext(Self.readerID, enabled: false),
+        ], setup: ChromiumProfileSetup())
+        XCTAssertEqual(session.chosenExtensions(detail).map(\.id), [Self.notesID], "off in the source: never installed")
+        detail.installedExtensionIDs = [Self.notesID]
+        XCTAssertTrue(session.chosenExtensions(detail).isEmpty)
+    }
 }
