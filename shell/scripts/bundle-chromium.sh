@@ -44,7 +44,8 @@ SHELL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="$(cd "$SHELL_DIR/.." && pwd)"
 OUT="${REARC_CHROMIUM_OUT:-$REPO/engine/chromium/src/out/ReArc-dev-arm64}"
 BRIDGE="$REPO/engine/chromium/src/chrome/browser/rearc_bridge"
-SCRATCH="$SHELL_DIR/.build-chromium"
+# REARC_SHELL_SCRATCH: another scratch path, so parallel builds do not share one.
+SCRATCH="${REARC_SHELL_SCRATCH:-$SHELL_DIR/.build-chromium}"
 DIST="$SHELL_DIR/dist/chromium"
 CONFIG=debug
 DYLIB_MODE=symlink

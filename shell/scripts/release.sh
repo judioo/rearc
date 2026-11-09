@@ -66,7 +66,7 @@ load_signing_env "$SHELL_DIR"
 REVISION="$(git -C "$REPO" rev-parse HEAD)"
 SUFFIX=""
 if [[ $FROM_HEAD == 1 ]]; then
-  STAGE="$SHELL_DIR/dist/.release-src"
+  STAGE="${REARC_RELEASE_STAGE:-$SHELL_DIR/dist/.release-src}"
   EXPORT="$(mktemp -d "${TMPDIR:-/tmp}/rearc-release-export.XXXXXX")"
   git -C "$REPO" archive HEAD shell | tar -x -C "$EXPORT"
   mkdir -p "$STAGE/shell"
@@ -109,7 +109,7 @@ for shipped in "$FW_DIR/Chromium Framework" "$FW_DIR/Libraries/"*.dylib "$FW_DIR
   dsym="$OUT/$(basename "$shipped" .app).dSYM"
   [[ -e $dsym ]] && cp -cR "$dsym" "$DIST/symbols/"
 done
-SHELL_DSYM="$(swift build --package-path "$SHELL_DIR" --scratch-path "$SHELL_DIR/.build-chromium" -c release --show-bin-path)/rearc.dSYM"
+SHELL_DSYM="$(swift build --package-path "$SHELL_DIR" --scratch-path "${REARC_SHELL_SCRATCH:-$SHELL_DIR/.build-chromium}" -c release --show-bin-path)/rearc.dSYM"
 [[ -e $SHELL_DSYM ]] && cp -cR "$SHELL_DSYM" "$DIST/symbols/ReArc.dSYM"
 echo "==> $(find "$DIST/symbols" -maxdepth 1 -name '*.dSYM' | wc -l | tr -d ' ') dSYMs in $DIST/symbols"
 echo "==> bundle ready in $((SECONDS - START))s: $APP ($(du -sh "$APP" | cut -f1))"
