@@ -174,7 +174,7 @@ public enum BrowserImportDiscovery {
             inventory.bookmarks = roots.reduce(0) { $0 + $1.linkCount }
         }
         inventory.historyPages = ChromiumHistoryReader.pageCount(url.appendingPathComponent(ChromiumHistoryReader.fileName))
-        inventory.extensions = ExtensionInventoryReader.read(profile: url).count
+        inventory.extensions = ExtensionInventoryReader.read(profile: url).filter { !$0.isComponent }.count
         func exists(_ name: String) -> Bool { fileManager.fileExists(atPath: url.appendingPathComponent(name).path) }
         inventory.hasPasswords = exists("Login Data")
         inventory.hasCookies = exists("Cookies")

@@ -35,8 +35,8 @@ final class BrowserImportTests: XCTestCase {
         XCTAssertEqual(work.todayTabCount, 1)
         guard work.pinned.count == 3,
               case .tab(let first) = work.pinned[0],
-              case .folder("Projects", _, let projects) = work.pinned[1],
-              case .split(nil, .horizontal, let panes) = work.pinned[2] else {
+              case .folder("Projects", _, let projects, _) = work.pinned[1],
+              case .split(nil, .horizontal, let panes, _) = work.pinned[2] else {
             return XCTFail("unexpected tree \(work.pinned)")
         }
         XCTAssertEqual(first.title, "Start Here")
@@ -44,7 +44,7 @@ final class BrowserImportTests: XCTestCase {
         XCTAssertEqual(first.icon, .emoji("📘"))
         XCTAssertTrue(first.isUnread)
         XCTAssertEqual(first.url.absoluteString, "https://docs.example.com/start")
-        guard projects.count == 2, case .folder("Archive", _, let archive) = projects[1] else { return XCTFail("\(projects)") }
+        guard projects.count == 2, case .folder("Archive", _, let archive, _) = projects[1] else { return XCTFail("\(projects)") }
         XCTAssertEqual(archive.count, 1)
         XCTAssertEqual(panes.map(\.title), ["Mail", "Calendar"])
     }
@@ -340,7 +340,7 @@ final class BrowserImportTests: XCTestCase {
         try fixture.installBrowsers()
         let profile = fixture.root.appendingPathComponent("Google/Chrome/Default")
         let extensions = ExtensionInventoryReader.read(profile: profile)
-        XCTAssertEqual(extensions.map(\.name), ["My Dev Tool", "Quiet Mode", "Tab Notes"])
+        XCTAssertEqual(extensions.filter { !$0.isComponent }.map(\.name), ["My Dev Tool", "Quiet Mode", "Tab Notes"])
         let notes = try XCTUnwrap(extensions.first { $0.id == BrowserImportFixture.webStoreID })
         XCTAssertEqual(notes.origin, .webStore)
         XCTAssertTrue(notes.isEnabled)
@@ -374,11 +374,11 @@ final class BrowserImportTests: XCTestCase {
             SourceExtension(id: BrowserImportFixture.disabledID, name: "Quiet Mode", version: "1", isEnabled: false, isPinned: false, isTheme: false, origin: .webStore),
         ]
         var queue = ExtensionReinstallQueue(extensions, into: profile)
-        XCTAssertEqual(queue.items.map(\.name), ["Tab Notes", "Quiet Mode"])
-        XCTAssertEqual(queue.progressText, "1 of 2")
+        XCTAssertEqual(queue.items.map(\.name), ["Tab Notes"])
+        XCTAssertEqual(queue.progressText, "1 of 1")
         XCTAssertEqual(queue.current?.profileID, profile)
         queue.advance()
-        XCTAssertEqual(queue.current?.name, "Quiet Mode")
+        XCTAssertNil(queue.current)
         queue.advance()
         XCTAssertTrue(queue.isFinished)
         XCTAssertNil(queue.progressText)
@@ -396,11 +396,11 @@ final class BrowserImportTests: XCTestCase {
                                     isPinned: false, isTheme: false, origin: .webStore)
         // From Arc, then the same one again from Chrome.
         var queue = ExtensionReinstallQueue([notes, quiet, notes], into: profile)
-        XCTAssertEqual(queue.items.map(\.id), [BrowserImportFixture.webStoreID, BrowserImportFixture.disabledID])
+        XCTAssertEqual(queue.items.map(\.id), [BrowserImportFixture.webStoreID])
         queue.advance()
         let saved = try JSONDecoder().decode(ExtensionReinstallQueue.self, from: JSONEncoder().encode(queue))
         XCTAssertEqual(saved, queue)
-        XCTAssertEqual(saved.current?.name, "Quiet Mode", "where it was left")
+        XCTAssertNil(saved.current, "disabled extensions are excluded")
     }
 
     func testOnlyTheChosenArcProfilesComeOver() throws {
@@ -489,4 +489,88 @@ final class BrowserImportTests: XCTestCase {
         XCTAssertTrue(consent.explanation.contains("\u{201C}Chrome Safe Storage\u{201D}"))
         XCTAssertFalse(consent.explanation.contains("Brave"))
     }
+    func testExtensionConsolidationAcrossBrowsersAndProfiles() {
+        let enabled = SourceExtension(id: BrowserImportFixture.webStoreID, name: "Notes", version: "1", isEnabled: true,
+                                      isPinned: false, isTheme: false, origin: .webStore)
+        var disabled = enabled
+        disabled.isEnabled = false
+        let duplicates = ExtensionConsolidation([disabled, enabled, disabled])
+        XCTAssertEqual(duplicates.totalFound, 3)
+        XCTAssertEqual(duplicates.uniqueCount, 1)
+        XCTAssertEqual(duplicates.candidates, [enabled])
+        XCTAssertEqual(duplicates.skipped.map(\.reason), ["duplicate", "duplicate"])
+        XCTAssertEqual(ExtensionConsolidation([disabled, disabled]).candidates, [])
+        XCTAssertEqual(ExtensionConsolidation([disabled]).skipped.first?.reason, "disabled")
+        XCTAssertTrue(ExtensionConsolidation([enabled], installedIDs: [enabled.id]).candidates.isEmpty)
+        XCTAssertTrue(ExtensionConsolidation.unavailable(status: 2), "removed from store is unavailable")
+        XCTAssertFalse(ExtensionConsolidation.unavailable(status: 3), "network failure remains a failure")
+        var retired = enabled
+        retired.manifestVersion = 2
+        XCTAssertEqual(ExtensionConsolidation([retired]).skipped.first?.reason, "retired (Manifest V2)")
+        retired.manifestVersion = 3
+        retired.isBlocklisted = true
+        XCTAssertEqual(ExtensionConsolidation([retired]).skipped.first?.reason, "blocklisted")
+    }
+
+    func testRepeatedArcImportKeepsStableSpacesAndAddsOnlyNewItems() throws {
+        var source = ArcSidebarImport(export: try arcExport())
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        let choices = source.defaultChoices(for: store)
+        store.importArcSidebar(source, choices: choices)
+        let snapshot = store.makeSnapshot()
+        let count = store.spaces.count
+        XCTAssertTrue(store.importArcSidebar(source, choices: choices).isEmpty)
+        XCTAssertEqual(store.spaces.count, count)
+        XCTAssertEqual(store.makeSnapshot().tabsByID.count, snapshot.tabsByID.count)
+        XCTAssertTrue(store.remainingArcImport(source, choices: choices).isEmpty)
+        // Ledger survives persistence; a new source ID appends to its old space.
+        let restored = SidebarStore(spaces: store.spaces)
+        restored.applySnapshot(try JSONDecoder().decode(SidebarSnapshot.self, from: JSONEncoder().encode(snapshot)))
+        XCTAssertTrue(restored.importArcSidebar(source, choices: choices).isEmpty)
+        source.export.spaces[0].pinned.append(.tab(ArcSidebarTab(sourceID: "NEW-TAB", title: "New", url: URL(string: "https://new.example/")!, isUnread: false)))
+        XCTAssertEqual(restored.importArcSidebar(source, choices: choices).pinnedTabs, 1)
+        XCTAssertEqual(restored.spaces.count, count)
+        XCTAssertTrue(restored.importArcSidebar(source, choices: choices).isEmpty)
+    }
+
+    func testAnExactLegacyArcSpaceIsAdoptedWithoutDuplicatingIt() throws {
+        var export = try arcExport()
+        var space = export.spaces[0]
+        guard case .tab(let tab) = space.pinned[0] else { return XCTFail("fixture") }
+        space.pinned = [.tab(tab)]
+        export.spaces = [space]
+        export.favorites = [:]
+        export.profiles = [space.profile]
+        let source = ArcSidebarImport(export: export)
+        let store = SidebarStore(spaces: [Space(name: "Main", sortRank: "a")])
+        let old = store.addSpace(name: space.name)
+        let oldTab = store.addTab(kind: .pinned, title: tab.title, url: tab.url, in: old.id)
+        if let title = tab.customTitle { store.renameTab(oldTab.id, to: title) }
+        var choices = source.defaultChoices(for: store)
+        choices.profileTargets[space.profile] = .existing(store.activeProfileID)
+        choices.includeFavorites = false
+        let count = store.spaces.count
+        XCTAssertTrue(store.importArcSidebar(source, choices: choices).isEmpty)
+        XCTAssertEqual(store.spaces.count, count)
+        XCTAssertEqual(store.content(for: old.id).pinned.first?.id, oldTab.id)
+        XCTAssertNotNil(store.space(withID: old.id)?.arcSourceID)
+        XCTAssertTrue(store.importArcSidebar(source, choices: choices).isEmpty)
+    }
+
+    func testLegacyQueuesRecheckDisabledCopiesBeforeInstalling() throws {
+        let source = SourceExtension(id: BrowserImportFixture.webStoreID, name: "Notes", version: "1", isEnabled: true,
+                                     isPinned: false, isTheme: false, origin: .webStore)
+        let queue = ExtensionReinstallQueue([source], into: UUID())
+        var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(queue)) as? [String: Any])
+        var rows = try XCTUnwrap(raw["items"] as? [[String: Any]])
+        rows[0].removeValue(forKey: "enabledByDefault")
+        raw["items"] = rows
+        var legacy = try JSONDecoder().decode(ExtensionReinstallQueue.self, from: JSONSerialization.data(withJSONObject: raw))
+        var disabled = source
+        disabled.isEnabled = false
+        let reasons = legacy.reconcileLegacyInventory([disabled, disabled])
+        XCTAssertTrue(legacy.isFinished)
+        XCTAssertTrue(reasons.contains { $0.reason == "disabled" })
+    }
+
 }

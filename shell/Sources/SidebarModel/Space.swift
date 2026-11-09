@@ -312,6 +312,10 @@ public extension Space {
 /// space of that profile.
 public struct Space: Identifiable, Hashable, Codable {
     public let id: UUID
+    /// Arc's stable source identity and import ledger, including removed rows.
+    public var arcSourceID: String? = nil
+    public var arcImportedItemIDs: Set<UUID>? = nil
+    public var arcItemMapping: [UUID: UUID]? = nil
     public var name: String
     public var theme: SpaceTheme
     /// SF Symbol name used as the space's glyph in the switcher.
@@ -354,6 +358,7 @@ public struct Space: Identifiable, Hashable, Codable {
     }
 
     enum CodingKeys: String, CodingKey {
+        case arcSourceID, arcImportedItemIDs, arcItemMapping
         case id, name, theme, iconName
         case pinnedContainerID, unpinnedContainerID, unpinnedShared
         case profileID, sortRank, boostsEnabled
@@ -361,6 +366,9 @@ public struct Space: Identifiable, Hashable, Codable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        arcItemMapping = try c.decodeIfPresent([UUID: UUID].self, forKey: .arcItemMapping)
+        arcSourceID = try c.decodeIfPresent(String.self, forKey: .arcSourceID)
+        arcImportedItemIDs = try c.decodeIfPresent(Set<UUID>.self, forKey: .arcImportedItemIDs)
         id = try c.decode(UUID.self, forKey: .id)
         name = try c.decode(String.self, forKey: .name)
         theme = try c.decode(SpaceTheme.self, forKey: .theme)
@@ -376,6 +384,9 @@ public struct Space: Identifiable, Hashable, Codable {
     /// `boostsEnabled` is written only when off, so a space encodes (and syncs) exactly as before.
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(arcItemMapping, forKey: .arcItemMapping)
+        try c.encodeIfPresent(arcSourceID, forKey: .arcSourceID)
+        try c.encodeIfPresent(arcImportedItemIDs, forKey: .arcImportedItemIDs)
         try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
         try c.encode(theme, forKey: .theme)

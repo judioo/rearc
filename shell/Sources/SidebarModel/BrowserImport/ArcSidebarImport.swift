@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// Where an Arc profile's spaces and favorites go.
 public enum ArcProfileTarget: Hashable, Sendable {
@@ -36,7 +37,7 @@ public struct ArcImportSummary: Equatable, Sendable {
 
     public init() {}
 
-    public var isEmpty: Bool { spaces == 0 && favorites == 0 }
+    public var isEmpty: Bool { spaces == 0 && favorites == 0 && pinnedTabs == 0 && folders == 0 && todayTabs == 0 }
 }
 
 /// Arc's sidebar plus the names of its profiles (Arc's `User Data/Local State`).
@@ -134,7 +135,9 @@ extension SidebarStore {
         func profileID(for profile: ArcProfileRef) -> Profile.ID {
             if let id = resolved[profile] { return id }
             let id: Profile.ID
-            if case .existing(let existing) = choices.profileTargets[profile] ?? .newProfile, self.profile(withID: existing) != nil {
+            if let imported = spaces.first(where: { $0.arcSourceID?.hasPrefix("\(profile.directory):") == true }) {
+                id = imported.profileID
+            } else if case .existing(let existing) = choices.profileTargets[profile] ?? .newProfile, self.profile(withID: existing) != nil {
                 id = existing
             } else {
                 let created = addProfile(name: source.name(of: profile))
@@ -149,21 +152,47 @@ extension SidebarStore {
         var firstSpace: Space.ID?
         for arcSpace in source.export.spaces where choices.spaceIDs.contains(arcSpace.id) {
             let target = profileID(for: arcSpace.profile)
-            let space = addSpace(name: arcSpace.name, theme: arcSpace.theme ?? .arcDefault,
-                                 iconName: arcSpace.icon ?? "circle.fill", profileID: target)
-            firstSpace = firstSpace ?? space.id
-            let pinned = importedEntries(arcSpace.pinned, kind: .pinned)
-            setSectionEntries(pinned, for: .pinned, spaceID: space.id)
-            journalImported(pinned, spaceID: space.id, container: .pinned)
-            summary.spaces += 1
-            summary.pinnedTabs += arcSpace.pinnedTabCount
-            summary.folders += arcSpace.folderCount
-            if choices.includeToday, !arcSpace.today.isEmpty {
-                let today = importedEntries(arcSpace.today, kind: .today)
-                setSectionEntries(today, for: .unpinned, spaceID: space.id)
-                journalImported(today, spaceID: space.id, container: .unpinned)
-                summary.todayTabs += arcSpace.todayTabCount
+            let sourceID = "\(arcSpace.profile.directory):\(arcSpace.id)"
+            let incoming = importedEntries(arcSpace.pinned, kind: .pinned)
+            // Older imports did not save source IDs. Adopt only an exact tree
+            // match in the target profile; names alone never claim a space.
+            let prior = spaces.first { $0.arcSourceID == sourceID } ?? spaces.first {
+                $0.profileID == target && $0.arcSourceID == nil && $0.name == arcSpace.name &&
+                !incoming.isEmpty && arcEntriesMatch(incoming, content(for: $0.id).pinned)
             }
+            let space = prior ?? addSpace(name: arcSpace.name, theme: arcSpace.theme ?? .arcDefault,
+                                         iconName: arcSpace.icon ?? "circle.fill", profileID: target)
+            firstSpace = firstSpace ?? space.id
+            var mapping = space.arcItemMapping ?? [:]
+            if prior != nil && space.arcSourceID == nil {
+                mapArcEntries(incoming, to: content(for: space.id).pinned, mapping: &mapping)
+            }
+            var known = space.arcImportedItemIDs ?? Set(mapping.values)
+            let previousIDs = known
+            let pinned = remapArcEntries(incoming, mapping: mapping)
+            let oldContent = content(for: space.id)
+            let merged = mergeArcEntries(pinned, into: oldContent.pinned, known: &known, summary: &summary)
+            setSectionEntries(merged, for: .pinned, spaceID: space.id)
+            if prior == nil { summary.spaces += 1 }
+            if choices.includeToday {
+                let incomingToday = importedEntries(arcSpace.today, kind: .today)
+                if prior != nil && space.arcSourceID == nil && arcEntriesMatch(incomingToday, oldContent.today) {
+                    mapArcEntries(incomingToday, to: oldContent.today, mapping: &mapping)
+                    known.formUnion(mapping.values)
+                }
+                let today = remapArcEntries(incomingToday, mapping: mapping)
+                let merged = mergeArcEntries(today, into: oldContent.today, known: &known, summary: &summary)
+                setSectionEntries(merged, for: .unpinned, spaceID: space.id)
+            }
+            let mergedContent = content(for: space.id)
+            journalArcAdditions(mergedContent.pinned, excluding: previousIDs, spaceID: space.id, container: .pinned)
+            journalArcAdditions(mergedContent.today, excluding: previousIDs, spaceID: space.id, container: .unpinned)
+            if let index = spaces.firstIndex(where: { $0.id == space.id }) {
+                spaces[index].arcItemMapping = mapping.isEmpty ? nil : mapping
+                spaces[index].arcSourceID = sourceID
+                spaces[index].arcImportedItemIDs = known
+            }
+
         }
 
         if choices.includeFavorites {
@@ -173,7 +202,14 @@ extension SidebarStore {
                 let target = profileID(for: profile)
                 guard let anchor = spaces(in: target).first?.id else { continue }
                 var existing = Set(favorites(in: target).map(\.url.absoluteString))
-                for arcTab in tabs where existing.insert(arcTab.url.absoluteString).inserted {
+                for arcTab in tabs {
+                    let sourceID = Self.arcItemID(arcTab.sourceID ?? arcTab.url.absoluteString)
+                    guard let index = spaces.firstIndex(where: { $0.id == anchor }) else { continue }
+                    if spaces[index].arcImportedItemIDs?.contains(sourceID) == true { continue }
+                    if spaces[index].arcSourceID == nil { spaces[index].arcSourceID = "\(profile.directory):__favorites" }
+                    if spaces[index].arcImportedItemIDs == nil { spaces[index].arcImportedItemIDs = [] }
+                    spaces[index].arcImportedItemIDs?.insert(sourceID)
+                    guard existing.insert(arcTab.url.absoluteString).inserted else { continue }
                     let tab = addTab(kind: .favorite, title: arcTab.title, url: arcTab.url, in: anchor)
                     if let customTitle = arcTab.customTitle { renameTab(tab.id, to: customTitle) }
                     if let icon = arcTab.icon { setCustomIcon(icon, for: tab.id) }
@@ -200,7 +236,7 @@ extension SidebarStore {
         let ranks = LexoRank.initialSequence(count: nodes.count)
         let date = now()
         func tab(_ arcTab: ArcSidebarTab, rank: String) -> Tab {
-            var tab = Tab(kind: kind, title: arcTab.title, url: arcTab.url, isUnread: arcTab.isUnread, sortRank: rank,
+            var tab = Tab(id: Self.arcItemID(arcTab.sourceID ?? arcTab.url.absoluteString), kind: kind, title: arcTab.title, url: arcTab.url, isUnread: arcTab.isUnread, sortRank: rank,
                           customTitle: arcTab.customTitle, lastActiveAt: date, customIcon: arcTab.icon)
             if kind == .pinned {
                 tab.savedURL = arcTab.url
@@ -212,13 +248,131 @@ extension SidebarStore {
             switch node {
             case .tab(let arcTab):
                 return .tab(tab(arcTab, rank: rank))
-            case .folder(let title, let icon, let children):
-                return .folder(SidebarFolder(title: title, children: importedEntries(children, kind: .pinned),
+            case .folder(let title, let icon, let children, let sourceID):
+                return .folder(SidebarFolder(id: Self.arcItemID(sourceID ?? "folder:\(title)"), title: title, children: importedEntries(children, kind: .pinned),
                                              sortRank: rank, customIcon: icon))
-            case .split(let title, let orientation, let tabs):
+            case .split(let title, let orientation, let tabs, let sourceID):
                 let memberRanks = LexoRank.initialSequence(count: tabs.count)
-                return .split(SplitViewItem(orientation: orientation, tabs: zip(tabs, memberRanks).map { tab($0, rank: $1) },
+                return .split(SplitViewItem(id: Self.arcItemID(sourceID ?? "split:\(title ?? "")"), orientation: orientation, tabs: zip(tabs, memberRanks).map { tab($0, rank: $1) },
                                             sortRank: rank, title: title))
+            }
+        }
+    }
+
+    private func arcEntriesMatch(_ lhs: [SidebarEntry], _ rhs: [SidebarEntry]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).allSatisfy { a, b in
+            switch (a, b) {
+            case (.tab(let a), .tab(let b)): return a.url == b.url && a.title == b.title && a.customTitle == b.customTitle
+            case (.folder(let a), .folder(let b)): return a.title == b.title && arcEntriesMatch(a.children, b.children)
+            case (.split(let a), .split(let b)): return a.title == b.title && a.orientation == b.orientation && arcEntriesMatch(a.tabs.map(SidebarEntry.tab), b.tabs.map(SidebarEntry.tab))
+            default: return false
+            }
+        }
+    }
+
+    private func mapArcEntries(_ source: [SidebarEntry], to target: [SidebarEntry], mapping: inout [UUID: UUID]) {
+        for (a, b) in zip(source, target) {
+            mapping[a.id] = b.id
+            if case .folder(let a) = a, case .folder(let b) = b {
+                mapArcEntries(a.children, to: b.children, mapping: &mapping)
+            } else if case .split(let a) = a, case .split(let b) = b {
+                mapArcEntries(a.tabs.map(SidebarEntry.tab), to: b.tabs.map(SidebarEntry.tab), mapping: &mapping)
+            }
+        }
+    }
+
+    private func remapArcEntries(_ entries: [SidebarEntry], mapping: [UUID: UUID]) -> [SidebarEntry] {
+        entries.map { entry in
+            switch entry {
+            case .tab(let tab):
+                return .tab(Tab(id: mapping[tab.id] ?? tab.id, kind: tab.kind, title: tab.title, url: tab.url,
+                                faviconToken: tab.faviconToken, isUnread: tab.isUnread, sortRank: tab.sortRank,
+                                customTitle: tab.customTitle, lastActiveAt: tab.lastActiveAt,
+                                savedURL: tab.savedURL, savedTitle: tab.savedTitle, customIcon: tab.customIcon))
+            case .folder(let folder):
+                return .folder(SidebarFolder(id: mapping[folder.id] ?? folder.id, title: folder.title,
+                    children: remapArcEntries(folder.children, mapping: mapping), sortRank: folder.sortRank, customIcon: folder.customIcon))
+            case .split(let split):
+                let tabs = remapArcEntries(split.tabs.map(SidebarEntry.tab), mapping: mapping).compactMap { if case .tab(let tab) = $0 { return tab }; return nil }
+                return .split(SplitViewItem(id: mapping[split.id] ?? split.id, orientation: split.orientation,
+                    tabs: tabs, sortRank: split.sortRank, customIcon: split.customIcon, title: split.title))
+            case .easel: return entry
+            }
+        }
+    }
+
+    static func arcItemID(_ source: String) -> UUID {
+        let bytes = Array(SHA256.hash(data: Data("rearc:arc:\(source)".utf8)).prefix(16))
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
+
+    private func mergeArcEntries(_ incoming: [SidebarEntry], into existing: [SidebarEntry],
+                                 known: inout Set<UUID>, summary: inout ArcImportSummary) -> [SidebarEntry] {
+        var out = existing
+        for entry in incoming {
+            if let index = out.firstIndex(where: { $0.id == entry.id }) {
+                if case .folder(var folder) = out[index], case .folder(let source) = entry {
+                    folder.children = mergeArcEntries(source.children, into: folder.children, known: &known, summary: &summary)
+                    out[index] = .folder(folder)
+                } else if case .split(var split) = out[index], case .split(let source) = entry {
+                    for tab in source.tabs where !known.contains(tab.id) && split.tabs.count < 4 {
+                        split.tabs.append(tab)
+                        known.insert(tab.id)
+                        summary.pinnedTabs += 1
+                    }
+                    out[index] = .split(split)
+                }
+                continue
+            }
+            guard known.insert(entry.id).inserted else { continue }
+            switch entry {
+            case .tab(let tab):
+                if tab.kind == .today { summary.todayTabs += 1 } else { summary.pinnedTabs += 1 }
+            case .folder(let folder):
+                summary.folders += 1
+                _ = mergeArcEntries(folder.children, into: [], known: &known, summary: &summary)
+            case .split(let split):
+                for tab in split.tabs { known.insert(tab.id) }
+                summary.pinnedTabs += split.tabs.count
+            case .easel: break
+            }
+            out.append(entry)
+        }
+        // Preserve the user's order; new rows follow existing ones.
+        let ranks = LexoRank.initialSequence(count: out.count)
+        return zip(out, ranks).map { entry, rank in
+            var entry = entry
+            switch entry {
+            case .tab(var tab): tab.sortRank = rank; entry = .tab(tab)
+            case .folder(var folder): folder.sortRank = rank; entry = .folder(folder)
+            case .split(var split): split.sortRank = rank; entry = .split(split)
+            case .easel: break
+            }
+            return entry
+        }
+    }
+
+    /// Preview against a snapshot, including the persisted source ledger.
+    public func remainingArcImport(_ source: ArcSidebarImport, choices: ArcImportChoices) -> ArcImportSummary {
+        let copy = SidebarStore(spaces: spaces)
+        copy.applySnapshot(makeSnapshot())
+        return copy.importArcSidebar(source, choices: choices)
+    }
+
+    private func journalArcAdditions(_ entries: [SidebarEntry], excluding known: Set<UUID>,
+                                     spaceID: Space.ID, container: SidebarItemContainer, folderID: UUID? = nil) {
+        for entry in entries {
+            if !known.contains(entry.id) {
+                if let folderID {
+                    mutationJournal.record(.placeItemInFolder(id: entry.id, folderID: folderID, sortRank: rank(of: entry)))
+                } else {
+                    mutationJournal.record(.insertItem(id: entry.id, spaceID: spaceID, container: container, sortRank: rank(of: entry)))
+                }
+            }
+            if case .folder(let folder) = entry {
+                journalArcAdditions(folder.children, excluding: known, spaceID: spaceID, container: container, folderID: folder.id)
             }
         }
     }

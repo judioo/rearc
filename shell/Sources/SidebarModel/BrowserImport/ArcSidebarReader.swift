@@ -41,6 +41,7 @@ public enum ArcProfileRef: Hashable, Sendable {
 /// An Arc tab as saved in its sidebar (`data.tab.savedURL` / `savedTitle`,
 /// the item `title` when renamed, `customInfo.iconType`).
 public struct ArcSidebarTab: Equatable, Sendable {
+    public var sourceID: String? = nil
     public var title: String
     public var url: URL
     public var customTitle: String?
@@ -50,19 +51,19 @@ public struct ArcSidebarTab: Equatable, Sendable {
 
 public indirect enum ArcSidebarNode: Equatable, Sendable {
     case tab(ArcSidebarTab)
-    case folder(title: String, icon: SidebarItemIcon?, children: [ArcSidebarNode])
-    case split(title: String?, orientation: SplitLayoutOrientation, tabs: [ArcSidebarTab])
+    case folder(title: String, icon: SidebarItemIcon?, children: [ArcSidebarNode], sourceID: String? = nil)
+    case split(title: String?, orientation: SplitLayoutOrientation, tabs: [ArcSidebarTab], sourceID: String? = nil)
 
     public var tabCount: Int {
         switch self {
         case .tab: return 1
-        case .folder(_, _, let children): return children.reduce(0) { $0 + $1.tabCount }
-        case .split(_, _, let tabs): return tabs.count
+        case .folder(_, _, let children, _): return children.reduce(0) { $0 + $1.tabCount }
+        case .split(_, _, let tabs, _): return tabs.count
         }
     }
 
     public var folderCount: Int {
-        guard case .folder(_, _, let children) = self else { return 0 }
+        guard case .folder(_, _, let children, _) = self else { return 0 }
         return 1 + children.reduce(0) { $0 + $1.folderCount }
     }
 }
@@ -234,22 +235,22 @@ public enum ArcSidebarReader {
                 guard let item = items[childID], let data = item["data"] as? [String: Any] else { continue }
                 let customTitle = (item["title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                 if let tabData = data["tab"] as? [String: Any] {
-                    if let tab = tab(item: item, data: tabData) { out.append(.tab(tab)) }
+                    if let tab = tab(id: childID, item: item, data: tabData) { out.append(.tab(tab)) }
                 } else if data["list"] != nil {
                     let children = nodes(under: childID, allowFolders: true, allowSplits: false, depth: depth + 1)
                     if allowFolders {
-                        out.append(.folder(title: customTitle ?? "Folder", icon: nil, children: children))
+                        out.append(.folder(title: customTitle ?? "Folder", icon: nil, children: children, sourceID: childID))
                     } else {
                         out += children
                     }
                 } else if let split = data["splitView"] as? [String: Any] {
                     let tabs = (item["childrenIds"] as? [String] ?? []).compactMap { id -> ArcSidebarTab? in
                         guard let child = items[id], let tabData = (child["data"] as? [String: Any])?["tab"] as? [String: Any] else { return nil }
-                        return tab(item: child, data: tabData)
+                        return tab(id: id, item: child, data: tabData)
                     }
                     if allowSplits, (2 ... 4).contains(tabs.count) {
                         let vertical = (split["layoutOrientation"] as? String) == "vertical"
-                        out.append(.split(title: customTitle, orientation: vertical ? .vertical : .horizontal, tabs: tabs))
+                        out.append(.split(title: customTitle, orientation: vertical ? .vertical : .horizontal, tabs: tabs, sourceID: childID))
                     } else {
                         if tabs.count > 1 { dropped.splitsFlattened += 1 }
                         out += tabs.map(ArcSidebarNode.tab)
@@ -263,7 +264,7 @@ public enum ArcSidebarReader {
             return out
         }
 
-        mutating func tab(item: [String: Any], data: [String: Any]) -> ArcSidebarTab? {
+        mutating func tab(id: String, item: [String: Any], data: [String: Any]) -> ArcSidebarTab? {
             guard let saved = data["savedURL"] as? String, let url = URL(string: saved),
                   let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https", url.host() != nil else {
                 dropped.nonWebTabs += 1
@@ -272,6 +273,7 @@ public enum ArcSidebarReader {
             let savedTitle = (data["savedTitle"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let rename = (item["title"] as? String).flatMap { $0.isEmpty || $0 == savedTitle ? nil : $0 }
             return ArcSidebarTab(
+                sourceID: id,
                 title: savedTitle.isEmpty ? (url.host() ?? saved) : savedTitle,
                 url: url,
                 customTitle: rename,
