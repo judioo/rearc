@@ -107,6 +107,11 @@ private struct AboutStingRepresentable: NSViewRepresentable {
     let view: AboutStingView
     func makeNSView(context: Context) -> AboutStingView { view }
     func updateNSView(_ nsView: AboutStingView, context: Context) {}
+    /// Exactly the frame AboutView gives it, whatever the GIF's own size.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: AboutStingView, context: Context) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions(by: CGSize(width: AboutWindowController.width,
+                                                           height: AboutWindowController.width * AboutStingView.aspect))
+    }
 }
 
 /// Resources/AboutSting.gif, played once by NSImageView and then swapped for
@@ -136,6 +141,11 @@ final class AboutStingView: NSImageView {
     init() {
         super.init(frame: .zero)
         imageScaling = .scaleProportionallyUpOrDown
+        // The GIF's 720×406 would otherwise outgrow the band above the
+        // text and run under the credits (QA-483 B11).
+        clipsToBounds = true
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         animates = true
         setAccessibilityLabel("ReArc")
         rest()
@@ -143,6 +153,8 @@ final class AboutStingView: NSImageView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric) }
 
     func play() {
         guard let frames = Self.frames else {
