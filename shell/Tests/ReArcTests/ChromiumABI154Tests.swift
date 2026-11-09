@@ -119,6 +119,31 @@ final class ChromiumABI154Tests: XCTestCase {
         XCTAssertNil(model.devToolsInTab(for: tab.id))
     }
 
+    /// The dock event naming the toolbox can arrive before the toolbox itself;
+    /// the content area must redraw when it lands (QA-483 B6, B7).
+    func testAToolboxArrivingAfterItsDockEventRedrawsTheContentArea() {
+        final class Flag: @unchecked Sendable { var raised = false }
+        let model = makeModel()
+        model.devToolsOpener = Opener()
+        model.windowPresenter = Presenter()
+        model.devToolsDockable = true
+        let tab = model.openInNewTab(URL(string: "https://inspect.test/")!)
+        let frontend = model.engineHost.engine(for: model.store.addTab(kind: .today, title: "F", url: URL(string: "about:blank")!),
+                                               profileID: model.store.activeProfileID)
+        model.attachDevTools(frontend, frontendTabID: 7, for: tab.id)
+        model.devToolsDockChanged(frontendTabID: 7, layout: DevToolsDockLayout(
+            side: .undocked, inTabTabID: 8, pageBounds: CGRect(x: 0, y: 0, width: 1162, height: 648)))
+        XCTAssertNil(model.devToolsInTab(for: tab.id)?.view, "no toolbox yet: the page fills the area")
+
+        let redrawn = Flag()
+        withObservationTracking { _ = model.devToolsInTab(for: tab.id) } onChange: { redrawn.raised = true }
+        let toolbox = model.engineHost.engine(for: model.store.addTab(kind: .today, title: "T", url: URL(string: "about:blank")!),
+                                              profileID: model.store.activeProfileID)
+        model.attachDevToolsToolbox(toolbox, toolboxTabID: 8, for: tab.id)
+        XCTAssertTrue(redrawn.raised, "the toolbox's arrival is observed")
+        XCTAssertTrue(model.devToolsInTab(for: tab.id)?.view === toolbox)
+    }
+
     func testDockableFrontendsHaveNoShellDockMenuItems() {
         let model = makeModel()
         XCTAssertTrue(ShellMenus.developer(model).flatMap { $0 }.contains { $0.title == "Dock Developer Tools" })
