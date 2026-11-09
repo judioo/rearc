@@ -60,7 +60,7 @@ final class Wave19SidebarTests: XCTestCase {
 
     func testUnloadingAPinnedTabKeepsItAndMovesSelection() throws {
         let store = makeStore()
-        let first = store.addTab(kind: .pinned, title: "A", url: url("https://a.test"))
+        store.addTab(kind: .pinned, title: "A", url: url("https://a.test"))
         let second = store.addTab(kind: .pinned, title: "B", url: url("https://b.test"))
         let folder = try XCTUnwrap(store.createFolder(title: "F", containing: [second.id]))
         store.selectTab(second.id)
@@ -70,11 +70,74 @@ final class Wave19SidebarTests: XCTestCase {
         XCTAssertEqual(store.tab(withID: second.id)?.url, url("https://b.test"), "reset to the saved URL")
         XCTAssertEqual(store.parentFolderID(of: second.id), folder.id, "still in its folder")
         XCTAssertNotEqual(store.selectedItemID, second.id)
-        XCTAssertEqual(store.selectedItemID, first.id)
+        XCTAssertNil(store.selectedItemID)
         XCTAssertFalse(store.archivedTabs.contains { $0.id == second.id }, "unloading is not closing")
 
         let today = store.addTab(kind: .today, title: "T", url: url("https://t.test"))
         XCTAssertFalse(store.unloadPinnedTab(today.id))
+    }
+
+    func testUnloadingCollapsedFolderPinDoesNotSelectSibling() throws {
+        let store = makeStore()
+        let a = store.addTab(kind: .pinned, title: "A", url: url("https://a.test"))
+        let b = store.addTab(kind: .pinned, title: "B", url: url("https://b.test"))
+        let folder = try XCTUnwrap(store.createFolder(containing: [a.id, b.id]))
+        store.setFolderExpanded(folder.id, false)
+        store.selectTab(a.id)
+
+        XCTAssertTrue(store.unloadPinnedTab(a.id))
+        XCTAssertNil(store.selectedItemID)
+        let rows = SidebarOutlineRow.rows(store.outline(for: store.activeSpaceID).pinned, expanded: store.expandedFolderIDs, selected: store.selectedItemID)
+        XCTAssertEqual(rows.map(\.id), [folder.id])
+        XCTAssertNotNil(store.tab(withID: a.id))
+        XCTAssertNotNil(store.tab(withID: b.id))
+    }
+
+    func testUnloadingNestedCollapsedFolderPinDoesNotSelectAnotherFolder() throws {
+        let store = makeStore()
+        let a = store.addTab(kind: .pinned, title: "A", url: url("https://a.test"))
+        let b = store.addTab(kind: .pinned, title: "B", url: url("https://b.test"))
+        let inner = try XCTUnwrap(store.createFolder(containing: [a.id, b.id]))
+        let outer = try XCTUnwrap(store.createFolder(containing: [inner.id]))
+        let c = store.addTab(kind: .pinned, title: "C", url: url("https://c.test"))
+        store.createFolder(containing: [c.id])
+        store.setFolderExpanded(inner.id, false)
+        store.setFolderExpanded(outer.id, false)
+        store.selectTab(a.id)
+
+        XCTAssertTrue(store.unloadPinnedTab(a.id))
+        XCTAssertNil(store.selectedItemID)
+        XCTAssertFalse(store.isFolderExpanded(inner.id))
+        XCTAssertFalse(store.isFolderExpanded(outer.id))
+    }
+
+    func testUnloadingPinSelectsFirstTodayRowInItsSpace() throws {
+        let store = makeStore()
+        let pin = store.addTab(kind: .pinned, title: "Pin", url: url("https://pin.test"))
+        let folder = try XCTUnwrap(store.createFolder(containing: [pin.id]))
+        store.setFolderExpanded(folder.id, false)
+        store.addTab(kind: .today, title: "Older", url: url("https://older.test"))
+        let newer = store.addTab(kind: .today, title: "Newer", url: url("https://newer.test"))
+        store.selectTab(pin.id)
+
+        XCTAssertTrue(store.unloadPinnedTab(pin.id))
+        XCTAssertEqual(store.selectedItemID, newer.id)
+        XCTAssertNotNil(store.tab(withID: pin.id))
+        // Unloading a background pin must not disturb the Today selection.
+        XCTAssertTrue(store.unloadPinnedTab(pin.id))
+        XCTAssertEqual(store.selectedItemID, newer.id)
+    }
+
+    func testClosingTodayKeepsPositionalSuccessorAndPreviousFallback() {
+        let store = makeStore()
+        let pin = store.addTab(kind: .pinned, title: "Pin", url: url("https://pin.test"))
+        let older = store.addTab(kind: .today, title: "Older", url: url("https://older.test"))
+        let newer = store.addTab(kind: .today, title: "Newer", url: url("https://newer.test"))
+        store.selectTab(newer.id)
+        store.closeTab(newer.id)
+        XCTAssertEqual(store.selectedItemID, older.id)
+        store.closeTab(older.id)
+        XCTAssertEqual(store.selectedItemID, pin.id)
     }
 
     func testResetAllPinnedTabsAndMakeCurrentSaved() {

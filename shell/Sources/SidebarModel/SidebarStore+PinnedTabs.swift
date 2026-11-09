@@ -16,10 +16,9 @@ extension SidebarStore {
     public func unloadPinnedTab(_ id: Tab.ID) -> Bool {
         guard case .pinned = locate(id), case .tab = entry(withID: id) else { return false }
         if selectedItemID == id {
-            let ordered = displayEntries()
-            let index = ordered.firstIndex(where: { $0.id == id }) ?? 0
-            let others = ordered.filter { $0.id != id }
-            selectedItemID = others.isEmpty ? nil : others[min(index, others.count - 1)].id
+            // A saved pin is not an open-tab successor. Only Today can take
+            // focus; otherwise leave the space empty (including folder peeks).
+            selectedItemID = content(for: activeSpaceID).todayLeaves.first?.id
         }
         resetTabToSavedURL(id)
         notifyMutation()
