@@ -242,8 +242,10 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
         let windowSpace = request.windowID > 0 ? reporter.key(forWindowID: request.windowID).flatMap { store.space(withID: $0)?.id } : nil
         let active = store.activeSpaceID
         let order = [active] + store.spaces.map(\.id).filter { $0 != active }
+        // An import's new extension: its welcome page waits in the background.
+        let quiet = runtime.capabilities.extensionBackgroundTabs && model.quietExtensionInstalls.isQuiet(request.extensionID)
         let placement = ExtensionTabPlacement.resolve(
-            request, currentSpace: active, windowSpace: windowSpace, spaces: order
+            request, currentSpace: active, windowSpace: windowSpace, spaces: order, quiet: quiet
         ) { [runtime] space in
             guard let profile = store.space(withID: space)?.profileID else { return false }
             return runtime.engineProfileID(for: .persistent(profile)) == request.profileID
@@ -251,6 +253,10 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
         switch placement {
         case .decline(let reason):
             decline(request, reason)
+        case .activate(let tab) where quiet:
+            // It may not bring its page forward either; the tab stays where it is.
+            guard runtime.engine(forTab: tab) != nil else { return decline(request, "tab \(tab) is not open") }
+            runtime.respondExtensionTabRequestInBackground(request.id, tab: tab)
         case .activate(let tab):
             guard let engine = runtime.engine(forTab: tab) else { return decline(request, "tab \(tab) is not open") }
             if engine.role == .littleArc, let record = store.littleArcLiveWindows.first(where: {
@@ -272,6 +278,21 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
             }
             reconcileWindows()
             runtime.respondExtensionTabRequest(request.id, tab: tabID)
+        case .backgroundTab(let space):
+            guard let (tabID, tab) = adoptBlankTab(profile: request.profileID, in: space, model: model, atBottom: true) else {
+                return decline(request, "tab creation failed")
+            }
+            reconcileWindows()
+            ChromiumLog.info("extension \(request.extensionID) tab request \(request.id) opened in the background (import install)")
+            if runtime.respondExtensionTabRequestInBackground(request.id, tab: tabID) != .rearcOK {
+                // Refused: answer as before, with the tab shown if it asked.
+                if request.active {
+                    if space != store.activeSpaceID { store.selectSpace(space) }
+                    model.selectTab(tab.id)
+                    reconcileWindows()
+                }
+                runtime.respondExtensionTabRequest(request.id, tab: tabID)
+            }
         case .littleArc:
             guard let tabID = runtime.createBlankTab(profile: request.profileID, role: .littleArc) else { return decline(request, "tab creation failed") }
             let event = ChromiumTabEvent.created(profileID: request.profileID, tabID: tabID, url: "about:blank")
@@ -286,11 +307,13 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
     /// (about:blank in the sidebar too, so selecting it loads nothing over
     /// the navigation the engine starts when the request is answered).
     @MainActor
-    private func adoptBlankTab(profile: UInt64, in space: UUID, model: BrowserViewModel, title: String = "New Tab") -> (UInt64, Tab)? {
+    private func adoptBlankTab(profile: UInt64, in space: UUID, model: BrowserViewModel, title: String = "New Tab",
+                               atBottom: Bool = false) -> (UInt64, Tab)? {
         guard let tabID = runtime.createBlankTab(profile: profile, role: .tab) else { return nil }
         let event = ChromiumTabEvent.created(profileID: profile, tabID: tabID, url: "about:blank")
         let blank = URL(string: "about:blank")!
-        let tab = model.store.addTab(kind: .today, title: title, url: blank, in: space)
+        let tab = atBottom ? model.store.appendTodayTab(title: title, url: blank, in: space)
+            : model.store.addTab(kind: .today, title: title, url: blank, in: space)
         let profileID = model.profileID(for: tab)
         let engine = ChromiumEngine(runtime: runtime, adopting: event, initialURL: blank,
                                     context: EngineProfileContext(profileID: profileID),

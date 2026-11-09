@@ -260,6 +260,20 @@ extension ChromiumRuntime {
         return status
     }
 
+    /// ABI 1.55: answers with a tab the window does not show (looked up, so
+    /// the shell still links against an engine without it).
+    @discardableResult
+    func respondExtensionTabRequestInBackground(_ request: UInt64, tab: UInt64) -> ReArcStatus {
+        typealias Respond = @convention(c) (UInt64, UInt64) -> ReArcStatus
+        guard capabilities.extensionBackgroundTabs, isReady,
+              let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcExtensionTabRequestRespondInBackground") else {
+            return ReArcStatus(REARC_UNSUPPORTED)
+        }
+        let status = unsafeBitCast(symbol, to: Respond.self)(request, tab)
+        ChromiumLog.info("extension tab request \(request) reply background tab \(tab) -> \(status.rearcName)")
+        return status
+    }
+
     /// `ReArcTabSetExtensionWindow`; logged only when refused.
     @discardableResult
     func setExtensionWindow(tab: UInt64, _ state: ExtensionWindowState) -> ReArcStatus {

@@ -40,7 +40,7 @@ final class ChromiumABI154Tests: XCTestCase {
         XCTAssertFalse(ChromiumCapabilities(abiMinorVersion: 53, hasFeature: { _ in true }).devToolsDocking)
         let current = ChromiumCapabilities(abiMinorVersion: 54, hasFeature: { _ in true })
         XCTAssertTrue(current.devToolsDocking)
-        XCTAssertTrue(current.summary.hasSuffix("page_theme_color=1 devtools_docking=1"))
+        XCTAssertTrue(current.summary.hasSuffix("page_theme_color=1 devtools_docking=1 extension_background_tabs=0"))
         for missing in ["devtools_docking", "devtools"] {
             XCTAssertFalse(ChromiumCapabilities(abiMinorVersion: 54, hasFeature: { $0 != missing }).devToolsDocking)
         }

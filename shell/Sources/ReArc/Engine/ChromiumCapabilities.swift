@@ -20,6 +20,7 @@ struct ChromiumCapabilities: Equatable {
     static let shutdownPendingClosesFeature = "shutdown_pending_closes"
     static let profileDirectoryFeature = "profile_directory"
     static let extensionBulkInstallFeature = "extension_bulk_install"
+    static let extensionBackgroundTabsFeature = "extension_background_tabs"
     static let webUICreditsFeature = "webui_credits"
     static let webUIDailyPagesFeature = "webui_daily_pages"
     static let historyRecordingFeature = "history_recording"
@@ -80,6 +81,7 @@ struct ChromiumCapabilities: Equatable {
         webUIDailyPagesFeature: 14,
         webUICreditsFeature: 52,
         extensionBulkInstallFeature: 53,
+        extensionBackgroundTabsFeature: 55,
         historyRecordingFeature: 15,
         passwordAutofillFeature: 15,
         findInPageFeature: 16,
@@ -246,6 +248,9 @@ struct ChromiumCapabilities: Equatable {
     /// Theme-colour events and the top-edge snapshot for the toolbar colour
     /// (`ReArcEngineSetThemeColorCallback`, snapshot scope 2).
     var extensionBulkInstall: Bool
+    /// `ReArcExtensionTabRequestRespondInBackground`: an import's new
+    /// extensions open their pages unselected. Requires `extensionWindows`.
+    var extensionBackgroundTabs: Bool
     var pageThemeColor: Bool
 
     static let none = ChromiumCapabilities(abiMinorVersion: nil, hasFeature: { _ in false })
@@ -311,6 +316,7 @@ struct ChromiumCapabilities: Equatable {
         downloadEventBatches = downloads && adopted(Self.downloadEventBatchesFeature)
         extensionTabGroups = extensionWindows && adopted(Self.extensionTabGroupsFeature)
         pageThemeColor = adopted(Self.pageThemeColorFeature)
+        extensionBackgroundTabs = extensionWindows && adopted(Self.extensionBackgroundTabsFeature)
     }
 
     /// Inspect in the page menu: the shell opens a hosted frontend itself
@@ -397,6 +403,7 @@ struct ChromiumCapabilities: Equatable {
             (Self.extensionTabGroupsFeature, extensionTabGroups),
             (Self.pageThemeColorFeature, pageThemeColor),
             (Self.devToolsDockingFeature, devToolsDocking),
+            (Self.extensionBackgroundTabsFeature, extensionBackgroundTabs),
         ]
         return "ABI minor \(minor): " + flags.map { "\($0.0)=\($0.1 ? 1 : 0)" }.joined(separator: " ")
     }
