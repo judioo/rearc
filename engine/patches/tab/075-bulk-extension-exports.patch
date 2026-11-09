@@ -1,0 +1,39 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 export the bulk extension install ABI (ABI 1.53)
+
+tab/073 declared ReArcProfileInstallExtensions and
+ReArcProfileLoadUnpackedExtension with REARC_ENGINE_EXPORT but did not list
+them in framework.exports/framework.order. The component dev build exports
+them anyway; the non-component release framework does not, and
+build-engine-release.sh refuses it. Export-list lines only.
+
+Last rebased: 2026-11-09 onto Chromium 156.0.8078.74 (d331de35ca).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 9a5c828b66..2ca63d8547 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -102,6 +102,8 @@ _ReArcEngineSetZoomCallback
+ _ReArcTabGetZoomFactor
+ _ReArcTabGetThemeColor
+ _ReArcEngineSetThemeColorCallback
++_ReArcProfileInstallExtensions
++_ReArcProfileLoadUnpackedExtension
+ _ReArcTabSetZoomFactor
+ _ReArcTabGetDocumentIdentity
+ _ReArcTabEvaluateScript2
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index b9b8811de5..5b6763aeb0 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -113,6 +113,8 @@ _ReArcEngineSetZoomCallback
+ _ReArcTabGetZoomFactor
+ _ReArcTabGetThemeColor
+ _ReArcEngineSetThemeColorCallback
++_ReArcProfileInstallExtensions
++_ReArcProfileLoadUnpackedExtension
+ _ReArcTabSetZoomFactor
+ _ReArcTabGetDocumentIdentity
+ _ReArcTabEvaluateScript2
