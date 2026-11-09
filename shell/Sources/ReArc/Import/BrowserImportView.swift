@@ -40,6 +40,11 @@ final class BrowserImportWindowController: NSWindowController, NSWindowDelegate 
 
 struct BrowserImportView: View {
     @Bindable var session: BrowserImportSession
+    /// The list's own selection, mirrored to the session. Bound straight to
+    /// the session, the first click after the window opened set it without
+    /// redrawing the pane beside the list: the row highlighted over the old
+    /// pane until it was clicked again (QA-483 B9).
+    @State private var selection: BrowserImportSession.Source?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -53,12 +58,15 @@ struct BrowserImportView: View {
             Divider()
             footer
         }
+        .onAppear { selection = session.selection }
+        .onChange(of: selection) { _, new in if session.selection != new { session.selection = new } }
+        .onChange(of: session.selection) { _, new in if selection != new { selection = new } }
     }
 
     // MARK: Sources
 
     private var sourceList: some View {
-        List(selection: $session.selection) {
+        List(selection: $selection) {
             if session.isDiscovering && session.browsers.isEmpty {
                 ProgressView().controlSize(.small)
             }
@@ -104,7 +112,7 @@ struct BrowserImportView: View {
 
     @ViewBuilder
     private var detail: some View {
-        switch session.selection {
+        switch selection {
         case .arcSidebar:
             ArcSidebarImportPane(session: session)
         case .profile(let profile):
