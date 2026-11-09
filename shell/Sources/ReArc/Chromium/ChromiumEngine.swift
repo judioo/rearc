@@ -112,6 +112,9 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
         tracker.onChange = { [weak self] in self?.pageColor = $0 }
         return tracker
     }()
+    /// A snapshot is with the engine; later ones wait in `snapshotWaiters` (main thread).
+    @ObservationIgnored private var snapshotInFlight = false
+    @ObservationIgnored private var snapshotWaiters: [CheckedContinuation<Void, Never>] = []
     /// Counts primary documents; the tracker drops a sample of an older one.
     @ObservationIgnored private var documentCount: UInt64 = 0
     /// Completed boost plan installs; navigation waits for the in-flight one.
@@ -971,13 +974,28 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
 
     @MainActor
     private func captureSnapshotOnMainActor(scope: CaptureScope) async throws -> Data {
+        try await takeSnapshot(scope: scope == .visible ? 0 : 1)
+    }
+
+    /// The engine takes one snapshot per tab at a time and refuses a second
+    /// with REARC_BUSY, so a capture and the toolbar's top-edge sample take turns.
+    @MainActor
+    private func takeSnapshot(scope: UInt32) async throws -> Data {
+        while snapshotInFlight {
+            await withCheckedContinuation { snapshotWaiters.append($0) }
+        }
+        snapshotInFlight = true
+        defer {
+            snapshotInFlight = false
+            if !snapshotWaiters.isEmpty { snapshotWaiters.removeFirst().resume() }
+        }
         guard tabID != 0 else { throw ChromiumEngineError.noTab }
         let tab = tabID
         let generation = contentGeneration
         return try await withCheckedThrowingContinuation { continuation in
             let request = SnapshotRequest(continuation: continuation, contentGeneration: generation)
             let context = Unmanaged.passRetained(request).toOpaque()
-            let status = ReArcTabCaptureSnapshot(tab, scope == .visible ? 0 : 1, snapshotCallback, context)
+            let status = ReArcTabCaptureSnapshot(tab, scope, snapshotCallback, context)
             if status != .rearcOK {
                 Unmanaged<SnapshotRequest>.fromOpaque(context).release()
                 continuation.resume(throwing: ChromiumEngineError.rejected("snapshot", status))
@@ -1002,18 +1020,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     /// Main actor: the engine CHECKs the snapshot call is on the main thread.
     @MainActor
     private func captureTopEdge() async -> Data? {
-        guard tabID != 0 else { return nil }
-        let tab = tabID
-        let generation = contentGeneration
-        return try? await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
-            let request = SnapshotRequest(continuation: continuation, contentGeneration: generation)
-            let context = Unmanaged.passRetained(request).toOpaque()
-            let status = ReArcTabCaptureSnapshot(tab, 2, snapshotCallback, context)
-            if status != .rearcOK {
-                Unmanaged<SnapshotRequest>.fromOpaque(context).release()
-                continuation.resume(throwing: ChromiumEngineError.rejected("snapshot", status))
-            }
-        }
+        try? await takeSnapshot(scope: 2)
     }
 
     // MARK: Script evaluation (ABI 1.5, identity 1.7)
