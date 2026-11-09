@@ -129,7 +129,7 @@ struct BrowserImportView: View {
             }
             Spacer()
             if session.isImporting { ProgressView().controlSize(.small) }
-            Button(!session.canImport && session.arc != nil && session.arcSummary.isEmpty && session.selection == .arcSidebar ? "Imported" : "Import") { session.performImport() }
+            Button(session.isUpToDate ? "Imported" : "Import") { session.performImport() }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!session.canImport)
         }
@@ -155,15 +155,18 @@ private struct ArcSidebarImportPane: View {
                     Section {
                         profileTarget(profile, name: arc.name(of: profile))
                         ForEach(spaces) { space in
+                            let imported = session.isImported(space)
                             Toggle(isOn: Binding(get: { session.arcChoices.spaceIDs.contains(space.id) },
                                                  set: { session.setSpace(space.id, included: $0) })) {
                                 HStack(spacing: 8) {
                                     spaceIcon(space)
                                     Text(space.name)
                                     Spacer()
-                                    Text(spaceCounts(space)).foregroundStyle(.secondary).font(.callout)
+                                    Text(imported ? "Imported" : spaceCounts(space)).foregroundStyle(.secondary).font(.callout)
                                 }
                             }
+                            // Already here: importing it again would add only what is new in Arc.
+                            .disabled(imported && session.arcSummary.isEmpty)
                         }
                     } header: {
                         Text("Arc profile \u{201C}\(arc.name(of: profile))\u{201D}")
@@ -194,16 +197,7 @@ private struct ArcSidebarImportPane: View {
         }
     }
 
-    private var summaryLine: String {
-        let summary = session.arcSummary
-        var parts = ["\(summary.spaces) space\(summary.spaces == 1 ? "" : "s")",
-                     "\(summary.pinnedTabs) pinned tab\(summary.pinnedTabs == 1 ? "" : "s")",
-                     "\(summary.favorites) favorite\(summary.favorites == 1 ? "" : "s")"]
-        if summary.folders > 0 { parts.insert("\(summary.folders) folder\(summary.folders == 1 ? "" : "s")", at: 2) }
-        if summary.todayTabs > 0 { parts.append("\(summary.todayTabs) Today tab\(summary.todayTabs == 1 ? "" : "s")") }
-        if summary.newProfiles > 0 { parts.append("\(summary.newProfiles) new profile\(summary.newProfiles == 1 ? "" : "s")") }
-        return parts.joined(separator: " · ")
-    }
+    private var summaryLine: String { session.arcHeadline }
 
     /// Its title and member-since date: the card in Settings › Account.
     private func cardDetail(_ card: ArcMembershipCardImport) -> String {
@@ -290,13 +284,16 @@ private struct ChromiumProfileImportPane: View {
                 }
             }
             Section {
-                SettingsToggleRow(label: "Bookmarks", detail: "\(detail.inventory.bookmarks) as a new space of pinned tabs and folders",
-                                  isOn: $session.includeBookmarks)
-                    .disabled(detail.inventory.bookmarks == 0)
+                let plan = session.bookmarkPlan(for: profile, detail)
+                SettingsToggleRow(label: "Bookmarks", detail: bookmarksDetail(plan), isOn: $session.includeBookmarks)
+                    .disabled(plan.isEmpty)
                 SettingsToggleRow(label: "History", detail: historyDetail, isOn: $session.includeHistory)
-                    .disabled((detail.inventory.historyPages ?? 0) == 0)
+                    .disabled((detail.newHistoryPages ?? 0) == 0)
                 if let engine = detail.setup.searchEngine {
-                    SettingsToggleRow(label: "Search engine", detail: "\(engine.name), if ReArc offers it", isOn: $session.includeSearchEngine)
+                    let isNew = session.newSearchEngine(detail) != nil
+                    SettingsToggleRow(label: "Search engine", detail: isNew ? "\(engine.name), if ReArc offers it" : "\(engine.name): already the default, or not offered",
+                                      isOn: $session.includeSearchEngine)
+                        .disabled(!isNew)
                 }
             }
             extensionsSection
@@ -307,9 +304,22 @@ private struct ChromiumProfileImportPane: View {
         .formStyle(.grouped)
     }
 
+    private func bookmarksDetail(_ plan: BookmarkImportPlan) -> String {
+        if plan.isEmpty {
+            if plan.mirrorsArcSidebar { return "Already in your spaces from Arc's sidebar" }
+            return plan.existingSpaceID != nil ? "Imported" : "None"
+        }
+        if plan.existingSpaceID != nil, let space = plan.existingSpaceID.flatMap(session.spaceName) {
+            return "\(plan.newLinks) new, into \(space)"
+        }
+        return "\(plan.newLinks) as a new space of pinned tabs and folders"
+    }
+
     private var historyDetail: String {
-        guard let pages = detail.inventory.historyPages else { return "Not readable" }
-        return "\(min(pages, VisitHistory.capacity)) most recent pages, for command bar suggestions"
+        guard let pages = detail.newHistoryPages else { return "Not readable" }
+        if pages == 0 { return (detail.inventory.historyPages ?? 0) > 0 ? "Imported" : "None" }
+        let new = detail.newHistoryPages == detail.inventory.historyPages ? "most recent pages" : "pages visited since the last import"
+        return "\(min(pages, VisitHistory.capacity)) \(new), for command bar suggestions"
     }
 
     @ViewBuilder
@@ -319,16 +329,17 @@ private struct ChromiumProfileImportPane: View {
                 SettingsToggleRow(label: "Extensions", detail: extensionsDetail, isOn: $session.includeExtensions)
                     .disabled(!session.canReinstallExtensions)
                 ForEach(detail.extensions) { item in
-                    Toggle(isOn: Binding(get: { item.canReinstall && !session.skippedExtensions.contains(item.id) },
+                    let installed = detail.installedExtensionIDs.contains(item.id)
+                    Toggle(isOn: Binding(get: { item.canReinstall && !installed && !session.skippedExtensions.contains(item.id) },
                                          set: { if $0 { session.skippedExtensions.remove(item.id) } else { session.skippedExtensions.insert(item.id) } })) {
                         HStack {
                             Text(item.name)
                             if item.isPinned { Image(systemName: "pin.fill").font(.caption).foregroundStyle(.secondary) }
                             Spacer()
-                            Text(extensionNote(item)).font(.callout).foregroundStyle(.secondary)
+                            Text(installed ? "installed" : extensionNote(item)).font(.callout).foregroundStyle(.secondary)
                         }
                     }
-                    .disabled(!item.canReinstall || !session.includeExtensions || !session.canReinstallExtensions)
+                    .disabled(installed || !item.canReinstall || !session.includeExtensions || !session.canReinstallExtensions)
                 }
             }
         }

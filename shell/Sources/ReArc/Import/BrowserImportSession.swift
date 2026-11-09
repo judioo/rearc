@@ -17,6 +17,12 @@ final class BrowserImportSession {
         var inventory: ImportSourceInventory
         var extensions: [SourceExtension]
         var setup: ChromiumProfileSetup
+        /// The profile's bookmarks, for `bookmarkPlan`.
+        var bookmarks: [BookmarkNode] = []
+        /// Pages visited since an earlier import of this profile (all of them the first time).
+        var newHistoryPages: Int?
+        /// Already in the target ReArc profile (`BrowserViewModel.installedExtensionsReader`).
+        var installedExtensionIDs: Set<String> = []
     }
 
     private(set) var browsers: [DiscoveredBrowser] = []
@@ -27,7 +33,13 @@ final class BrowserImportSession {
 
     private(set) var arc: ArcSidebarImport?
     private(set) var arcProblem: String?
-    var arcChoices = ArcImportChoices(spaceIDs: [])
+    var arcChoices = ArcImportChoices(spaceIDs: []) {
+        didSet { if oldValue != arcChoices { refreshArcSummary() } }
+    }
+    /// What Import would still add (`SidebarStore.remainingArcImport`). Kept,
+    /// not computed per render: each count runs the import on a copy of the
+    /// whole sidebar.
+    private(set) var arcSummary = ArcImportSummary()
     private(set) var arcSettings = ArcSettingsImport()
     var includeArcSettings = true
     /// Arc's membership card (its title, colours and member-since date).
@@ -42,7 +54,9 @@ final class BrowserImportSession {
     /// Extensions unticked in the list.
     var skippedExtensions: Set<String> = []
     /// The ReArc profile a Chrome or Brave profile's data goes to.
-    var targetProfileID: Profile.ID
+    var targetProfileID: Profile.ID {
+        didSet { if oldValue != targetProfileID { details = [:]; if case .profile(let profile) = selection { loadDetail(profile) } } }
+    }
 
     private(set) var isImporting = false
     /// The last import's outcome, shown under the buttons.
@@ -94,6 +108,7 @@ final class BrowserImportSession {
                 self.arcSettings = settings
                 self.arcCard = card
                 if let arc, let store = self.model?.store { self.arcChoices = arc.defaultChoices(for: store) }
+                self.refreshArcSummary()
                 self.details = [:]
                 self.isDiscovering = false
                 if let selection = self.selection, self.sources.contains(selection) {
@@ -122,34 +137,109 @@ final class BrowserImportSession {
 
     func detail(for profile: ImportSourceProfile) -> ProfileDetail? { details[profile.id] }
 
+    func spaceName(_ id: Space.ID) -> String? { model?.store.space(withID: id)?.name }
+
     /// The profiles the pickers offer.
     var reArcProfiles: [Profile] { model?.store.profiles ?? [] }
 
+    /// What the profile holds and how much of it is new: bookmarks against
+    /// the sidebar, history against the import ledger, extensions against
+    /// the target profile's own.
     private func loadDetail(_ profile: ImportSourceProfile) {
         guard details[profile.id] == nil else { return }
+        let historyThrough = model?.loadImportLedger().historyThrough[profile.id]
+        let installed: InstalledExtensionsReader = model?.installedExtensionsReader() ?? { _ in [] }
+        let target = targetProfileID
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let detail = ProfileDetail(
+            var detail = ProfileDetail(
                 inventory: BrowserImportDiscovery.inventory(of: profile),
                 extensions: ExtensionInventoryReader.read(profile: profile.url),
                 setup: ChromiumProfileSetup.read(profile: profile.url)
             )
-            DispatchQueue.main.async { [weak self] in self?.details[profile.id] = detail }
+            detail.bookmarks = (try? ChromiumBookmarksReader.read(profile.url.appendingPathComponent(ChromiumBookmarksReader.fileName))) ?? []
+            detail.newHistoryPages = historyThrough == nil ? detail.inventory.historyPages
+                : ChromiumHistoryReader.pageCount(profile.url.appendingPathComponent(ChromiumHistoryReader.fileName), after: historyThrough)
+            detail.installedExtensionIDs = installed(target)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.targetProfileID == target else { return }
+                self.details[profile.id] = detail
+            }
         }
     }
 
-    var arcSummary: ArcImportSummary {
-        guard let arc else { return ArcImportSummary() }
-        guard let model else { return arc.summary(for: arcChoices) }
-        return model.store.remainingArcImport(arc, choices: arcChoices)
+    /// The bookmarks an import would add (none twice; Arc's own only if they
+    /// are not copies of its sidebar, `BookmarkImportPlan.arcMirrorNewShare`).
+    func bookmarkPlan(for profile: ImportSourceProfile, _ detail: ProfileDetail) -> BookmarkImportPlan {
+        model?.store.bookmarkImportPlan(detail.bookmarks, sourceID: profile.id,
+                                        arcProfileDirectory: profile.browser == .arc ? profile.directory : nil,
+                                        profileID: targetProfileID)
+            ?? .make(detail.bookmarks, known: [])
+    }
+
+    /// The source's default search engine, when ReArc offers it and it is not already the default.
+    func newSearchEngine(_ detail: ProfileDetail) -> SearchEngineChoice? {
+        guard let name = detail.setup.searchEngine?.name, let settings = model?.activeSearchEngineSettings,
+              settings.isEditable(for: targetProfileID),
+              let choice = settings.engines(for: targetProfileID).first(where: { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }),
+              settings.defaultEngine(for: targetProfileID) != choice.id else { return nil }
+        return choice
+    }
+
+    private func refreshArcSummary() {
+        guard let arc else { arcSummary = ArcImportSummary(); return }
+        guard let model else { arcSummary = arc.summary(for: arcChoices); return }
+        arcSummary = model.store.remainingArcImport(arc, choices: arcChoices)
+    }
+
+    /// The Arc pane's first line: what Import would add, or, once
+    /// everything is here, what came over (never "0 spaces" above a list
+    /// of spaces that are all in).
+    var arcHeadline: String {
+        let summary = arcSummary
+        // Everything is here already: say so, rather than "0 spaces" over a list of spaces.
+        if summary.isEmpty, let arc = arc {
+            let imported = arc.export.spaces.filter(isImported)
+            if !imported.isEmpty {
+                let tabs = imported.reduce(0) { $0 + $1.pinnedTabCount }
+                return "\(imported.count) space\(imported.count == 1 ? "" : "s") · \(tabs) pinned tab\(tabs == 1 ? "" : "s") imported"
+            }
+        }
+        var parts = ["\(summary.spaces) space\(summary.spaces == 1 ? "" : "s")",
+                     "\(summary.pinnedTabs) pinned tab\(summary.pinnedTabs == 1 ? "" : "s")",
+                     "\(summary.favorites) favorite\(summary.favorites == 1 ? "" : "s")"]
+        if summary.folders > 0 { parts.insert("\(summary.folders) folder\(summary.folders == 1 ? "" : "s")", at: 2) }
+        if summary.todayTabs > 0 { parts.append("\(summary.todayTabs) Today tab\(summary.todayTabs == 1 ? "" : "s")") }
+        if summary.newProfiles > 0 { parts.append("\(summary.newProfiles) new profile\(summary.newProfiles == 1 ? "" : "s")") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The Arc space came over in an earlier import (its source ID is on a space here).
+    func isImported(_ space: ArcSidebarSpace) -> Bool {
+        let sourceID = "\(space.profile.directory):\(space.id)"
+        return model?.store.spaces.contains { $0.arcSourceID == sourceID } == true
     }
 
     func setSpace(_ id: String, included: Bool) {
         if included { arcChoices.spaceIDs.insert(id) } else { arcChoices.spaceIDs.remove(id) }
     }
 
-    /// Extensions the queue would reinstall from this profile.
+    /// Extensions the queue would reinstall from this profile; never one the target profile has.
     func chosenExtensions(_ detail: ProfileDetail) -> [SourceExtension] {
-        detail.extensions.filter { $0.canReinstall && !skippedExtensions.contains($0.id) }
+        detail.extensions.filter { $0.canReinstall && !skippedExtensions.contains($0.id) && !detail.installedExtensionIDs.contains($0.id) }
+    }
+
+    /// Nothing left to bring from the selection: the button reads Imported.
+    var isUpToDate: Bool {
+        guard !canImport, !isImporting, let selection else { return false }
+        switch selection {
+        case .arcSidebar:
+            return arc != nil && arcSummary.isEmpty
+        case .profile(let profile):
+            guard let detail = details[profile.id] else { return false }
+            let plan = bookmarkPlan(for: profile, detail)
+            return plan.existingSpaceID != nil || plan.mirrorsArcSidebar || detail.newHistoryPages != detail.inventory.historyPages
+                || !detail.installedExtensionIDs.isDisjoint(with: detail.extensions.map(\.id))
+        }
     }
 
     var canImport: Bool {
@@ -164,9 +254,9 @@ final class BrowserImportSession {
             return !arcSummary.isEmpty || extras
         case .profile(let profile):
             guard let detail = details[profile.id] else { return false }
-            return (includeBookmarks && detail.inventory.bookmarks > 0)
-                || (includeHistory && (detail.inventory.historyPages ?? 0) > 0)
-                || (includeSearchEngine && detail.setup.searchEngine != nil)
+            return (includeBookmarks && !bookmarkPlan(for: profile, detail).isEmpty)
+                || (includeHistory && (detail.newHistoryPages ?? 0) > 0)
+                || (includeSearchEngine && newSearchEngine(detail) != nil)
                 || (includeExtensions && canReinstallExtensions && !chosenExtensions(detail).isEmpty)
         }
     }
@@ -185,33 +275,41 @@ final class BrowserImportSession {
             let card = includeArcCard ? arcCard : nil
             if let card { model.importArcMembershipCard(card) }
             importedArcExtras = true
+            refreshArcSummary()
             result = BrowserImportSession.describe(summary, settings: includeArcSettings ? arcSettings.count : 0, card: card != nil)
             completion?()
         case .profile(let profile):
             guard let detail = details[profile.id] else { return }
             isImporting = true
-            let wantsBookmarks = includeBookmarks && detail.inventory.bookmarks > 0
-            let wantsHistory = includeHistory && (detail.inventory.historyPages ?? 0) > 0
-            let engine = includeSearchEngine ? detail.setup.searchEngine?.name : nil
-            let queue = includeExtensions && canReinstallExtensions
-                ? ExtensionReinstallQueue(chosenExtensions(detail), into: targetProfileID) : nil
+            let wantsBookmarks = includeBookmarks && !bookmarkPlan(for: profile, detail).isEmpty
+            let wantsHistory = includeHistory && (detail.newHistoryPages ?? 0) > 0
+            let engine = includeSearchEngine ? newSearchEngine(detail)?.name : nil
+            let chosen = includeExtensions && canReinstallExtensions ? chosenExtensions(detail) : []
+            let installed = model.installedExtensionsReader()
             let target = targetProfileID
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let bookmarks = wantsBookmarks
                     ? (try? ChromiumBookmarksReader.read(profile.url.appendingPathComponent(ChromiumBookmarksReader.fileName))) : nil
                 let history = wantsHistory
                     ? (try? ChromiumHistoryReader.read(profile.url.appendingPathComponent(ChromiumHistoryReader.fileName))) : nil
+                // Read again now: an extension may have finished installing since the pane loaded.
+                let installedIDs = chosen.isEmpty ? [] : installed(target)
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     var lines = model.applyChromiumImport(from: profile, bookmarks: bookmarks, history: history,
                                                           searchEngine: engine, into: target)
-                    if let queue, !queue.isFinished {
-                        model.queueExtensionReinstall(queue, from: profile.browser.name, skipped: ExtensionConsolidation(chosenExtensions(detail)).skipped)
+                    let queue = ExtensionReinstallQueue(chosen, into: target, installedIDs: installedIDs)
+                    if !queue.isFinished {
+                        model.queueExtensionReinstall(queue, from: profile.browser.name,
+                                                      skipped: ExtensionConsolidation(chosen, installedIDs: installedIDs).skipped)
                         model.installPendingExtensions()
                         lines.append("\(queue.items.count) extension\(queue.items.count == 1 ? "" : "s") installing in the background")
                     }
-                    self.result = lines.isEmpty ? "Nothing was imported." : lines.joined(separator: " · ")
+                    self.result = lines.isEmpty ? "Nothing new to import." : lines.joined(separator: " · ")
                     self.isImporting = false
+                    // The pane shows what is left (nothing, usually) against the new state.
+                    self.details[profile.id] = nil
+                    self.loadDetail(profile)
                     completion?()
                 }
             }
@@ -269,21 +367,27 @@ extension BrowserViewModel {
         if let value = settings.autoArchive { setAutoArchiveThreshold(value) }
     }
 
-    /// A Chrome or Brave profile's bookmarks (a new space in `profileID`),
-    /// history (command-bar suggestions) and search engine. Returns one
-    /// line per thing imported.
+    /// A Chrome, Brave or Arc profile's bookmarks (a space in `profileID`,
+    /// made by the first import and added to by later ones), history
+    /// (command-bar suggestions) and search engine, each only what an earlier
+    /// import did not bring. Returns one line per thing imported.
     func applyChromiumImport(from source: ImportSourceProfile, bookmarks: [BookmarkNode]?, history: [VisitRecord]?,
                              searchEngine: String?, into profileID: Profile.ID) -> [String] {
         var lines: [String] = []
         if let bookmarks, let result = store.importBookmarks(bookmarks, spaceName: "\(source.browser.name) – \(source.name)",
-                                                             profileID: profileID) {
+                                                             profileID: profileID, sourceID: source.id,
+                                                             arcProfileDirectory: source.browser == .arc ? source.directory : nil) {
             selectSpace(result.space.id)
             lines.append("\(result.tabs) bookmark\(result.tabs == 1 ? "" : "s") in \(result.space.name)")
         }
-        if let history, !history.isEmpty {
-            let added = visitHistory.merge(history)
-            scheduleVisitHistorySave()
-            lines.append("\(added) history page\(added == 1 ? "" : "s")")
+        if let history {
+            let new = loadImportLedger().newHistory(history, from: source.id)
+            if !new.isEmpty {
+                let added = visitHistory.merge(new)
+                scheduleVisitHistorySave()
+                recordImportedHistory(new, from: source.id)
+                if added > 0 { lines.append("\(added) history page\(added == 1 ? "" : "s")") }
+            }
         }
         if let searchEngine, let settings = activeSearchEngineSettings,
            let choice = settings.engines(for: profileID).first(where: { $0.name.localizedCaseInsensitiveCompare(searchEngine) == .orderedSame }),
