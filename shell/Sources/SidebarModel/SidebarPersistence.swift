@@ -47,11 +47,38 @@ public final class SidebarFilePersistence: SidebarPersisting {
 
     public private(set) var loadOutcome: SidebarLoadOutcome = .missingFile
     public private(set) var autosaveEnabled = true
+    /// A first run's onboarding has begun and not finished (the marker file
+    /// was there at load).
+    public private(set) var onboardingPending = false
 
-    /// Loads persisted state, or sample data when the file is missing or invalid.
+    /// Beside the sidebar file from a first run's onboarding start until it
+    /// completes or is skipped. The sidebar is saved meanwhile (sync's state
+    /// must match it), so the marker, not the file's absence, keeps a quit or
+    /// crash mid-onboarding a first run. Installs from before the marker have
+    /// a sidebar file and no marker: never a first run.
+    public var onboardingMarkerURL: URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("onboarding-pending", isDirectory: false)
+    }
+
+    /// No sidebar yet, or one an unfinished onboarding left.
+    public var isFirstRun: Bool { loadOutcome == .missingFile || onboardingPending }
+
+    /// Written before the onboarding can change the store.
+    public func beginOnboarding() {
+        guard !FileManager.default.fileExists(atPath: onboardingMarkerURL.path) else { return }
+        try? FileManager.default.createDirectory(at: onboardingMarkerURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? Data().write(to: onboardingMarkerURL, options: [.atomic])
+    }
+
+    /// Completed or skipped: the next launch opens the browser.
+    public func finishOnboarding() {
+        try? FileManager.default.removeItem(at: onboardingMarkerURL)
+    }
+
+    /// Loads persisted state, or the empty starter when the file is missing or invalid.
     public static func loadStore(
         fileURL: URL = SidebarFilePersistence.defaultFileURL,
-        fallback: () -> SidebarStore = { SidebarStore.sample() },
+        fallback: () -> SidebarStore = { SidebarStore.starter() },
         persistence: SidebarFilePersistence? = nil
     ) -> SidebarStore {
         let persistence = persistence ?? SidebarFilePersistence(fileURL: fileURL)
@@ -69,24 +96,29 @@ public final class SidebarFilePersistence: SidebarPersisting {
     public struct PreparedLoad {
         public let snapshot: SidebarSnapshot?
         public let outcome: SidebarLoadOutcome
+        public let onboardingPending: Bool
+
+        public var isFirstRun: Bool { outcome == .missingFile || onboardingPending }
     }
 
     public static func prepareLoad(from fileURL: URL) -> PreparedLoad {
         let persistence = SidebarFilePersistence(fileURL: fileURL)
         let snapshot = persistence.loadSnapshot()
-        return PreparedLoad(snapshot: snapshot, outcome: persistence.loadOutcome)
+        return PreparedLoad(snapshot: snapshot, outcome: persistence.loadOutcome, onboardingPending: persistence.onboardingPending)
     }
 
     public func restoreStore(from prepared: PreparedLoad) -> SidebarStore {
         loadOutcome = prepared.outcome
+        onboardingPending = prepared.onboardingPending
         autosaveEnabled = prepared.outcome != .recoveredFromCorruptFile
-        guard let snapshot = prepared.snapshot else { return SidebarStore.sample() }
+        guard let snapshot = prepared.snapshot else { return SidebarStore.starter() }
         let store = SidebarStore()
         store.applySnapshot(snapshot)
         return store
     }
 
     public func loadSnapshot() -> SidebarSnapshot? {
+        onboardingPending = FileManager.default.fileExists(atPath: onboardingMarkerURL.path)
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             loadOutcome = .missingFile
             return nil

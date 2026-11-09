@@ -65,6 +65,57 @@ final class SidebarPersistenceTests: XCTestCase {
         XCTAssertEqual(store.spaces.first?.name, "Fallback")
     }
 
+    func testAFirstRunStartsOnOneEmptySpace() {
+        let persistence = SidebarFilePersistence(fileURL: fileURL())
+        let store = SidebarFilePersistence.loadStore(persistence: persistence)
+        XCTAssertTrue(persistence.isFirstRun)
+        XCTAssertEqual(store.spaces.count, 1)
+        XCTAssertTrue(store.displayTabs().isEmpty)
+        XCTAssertTrue(store.profiles.allSatisfy { store.favorites(in: $0.id).isEmpty })
+        XCTAssertFalse(store.spaces.contains { $0.name == "Work" }, "no developer sample")
+
+        let prepared = SidebarFilePersistence.prepareLoad(from: fileURL())
+        let restored = SidebarFilePersistence(fileURL: fileURL()).restoreStore(from: prepared)
+        XCTAssertTrue(prepared.isFirstRun)
+        XCTAssertEqual(restored.spaces.count, 1)
+        XCTAssertTrue(restored.displayTabs().isEmpty)
+    }
+
+    func testAStartedOnboardingKeepsTheNextLaunchAFirstRun() {
+        let persistence = SidebarFilePersistence(fileURL: fileURL(), debounceInterval: 0.01)
+        let store = SidebarFilePersistence.loadStore(persistence: persistence)
+        persistence.beginOnboarding()
+        persistence.start(autoSave: store)
+        store.addTab(kind: .today, title: "A", url: URL(string: "https://a.com")!)
+        persistence.flush()
+
+        let relaunch = SidebarFilePersistence(fileURL: fileURL())
+        _ = SidebarFilePersistence.loadStore(persistence: relaunch)
+        XCTAssertEqual(relaunch.loadOutcome, .loaded)
+        XCTAssertTrue(relaunch.isFirstRun, "a quit or crash before the end is still a first run")
+        XCTAssertTrue(SidebarFilePersistence.prepareLoad(from: fileURL()).isFirstRun)
+
+        relaunch.finishOnboarding()
+        let after = SidebarFilePersistence(fileURL: fileURL())
+        _ = SidebarFilePersistence.loadStore(persistence: after)
+        XCTAssertFalse(after.isFirstRun)
+        XCTAssertFalse(SidebarFilePersistence.prepareLoad(from: fileURL()).isFirstRun)
+        persistence.stop()
+    }
+
+    func testAnExistingSidebarWithoutTheMarkerIsNoFirstRun() {
+        // Installs from before the marker: a sidebar file, never onboarded again.
+        let persistence = SidebarFilePersistence(fileURL: fileURL())
+        persistence.start(autoSave: SidebarStore.sample())
+        persistence.flush()
+        let relaunch = SidebarFilePersistence(fileURL: fileURL())
+        let store = SidebarFilePersistence.loadStore(persistence: relaunch)
+        XCTAssertFalse(relaunch.isFirstRun)
+        XCTAssertFalse(SidebarFilePersistence.prepareLoad(from: fileURL()).isFirstRun)
+        XCTAssertTrue(store.spaces.contains { $0.name == "Work" }, "their sidebar is left as it is")
+        persistence.stop()
+    }
+
     func testDebounceCoalescesRapidMutations() {
         let url = fileURL()
         let store = SidebarStore(spaces: [Space(name: "One")])

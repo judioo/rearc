@@ -376,6 +376,29 @@ final class Wave25SyncConvergenceTests: XCTestCase {
         XCTAssertTrue(fresh.store.displayTabs().contains { $0.title == "SwiftUI Documentation" })
     }
 
+    func testFreshInstallOnTheEmptyStarterAdoptsTheICloudSidebar() async {
+        let a = richDevice("A")
+        await a.sync()
+        let starter = SidebarStore.starter()
+        XCTAssertTrue(SidebarSyncProjection.isPristine(starter.makeSnapshot()))
+        let fresh = Device("B", server: server, store: starter, clock: clock)
+        await fresh.sync()
+        XCTAssertEqual(fresh.store.spaces.map(\.name), ["Home", "Work"], "no empty Personal space next to iCloud's")
+        XCTAssertEqual(fresh.store.profiles.count, 1)
+        assertSameRecords(fresh, a)
+    }
+
+    func testAStarterTheOnboardingShapedMergesWithTheICloudSidebar() async {
+        let a = richDevice("A")
+        await a.sync()
+        let starter = SidebarStore.starter()
+        _ = starter.addSpace(name: "Side project", iconName: "🎮")
+        XCTAssertFalse(SidebarSyncProjection.isPristine(starter.makeSnapshot()))
+        let b = Device("B", server: server, store: starter, clock: clock)
+        await b.sync()
+        XCTAssertEqual(Set(b.store.spaces.map(\.name)), ["Home", "Work", "Personal", "Side project"])
+    }
+
     func testUsedMacMergesWithTheICloudSidebar() async {
         let a = richDevice("A")
         await a.sync()

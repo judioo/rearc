@@ -1854,8 +1854,18 @@ public final class SidebarStore {
         archivedTabs = TabArchivePolicy.pruned(archivedTabs, now: now())
     }
 
-    // MARK: - Sample content
+    // MARK: - Starter and sample content
 
+    /// What a real install starts on until the onboarding makes its spaces,
+    /// and keeps when it is skipped or makes none: one empty space in the
+    /// default profile, no tabs, no favorites.
+    public static func starter() -> SidebarStore {
+        SidebarStore()
+    }
+
+    /// Developer fixture for tests, previews and benches; never a real
+    /// install's sidebar. Earlier builds started on it, so sync still knows
+    /// it as untouched (`SidebarSyncProjection.isPristine`).
     public static func sample() -> SidebarStore {
         let store = SidebarStore()
         let personal = store.spaces[0].id

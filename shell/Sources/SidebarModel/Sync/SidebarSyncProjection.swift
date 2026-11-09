@@ -369,7 +369,8 @@ public enum SidebarSyncProjection {
         return out
     }
 
-    /// A fresh install: an empty sidebar or the untouched starter sidebar
+    /// A fresh install: the untouched starter sidebar (`SidebarStore.starter()`,
+    /// one empty space), or the developer sample earlier builds started on
     /// (`SidebarStore.sample()`). It adopts the iCloud sidebar on first sync
     /// instead of adding a second copy of the starter rows to it.
     public static func isPristine(_ snapshot: SidebarSnapshot) -> Bool {
@@ -377,6 +378,7 @@ public enum SidebarSyncProjection {
     }
 
     private static let starterPrints: [StarterPrint] = [
+        // `SidebarStore.starter()`'s shape, on a throwaway device id.
         StarterPrint(extract(SidebarStore(mutationJournal: SidebarMutationJournal(deviceID: UUID())).makeSnapshot())),
         StarterPrint(extract(SidebarStore.sample().makeSnapshot())),
     ]
