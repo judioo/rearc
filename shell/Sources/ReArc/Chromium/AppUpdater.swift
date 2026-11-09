@@ -51,21 +51,21 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDeleg
         menuState.updateAvailable = false
     }
 
-    var supportsGentleScheduledUpdateReminders: Bool { true }
+    nonisolated var supportsGentleScheduledUpdateReminders: Bool { true }
 
-    func standardUserDriverShouldHandleShowingScheduledUpdate(_ update: SUAppcastItem,
+    nonisolated func standardUserDriverShouldHandleShowingScheduledUpdate(_ update: SUAppcastItem,
                                                               andInImmediateFocus immediateFocus: Bool) -> Bool {
         // Critical updates keep Sparkle's prominent presentation and cannot be skipped.
         update.isCriticalUpdate
     }
 
-    func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool,
+    nonisolated func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool,
                                                    forUpdate update: SUAppcastItem, state: SPUUserUpdateState) {
-        menuState.updateAvailable = true
+        MainActor.assumeIsolated { menuState.updateAvailable = true }
     }
 
-    func standardUserDriverWillFinishUpdateSession() {
-        menuState.updateAvailable = false
+    nonisolated func standardUserDriverWillFinishUpdateSession() {
+        MainActor.assumeIsolated { menuState.updateAvailable = false }
     }
 }
 
