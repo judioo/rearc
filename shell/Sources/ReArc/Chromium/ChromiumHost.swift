@@ -752,6 +752,12 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         return window
     }
 
+    private func closeShortcutTarget(_ window: NSWindow) -> CloseShortcutTarget {
+        CloseShortcutTarget.resolve(keyWindow: window) { [windows] in
+            if case .browser = windows[ObjectIdentifier($0)]?.role { true } else { false }
+        }
+    }
+
     private func track(_ window: NSWindow, _ role: WindowRole) {
         windows[ObjectIdentifier(window)] = (window, role)
     }
@@ -1191,20 +1197,22 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
 
         let tabs = NSMenu(title: "Tabs")
         let close = target.item("Close Tab", "w") { [weak self] in
-            // A private or Little Arc window has one page: Cmd+W closes the window.
-            if let window = NSApp.keyWindow, let entry = self?.windows[ObjectIdentifier(window)] {
-                if case .browser = entry.role {} else { return self?.closeWindow(window) ?? () }
-            }
-            // Settings and Air Traffic Control: Cmd+W closes them, never a tab behind them.
-            if let window = NSApp.keyWindow, window === self?.settingsWindow?.window || window === self?.airTrafficControlWindow {
-                return window.performClose(nil)
+            // Any other key window (About, Settings, Import, DevTools, a private
+            // or Little Arc window): Cmd+W closes it, never a tab behind it.
+            if let self, let window = NSApp.keyWindow, self.closeShortcutTarget(window) == .keyWindow {
+                // Windows with pages detach them first.
+                return self.windows[ObjectIdentifier(window)] != nil ? self.closeWindow(window) : window.performClose(nil)
             }
             model.closeSelectedTab()
         }
         // Named for what it does to the selected tab ("Archive Tab" in Today).
         target.setLiveTitle(of: close) { [weak self] in
-            if let window = NSApp.keyWindow, let entry = self?.windows[ObjectIdentifier(window)] {
-                if case .browser = entry.role {} else { return "Close Tab" }
+            if let self, let window = NSApp.keyWindow, self.closeShortcutTarget(window) == .keyWindow {
+                // A private or Little Arc window has one page.
+                switch self.windows[ObjectIdentifier(window)]?.role {
+                case .littleArc?, .privateBrowsing?: return "Close Tab"
+                default: return "Close Window"
+                }
             }
             return model.closeTabMenuTitle
         }
