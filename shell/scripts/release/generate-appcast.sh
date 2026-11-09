@@ -3,7 +3,8 @@
 set -euo pipefail
 DIR="${1:?usage: generate-appcast.sh ARCHIVES_DIR [beta]}"
 CHANNEL="${2:-}"
-TOOLS="${REARC_SPARKLE_TOOLS:?set REARC_SPARKLE_TOOLS to the bin directory from Sparkle 2.10.1}"
+# Default: the tools SwiftPM unpacked with the pinned Sparkle artifact during the release build.
+TOOLS="${REARC_SPARKLE_TOOLS:-$(cd "$(dirname "$0")/../.." && pwd)/.build-chromium/artifacts/sparkle/Sparkle/bin}"
 [[ -x "$TOOLS/generate_appcast" && -x "$TOOLS/generate_keys" ]] || { echo 'Sparkle tools missing' >&2; exit 1; }
 PUBLIC_KEY="$TOOLS/generate_keys"
 EXPECTED="$(tr -d '[:space:]' <"$(dirname "$0")/sparkle-public-key.txt")"
