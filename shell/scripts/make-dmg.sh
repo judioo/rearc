@@ -60,8 +60,12 @@ if swift "$SHELL_DIR/scripts/release/dmg-background.swift" "$WORK" >/dev/null 2>
     && tiffutil -cathidpicheck "$WORK/background.png" "$WORK/background@2x.png" \
       -out "$STAGE/.background/background.tiff" >/dev/null 2>&1; then
   DSSTORE="$REPO/engine/chromium/src/chrome/installer/mac/generate_dsstore.py"
+  # A taller window than the script's 633 x 320, icons higher: Finder keeps its own path
+  # bar and status bar settings, and with both on the 320 pt window clipped the app's label.
+  # dmg-background.swift draws for this geometry.
   if [[ -f $DSSTORE ]] && python3 -I "$DSSTORE" "$STAGE/.DS_Store" --volume-name "$VOLUME" \
-      --app-name ReArc.app --background-image /.background/background.tiff; then
+      --app-name ReArc.app --background-image /.background/background.tiff \
+      --window-height 380 --app-y 136 --link-y 136; then
     BACKGROUND=1
   fi
 fi

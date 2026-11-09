@@ -1,14 +1,19 @@
 // Draws the DMG window background for scripts/make-dmg.sh: brand canvas, a cobalt arrow
 // from the app icon to the Applications link, and the link's label (the link itself is
 // named " ", as Chromium's DMG layout in chrome/installer/mac/generate_dsstore.py expects).
-// Geometry matches that script's defaults: 633 x 320 window, icons centered at (163, 148)
-// and (470, 148), 128 pt icons. make-dmg.sh combines the 1x and @2x PNGs into one
-// multi-resolution TIFF (tiffutil -cathidpicheck), the form Finder uses on Retina displays.
+// Geometry matches the layout make-dmg.sh passes that script: a 633 x 380 window (its
+// bounds include the 32 pt title bar, so 348 pt of content), icons centered at (163, 136)
+// and (470, 136), 128 pt icons. Everything sits in the top 276 pt, so the labels and the
+// hint stay clear of Finder's path bar and status bar (about 28 pt each) when they are on.
+// make-dmg.sh combines the 1x and @2x PNGs into one multi-resolution TIFF
+// (tiffutil -cathidpicheck), the form Finder uses on Retina displays.
 // Usage: swift dmg-background.swift OUT_DIR   (writes background.png and background@2x.png)
 import AppKit
 
-let width: CGFloat = 633, height: CGFloat = 320
-let appCenter = CGPoint(x: 163, y: 148), linkCenter = CGPoint(x: 470, y: 148)
+let width: CGFloat = 633, height: CGFloat = 348
+let appCenter = CGPoint(x: 163, y: 136), linkCenter = CGPoint(x: 470, y: 136)
+/// Top of the hint line, below the icons' labels.
+let hintTop: CGFloat = 250
 let canvas = NSColor(srgbRed: 0xF8 / 255, green: 0xFA / 255, blue: 0xFC / 255, alpha: 1)
 let cobalt = NSColor(srgbRed: 0x25 / 255, green: 0x63 / 255, blue: 0xEB / 255, alpha: 1)
 let muted = NSColor(srgbRed: 0x64 / 255, green: 0x74 / 255, blue: 0x8B / 255, alpha: 1)
@@ -52,7 +57,7 @@ func render(scale: CGFloat, to url: URL) throws {
     // Under the link icon, where Finder would put a label (128 pt icon, 12 pt text).
     draw("Applications", size: 12, color: primary, weight: .regular, centerX: linkCenter.x, baseline: y - 64 - 18)
     draw("Drag ReArc to Applications to install", size: 13, color: muted, weight: .medium,
-         centerX: width / 2, baseline: 28)
+         centerX: width / 2, baseline: height - hintTop - 16)
     NSGraphicsContext.restoreGraphicsState()
     guard let png = rep.representation(using: .png, properties: [:]) else {
         throw CocoaError(.fileWriteUnknown)
