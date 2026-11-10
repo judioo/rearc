@@ -1,0 +1,232 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 Safe Browsing tab helpers for registry tabs (ABI 1.57)
+
+Security audit RC-500 F-02, engine part. Bridge 0.60.0, feature
+safe_browsing_tab_helpers. AttachBrowserlessTabHelpers attaches what
+TabHelpers::AttachTabHelpers does for Safe Browsing, in its order:
+ChromePasswordReuseDetectionManagerClient after the password manager client;
+SafeBrowsingNavigationObserver (referrer chains), AsyncCheckTracker and
+SafeBrowsingTabObserver (client-side phishing detection) after
+PermissionRequestManager and the autofill client, which
+ClientSideDetectionHost observes from its constructor; TriggerCreator;
+SafetyTipWebContentsObserver (its bubble needs a Browser and is not shown).
+ReArcEngineSafeBrowsingAvailable() is true only when Safe Browsing is compiled
+in and google_apis::HasAPIKeyConfigured(): an engine built without a
+google_api_key sends dummytoken, which Google rejects, so the host must not
+claim protection.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 9ff0a59d6f..a848ab3d4a 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -62,6 +62,7 @@ _ReArcDownloadRemoveArchived
+ _ReArcDownloadGetTimes
+ _ReArcEngineConfigure
+ _ReArcEngineAllowTestSwitches
++_ReArcEngineSafeBrowsingAvailable
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+ _ReArcEngineDefaultProfile
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index bde9c7ce56..c3dcd73d8e 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -69,6 +69,7 @@ _ReArcDownloadRemoveArchived
+ _ReArcDownloadGetTimes
+ _ReArcEngineConfigure
+ _ReArcEngineAllowTestSwitches
++_ReArcEngineSafeBrowsingAvailable
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+ _ReArcEngineDefaultProfile
+diff --git a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+index 02aede22cf..1a9c396016 100644
+--- a/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
++++ b/chrome/browser/rearc_bridge/browserless_tab_helpers.cc
+@@ -9,14 +9,20 @@
+ #include <memory>
+ 
+ #include "base/check.h"
++#include "build/build_config.h"
++#include "chrome/browser/browser_process.h"
++#include "chrome/browser/content_settings/host_content_settings_map_factory.h"
++#include "chrome/browser/enterprise/connectors/referrer_cache_utils.h"
+ #include "chrome/browser/extensions/api/web_navigation/web_navigation_tab_observer.h"  // nogncheck
+ #include "chrome/browser/extensions/tab_helper.h"  // nogncheck
+ #include "chrome/browser/history/history_tab_helper.h"
++#include "chrome/browser/lookalikes/safety_tip_web_contents_observer.h"
+ #include "chrome/browser/password_manager/chrome_password_manager_client.h"
+ #include "chrome/browser/printing/printing_init.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_key.h"
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "chrome/browser/safe_browsing/safe_browsing_navigation_observer_manager_factory.h"
+ #include "chrome/browser/ui/autofill/autofill_client_provider.h"
+ #include "chrome/browser/ui/autofill/autofill_client_provider_factory.h"
+ #include "components/download/content/factory/navigation_monitor_factory.h"
+@@ -24,6 +30,10 @@
+ #include "components/find_in_page/find_tab_helper.h"
+ #include "components/zoom/zoom_controller.h"
+ #include "components/permissions/permission_request_manager.h"
++#include "components/safe_browsing/buildflags.h"
++#include "components/safe_browsing/content/browser/async_check_tracker.h"
++#include "components/safe_browsing/content/browser/safe_browsing_navigation_observer.h"
++#include "components/safe_browsing/content/browser/ui_manager.h"
+ #include "components/sessions/content/session_tab_helper.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_user_data.h"
+@@ -31,6 +41,14 @@
+ #include "extensions/browser/view_type_utils.h"
+ #include "extensions/common/mojom/view_type.mojom.h"
+ 
++#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
++#include "chrome/browser/safe_browsing/chrome_password_reuse_detection_manager_client.h"
++#include "chrome/browser/safe_browsing/chrome_safe_browsing_tab_observer_delegate.h"
++#include "chrome/browser/safe_browsing/safe_browsing_service.h"
++#include "chrome/browser/safe_browsing/trigger_creator.h"
++#include "components/safe_browsing/content/browser/safe_browsing_tab_observer.h"
++#endif
++
+ namespace rearc {
+ namespace {
+ 
+@@ -84,6 +102,11 @@ void AttachBrowserlessTabHelpers(content::WebContents* contents) {
+     // usage bookkeeping and the store are Chromium's.
+     ChromePasswordManagerClient::CreateForWebContents(contents);
+   }
++#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
++  // ABI 1.57: password reuse warnings, as TabHelpers attaches it after the
++  // password manager client.
++  ChromePasswordReuseDetectionManagerClient::CreateForWebContents(contents);
++#endif
+   // Stock policy: no history helper for off-the-record profiles, nor for
+   // extension popups and side panels (ExtensionViewHost contents record no
+   // history).
+@@ -98,6 +121,35 @@ void AttachBrowserlessTabHelpers(content::WebContents* contents) {
+   }
+   find_in_page::FindTabHelper::CreateForWebContents(contents);
+   permissions::PermissionRequestManager::CreateForWebContents(contents);
++#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
++  // ABI 1.57 (safe_browsing_tab_helpers): Safe Browsing's tab helpers in
++  // TabHelpers::AttachTabHelpers order. The navigation observer builds the
++  // referrer chains download and phishing checks send. ClientSideDetectionHost
++  // (created by SafeBrowsingTabObserver) observes PermissionRequestManager,
++  // AsyncCheckTracker and the ContentAutofillClient's managers in its
++  // constructor, so those exist first.
++  safe_browsing::SafeBrowsingNavigationObserver::MaybeCreateForWebContents(
++      contents, HostContentSettingsMapFactory::GetForProfile(profile),
++      safe_browsing::SafeBrowsingNavigationObserverManagerFactory::
++          GetForBrowserContext(profile),
++      profile->GetPrefs(), g_browser_process->safe_browsing_service(),
++      enterprise_connectors::IsReferrerChainNeededForEnterprise(profile));
++  if (g_browser_process->safe_browsing_service()) {
++    safe_browsing::AsyncCheckTracker::CreateForWebContents(
++        contents, g_browser_process->safe_browsing_service()->ui_manager(),
++        safe_browsing::AsyncCheckTracker::
++            IsPlatformEligibleForSyncCheckerCheckAllowlist());
++  }
++  safe_browsing::SafeBrowsingTabObserver::CreateForWebContents(
++      contents,
++      std::make_unique<safe_browsing::ChromeSafeBrowsingTabObserverDelegate>());
++  safe_browsing::TriggerCreator::MaybeCreateTriggersForWebContents(profile,
++                                                                   contents);
++#endif
++  // Lookalike reputation checks. Without a Browser window the safety tip
++  // bubble is not shown (ShowSafetyTipDialog returns), as for other
++  // browser-less contents.
++  SafetyTipWebContentsObserver::CreateForWebContents(contents);
+   // Wave 18e: PDF generation for host printing. PrintViewManager's preview
+   // and system-dialog paths are routed to the host for registry tabs.
+   printing::InitializePrintingForWebContents(contents);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 58e5611803..b4019757d5 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 56, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 57, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -121,6 +121,14 @@ ReArcEngineConfigure(uint32_t abi_version,
+ // ReArcEngineAllowTestSwitches (after Configure, before Run) for its own
+ // self-test. Debug engines pass every switch through for engine tests.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcEngineAllowTestSwitches(void);
++// ABI 1.57 (safe_browsing_tab_helpers): registry tabs get Chromium's Safe
++// Browsing tab helpers (navigation observer, async checks, client-side
++// phishing detection, password reuse, triggers, safety tips). True when this
++// engine can actually protect: Safe Browsing is compiled in and the build has
++// a real Google API key (google_api_key GN arg), not the "dummytoken"
++// placeholder Google rejects. False before ready. The profile's protection
++// level is a separate preference; show it only when this is true.
++REARC_ENGINE_EXPORT bool ReArcEngineSafeBrowsingAvailable(void);
+ REARC_ENGINE_EXPORT int ReArcEngineRun(int argc, const char* const* argv);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcEngineShutdown(bool force,
+                                                     ReArcCompletion completion,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 3a6251d731..03005c5ffe 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -54,7 +54,12 @@
+ #include "chrome/browser/rearc_bridge/rearc_readiness.h"
+ #include "chrome/browser/rearc_bridge/tab_observer.h"
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
++#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
++#include "chrome/browser/safe_browsing/safe_browsing_service.h"
++#endif
++#include "components/safe_browsing/buildflags.h"
+ #include "components/version_info/version_info.h"
++#include "google_apis/google_api_keys.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/web_contents.h"
+ #include "ui/base/page_transition_types.h"
+@@ -746,6 +751,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "extension_bulk_install" ||
+          std::string(feature) == "extension_background_tabs" ||
+          std::string(feature) == "launch_switch_filter" ||
++         std::string(feature) == "safe_browsing_tab_helpers" ||
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "history_query" ||
+          std::string(feature) == "search_autocomplete" ||
+@@ -920,6 +926,21 @@ int ReArcEngineRun(int argc, const char* const* argv) {
+   }
+   return result;
+ }
++bool ReArcEngineSafeBrowsingAvailable(void) {
++  CHECK([NSThread isMainThread]);
++  auto& a = ABI::Get();
++  if (!a.ready || a.stopping) {
++    return false;
++  }
++#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
++  // List updates and hash lookups carry google_apis::GetAPIKey(); Google
++  // rejects the "dummytoken" placeholder an engine built without a key sends.
++  return g_browser_process->safe_browsing_service() &&
++         google_apis::HasAPIKeyConfigured();
++#else
++  return false;
++#endif
++}
+ uint64_t ReArcEngineDefaultProfile(void) {
+   CHECK([NSThread isMainThread]);
+   return ABI::Get().ready && !ABI::Get().stopping
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 0109f54bcb..83c696c252 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.59.0";
++  return "0.60.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
