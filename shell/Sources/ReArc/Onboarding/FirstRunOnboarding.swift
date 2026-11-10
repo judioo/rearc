@@ -40,14 +40,44 @@ final class FirstRunOnboarding: OnboardingHost {
         OnboardingResumeTicket.peek(bundlePath: Bundle.main.bundlePath)
     }
 
-    /// At process start, before anything reads `ShellDataLocation`: a
-    /// reopen from System Settings has no `REARC_DATA_DIR`, so the ticket's
-    /// data folder comes back.
-    static func restoreDataDirectoryForResume(arguments: [String] = CommandLine.arguments) {
-        guard !isAutomated(arguments),
-              let dir = OnboardingResumeTicket.dataDirectory(environment: ProcessInfo.processInfo.environment, ticket: resumeTicket)
-        else { return }
-        setenv(ShellDataLocation.environmentKey, dir, 1)
+    /// This copy's ticket, once: the onboarding about to start resumes from it.
+    static func takeResumeTicket(at url: URL = OnboardingResumeTicket.defaultURL) -> OnboardingResumeTicket? {
+        OnboardingResumeTicket.take(at: url, bundlePath: Bundle.main.bundlePath)
+    }
+
+    /// At process start, before anything reads or writes `ShellDataLocation`:
+    /// what a fresh resume ticket asks of this launch. A reopen from System
+    /// Settings carries no `REARC_DATA_DIR` or arguments and may even be
+    /// another copy of ReArc (it goes by bundle id), so the ticket, outside
+    /// any data folder, says where the onboarding was. Logs which path
+    /// relaunched to `relaunch.log` beside it.
+    static func applyResumeTicketAtLaunch(arguments: [String] = CommandLine.arguments,
+                                          environment: [String: String] = ProcessInfo.processInfo.environment) {
+        guard !isAutomated(arguments) else { return }
+        let by = environment[ReArcRelaunch.relaunchedByKey]
+        unsetenv(ReArcRelaunch.relaunchedByKey)
+        let ticket = OnboardingResumeTicket.current()
+        guard ticket != nil || by != nil else { return }
+        let here = Bundle.main.bundlePath
+        let action = OnboardingResumeTicket.launchAction(environment: environment, bundlePath: here, ticket: ticket)
+        OnboardingResumeTicket.log("launch of \(here), opened by \(by ?? "macOS or the person (Quit & Reopen, Finder, open)"): \(action)")
+        switch action {
+        case .none:
+            break
+        case .discard:
+            OnboardingResumeTicket.remove()
+        case .adopt(let dir):
+            if let dir { setenv(ShellDataLocation.environmentKey, dir, 1) }
+            if var ticket, ticket.bundlePath != here {
+                // Its own copy is gone: this one resumes in its place.
+                ticket.bundlePath = here
+                ticket.write()
+            }
+        case .handOff(let path, let dir):
+            ReArcRelaunch.open(URL(fileURLWithPath: path, isDirectory: true), arguments: ticket?.isRehearsal == true ? [forceFlag] : [],
+                               dataDirectory: dir, by: "a hand-off from \(here)")
+            exit(0)
+        }
     }
 
     /// Whether this launch runs it, and how.
@@ -120,7 +150,8 @@ final class FirstRunOnboarding: OnboardingHost {
         let takeover = SunriseTakeover(host: self, mode: kind == .replay ? .replay : .firstRun)
         self.takeover = takeover
         takeover.present { }
-        if kind != .replay, let ticket = OnboardingResumeTicket.take(bundlePath: Bundle.main.bundlePath) {
+        if kind != .replay, let ticket = Self.takeResumeTicket() {
+            OnboardingResumeTicket.log("onboarding resumes at the browser step (ticket \(ticket.nonce))")
             takeover.player.resumeAtBrowsers(name: ticket.name, colourIndex: ticket.colourIndex)
         }
     }
@@ -163,8 +194,10 @@ final class FirstRunOnboarding: OnboardingHost {
     func saveResumePoint(name: String, colourIndex: Int) {
         guard kind != .replay else { return }
         let dir = ShellDataLocation.isOverridden ? ShellDataLocation.root.path : nil
-        OnboardingResumeTicket(dataDirectory: dir, bundlePath: Bundle.main.bundlePath, name: name, colourIndex: colourIndex,
-                               isRehearsal: kind == .rehearsal).write()
+        let ticket = OnboardingResumeTicket(dataDirectory: dir, bundlePath: Bundle.main.bundlePath, name: name, colourIndex: colourIndex,
+                                            isRehearsal: kind == .rehearsal)
+        ticket.write()
+        OnboardingResumeTicket.log("resume point saved (ticket \(ticket.nonce), data \(dir ?? "default"))")
     }
 
     func bring(_ sources: [ImportSource], categories: [ImportCategory], done: @escaping (OnboardingImportOutcome) -> Void) {

@@ -9,10 +9,16 @@ import XCTest
 final class SettingsAccessTests: XCTestCase {
     final class Host: OnboardingHost {
         var scans: [BrowserScan] = []
+        /// When set, a scan waits here instead of answering at once.
+        var held: ((BrowserScan) -> Void)?
+        var holds = false
         var saved: (String, Int)?
         var relaunched = 0
         var importCategories: [ImportCategory] { ImportCategory.allCases }
-        func discoverSources(_ done: @escaping (BrowserScan) -> Void) { done(scans.isEmpty ? BrowserScan() : scans.removeFirst()) }
+        func discoverSources(_ done: @escaping (BrowserScan) -> Void) {
+            if holds { held = done; return }
+            done(scans.isEmpty ? BrowserScan() : scans.removeFirst())
+        }
         var canRelaunch: Bool { true }
         func relaunchForAccess() { relaunched += 1 }
         func saveResumePoint(name: String, colourIndex: Int) { saved = (name, colourIndex) }
@@ -120,7 +126,11 @@ final class SettingsAccessTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(centred.scene.minX, assumed.maxX)
         let helper = try! XCTUnwrap(centred.helper)
         XCTAssertFalse(helper.intersects(assumed))
-        XCTAssertFalse(helper.intersects(centred.scene), "the helper sits above the scene")
+        XCTAssertFalse(helper.intersects(centred.scene), "the helper sits under the scene")
+        XCTAssertEqual(helper.minY, 16, "at the foot of the column")
+        let notifications = NSRect(x: screen.maxX - 400, y: screen.maxY - 180, width: 400, height: 180)
+        XCTAssertFalse(helper.intersects(notifications), "clear of macOS's top-right notifications")
+        XCTAssertFalse(centred.scene.intersects(notifications))
         XCTAssertEqual(centred.scene.width / centred.scene.height, 1.6, accuracy: 0.01)
         XCTAssertTrue(screen.contains(centred.scene) && screen.contains(helper))
 
@@ -150,5 +160,19 @@ final class SettingsAccessTests: XCTestCase {
                        "Switch on ReArc in Full Disk Access. If macOS offers Quit & Reopen, choose Later, then come back.")
         log.quitAndReopenIsSafe = true
         XCTAssertEqual(log.permissionLines?.steps, "Switch on ReArc in Full Disk Access. If macOS offers Quit & Reopen, choose it.")
+    }
+
+    func testActTwoWaitsForAScanStartedAtTheColourPick() throws {
+        let host = Host()
+        host.holds = true
+        let player = player(host)
+        player.startScanIfNeeded()
+        XCTAssertNotNil(host.held, "the scan runs")
+        player.startAct2()
+        XCTAssertNil(player.act2, "Act 2 waits for it")
+        host.held?(BrowserScan(sources: [ImportSource.demo[0]], pending: [chromeLocked]))
+        let act2 = try XCTUnwrap(player.act2)
+        XCTAssertEqual(act2.pending, [chromeLocked])
+        XCTAssertTrue(act2.arrivals.isEmpty, "found at the start: no Found rings")
     }
 }

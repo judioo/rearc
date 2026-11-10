@@ -257,4 +257,26 @@ final class FirstRunOnboardingTests: XCTestCase {
         XCTAssertTrue(html.contains("REFOCUSED · RESTORED · REARC"))
         XCTAssertFalse(WelcomePage.html(name: "", colour: MarkPalette.sun, spaces: 3, imported: nil).contains("came with you"))
     }
+
+    /// A real install (default data folder, one copy) after System Settings'
+    /// Quit & Reopen: no environment, no arguments; the pending marker makes
+    /// it a first run, and the ticket resumes it at the browser step.
+    func testQuitAndReopenOfARealInstallResumesAtTheBrowserStep() throws {
+        let first = launch()
+        XCTAssertEqual(FirstRunOnboarding.forLaunch(first, arguments: [], automated: false), .firstRun)
+        let tickets = data.appendingPathComponent("caches/onboarding-resume.json")
+        OnboardingResumeTicket(dataDirectory: nil, bundlePath: Bundle.main.bundlePath, name: "Kai", colourIndex: 4, isRehearsal: false)
+            .write(to: tickets)
+        quit(first)
+
+        let ticket = OnboardingResumeTicket.current(at: tickets)
+        XCTAssertEqual(OnboardingResumeTicket.launchAction(environment: [:], bundlePath: Bundle.main.bundlePath, ticket: ticket),
+                       .adopt(dataDirectory: nil), "stays on the default folder")
+        let second = launch()
+        XCTAssertEqual(FirstRunOnboarding.forLaunch(second, arguments: [], automated: false), .firstRun, "onboarding-pending survived")
+        let resumed = try XCTUnwrap(FirstRunOnboarding.takeResumeTicket(at: tickets))
+        XCTAssertEqual(resumed.name, "Kai")
+        XCTAssertEqual(resumed.colourIndex, 4)
+        XCTAssertNil(FirstRunOnboarding.takeResumeTicket(at: tickets), "once")
+    }
 }

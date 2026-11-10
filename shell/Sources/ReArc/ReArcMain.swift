@@ -11,7 +11,7 @@ enum ReArcMain {
         ReArcRelaunch.runHelperIfAsked()
         PerfSignposts.launchEvent("Main")
         // Before anything reads ShellDataLocation (a reopen from System Settings carries no environment).
-        FirstRunOnboarding.restoreDataDirectoryForResume()
+        FirstRunOnboarding.applyResumeTicketAtLaunch()
         let info = Bundle.main.infoDictionary
         let chromiumOwnsApplication = EngineLaunchOptions.applicationClassRequiresChromium(infoDictionary: info) {
             NSClassFromString($0) != nil

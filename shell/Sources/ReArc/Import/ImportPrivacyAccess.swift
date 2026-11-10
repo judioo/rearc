@@ -126,6 +126,9 @@ enum ReArcRelaunch {
         return posix_spawn(&pid, exe, nil, &attributes, &cArgs, environ) == 0
     }
 
+    /// Set in the reopened app's environment: who opened it, for `relaunch.log`.
+    static let relaunchedByKey = "REARC_RELAUNCHED_BY"
+
     /// In the helper: wait (up to a minute) until the old ReArc has quit and
     /// Launch Services has let go of it, then open the bundle by its URL.
     static func runHelperIfAsked(_ argv: [String] = CommandLine.arguments) {
@@ -135,15 +138,29 @@ enum ReArcRelaunch {
             usleep(100_000)
         }
         usleep(300_000)
+        let dir = ProcessInfo.processInfo.environment[ShellDataLocation.environmentKey]
+        open(request.bundle, arguments: request.arguments, dataDirectory: dir, by: "ReArc's Relaunch helper (old pid \(request.pid))")
+        exit(0)
+    }
+
+    /// Opens exactly `bundle`, a new instance, with `arguments` and the data
+    /// folder; waits for Launch Services to answer. Never by bundle id.
+    static func open(_ bundle: URL, arguments: [String], dataDirectory: String?, by: String) {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
         configuration.activates = true
-        configuration.arguments = request.arguments
-        configuration.environment = environment(ProcessInfo.processInfo.environment)
+        configuration.arguments = arguments
+        var env = dataDirectory.map { [ShellDataLocation.environmentKey: $0] } ?? [:]
+        env[relaunchedByKey] = by
+        configuration.environment = env
         let done = DispatchSemaphore(value: 0)
-        NSWorkspace.shared.openApplication(at: request.bundle, configuration: configuration) { _, _ in done.signal() }
+        var outcome = "no answer"
+        NSWorkspace.shared.openApplication(at: bundle, configuration: configuration) { app, error in
+            outcome = app.map { "opened pid \($0.processIdentifier)" } ?? "failed: \(error?.localizedDescription ?? "unknown")"
+            done.signal()
+        }
         _ = done.wait(timeout: .now() + 30)
-        exit(0)
+        OnboardingResumeTicket.log("\(by) opened \(bundle.path) (data \(dataDirectory ?? "default")): \(outcome)")
     }
 }
 

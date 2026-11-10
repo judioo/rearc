@@ -116,7 +116,7 @@ public enum SettingsAccess {
 
 /// Where the onboarding's window and the drag helper go while System
 /// Settings is open: on Settings' display, in the larger free column beside
-/// its window, the helper on top and the scene under it, so neither covers
+/// its window, the scene in its middle and the helper at its foot, so neither covers
 /// Settings. When a column is too narrow they still stay clear of Settings'
 /// right-hand list: only its sidebar, on the left, may be covered.
 public struct SettingsCompanionLayout: Equatable, Sendable {
@@ -143,14 +143,17 @@ public struct SettingsCompanionLayout: Equatable, Sendable {
             width = min(minSceneWidth, screen.width - 2 * m)
             x = screen.minX + m
         }
+        // The helper at the foot of the column: macOS's "Data Access Blocked"
+        // notifications come in at the top right, and would cover it there.
         let helperFrame = helper.map { size in
-            NSRect(x: x + max(0, (width - size.width) / 2), y: screen.maxY - m - size.height, width: min(size.width, width), height: size.height)
+            NSRect(x: x + max(0, (width - size.width) / 2), y: screen.minY + m, width: min(size.width, width), height: size.height)
         }
-        let top = (helperFrame?.minY ?? screen.maxY) - m
-        // The scene keeps its 16:10 shape inside the rest of the column.
-        let height = min(top - screen.minY - m, width * 10 / 16)
+        let bottom = (helperFrame?.maxY ?? screen.minY) + m
+        let room = screen.maxY - m - bottom
+        // The scene keeps its 16:10 shape, centred in the rest of the column.
+        let height = min(room, width * 10 / 16)
         let sceneWidth = min(width, height * 16 / 10)
-        let scene = NSRect(x: (x + (width - sceneWidth) / 2).rounded(), y: (top - height).rounded(),
+        let scene = NSRect(x: (x + (width - sceneWidth) / 2).rounded(), y: (bottom + (room - height) / 2).rounded(),
                            width: sceneWidth.rounded(), height: height.rounded())
         return SettingsCompanionLayout(scene: scene, helper: helperFrame)
     }

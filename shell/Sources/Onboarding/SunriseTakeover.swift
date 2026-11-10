@@ -142,14 +142,31 @@ public final class SunrisePlayer: ObservableObject {
         if mode == .replay { finish(); return }
         guard act1 == nil, exitStart == nil else { return }
         act1 = Act1Log(start: time(at: Date()))
-        if sources == nil {
-            if usesDemoSources, host == nil {
-                sources = ImportSource.demo
-            } else {
-                scanBrowsers { [weak self] scan in
-                    self?.sources = scan.sources
-                    self?.pending = scan.pending
-                }
+        if sources == nil, usesDemoSources, host == nil { sources = ImportSource.demo }
+    }
+
+    /// The browsers are looked at when the colour is picked, not when Act 1
+    /// begins: a blocked read makes macOS show "Data Access Blocked", which
+    /// then arrives as Act 2 names the locked browsers, not while the person
+    /// types their name, and is gone by the time they press Allow access….
+    private var scanInFlight = false
+    private var act2WaitsForScan = false
+
+    func startScanIfNeeded() {
+        guard sources == nil, !scanInFlight else { return }
+        scanInFlight = true
+        scanBrowsers { [weak self] scan in
+            guard let self else { return }
+            self.scanInFlight = false
+            self.sources = scan.sources
+            self.pending = scan.pending
+            if self.act2WaitsForScan {
+                self.act2WaitsForScan = false
+                self.startAct2()
+            } else if var log = self.act2, log.choice == nil {
+                // Act 2 could not wait any longer: what the scan found joins it.
+                log.merge(scan, at: self.time(at: Date()))
+                self.act2 = log
             }
         }
     }
@@ -183,6 +200,7 @@ public final class SunrisePlayer: ObservableObject {
         guard choosing, var log = act1 else { return }
         log.picked = (time(at: Date()), index)
         act1 = log
+        startScanIfNeeded()
         DispatchQueue.main.asyncAfter(deadline: .now() + Act1Timeline.confirmHold) { [weak self] in
             guard self?.act1?.picked != nil else { return }
             self?.startAct2()
@@ -290,8 +308,19 @@ public final class SunrisePlayer: ObservableObject {
         }
     }
 
-    func startAct2() {
+    func startAct2(waited: Bool = false) {
         guard act2 == nil, exitStart == nil else { return }
+        if scanInFlight, !waited {
+            // The scan is a moment behind: Act 2 starts when it lands, or after 5 s without it.
+            guard !act2WaitsForScan else { return }
+            act2WaitsForScan = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                guard let self, self.act2WaitsForScan else { return }
+                self.act2WaitsForScan = false
+                self.startAct2(waited: true)
+            }
+            return
+        }
         var log = Act2Log(start: time(at: Date()), sources: sources ?? [],
                           offered: host?.importCategories ?? ImportCategory.allCases, pending: pending)
         log.quitAndReopenIsSafe = host?.macOSReopensThisCopy ?? false
