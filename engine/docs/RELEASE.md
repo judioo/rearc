@@ -163,6 +163,18 @@ branding_file_path="<repo>/shell/.build-release/BRANDING"   (generated, carries 
   major (156) and this stays inert. Crash reports (crashpad `ver`) carry the ReArc version.
 - DMG name: `ReArc-<CFBundleShortVersionString>.dmg`.
 
+## Release notes
+
+`RELEASES.md` at the repo root records every distributed build, newest first. Each entry is
+headed `## ReArc <VERSION> (<build>) — <YYYY-MM-DD>` and lists, for ReArc's users, all the
+features and fixes since the previous release. `release.sh --dmg` (and `--appcast`) stops
+before building when the committed `RELEASES.md` at HEAD lacks the heading for the build
+being made.
+
+The build number is the commit count, so the notes commit has to carry its own number. Add
+the entry as the last commit before the release, numbered
+`$(( $(git rev-list --count HEAD) + 1 ))`, and build from that commit.
+
 ## Verification (this machine, Apple Development identity)
 
 R1 run: shell HEAD `667658d9`, overlay `f511949e6b`, version 0.1.0 (98).

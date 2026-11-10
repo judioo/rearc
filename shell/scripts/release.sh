@@ -64,6 +64,13 @@ load_signing_env "$SHELL_DIR"
 # 1. Source: the committed shell/ at HEAD, so uncommitted work never ships. The stage keeps
 #    unchanged files' timestamps (rsync --checksum), so the release build stays incremental.
 REVISION="$(git -C "$REPO" rev-parse HEAD)"
+# A distributable build needs its entry in the committed RELEASES.md (RELEASE.md, "Release notes").
+if [[ $DMG == 1 ]]; then
+  marketing="$(tr -d '[:space:]' <"$LIVE_SHELL/scripts/release/VERSION")"
+  build="$(git -C "$REPO" rev-list --count "$REVISION")"
+  git -C "$REPO" show "$REVISION:RELEASES.md" 2>/dev/null | grep -qF "## ReArc $marketing ($build)" \
+    || die "RELEASES.md at HEAD has no \"## ReArc $marketing ($build) — <date>\" entry; commit the release notes first"
+fi
 SUFFIX=""
 if [[ $FROM_HEAD == 1 ]]; then
   STAGE="${REARC_RELEASE_STAGE:-$SHELL_DIR/dist/.release-src}"
