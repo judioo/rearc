@@ -116,6 +116,62 @@ final class SidebarPersistenceTests: XCTestCase {
         persistence.stop()
     }
 
+    func testDeferredSetupPersistsThroughBothLaunchLoadPaths() {
+        let persistence = SidebarFilePersistence(fileURL: fileURL())
+        let store = SidebarFilePersistence.loadStore(persistence: persistence)
+        persistence.beginOnboarding()
+        persistence.start(autoSave: store)
+        persistence.flush()
+        persistence.deferOnboarding()
+        persistence.stop()
+
+        let relaunch = SidebarFilePersistence(fileURL: fileURL())
+        _ = SidebarFilePersistence.loadStore(persistence: relaunch)
+        XCTAssertEqual(relaunch.onboardingSetupState, .deferred)
+        XCTAssertFalse(relaunch.isFirstRun)
+        XCTAssertTrue(relaunch.onboardingPending, "deferred is not completed")
+
+        let prepared = SidebarFilePersistence.prepareLoad(from: fileURL())
+        XCTAssertFalse(prepared.isFirstRun, "Chromium's early-window decision agrees")
+        let restored = SidebarFilePersistence(fileURL: fileURL())
+        _ = restored.restoreStore(from: prepared)
+        XCTAssertEqual(restored.onboardingSetupState, .deferred)
+        XCTAssertFalse(restored.isFirstRun)
+
+        restored.dismissOnboardingCard()
+        let dismissed = SidebarFilePersistence.prepareLoad(from: fileURL())
+        XCTAssertEqual(dismissed.onboardingSetupState, .dismissed)
+        XCTAssertFalse(dismissed.onboardingSetupState.showsCard)
+        XCTAssertTrue(dismissed.onboardingSetupState.showsMenuItem)
+        _ = relaunch.restoreStore(from: dismissed)
+        relaunch.finishOnboarding()
+        let completed = SidebarFilePersistence.prepareLoad(from: fileURL())
+        XCTAssertFalse(completed.isFirstRun)
+        XCTAssertFalse(completed.onboardingPending)
+        XCTAssertFalse(completed.onboardingSetupState.showsCard)
+        XCTAssertFalse(completed.onboardingSetupState.showsMenuItem)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: relaunch.onboardingDeferredURL.path))
+    }
+
+    func testDismissingWithoutDeferralDoesNotCreateAReminder() {
+        let persistence = SidebarFilePersistence(fileURL: fileURL())
+        _ = SidebarFilePersistence.loadStore(persistence: persistence)
+        persistence.dismissOnboardingCard()
+        XCTAssertEqual(persistence.onboardingSetupState, .notDeferred)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: persistence.onboardingDeferredURL.path))
+    }
+
+    func testLegacyEmptyPendingMarkerStillResumesOnboarding() throws {
+        let persistence = SidebarFilePersistence(fileURL: fileURL())
+        persistence.start(autoSave: SidebarStore.starter())
+        persistence.flush()
+        persistence.stop()
+        try Data().write(to: persistence.onboardingMarkerURL)
+        let prepared = SidebarFilePersistence.prepareLoad(from: fileURL())
+        XCTAssertTrue(prepared.isFirstRun)
+        XCTAssertEqual(prepared.onboardingSetupState, .notDeferred)
+    }
+
     func testDebounceCoalescesRapidMutations() {
         let url = fileURL()
         let store = SidebarStore(spaces: [Space(name: "One")])

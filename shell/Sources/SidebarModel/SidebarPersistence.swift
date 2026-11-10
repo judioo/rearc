@@ -50,18 +50,26 @@ public final class SidebarFilePersistence: SidebarPersisting {
     /// A first run's onboarding has begun and not finished (the marker file
     /// was there at load).
     public private(set) var onboardingPending = false
+    public private(set) var onboardingSetupState: OnboardingSetupState = .notDeferred
 
     /// Beside the sidebar file from a first run's onboarding start until it
-    /// completes or is skipped. The sidebar is saved meanwhile (sync's state
-    /// must match it), so the marker, not the file's absence, keeps a quit or
+    /// completes or is explicitly skipped by a launch flag. The sidebar is
+    /// saved meanwhile (sync's state must match it), so the marker keeps a quit or
     /// crash mid-onboarding a first run. Installs from before the marker have
     /// a sidebar file and no marker: never a first run.
     public var onboardingMarkerURL: URL {
         fileURL.deletingLastPathComponent().appendingPathComponent("onboarding-pending", isDirectory: false)
     }
 
-    /// No sidebar yet, or one an unfinished onboarding left.
-    public var isFirstRun: Bool { loadOutcome == .missingFile || onboardingPending }
+    /// An explicit deferral opens the browser with a reminder instead of
+    /// taking over the screen again. Keep the pending marker until completion.
+    public var onboardingDeferredURL: URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("onboarding-deferred", isDirectory: false)
+    }
+
+    public var isFirstRun: Bool {
+        !onboardingSetupState.showsMenuItem && (loadOutcome == .missingFile || onboardingPending)
+    }
 
     /// The untouched starter an onboarding replaces, kept in the marker so
     /// a launch that resumes an interrupted onboarding still knows which
@@ -93,6 +101,7 @@ public final class SidebarFilePersistence: SidebarPersisting {
     /// Written before the onboarding can change the store; a marker already
     /// there (an interrupted onboarding) keeps the starter it recorded.
     public func beginOnboarding(starter: OnboardingStarter = OnboardingStarter()) {
+        onboardingPending = true
         guard !FileManager.default.fileExists(atPath: onboardingMarkerURL.path) else { return }
         try? FileManager.default.createDirectory(at: onboardingMarkerURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let data = (try? JSONEncoder().encode(starter)) ?? Data()
@@ -106,9 +115,30 @@ public final class SidebarFilePersistence: SidebarPersisting {
         return try? JSONDecoder().decode(OnboardingStarter.self, from: data)
     }
 
-    /// Completed or skipped: the next launch opens the browser.
+    /// Save the explicit deferral separately so old pending markers still
+    /// resume the sunrise. Dismissing only the card keeps the menu available.
+    public func deferOnboarding() {
+        saveOnboardingSetupState(.deferred)
+    }
+
+    public func dismissOnboardingCard() {
+        guard onboardingSetupState.showsCard else { return }
+        saveOnboardingSetupState(.dismissed)
+    }
+
+    private func saveOnboardingSetupState(_ state: OnboardingSetupState) {
+        try? FileManager.default.createDirectory(at: onboardingDeferredURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(state),
+              (try? data.write(to: onboardingDeferredURL, options: .atomic)) != nil else { return }
+        onboardingSetupState = state
+    }
+
+    /// Completed or explicitly skipped by a launch flag: no reminder remains.
     public func finishOnboarding() {
         try? FileManager.default.removeItem(at: onboardingMarkerURL)
+        try? FileManager.default.removeItem(at: onboardingDeferredURL)
+        onboardingPending = false
+        onboardingSetupState = .notDeferred
     }
 
     /// Loads persisted state, or the empty starter when the file is missing or invalid.
@@ -133,19 +163,24 @@ public final class SidebarFilePersistence: SidebarPersisting {
         public let snapshot: SidebarSnapshot?
         public let outcome: SidebarLoadOutcome
         public let onboardingPending: Bool
+        public let onboardingSetupState: OnboardingSetupState
 
-        public var isFirstRun: Bool { outcome == .missingFile || onboardingPending }
+        public var isFirstRun: Bool {
+            !onboardingSetupState.showsMenuItem && (outcome == .missingFile || onboardingPending)
+        }
     }
 
     public static func prepareLoad(from fileURL: URL) -> PreparedLoad {
         let persistence = SidebarFilePersistence(fileURL: fileURL)
         let snapshot = persistence.loadSnapshot()
-        return PreparedLoad(snapshot: snapshot, outcome: persistence.loadOutcome, onboardingPending: persistence.onboardingPending)
+        return PreparedLoad(snapshot: snapshot, outcome: persistence.loadOutcome, onboardingPending: persistence.onboardingPending,
+                            onboardingSetupState: persistence.onboardingSetupState)
     }
 
     public func restoreStore(from prepared: PreparedLoad) -> SidebarStore {
         loadOutcome = prepared.outcome
         onboardingPending = prepared.onboardingPending
+        onboardingSetupState = prepared.onboardingSetupState
         autosaveEnabled = prepared.outcome != .recoveredFromCorruptFile
         guard let snapshot = prepared.snapshot else { return SidebarStore.starter() }
         let store = SidebarStore()
@@ -155,6 +190,12 @@ public final class SidebarFilePersistence: SidebarPersisting {
 
     public func loadSnapshot() -> SidebarSnapshot? {
         onboardingPending = FileManager.default.fileExists(atPath: onboardingMarkerURL.path)
+        if let data = try? Data(contentsOf: onboardingDeferredURL) {
+            // Even an unreadable deferred choice should not replay the takeover.
+            onboardingSetupState = (try? JSONDecoder().decode(OnboardingSetupState.self, from: data)) ?? .deferred
+        } else {
+            onboardingSetupState = .notDeferred
+        }
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             loadOutcome = .missingFile
             return nil
