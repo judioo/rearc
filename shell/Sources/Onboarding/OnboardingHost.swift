@@ -65,6 +65,9 @@ public protocol OnboardingHost: AnyObject {
     /// Quit and start again: macOS applies some privacy switches only to a
     /// new launch. The onboarding resumes by itself.
     func relaunchForAccess()
+    /// Remember Act 1's answers: ReArc may quit for a permission (System
+    /// Settings' "Quit & Reopen"), and the next launch resumes at Act 2.
+    func saveResumePoint(name: String, colourIndex: Int)
     /// Bring them over: import now, while the light flows in.
     func bring(_ sources: [ImportSource], categories: [ImportCategory], done: @escaping (OnboardingImportOutcome) -> Void)
     /// Act 4 begins: name the main profile, colour it, shape the spaces.
@@ -82,4 +85,5 @@ public extension OnboardingHost {
     func onboardingDeferred() { onboardingFinished() }
     var canRelaunch: Bool { false }
     func relaunchForAccess() {}
+    func saveResumePoint(name: String, colourIndex: Int) {}
 }

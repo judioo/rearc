@@ -45,6 +45,8 @@ public struct Act2Log: Equatable, Sendable {
     public var arrivals: [Int: Double] = [:]
     /// Back from System Settings and still locked: Relaunch ReArc is offered.
     public var offersRelaunch = false
+    /// System Settings' window came up on another display than the onboarding.
+    public var settingsElsewhere = false
 
     public init(start: Double, sources: [ImportSource], offered: [ImportCategory] = ImportCategory.allCases,
                 pending: [PendingBrowser] = []) {
@@ -59,6 +61,26 @@ public struct Act2Log: Equatable, Sendable {
         guard let last = names.last else { return nil }
         return names.count == 1 ? last : names.dropLast().joined(separator: ", ") + " and " + last
     }
+
+    /// The two calm lines beside the trail: what macOS does, then what to do.
+    public var permissionLines: (explanation: String, steps: String)? {
+        guard let names = blockedNames, let permission = neededPermission else { return nil }
+        let explanation = "macOS keeps \(names) private."
+        if offersRelaunch {
+            return (explanation, permission == .fullDiskAccess
+                ? "Switched on? macOS applies it when ReArc starts again."
+                : "Switched on and still locked? ReArc may need to start again.")
+        }
+        if settingsElsewhere { return (explanation, "System Settings opened on your other display.") }
+        switch permission {
+        case .fullDiskAccess: return (explanation, "Switch on ReArc in Full Disk Access, then come back.")
+        case .appData: return (explanation, "Under ReArc in Files & Folders, switch on \(names), then come back.")
+        }
+    }
+
+    /// The one button: "Allow access…", or "Relaunch ReArc" once a new
+    /// launch is what macOS is waiting for.
+    public var permissionButton: String { offersRelaunch ? "Relaunch ReArc" : "Allow access\u{2026}" }
 
     /// The pane the one "Allow access…" button opens: Full Disk Access when
     /// Safari is among them (it covers the others too), else Files & Folders.
@@ -97,6 +119,7 @@ public struct Act2Log: Equatable, Sendable {
             && a.choice?.time == b.choice?.time && a.choice?.bring == b.choice?.bring
             && a.offered == b.offered && a.outcome == b.outcome
             && a.pending == b.pending && a.arrivals == b.arrivals && a.offersRelaunch == b.offersRelaunch
+            && a.settingsElsewhere == b.settingsElsewhere
     }
 
     public func isOn(source i: Int, at t: Double) -> Bool {
@@ -326,6 +349,9 @@ public struct Act2Layout {
     public var subline: CGFloat { H * 0.405 }
     public var chips: CGFloat { H * 0.475 }
     public var buttons: CGFloat { H * 0.555 }
+    /// The permission note's top left: right of your avatar, opposite the
+    /// browsers on the trail, where the sweep ahead is not drawn yet.
+    public var permissionOrigin: CGPoint { CGPoint(x: W / 2 + avatarRadius * 2.6, y: apex.y - H * 0.02) }
     /// Past on the left: the trail runs from here to the apex.
     public static let trailStart = -156.0
 

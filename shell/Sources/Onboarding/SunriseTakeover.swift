@@ -216,18 +216,58 @@ public final class SunrisePlayer: ObservableObject {
         }
     }
 
-    /// "Allow access…": System Settings, at the pane that opens them all.
+    /// The scene's window, to tell which display it is on.
+    var sceneWindow: (() -> NSWindow?)?
+    /// Full screen was left so System Settings comes up in front; it comes back on return.
+    private var leftFullScreenForSettings = false
+
+    /// "Allow access…": out of full screen, so System Settings is not behind
+    /// the scene or on another Space; then its pane, a drag helper for Full
+    /// Disk Access (macOS never lists ReArc there by itself), and a check of
+    /// which display Settings came up on. The host notes where the
+    /// onboarding is, so a "Quit & Reopen" comes back to this step.
     public func allowAccess() {
-        guard let permission = act2?.neededPermission else { return }
+        guard var log = act2, let permission = log.neededPermission else { return }
         access.openedSettings(permission)
-        NSWorkspace.shared.open(permission.settingsURL)
+        if let name = act1?.submitted?.name, let colour = act1?.picked?.index { host?.saveResumePoint(name: name, colourIndex: colour) }
+        if !windowed {
+            leftFullScreenForSettings = true
+            toggleWindow()
+        }
+        log.settingsElsewhere = false
+        act2 = log
+        presentSettings(permission) { [weak self] elsewhere in
+            guard let self, elsewhere, var log = self.act2, log.choice == nil else { return }
+            log.settingsElsewhere = true
+            self.act2 = log
+        }
     }
 
-    public func relaunchForAccess() { host?.relaunchForAccess() }
+    /// Opens the pane; calls back with whether its window came up on another
+    /// display than the scene. Tests replace it (nothing opens System Settings).
+    lazy var presentSettings: (ImportPermission, @escaping @MainActor (Bool) -> Void) -> Void = { [weak self] permission, done in
+        SettingsAccess.open(permission)
+        let screen = self?.sceneWindow?()?.screen
+        SettingsAccess.whenSettingsAppears { [weak self] frame in
+            if permission == .fullDiskAccess { SettingsAccess.showDragHelper(near: frame, fallback: screen) }
+            done(frame != nil && SettingsAccess.settingsIsElsewhere(than: self?.sceneWindow?()) == true)
+        }
+    }
 
-    /// ReArc is active again: while Act 2 still asks, look at the browsers
-    /// again, and bring in any that macOS now lets through.
+    public func relaunchForAccess() {
+        if let name = act1?.submitted?.name, let colour = act1?.picked?.index { host?.saveResumePoint(name: name, colourIndex: colour) }
+        host?.relaunchForAccess()
+    }
+
+    /// ReArc is active again: back to full screen if it was, the helper
+    /// goes, and while Act 2 still asks, look at the browsers again and
+    /// bring in any that macOS now lets through.
     public func applicationBecameActive() {
+        if leftFullScreenForSettings {
+            leftFullScreenForSettings = false
+            if windowed { toggleWindow() }
+        }
+        hideSettingsHelper()
         guard let log = act2, log.choice == nil, access.becameActive(), !rescanning else { return }
         rescanning = true
         scanBrowsers { [weak self] scan in
@@ -236,7 +276,31 @@ public final class SunrisePlayer: ObservableObject {
             guard var log = self.act2, log.choice == nil else { return }
             log.merge(scan, at: self.time(at: Date()))
             log.offersRelaunch = self.access.offersRelaunch && (self.host?.canRelaunch ?? false)
+            log.settingsElsewhere = false
             if log != self.act2 { self.act2 = log }
+        }
+    }
+
+    lazy var hideSettingsHelper: () -> Void = { SettingsAccess.hideDragHelper() }
+
+    /// Straight to the browser step with Act 1's name and colour, as if the
+    /// sunrise and Act 1 had just played: after a relaunch for a permission.
+    public func resumeAtBrowsers(name: String, colourIndex: Int) {
+        guard act1 == nil, act2 == nil, exitStart == nil, ProfilePalette.colours.indices.contains(colourIndex) else { return }
+        audio?.skip()
+        var log = Act1Log(start: cues.end)
+        log.edits = [(cues.end + 0.5, name)]
+        log.submitted = (cues.end + 1, name)
+        log.picked = (cues.end + 2, colourIndex)
+        self.name = name
+        // The scene clock just past Act 1's hand-off.
+        startDate = Date().addingTimeInterval(-((log.handOff ?? cues.end) + 0.05))
+        act1 = log
+        scanBrowsers { [weak self] scan in
+            guard let self else { return }
+            self.sources = scan.sources
+            self.pending = scan.pending
+            self.startAct2()
         }
     }
 
@@ -531,6 +595,7 @@ public final class SunriseTakeover {
         window.contentView = TakeoverHostingView(rootView: SunriseLiveView(player: player, showsVariantPicker: showsVariantPicker))
         self.window = window
         player.onReveal = { [weak self] in self?.reveal() }
+        player.sceneWindow = { [weak self] in self?.window }
         player.onToggleWindow = { [weak self] in
             guard let self else { return }
             self.setWindowed(!self.windowed)
@@ -669,6 +734,7 @@ public final class SunriseTakeover {
     }
 
     public func dismiss() {
+        SettingsAccess.hideDragHelper()
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
         if let activation { NotificationCenter.default.removeObserver(activation) }

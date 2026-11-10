@@ -1,4 +1,5 @@
 import AppKit
+import Onboarding
 import SidebarModel
 
 /// The File › Import from Another Browser… window's state
@@ -154,6 +155,7 @@ final class BrowserImportSession {
     }
 
     /// The button under a blocked browser: System Settings, at its pane.
+    @MainActor
     func openSettings(for permission: ImportPermission) {
         access.openedSettings(permission)
         ImportPrivacyAccess.openSettings(for: permission)
@@ -172,7 +174,9 @@ final class BrowserImportSession {
 
     /// ReArc is active again (the window calls this while it is open): if
     /// a browser is blocked, look at just those, and bring in any that opened.
+    @MainActor
     func applicationBecameActive() {
+        SettingsAccess.hideDragHelper()
         guard access.becameActive(), !isDiscovering, !isRecheckingAccess else { return }
         isRecheckingAccess = true
         let root = applicationSupport

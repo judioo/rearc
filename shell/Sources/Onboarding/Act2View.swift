@@ -126,7 +126,7 @@ extension SunrisePainter {
             let x = p.x - r - H * 0.014
             label.draw(Text(item.name).font(.system(size: H * 0.017, weight: .semibold)).foregroundColor(ink),
                        at: CGPoint(x: x, y: p.y - H * 0.011), anchor: .trailing)
-            label.draw(Text(locked ? "Needs permission" : "No data yet").font(.system(size: H * 0.015)).foregroundColor(ink.opacity(0.6)),
+            label.draw(Text(locked ? "Locked" : "No data yet").font(.system(size: H * 0.015)).foregroundColor(ink.opacity(0.6)),
                        at: CGPoint(x: x, y: p.y + H * 0.012), anchor: .trailing)
         }
 
@@ -134,7 +134,7 @@ extension SunrisePainter {
         let small = Font.system(size: H * 0.017)
         line(&ctx, Text("Coming from another browser?").font(lineFont).foregroundColor(ink), at: mid, opacity: g.ask)
         line(&ctx, Text("Bring what matters. Leave the rest.").font(small).foregroundColor(ink.opacity(0.6)), at: sub, opacity: g.ask)
-        let shift = log.blockedNames != nil && g.passwordsLeftBehind != nil ? H * 0.03 : 0
+        let shift: CGFloat = 0
         line(&ctx, Text(g.totals.summary).font(.system(size: H * 0.016)).foregroundColor(ink.opacity(0.55)),
              at: CGPoint(x: W / 2, y: A.buttons + H * 0.062 + shift), opacity: g.buttons)
 
@@ -193,31 +193,38 @@ struct Act2ControlsView: View {
                     .position(x: layout.size.width / 2, y: layout.chips + H * 0.037)
             }
 
-            // One line and one button for every browser macOS keeps private.
-            if let names = log.blockedNames {
-                HStack(spacing: H * 0.012) {
-                    Text("macOS keeps \(names) private until you allow ReArc.")
+            // Beside the trail, opposite the browsers: two calm lines and one button.
+            if let lines = log.permissionLines {
+                let width = H * 0.42
+                VStack(alignment: .leading, spacing: H * 0.008) {
+                    Text(lines.explanation)
+                        .font(.system(size: H * 0.017, weight: .medium))
+                        .foregroundStyle(ink.opacity(0.8))
+                    Text(lines.steps)
                         .font(.system(size: H * 0.0145))
                         .foregroundStyle(ink.opacity(0.55))
-                    Text("Allow access\u{2026}")
-                        .font(.system(size: H * 0.0145, weight: .medium))
-                        .foregroundStyle(ink.opacity(0.85))
-                        .padding(.horizontal, H * 0.012).padding(.vertical, H * 0.005)
-                        .background(Capsule().fill(Color.white.opacity(0.55)))
-                        .overlay(Capsule().strokeBorder(ink.opacity(0.15), lineWidth: 1))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(log.permissionButton)
+                        .font(.system(size: H * 0.016, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, H * 0.022).padding(.vertical, H * 0.009)
+                        .background(Capsule().fill(MarkPalette.navy.color))
+                        .shadow(color: MarkPalette.navy.color.opacity(0.2), radius: 10, y: 4)
                         .contentShape(Capsule())
-                        .sunriseButton("Allow access") { controls?.allowAccess() }
+                        .sunriseButton(log.permissionButton) { log.offersRelaunch ? controls?.relaunch() : controls?.allowAccess() }
+                        .padding(.top, H * 0.006)
                     if log.offersRelaunch {
-                        Text("Still locked? Relaunch ReArc")
-                            .font(.system(size: H * 0.0145, weight: .medium))
-                            .foregroundStyle(ink.opacity(0.6))
+                        Text("Open System Settings again")
+                            .font(.system(size: H * 0.0135))
+                            .foregroundStyle(ink.opacity(0.5))
                             .underline()
                             .contentShape(Rectangle())
-                            .sunriseButton("Relaunch ReArc") { controls?.relaunch() }
+                            .sunriseButton("Open System Settings again") { controls?.allowAccess() }
                     }
                 }
+                .frame(width: width, height: H * 0.2, alignment: .topLeading)
                 .opacity(frame.permission)
-                .position(x: layout.size.width / 2, y: layout.chips + H * (frame.passwordsLeftBehind == nil ? 0.037 : 0.07))
+                .position(x: layout.permissionOrigin.x + width / 2, y: layout.permissionOrigin.y + H * 0.1)
                 .sunriseControlsActive(controls != nil && frame.permission > 0.5)
             }
 
@@ -237,7 +244,7 @@ struct Act2ControlsView: View {
                     .sunriseButton("Bring them over") { controls?.choose(true) }
             }
             .opacity(frame.buttons)
-            .position(x: layout.size.width / 2, y: layout.buttons + (log.blockedNames != nil && frame.passwordsLeftBehind != nil ? H * 0.03 : 0))
+            .position(x: layout.size.width / 2, y: layout.buttons)
             .sunriseControlsActive(controls != nil && frame.buttons > 0.5)
 
             if let controls, frame.buttons > 0.5 {

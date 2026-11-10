@@ -34,6 +34,22 @@ final class FirstRunOnboarding: OnboardingHost {
         kind(isFirstRun: isFirstRun, arguments: arguments, automated: isAutomated(arguments))
     }
 
+    /// A relaunch for a privacy permission left a ticket: the onboarding
+    /// resumes at its browser step (a rehearsal as a rehearsal).
+    static var resumeTicket: OnboardingResumeTicket? {
+        OnboardingResumeTicket.peek(bundlePath: Bundle.main.bundlePath)
+    }
+
+    /// At process start, before anything reads `ShellDataLocation`: a
+    /// reopen from System Settings has no `REARC_DATA_DIR`, so the ticket's
+    /// data folder comes back.
+    static func restoreDataDirectoryForResume(arguments: [String] = CommandLine.arguments) {
+        guard !isAutomated(arguments),
+              let dir = OnboardingResumeTicket.dataDirectory(environment: ProcessInfo.processInfo.environment, ticket: resumeTicket)
+        else { return }
+        setenv(ShellDataLocation.environmentKey, dir, 1)
+    }
+
     /// Whether this launch runs it, and how.
     static func kind(isFirstRun: Bool, arguments: [String], automated: Bool) -> Kind? {
         if automated || arguments.contains(skipFlag) { return nil }
@@ -46,7 +62,9 @@ final class FirstRunOnboarding: OnboardingHost {
     /// run too; one this launch skips (`--no-onboarding`) is over. Automated
     /// launches leave the marker alone.
     static func forLaunch(_ model: BrowserViewModel, arguments: [String] = CommandLine.arguments) -> Kind? {
-        forLaunch(model, arguments: arguments, automated: isAutomated(arguments))
+        let automated = isAutomated(arguments)
+        let resumesRehearsal = !automated && resumeTicket?.isRehearsal == true
+        return forLaunch(model, arguments: resumesRehearsal ? arguments + [forceFlag] : arguments, automated: automated)
     }
 
     static func forLaunch(_ model: BrowserViewModel, arguments: [String], automated: Bool) -> Kind? {
@@ -102,6 +120,9 @@ final class FirstRunOnboarding: OnboardingHost {
         let takeover = SunriseTakeover(host: self, mode: kind == .replay ? .replay : .firstRun)
         self.takeover = takeover
         takeover.present { }
+        if kind != .replay, let ticket = OnboardingResumeTicket.take(bundlePath: Bundle.main.bundlePath) {
+            takeover.player.resumeAtBrowsers(name: ticket.name, colourIndex: ticket.colourIndex)
+        }
     }
 
     // MARK: OnboardingHost
@@ -135,6 +156,13 @@ final class FirstRunOnboarding: OnboardingHost {
     func relaunchForAccess() {
         guard canRelaunch else { return }
         ImportPrivacyAccess.relaunch(reopenImport: false)
+    }
+
+    func saveResumePoint(name: String, colourIndex: Int) {
+        guard kind != .replay else { return }
+        let dir = ShellDataLocation.isOverridden ? ShellDataLocation.root.path : nil
+        OnboardingResumeTicket(dataDirectory: dir, bundlePath: Bundle.main.bundlePath, name: name, colourIndex: colourIndex,
+                               isRehearsal: kind == .rehearsal).write()
     }
 
     func bring(_ sources: [ImportSource], categories: [ImportCategory], done: @escaping (OnboardingImportOutcome) -> Void) {
@@ -193,6 +221,7 @@ final class FirstRunOnboarding: OnboardingHost {
     }
 
     func onboardingFinished() {
+        OnboardingResumeTicket.remove()
         if kind != .replay {
             // Rehearsal (or an early quit of Act 4): nothing left hidden.
             for window in hidden where !window.isVisible { window.orderFront(nil) }
@@ -215,6 +244,7 @@ final class FirstRunOnboarding: OnboardingHost {
     /// “Onboard later”: the browser comes back with a persistent setup
     /// reminder. An interruption without this choice still resumes the sunrise.
     func onboardingDeferred() {
+        OnboardingResumeTicket.remove()
         for window in hidden where !window.isVisible { window.orderFront(nil) }
         hidden.first?.makeKeyAndOrderFront(nil)
         hidden = []

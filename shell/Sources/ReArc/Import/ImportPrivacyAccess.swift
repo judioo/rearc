@@ -1,4 +1,5 @@
 import AppKit
+import Onboarding
 import SidebarModel
 
 /// Getting past macOS's privacy protection of other browsers' data
@@ -21,8 +22,13 @@ enum ImportPrivacyAccess {
 
     /// The pane that allows ReArc. macOS has no prompt to ask with: it
     /// records the attempt and denies it, so the person switches it on there.
+    @MainActor
     static func openSettings(for permission: ImportPermission) {
-        NSWorkspace.shared.open(permission.settingsURL)
+        SettingsAccess.open(permission)
+        // macOS never lists ReArc in Full Disk Access by itself: offer its icon to drag in.
+        guard permission == .fullDiskAccess else { return }
+        let screen = NSApp.keyWindow?.screen
+        SettingsAccess.whenSettingsAppears { frame in SettingsAccess.showDragHelper(near: frame, fallback: screen) }
     }
 
     /// "Allow ReArc to read Brave's data in System Settings › Privacy & Security › Files & Folders."
@@ -30,11 +36,11 @@ enum ImportPrivacyAccess {
         let names = ListFormatter.localizedString(byJoining: browsers.map(\.name))
         switch permission {
         case .appData:
-            return "macOS keeps \(names) data private. Allow ReArc under Privacy & Security › Files & Folders "
-                + "(or give it Full Disk Access), then come back here."
+            return "macOS keeps \(names) private. Under ReArc in Privacy & Security › Files & Folders, "
+                + "switch on \(names), then come back."
         case .fullDiskAccess:
-            return "macOS lets only apps with Full Disk Access read \(names) data. Switch ReArc on under "
-                + "Privacy & Security › Full Disk Access, then come back here."
+            return "macOS keeps \(names) private. Switch on ReArc in Privacy & Security › Full Disk Access, "
+                + "then come back. macOS applies it when ReArc starts again."
         }
     }
 
