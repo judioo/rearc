@@ -42,6 +42,7 @@ struct CardToolbarView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .addressBarControlFocus()
             .onHover { isHoveringURL = $0 }
             .help(url?.absoluteString ?? "Open the command bar (⌘L)")
             .padding(.horizontal, 140)
@@ -73,6 +74,7 @@ struct CardToolbarView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .addressBarControlFocus()
                 .foregroundStyle(quietInk)
                 .disabled(site == nil || engine == nil)
                 .background(AnchorReader { siteControlsAnchor = $0 })
@@ -92,6 +94,7 @@ struct CardToolbarView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .addressBarControlFocus()
                 .foregroundStyle(quietInk)
                 .help("Add Split View")
                 .accessibilityLabel("Add Split View")
@@ -105,6 +108,7 @@ struct CardToolbarView: View {
         }
         .frame(height: Self.height)
         .pageColorToolbar(tint, palette: palette, reduceMotion: reduceMotion)
+        .transformPreference(AddressBarFocusPreference.self) { $0 = $0 || showsSiteControls }
         .onChange(of: model.siteControlCenterRequest) { _, _ in
             if site != nil, model.isKeyBrowserWindow(window) { showsSiteControls = true }
         }
@@ -220,6 +224,7 @@ struct CardToolbarButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .addressBarControlFocus()
         .foregroundStyle(enabled ? ink.ink : ink.disabled)
         .disabled(!enabled)
         .help(help)

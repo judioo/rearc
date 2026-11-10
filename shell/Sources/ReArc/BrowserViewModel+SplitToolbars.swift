@@ -4,6 +4,12 @@ import SidebarModel
 /// Split view's per-pane toolbar rows (SPLIT-VIEW §3.1): which pane shows
 /// the controls, focusing a pane by clicking it, and ⌘L aimed at a pane.
 extension BrowserViewModel {
+    /// The command bar is the address editor. Target it by pane and window,
+    /// rather than by the split's active row, so unrelated bars stay hidden.
+    func addressBarHasKeyboardFocus(for tabID: Tab.ID?, in window: SidebarWindowID?) -> Bool {
+        isCommandBarPresented && isKeyBrowserWindow(window) && commandBarTargetID == tabID
+    }
+
     /// The rows a window's split shows, in pane order.
     func splitPaneToolbarLayout(_ split: SplitViewItem, in window: SidebarWindowID?) -> SplitPaneToolbarLayout {
         SplitPaneToolbarLayout(split: split, visiblePanes: visibleSplitPanes(split, in: window))

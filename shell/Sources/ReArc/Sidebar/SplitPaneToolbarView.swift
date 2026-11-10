@@ -72,6 +72,7 @@ struct SplitPaneToolbarView: View, Equatable {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .addressBarControlFocus()
                 .foregroundStyle(ink.ink)
                 .help("Close Pane (⌥-click to separate it from the split)")
                 .accessibilityLabel("Close Pane")
@@ -85,6 +86,7 @@ struct SplitPaneToolbarView: View, Equatable {
         .padding(.leading, row.isAtLeadingCorner ? trafficLightsClearance : 0)
         .frame(height: CardToolbarView.height)
         .pageColorToolbar(tint, palette: ink, reduceMotion: reduceMotion)
+        .transformPreference(AddressBarFocusPreference.self) { $0 = $0 || showsSiteControls }
         .onChange(of: model.siteControlCenterRequest) { _, _ in
             if row.isActive, SiteControlCenter.site(for: url) != nil, model.isKeyBrowserWindow(window) { showsSiteControls = true }
         }
@@ -121,6 +123,7 @@ struct SplitPaneToolbarView: View, Equatable {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .addressBarControlFocus()
         .onHover { isHoveringURL = $0 }
         .help(url?.absoluteString ?? "Open the command bar (⌘L)")
         .accessibilityLabel("Address of pane: \(parts.map { $0.host + $0.rest } ?? "blank")")
@@ -138,6 +141,7 @@ struct SplitPaneToolbarView: View, Equatable {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .addressBarControlFocus()
         .foregroundStyle(ink.ink)
         .disabled(site == nil)
         .background(AnchorReader { siteControlsAnchor = $0 })
@@ -178,6 +182,7 @@ struct SplitPaneToolbarView: View, Equatable {
         // A plain button keeps the glyph in the toolbar's ink (the borderless style dims it).
         .menuStyle(.button)
         .buttonStyle(.plain)
+        .addressBarControlFocus()
         .menuIndicator(.hidden)
         .foregroundStyle(ink.ink)
         .fixedSize()

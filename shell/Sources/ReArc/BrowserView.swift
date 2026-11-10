@@ -24,6 +24,7 @@ struct BrowserView: View {
     @State private var draggedItemID: UUID?
     @State private var isNativeFullscreen = false
     @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
+    @AppStorage(AutoHideAddressBarPreference.key) private var autoHideAddressBar = AutoHideAddressBarPreference.defaultValue
     @Environment(\.colorScheme) private var colorScheme
 
     init(model: BrowserViewModel, windowID: SidebarWindowID = SidebarWindowID(), initialSpaceID: Space.ID? = nil) {
@@ -336,9 +337,16 @@ struct BrowserView: View {
             && model.librarySection(in: windowID)?.coversPage != true && model.selectedEaselRef(in: windowID) == nil
     }
 
+    /// The strip holds its place at the card's top. An auto-hiding one slides
+    /// over the page instead, so the card and traffic lights are laid out as
+    /// without a strip: the buttons never float over the page.
+    private var reservesCardToolbar: Bool {
+        showsCardToolbar && !autoHideAddressBar
+    }
+
     /// Arc's height in the sidebar's top row; on the right, the card toolbar's middle.
     private var trafficLightsCentreY: CGFloat {
-        guard !placement.trafficLightsInSidebar, showsCardToolbar else { return TrafficLightPositioner.centreY }
+        guard !placement.trafficLightsInSidebar, reservesCardToolbar else { return TrafficLightPositioner.centreY }
         return Self.cardInset + CardToolbarView.height / 2
     }
 
@@ -433,7 +441,7 @@ struct BrowserView: View {
         let inset = CGFloat(layout.inset)
         let showsToolbar = showsCardToolbar
         let placement = placement
-        let topInset = CGFloat(layout.topInset(showsToolbar: showsToolbar, trafficLightsInSidebar: placement.trafficLightsInSidebar,
+        let topInset = CGFloat(layout.topInset(showsToolbar: reservesCardToolbar, trafficLightsInSidebar: placement.trafficLightsInSidebar,
                                                trafficLightClearance: Double(TrafficLightPositioner.cardClearance)))
         let sidebarWidth = model.sidebarWidth(in: windowID)
         // The Library widening the sidebar moves the page without laying it out again.
@@ -449,11 +457,10 @@ struct BrowserView: View {
                                                           inset: Double(inset))
         // A split's panes are cards of their own, each with its own row (SPLIT-VIEW §3.1).
         let splitCards = !fullscreen && shownSplit != nil
-        return VStack(spacing: 0) {
-            if showsToolbar, shownSplit == nil {
-                CardToolbarView(model: model, trafficLightsClearance: cardToolbarTrafficLightsClearance)
-                    .zIndex(1)
-            }
+        return AddressBarContainer(
+            showsToolbar: showsToolbar && shownSplit == nil,
+            holdsForAddressEditing: model.addressBarHasKeyboardFocus(for: model.selectedTab(in: windowID)?.id, in: windowID)
+        ) {
             contentArea
                 .overlay {
                     if let session = model.pageCaptureSession,
@@ -469,6 +476,8 @@ struct BrowserView: View {
                         }
                     }
                 }
+        } toolbar: {
+            CardToolbarView(model: model, trafficLightsClearance: cardToolbarTrafficLightsClearance)
         }
         .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil,
                     toolbarHeight: showsCardToolbar ? CardToolbarView.height : 0) { start in
@@ -492,7 +501,8 @@ struct BrowserView: View {
 
     /// With the sidebar on the right the toolbar's first glyph starts after the traffic lights.
     private var cardToolbarTrafficLightsClearance: CGFloat {
-        placement.trafficLightsInSidebar || !showsTrafficLights ? 0 : TrafficLightPositioner.titlebarWidth - Self.cardInset
+        placement.trafficLightsInSidebar || !showsTrafficLights || !reservesCardToolbar
+            ? 0 : TrafficLightPositioner.titlebarWidth - Self.cardInset
     }
 
     /// The split the content area shows, if it shows one (`contentArea`'s order).
