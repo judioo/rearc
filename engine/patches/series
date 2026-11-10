@@ -88,6 +88,7 @@ tab/079-safe-browsing-tab-helpers.patch         # P-TAB-001 ABI 1.57: Safe Brows
 tab/080-context-menu-link-initiator.patch       # P-TAB-001 ABI 1.58: context-menu opens keep the frame as initiator; new-tab/window/split actions (audit F-06)
 tab/081-fullscreen-origin.patch                 # P-TAB-001 ABI 1.59: fullscreen events with the requesting origin (audit F-08)
 tab/082-credential-leak-events.patch            # P-TAB-001 ABI 1.60: host credential leak events (audit F-09)
+tab/083-extension-install-sources.patch         # P-TAB-001 ABI 1.61: store imports prompt when permissions grew (audit F-13)
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:

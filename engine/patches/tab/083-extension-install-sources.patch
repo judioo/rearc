@@ -1,0 +1,307 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 store imports prompt when permissions grew (ABI 1.61)
+
+Security audit RC-500 F-13, engine part. Bridge 0.64.0, feature
+extension_install_sources. ReArcProfileInstallExtensionSources takes each Web
+Store ID with the source browser's manifest.json. After the blocklist and
+policy checks, ApprovedStoreInstaller compares the store manifest's required
+permissions with the source manifest's using
+PermissionMessageProvider::IsPrivilegeIncrease, the rule
+ChromeExtensionRegistrarDelegate applies to updates. On an increase, or a
+source manifest that does not parse, CreateInstallPrompt returns Chromium's
+install prompt, which tab/050 routes to the host with its permission list.
+ReArcProfileInstallExtensions keeps consent by ID.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 4c8270d656..1547ba0e1d 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -105,6 +105,7 @@ _ReArcTabGetZoomFactor
+ _ReArcTabGetThemeColor
+ _ReArcEngineSetThemeColorCallback
+ _ReArcProfileInstallExtensions
++_ReArcProfileInstallExtensionSources
+ _ReArcProfileLoadUnpackedExtension
+ _ReArcTabSetZoomFactor
+ _ReArcTabGetDocumentIdentity
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 3e411a0b66..42dc8c0b61 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -116,6 +116,7 @@ _ReArcTabGetZoomFactor
+ _ReArcTabGetThemeColor
+ _ReArcEngineSetThemeColorCallback
+ _ReArcProfileInstallExtensions
++_ReArcProfileInstallExtensionSources
+ _ReArcProfileLoadUnpackedExtension
+ _ReArcTabSetZoomFactor
+ _ReArcTabGetDocumentIdentity
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index e86fea40b3..e6f1ccbecf 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 60, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 61, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -172,6 +172,21 @@ typedef void (*ReArcExtensionInstallCallback)(void* context, const char* id,
+ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileInstallExtensions(uint64_t profile_id,
+     const char* const* ids, uint32_t count,
+     ReArcExtensionInstallCallback callback, void* context);
++// ABI 1.61 (extension_install_sources). As ReArcProfileInstallExtensions,
++// with the source browser's manifest.json text for each ID (at most 1 MiB).
++// When the store's current manifest requires permissions that warn beyond the
++// source's (Chromium's IsPrivilegeIncrease, the rule that disables such an
++// update in Chrome), or the source manifest does not parse, that install shows
++// Chromium's normal install prompt through the extension prompt channel (1.32,
++// kind install, profile only, tab 0) with the permission list; cancel or no
++// prompt callback ends it with result 3. Otherwise the import's consent stands.
++typedef struct ReArcExtensionInstallSource {
++  const char* id;
++  const char* manifest_json;
++} ReArcExtensionInstallSource;
++REARC_ENGINE_EXPORT ReArcStatus ReArcProfileInstallExtensionSources(
++    uint64_t profile_id, const ReArcExtensionInstallSource* sources,
++    uint32_t count, ReArcExtensionInstallCallback callback, void* context);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileLoadUnpackedExtension(uint64_t profile_id,
+     const char* path, ReArcExtensionInstallCallback callback, void* context);
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 2f4bad2ac3..9ac7fcaf54 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -7,6 +7,8 @@
+ #import <AppKit/AppKit.h>
+ 
+ #include <algorithm>
++#include <cstring>
++#include <optional>
+ #include <string_view>
+ #include <cmath>
+ #include <cstdlib>
+@@ -19,17 +21,22 @@
+ #include "base/check.h"
+ #include "chrome/browser/extensions/webstore_standalone_installer.h"
+ #include "extensions/browser/extension_registry.h"
++#include "extensions/browser/install_prompt_data.h"
+ #include "extensions/browser/extension_system.h"
+ #include "extensions/browser/extensions_browser_client.h"
+ #include "extensions/browser/management_policy.h"
+ #include "extensions/browser/blocklist.h"
+ #include "extensions/browser/unpacked_installer.h"
+ #include "extensions/common/extension.h"
++#include "extensions/common/manifest_handlers/permissions_parser.h"
++#include "extensions/common/permissions/permission_message_provider.h"
++#include "extensions/common/permissions/permission_set.h"
+ #include "components/crx_file/id_util.h"
+ #include "base/files/file_enumerator.h"
+ #include "base/files/file_util.h"
+ #include "base/task/thread_pool.h"
+ #include "base/functional/bind.h"
++#include "base/json/json_reader.h"
+ #include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/no_destructor.h"
+@@ -426,8 +433,11 @@ bool CancelTerminate(void*) {
+ // shell's consent replaces only the install prompt and post-install bubble.
+ class ApprovedStoreInstaller : public extensions::WebstoreStandaloneInstaller {
+  public:
+-  ApprovedStoreInstaller(const std::string& id, Profile* profile, Callback done)
++  ApprovedStoreInstaller(const std::string& id, Profile* profile,
++                         std::optional<std::string> source_manifest,
++                         Callback done)
+       : WebstoreStandaloneInstaller(id, profile, std::move(done)),
++        source_manifest_(std::move(source_manifest)),
+         contents_(content::WebContents::Create(
+             content::WebContents::CreateParams(profile))) {}
+  private:
+@@ -455,6 +465,7 @@ void OnManifestParsed() override {
+                   self->CompleteInstall(extensions::webstore_install::BLOCKED_BY_POLICY,
+                                         base::UTF16ToUTF8(decision.error));
+                 } else {
++                  self->prompt_ = self->AsksForMore();
+                   self->ProceedWithInstallPrompt();
+                 }
+               }, base::Unretained(self)));
+@@ -463,8 +474,41 @@ void OnManifestParsed() override {
+   bool CheckRequestorAlive() const override { return true; }
+   bool ShouldShowPostInstallUI() const override { return false; }
+   content::WebContents* GetWebContents() const override { return contents_.get(); }
++  // ABI 1.61: the import's consent covers what the source browser's copy
++  // was allowed. Chrome disables an update that asks for more until the user
++  // approves it (ChromeExtensionRegistrarDelegate, IsPrivilegeIncrease); so
++  // does this: the store manifest's required permissions against the source
++  // manifest's, with Chromium's rule. An unreadable source manifest prompts.
++  bool AsksForMore() {
++    if (!source_manifest_) {
++      return false;  // ReArcProfileInstallExtensions: consent by ID (1.53).
++    }
++    auto store = GetLocalizedExtensionForDisplay();
++    auto dict = base::JSONReader::ReadDict(*source_manifest_,
++                                           base::JSON_PARSE_RFC);
++    if (!store || !dict) {
++      return true;
++    }
++    std::u16string error;
++    auto source = extensions::Extension::Create(
++        base::FilePath(), extensions::mojom::ManifestLocation::kInternal,
++        *dict, extensions::Extension::FROM_WEBSTORE, id(), &error);
++    return !source ||
++           extensions::PermissionMessageProvider::Get()->IsPrivilegeIncrease(
++               extensions::PermissionsParser::GetRequiredPermissions(
++                   source.get()),
++               extensions::PermissionsParser::GetRequiredPermissions(
++                   store.get()),
++               store->GetType());
++  }
++  // A permission increase gets Chromium's normal install prompt, which
++  // tab/050 routes to the host with the permission list (no registry tab).
+   std::unique_ptr<extensions::InstallPromptData> CreateInstallPrompt() const override {
+-    return nullptr;
++    if (!prompt_) {
++      return nullptr;
++    }
++    return std::make_unique<extensions::InstallPromptData>(
++        extensions::InstallPromptData::INSTALL_PROMPT);
+   }
+   void OnWebstoreRequestFailureWithStatus(const std::string& id, int status) override {
+     if (status == 404 || status == 410) {
+@@ -477,12 +521,16 @@ void OnWebstoreRequestFailureWithStatus(const std::string& id, int status) overr
+   bool missing() const { return missing_; }
+  private:
+   bool missing_ = false;
++  bool prompt_ = false;
++  std::optional<std::string> source_manifest_;
+   std::unique_ptr<content::WebContents> contents_;
+ };
+ 
+ struct ExtensionInstallBatch : base::RefCounted<ExtensionInstallBatch> {
+   uint64_t profile_id;
+   std::vector<std::string> ids;
++  // Parallel to ids: the source browser's manifest.json (1.61), if given.
++  std::vector<std::optional<std::string>> manifests;
+   size_t next = 0;
+   uint32_t completed = 0;
+   int active = 0;
+@@ -501,6 +549,7 @@ void Finish(std::string id, int result, std::string reason) {
+   void Pump() {
+     auto* profile = FindBridgeProfile(profile_id);
+     while (active < 3 && next < ids.size()) {
++      std::optional<std::string> manifest = std::move(manifests[next]);
+       std::string id = ids[next++];
+       ++active;
+       if (extensions::ExtensionRegistry::Get(profile)->GetExtensionById(
+@@ -511,7 +560,7 @@ void Pump() {
+       }
+       // The installer owns itself until completion. Capture a non-owning
+       // pointer only for inspecting its HTTP result inside that completion.
+-      auto* installer = new ApprovedStoreInstaller(id, profile,
++      auto* installer = new ApprovedStoreInstaller(id, profile, std::move(manifest),
+           base::BindOnce([](scoped_refptr<ExtensionInstallBatch> batch,
+                             std::string id, bool success,
+                             const std::string& error,
+@@ -755,6 +804,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "context_menu_link_open" ||
+          std::string(feature) == "fullscreen_origin" ||
+          std::string(feature) == "credential_leak_events" ||
++         std::string(feature) == "extension_install_sources" ||
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "history_query" ||
+          std::string(feature) == "search_autocomplete" ||
+@@ -988,12 +1038,14 @@ ReArcStatus ReArcEngineShutdown(bool force,
+   a.ContinueShutdown();
+   return REARC_OK;
+ }
+-ReArcStatus ReArcProfileInstallExtensions(uint64_t profile_id,
+-    const char* const* ids, uint32_t count,
++namespace rearc {
++namespace {
++ReArcStatus StartExtensionInstalls(
++    uint64_t profile_id,
++    std::vector<std::pair<std::string, std::optional<std::string>>> items,
+     ReArcExtensionInstallCallback callback, void* context) {
+-  CHECK([NSThread isMainThread]);
+   if (auto status = rearc::Available()) return status;
+-  if (!ids || !count || count > 512 || !callback) return REARC_INVALID_ARGUMENT;
++  if (items.empty() || items.size() > 512 || !callback) return REARC_INVALID_ARGUMENT;
+   auto* profile = rearc::FindBridgeProfile(profile_id);
+   if (!profile) return REARC_PROFILE_NOT_FOUND;
+   if (profile->IsOffTheRecord()) return REARC_INVALID_ARGUMENT;
+@@ -1001,10 +1053,11 @@ ReArcStatus ReArcProfileInstallExtensions(uint64_t profile_id,
+       rearc::ExtensionInstallProfiles().contains(profile_id)) return REARC_BUSY;
+   std::set<std::string> seen;
+   auto batch = base::MakeRefCounted<rearc::ExtensionInstallBatch>();
+-  for (uint32_t i = 0; i < count; ++i) {
+-    if (!ids[i] || !crx_file::id_util::IdIsValid(ids[i]) ||
+-        !seen.insert(ids[i]).second) return REARC_INVALID_ARGUMENT;
+-    batch->ids.emplace_back(ids[i]);
++  for (auto& [id, manifest] : items) {
++    if (!crx_file::id_util::IdIsValid(id) || !seen.insert(id).second)
++      return REARC_INVALID_ARGUMENT;
++    batch->ids.push_back(std::move(id));
++    batch->manifests.push_back(std::move(manifest));
+   }
+   batch->profile_id = profile_id;
+   batch->callback = callback;
+@@ -1013,6 +1066,39 @@ ReArcStatus ReArcProfileInstallExtensions(uint64_t profile_id,
+   rearc::ABIPost(base::BindOnce(&rearc::ExtensionInstallBatch::Pump, batch));
+   return REARC_OK;
+ }
++}  // namespace
++}  // namespace rearc
++
++ReArcStatus ReArcProfileInstallExtensions(uint64_t profile_id,
++    const char* const* ids, uint32_t count,
++    ReArcExtensionInstallCallback callback, void* context) {
++  CHECK([NSThread isMainThread]);
++  if (!ids || count > 512) return REARC_INVALID_ARGUMENT;
++  std::vector<std::pair<std::string, std::optional<std::string>>> items;
++  for (uint32_t i = 0; i < count; ++i) {
++    if (!ids[i]) return REARC_INVALID_ARGUMENT;
++    items.emplace_back(ids[i], std::nullopt);
++  }
++  return rearc::StartExtensionInstalls(profile_id, std::move(items), callback,
++                                       context);
++}
++
++ReArcStatus ReArcProfileInstallExtensionSources(uint64_t profile_id,
++    const ReArcExtensionInstallSource* sources, uint32_t count,
++    ReArcExtensionInstallCallback callback, void* context) {
++  CHECK([NSThread isMainThread]);
++  if (!sources || count > 512) return REARC_INVALID_ARGUMENT;
++  std::vector<std::pair<std::string, std::optional<std::string>>> items;
++  for (uint32_t i = 0; i < count; ++i) {
++    if (!sources[i].id || !sources[i].manifest_json ||
++        strlen(sources[i].manifest_json) > 1024 * 1024) {
++      return REARC_INVALID_ARGUMENT;
++    }
++    items.emplace_back(sources[i].id, sources[i].manifest_json);
++  }
++  return rearc::StartExtensionInstalls(profile_id, std::move(items), callback,
++                                       context);
++}
+ 
+ ReArcStatus ReArcProfileLoadUnpackedExtension(uint64_t profile_id,
+     const char* path, ReArcExtensionInstallCallback callback, void* context) {
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 680ee0583c..db387d18f4 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.63.0";
++  return "0.64.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
