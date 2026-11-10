@@ -146,9 +146,9 @@ final class BrowserImportShellTests: XCTestCase {
         session.performImport()
         let imported = model.membershipCard.ensureLoaded()
         XCTAssertEqual(imported.title, "STATUESQUE HUNTER")
-        XCTAssertEqual(imported.arcName, "Akilu")
+        XCTAssertNil(imported.arcName)
         XCTAssertEqual(imported.arcPalette, 6)
-        XCTAssertFalse(imported.transitionShown)
+        XCTAssertTrue(imported.transitionShown)
         XCTAssertTrue(session.result?.contains("membership card") == true)
         let saved = expectation(description: "saved")
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { saved.fulfill() }
