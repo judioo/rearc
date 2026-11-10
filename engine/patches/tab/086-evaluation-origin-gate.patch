@@ -1,0 +1,66 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 shell evaluation gated by origin
+
+Security audit RC-500 F-20. Bridge 0.67.0. evaluation_allowed() admitted
+about:blank and data: by URL, so a file: page's about:blank popup, a file:
+origin document, accepted shell evaluations and snapshots. The committed main-
+frame origin now decides: http(s), or opaque with no non-web precursor.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 3ea0092beb..89cd68f97f 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.66.0";
++  return "0.67.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 12113d5314..1836ddfce7 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -31,6 +31,10 @@
+ #include "base/timer/timer.h"
+ #include "base/time/time.h"
+ #include "base/values.h"
++#include "content/public/browser/render_frame_host.h"
++#include "url/origin.h"
++#include "url/scheme_host_port.h"
++#include "url/url_constants.h"
+ #include "chrome/browser/rearc_bridge/favicon_adapter.h"
+ #include "chrome/browser/rearc_bridge/ipc_service_events.h"
+ #include "chrome/browser/rearc_bridge/media_adapter.h"
+@@ -606,8 +610,23 @@ class PageServices : public content::DevToolsAgentHostClient,
+   }
+   bool evaluation_allowed() const {
+     const GURL& url = web_contents()->GetLastCommittedURL();
+-    return url.SchemeIsHTTPOrHTTPS() || url.SchemeIs("data") ||
+-           url.spec() == "about:blank";
++    if (!url.SchemeIsHTTPOrHTTPS() && !url.SchemeIs("data") &&
++        url.spec() != "about:blank") {
++      return false;
++    }
++    // Bridge 0.67.0: the document's origin decides, not its URL. about:blank
++    // inherits its creator's origin, so a file: page's blank popup is a file:
++    // document; data: and sandboxed documents are opaque, and allowed unless
++    // they descend from a non-web origin.
++    const url::Origin& origin =
++        web_contents()->GetPrimaryMainFrame()->GetLastCommittedOrigin();
++    const url::SchemeHostPort& tuple =
++        origin.GetTupleOrPrecursorTupleIfOpaque();
++    if (origin.opaque() && !tuple.IsValid()) {
++      return true;
++    }
++    return tuple.scheme() == url::kHttpScheme ||
++           tuple.scheme() == url::kHttpsScheme;
+   }
+   void EvaluateScript(std::string source, std::string world,
+                       uint32_t timeout_ms, ReArcScriptCallback callback,
