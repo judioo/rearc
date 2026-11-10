@@ -1,0 +1,146 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 dangerous download keep and discard report as Chrome does (ABI 1.62)
+
+Security audit RC-500 F-18. Bridge 0.68.0, feature download_scan_actions.
+ReArcDownloadResolveDanger called ValidateDangerousDownload directly: no
+warning-action event, no Safe Browsing bypass report, and Keep on a prompt-
+for-scanning item skipped the scan. Keep and Discard now record the warning
+and the choice (bubble subpage surface) and run Chromium's download commands
+(KEEP, BYPASS_DEEP_SCANNING for danger types 17 and 21, DISCARD), which send
+the report. New action 2 uploads a type-17 item for deep scanning; type 21 and
+encrypted archives need a password prompt and return unsupported.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/rearc_bridge/rearc_downloads_abi.cc b/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+index 2245d93b99..8bf2731fc5 100644
+--- a/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_downloads_abi.cc
+@@ -28,9 +28,12 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/task/thread_pool.h"
+ #include "base/time/time.h"
++#include "chrome/browser/download/download_commands.h"
+ #include "chrome/browser/download/download_core_service.h"
+ #include "chrome/browser/download/download_core_service_factory.h"
+ #include "chrome/browser/download/download_history.h"
++#include "chrome/browser/download/download_item_model.h"
++#include "chrome/browser/download/download_item_warning_data.h"
+ #include "chrome/browser/download/download_prefs.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
+@@ -587,17 +590,55 @@ ReArcStatus ReArcDownloadResolveDanger(uint64_t profile, uint32_t id,
+                                        uint32_t action) {
+   CHECK(pthread_main_np());
+   if (auto status = rearc::Available()) return status;
+-  if (action > 1) return REARC_INVALID_ARGUMENT;
++  if (action > 2) return REARC_INVALID_ARGUMENT;
+   auto it = rearc::Downloads().find(profile);
+   if (it == rearc::Downloads().end()) return REARC_PROFILE_NOT_FOUND;
+   auto* item = it->second->Find(id);
+   if (!item) return REARC_NOT_FOUND;
+   if (item->IsDone() || (!item->IsDangerous() && !item->IsInsecure()))
+     return REARC_INVALID_STATE;
+-  // Validation/Remove can synchronously delete the item. Never access it again.
+-  if (action == 1) item->Remove();
+-  else if (item->IsInsecure()) item->ValidateInsecureDownload();
+-  else item->ValidateDangerousDownload();
++  using Surface = DownloadItemWarningData::WarningSurface;
++  using WarningAction = DownloadItemWarningData::WarningAction;
++  const auto danger = item->GetDangerType();
++  const bool scan_prompt =
++      danger == download::DOWNLOAD_DANGER_TYPE_PROMPT_FOR_SCANNING ||
++      danger == download::DOWNLOAD_DANGER_TYPE_PROMPT_FOR_LOCAL_PASSWORD_SCANNING;
++  if (action == 2 &&
++      (item->IsInsecure() ||
++       danger != download::DOWNLOAD_DANGER_TYPE_PROMPT_FOR_SCANNING ||
++       DownloadItemWarningData::IsTopLevelEncryptedArchive(item))) {
++    // A password-protected archive needs Chrome's password prompt.
++    return item->IsDangerous() && scan_prompt ? REARC_UNSUPPORTED
++                                              : REARC_INVALID_STATE;
++  }
++  if (!item->IsInsecure() || action == 1) {
++    // ABI 1.62: as the download bubble's warning page does, record the
++    // warning and the user's choice, which a Safe Browsing report on keep or
++    // discard includes (no-ops for an item that is not dangerous).
++    DownloadItemWarningData::AddWarningActionEvent(item, Surface::BUBBLE_SUBPAGE,
++                                                   WarningAction::SHOWN);
++    DownloadItemWarningData::AddWarningActionEvent(
++        item, Surface::BUBBLE_SUBPAGE,
++        action == 0   ? WarningAction::PROCEED
++        : action == 1 ? WarningAction::DISCARD
++                      : WarningAction::ACCEPT_DEEP_SCAN);
++  }
++  // Chromium's download commands: Keep sends the bypass report and validates
++  // (insecure first, as before); a scan prompt's Keep is "download without
++  // scanning"; Discard reports and removes. The item may be deleted
++  // synchronously. Never access it again.
++  DownloadItemModel model(item);
++  DownloadCommands commands(model.GetWeakPtr());
++  if (action == 1 && !item->IsDangerous()) {
++    item->Remove();
++  } else {
++    commands.ExecuteCommand(
++        action == 1 ? DownloadCommands::DISCARD
++        : action == 2 ? DownloadCommands::DEEP_SCAN
++        : scan_prompt && !item->IsInsecure()
++            ? DownloadCommands::BYPASS_DEEP_SCANNING
++            : DownloadCommands::KEEP);
++  }
+   return REARC_OK;
+ }
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index e6f1ccbecf..f43cbc28a8 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 61, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 62, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -217,6 +217,13 @@ REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadGetWarning(
+ // Keep validates insecure first, then danger on a subsequent explicit call if
+ // still dangerous, exactly as chrome://downloads does. Discard removes the
+ // item and its file through DownloadItem::Remove. No automatic opening.
++// ABI 1.62 (download_scan_actions): Keep and Discard of a dangerous item run
++// Chromium's download commands, so the warning action is recorded and the
++// Safe Browsing bypass report is sent, as from chrome://downloads. For danger
++// type 17 (prompt for scanning) and 21 (prompt for local password scanning),
++// keep means download without scanning. action 2 scan: type 17 only, uploads
++// for Safe Browsing deep scanning (danger type 10 while scanning, then a
++// verdict); type 21 and encrypted archives need a password: unsupported.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcDownloadResolveDanger(
+     uint64_t profile_id, uint32_t download_id, uint32_t action);
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index dd1a8f640a..9c1c7c8ad0 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -844,6 +844,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "fullscreen_origin" ||
+          std::string(feature) == "credential_leak_events" ||
+          std::string(feature) == "extension_install_sources" ||
++         std::string(feature) == "download_scan_actions" ||
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "history_query" ||
+          std::string(feature) == "search_autocomplete" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 89cd68f97f..4d9d678bfe 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.67.0";
++  return "0.68.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(

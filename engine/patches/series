@@ -92,6 +92,7 @@ tab/083-extension-install-sources.patch         # P-TAB-001 ABI 1.61: store impo
 tab/084-shutdown-cancels-extension-installs.patch # P-TAB-001 bridge 0.65.0: shutdown cancels bulk store installs (audit F-19)
 tab/085-random-isolated-world-names.patch       # P-TAB-001 bridge 0.66.0: per-run random isolated world names (audit F-16)
 tab/086-evaluation-origin-gate.patch            # P-TAB-001 bridge 0.67.0: shell evaluation gated by origin (audit F-20)
+tab/087-download-warning-actions.patch          # P-TAB-001 ABI 1.62: dangerous download keep/discard report; scan action (audit F-18)
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:
