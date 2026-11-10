@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.55** (major remains 1 for existing hosts), bridge **0.58.0**, compiled Chromium **156.0.8078.96**. Public header:
+ABI **1.63** (major remains 1 for existing hosts), bridge **0.70.0**, compiled Chromium **156.0.8078.96**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -981,7 +981,7 @@ Action 6 remains invalid for legacy hosts.
 | Function | Contract |
 |---|---|
 | `ReArcDownloadGetWarning(profile, id, out_warning)` | Current item snapshot: Chromium `danger_type`, `insecure_status`, `is_dangerous`, `is_insecure`. Non-null output is zeroed on rejection. |
-| `ReArcDownloadResolveDanger(profile, id, action)` | 0 keep, 1 discard. Requires an unfinished item that is dangerous or insecure. Keep calls ValidateInsecureDownload first when insecure, otherwise ValidateDangerousDownload, as chrome://downloads does. If both warnings exist, one explicit keep can leave the other pending: re-query before another user decision. Discard calls DownloadItem::Remove, cancelling and removing the item and its file through Chromium. |
+| `ReArcDownloadResolveDanger(profile, id, action)` | 0 keep, 1 discard. Requires an unfinished item that is dangerous or insecure. Keep calls ValidateInsecureDownload first when insecure, otherwise ValidateDangerousDownload, as chrome://downloads does. If both warnings exist, one explicit keep can leave the other pending: re-query before another user decision. Discard calls DownloadItem::Remove, cancelling and removing the item and its file through Chromium. ABI 1.62 sends Chromium's warning-action event and bypass report and adds action 2, scan (see "Security audit fixes"). |
 
 Use `is_dangerous`/`is_insecure` to offer a decision. A nonzero danger code alone
 is insufficient: 4 is a pending check, and 6 means user-validated. Insecure
@@ -1122,6 +1122,8 @@ one exit event. `ReArcTabExitFullscreen(tab)` returns `invalid_state` when not
 fullscreen. `ReArcTabGetFullscreenState(tab, &bool)` resets its output, then
 reports state. Callback replacement exits every fullscreen tab; those exits are
 not delivered to the old or new host. Discard still refuses fullscreen tabs.
+ABI 1.59 adds the requesting origin (`ReArcEngineSetFullscreenCallback2`, see
+"Security audit fixes").
 
 ## Printing (1.28)
 
@@ -1381,8 +1383,8 @@ checks a successfully submitted sign-in against Google's leak service
 and an encrypted payload, never the plain password. When off, no check is
 started. The value persists in the profile's Preferences. managed reports
 enterprise policy; Set then returns invalid_state. Off-the-record profiles
-never run leak checks and return unsupported. A detected leak is not yet
-surfaced to the host: Chromium's leak dialog needs ManagePasswordsUIController.
+never run leak checks and return unsupported. From ABI 1.60 a detected leak
+reaches the host as a credential leak event (see "Security audit fixes").
 
 **Tests:** hosts that submit sign-ins (passwords, helpers, leak phase 2)
 turn it off. Since wave 18f, every native, smoke and stress process also runs
@@ -2235,7 +2237,8 @@ Patch `tab/073-bulk-extension-install`, bridge 0.56.0, advertises
 `extension_bulk_install`. `ReArcProfileInstallExtensions(profile, ids, count,
 callback, context)` copies and validates up to 512 unique Web Store IDs.
 `ReArcProfileLoadUnpackedExtension(profile, absolute_path, callback, context)`
-loads one developer extension through `UnpackedInstaller`. Both require a
+loaded one developer extension through `UnpackedInstaller`; ABI 1.63 removed it
+(see "Security audit fixes"). Both required a
 registered persistent profile and the host's prior import consent. No external
 extension preferences or JSON installation mechanism is used.
 
@@ -2254,7 +2257,8 @@ MV2, and check Chromium's blocklist and management policy before downloading.
 no-prompt `InstallApproval`, then invokes `WebstoreInstaller` with its normal
 CRX signature and policy checks. The shell substitutes import consent only
 for the per-extension prompt and suppresses post-install bubbles. Explicit
-profile close and engine shutdown return BUSY while work is active.
+profile close returns BUSY while work is active. Engine shutdown returned BUSY
+too until bridge 0.65.0; it now cancels the batch (see "Security audit fixes").
 
 Small upstream seams preserve HTTP status on metadata failure and propagate
 store download 204/404/410 through an appended installer result. Existing
@@ -2338,3 +2342,208 @@ their welcome pages collect as unselected Today tabs instead of taking the
 window. Chrome installs synced extensions silently (`PendingExtensionManager::
 AddFromSync`, no prompt or bubble) but has no such rule for the tabs they open
 from `runtime.onInstalled`: those open, and take the window, as any `tabs.create`.
+
+## Security audit fixes (ABI 1.56–1.63, bridge 0.59.0–0.70.0)
+
+Patches `tab/078` to `tab/089` fix the engine findings of the RC-500 security
+audit. Each new function is optional: resolve it with `dlsym` after checking the
+minor version and feature, as the shell does for 1.53's exports.
+
+### Launch switch filter (ABI 1.56)
+
+Patch `tab/078-launch-switch-filter`, feature `launch_switch_filter`.
+`ReArcEngineRun` passed every argv switch to ChromeMain, so any process running
+as the user could relaunch the app on the real profile with
+`--remote-debugging-port` and read its cookies over the DevTools protocol.
+Chromium blocks that only for Google Chrome branding. A release (NDEBUG) engine
+now drops, in both `--name` and `-name` spellings, with or without a value:
+
+- always: every `--remote-debugging-*` switch, `--remote-allow-origins`,
+  `--no-sandbox`, `--disable-gpu-sandbox`, `--disable-web-security`,
+  `--disable-site-isolation-trials`, `--js-flags`, `--renderer-cmd-prefix`,
+  `--utility-cmd-prefix`, `--gpu-launcher`, `--browser-subprocess-path`,
+  `--ignore-certificate-errors`, `--proxy-server`, `--proxy-pac-url`,
+  `--unsafely-treat-insecure-origin-as-secure`,
+  `--allow-running-insecure-content` and `--enable-automation`;
+- unless the host called `ReArcEngineAllowTestSwitches()` after Configure and
+  before Run: `--load-extension`, `--disable-extensions-except`,
+  `--host-resolver-rules` and `--ignore-certificate-errors-spki-list`. The
+  shell calls it only for its self-test and bench runs (they need local
+  extension fixtures and no outside network). Called after Run:
+  `invalid_state`.
+
+Each dropped switch is logged by name (never its value). Debug engines pass
+everything through, because engine/tests rely on `--remote-debugging-port=0`
+and the test switches. This is the second layer. The shell's own allowlist of
+launch arguments is the first.
+
+### Safe Browsing tab helpers (ABI 1.57)
+
+Patch `tab/079-safe-browsing-tab-helpers`, feature `safe_browsing_tab_helpers`.
+`AttachBrowserlessTabHelpers` attaches Safe Browsing's tab helpers in
+`TabHelpers::AttachTabHelpers` order:
+`ChromePasswordReuseDetectionManagerClient` after the password manager client;
+then, after `PermissionRequestManager` and the autofill client (which
+`ClientSideDetectionHost` observes from its constructor),
+`SafeBrowsingNavigationObserver` (referrer chains for download and phishing
+pings), `AsyncCheckTracker`, `SafeBrowsingTabObserver` (client-side phishing
+detection), `TriggerCreator` and `SafetyTipWebContentsObserver`. Interstitials
+already worked in registry tabs (wave 18g). The password reuse warning is
+Chromium's window-modal dialog over the tab's window. The safety tip bubble
+needs a Browser and is not shown.
+
+`bool ReArcEngineSafeBrowsingAvailable(void)` is true only after ready, when
+Safe Browsing is compiled in and `google_apis::HasAPIKeyConfigured()`. List
+updates and hash lookups carry the build's Google API key. An engine built
+without the `google_api_key` GN arg sends the `dummytoken` placeholder, which
+Google rejects with `API_KEY_INVALID`, so no list ever downloads. A host must
+show Safe Browsing as unavailable when this is false, whatever the profile's
+protection-level preference says. The release engine takes its key from outside
+the repository (RELEASE.md, "Safe Browsing key").
+
+### Context-menu opens (ABI 1.58)
+
+Patch `tab/080-context-menu-link-initiator`, feature `context_menu_link_open`.
+`link_url` and `src_url` are page data, possibly from a cross-site iframe.
+Action 0 used to call `ReArcTabNavigate` with them: a navigation with no
+initiator and no referrer, sent as `Sec-Fetch-Site: none` with SameSite=Strict
+cookies, for any URL the navigation policy admits (data:, file:). Now:
+
+| action | opens | where | link-open disposition |
+|---|---|---|---|
+| 0 | `link_url` | this tab | — |
+| 13 / 17 | `link_url` / `src_url` | new background tab | 2 |
+| 14 / 18 | `link_url` / `src_url` | new foreground tab | 1 |
+| 15 / 19 | `link_url` / `src_url` | new window (Little Arc) | 4 |
+| 16 / 20 | `link_url` / `src_url` | split view | 5 |
+
+Only http(s) URLs are accepted, else `unsupported`; an empty URL returns
+`invalid_state`. The engine builds the `OpenURLParams` Chrome's
+`RenderViewContextMenuBase` builds: link transition, the clicked frame's origin,
+frame token, process and site instance as initiator, its referrer sanitized with
+the page's referrer policy, `started_from_context_menu`. Action 0 navigates this
+tab with them. Actions 13–20 arrive as `ReArcLinkOpenEvent` requests (1.39) and
+are answered with `ReArcLinkOpenRespond`, exactly like a Command-click. They need
+a link-open callback, else `unsupported`. Hosts must not open these URLs with
+`ReArcTabNavigate` or `ReArcTabCreate`.
+
+### Fullscreen origin (ABI 1.59)
+
+Patch `tab/081-fullscreen-origin`, feature `fullscreen_origin`.
+`ReArcEngineSetFullscreenCallback2(callback, context)` delivers
+`ReArcFullscreenEvent2 { ReArcFullscreenEvent event; const char* origin; }`.
+`origin` is the serialized origin of the frame that called
+`requestFullscreen()`: an iframe's own origin, or `"null"` when opaque. It is
+the same on the matching exit event. It lets the host name the site in a notice
+on every page fullscreen entry. That matters most when the window is already in
+native full screen and only the sidebar disappears. The 1.27 struct keeps its
+layout. Setting either callback replaces the other, with 1.27's
+replacement semantics.
+
+### Credential leak events (ABI 1.60)
+
+Patch `tab/082-credential-leak-events`, feature `credential_leak_events`.
+`ReArcEngineSetCredentialLeakCallback(callback, context)`. When leak detection
+(1.35) finds that a credential just used in a registry tab is in a breach,
+`ChromePasswordManagerClient::NotifyUserCredentialsWereLeaked` posts
+`ReArcCredentialLeakEvent`. Before 1.60 that result went to a
+`ManagePasswordsUIController` registry tabs do not have, and was dropped. The
+event carries profile, tab and content generation, `leak_type` (Chromium's
+`CredentialLeakFlags`: 1 saved, 2 used on other sites, 4 synced, 8 the site has
+a change-password URL, 16 saved as backup), the credential's origin and its
+username (may be empty). The password never crosses the ABI. It is a
+notification only: there is nothing to answer. With no callback it is dropped,
+as before.
+
+### Store imports with source manifests (ABI 1.61)
+
+Patch `tab/083-extension-install-sources`, feature `extension_install_sources`.
+`ReArcProfileInstallExtensionSources(profile, sources, count, callback,
+context)` takes `ReArcExtensionInstallSource { id; manifest_json; }` items: the
+Web Store ID and the source browser's `manifest.json` text for it (non-null, at
+most 1 MiB). Batching, results, callbacks and limits are 1.53's. After the
+blocklist and policy checks, the installer compares the required permissions of
+the store's current manifest with the source manifest's, using
+`PermissionMessageProvider::IsPrivilegeIncrease`. That is the rule
+`ChromeExtensionRegistrarDelegate` uses to disable an update that asks for
+more. On an increase, or when the source manifest does not parse, that
+extension gets Chromium's normal install prompt. It arrives through the
+extension prompt channel (1.32): kind 0, tab 0, with Chromium's permission
+strings. Accept continues the install. Cancel, or no prompt callback, ends it
+with result 3. With no increase, the import's consent stands and no prompt
+appears. `ReArcProfileInstallExtensions` keeps 1.53's consent by ID.
+
+### Shutdown cancels store batches (bridge 0.65.0)
+
+Patch `tab/084-shutdown-cancels-extension-installs`. `ReArcEngineShutdown` no
+longer returns BUSY while a store batch runs. IDs not yet started finish with
+result 3 ("Cancelled: the engine is shutting down."). Running installers end
+through Chromium's own abort (`RunCallback(ABORTED)` then `AbortInstall`, as
+`OnProfileWillBeDestroyed` does). Every ID still gets exactly one callback, all
+delivered before the shutdown completion. Explicit profile close still returns
+BUSY during a batch.
+
+### Isolated world names (bridge 0.66.0)
+
+Patch `tab/085-random-isolated-world-names`. An extension's content-script world
+is named after the extension, and `Runtime.addBinding` with
+`executionContextName` binds every context of that name. An extension named
+`rearc.host` used to get the link-peek binding, and one named
+`rearc.boost.<id>` could post isolated page messages (1.9) as that boost. World
+names now carry a 128-bit random token chosen once per run:
+`rearc.host.<token>` and `rearc.boost.<token>.<id>`. Nothing visible to the host
+changes.
+
+### Evaluation origin gate (bridge 0.67.0)
+
+Patch `tab/086-evaluation-origin-gate`. Script evaluation, isolated messages and
+snapshots used to be admitted for http(s), data: and about:blank documents by
+URL. They now also require the committed main-frame origin to be http(s), or
+opaque with no non-web precursor. That rejects an about:blank popup opened by a
+file: page, which inherits the file origin. Once a feature has used it, the
+tab's DevTools client stays attached with `Runtime.enable`. The toolbar-colour
+snapshot (1.51) uses it on every page load, so detaching when idle would
+attach and detach on every navigation. That is left as is.
+
+### Dangerous download actions (ABI 1.62)
+
+Patch `tab/087-download-warning-actions`, feature `download_scan_actions`.
+Keep (0) and Discard (1) on a dangerous item now record the warning and the
+user's choice in `DownloadItemWarningData` (bubble subpage surface). They run
+Chromium's download commands, so the Safe Browsing bypass report goes out as
+from chrome://downloads. For danger types 17 (prompt for scanning) and 21
+(prompt for local password scanning), Keep means "download without scanning"
+(`BYPASS_DEEP_SCANNING`). New action 2 uploads a type-17 item for Safe
+Browsing deep scanning (`DEEP_SCAN`). The item turns type 10 (async scanning),
+then takes its verdict through the usual download events. Type 21 and
+encrypted archives need a password prompt and return `unsupported`. Insecure
+items keep 1.24's insecure-first validation. The host's confirmation dialog
+stays the gesture.
+
+### Unpacked extension loading removed (ABI 1.63)
+
+Patch `tab/088-remove-unpacked-extension-loading`.
+`ReArcProfileLoadUnpackedExtension` (1.53) is gone: its export, its
+implementation and its framework export entries. It accepted any absolute path,
+and the importer fed it paths read from another browser's preferences (audit
+F-05). The shell no longer imports unpacked extensions. chrome://extensions
+"Load unpacked" is unchanged. A host built against 1.53–1.62 that resolves it
+with `dlsym` gets null and must treat the operation as unsupported.
+
+### Histogram completions (bridge 0.70.0)
+
+Patch `tab/089-histogram-completion-delivery`. `ReArcMetricsGetHistogram` called
+the host straight from the histogram fetch reply instead of through an ABIPost
+delivery. A reply lost to shutdown never completed. Requests are now tracked. The
+reply posts the completion, and `ReArcEngineRun` completes the remaining ones
+with `cancelled` after ChromeMain returns, before the final flush. Each
+completes exactly once.
+
+**Tests:** `engine/tests/check_abi163_imports.py` checks that every ABI 1.55
+struct keeps its layout, that the 1.63 header has no unpacked loader, and that
+gated Swift adoption of every new function typechecks.
+`engine/tests/run_bulk_extensions.py` (windowless, loopback store) covers 1.61
+and 0.65.0. A store manifest asking for more than the source raises the install
+prompt, which the test cancels: result 3. Equal permissions install with no
+prompt. A batch started just before shutdown answers every ID with result 3
+before the shutdown completion.
