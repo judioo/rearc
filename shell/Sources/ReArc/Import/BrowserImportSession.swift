@@ -132,7 +132,7 @@ final class BrowserImportSession {
     }
 
     var unreadableBrowsers: [ImportBrowser] {
-        browsers.filter { $0.status == .notReadable }.map(\.browser)
+        browsers.filter(\.isBlocked).map(\.browser)
     }
 
     func detail(for profile: ImportSourceProfile) -> ProfileDetail? { details[profile.id] }
