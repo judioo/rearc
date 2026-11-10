@@ -73,7 +73,9 @@ public enum SidebarSyncProjection {
 
             for package in library?.packages ?? [] {
                 var boost: [String: SyncValue] = ["profileID": .string(profile.id.uuidString)]
-                boost["package"] = (try? SyncValue.encoding(package)) ?? .null
+                var portable = package
+                portable.scriptBoost?.userScriptEnabled = false
+                boost["package"] = (try? SyncValue.encoding(portable)) ?? .null
                 boost["installation"] = library?.installation(for: package.manifest.id).map(installationValue) ?? .null
                 records[SyncRecordKind.boost.recordName(for: package.manifest.id)] = SyncRecordBody(kind: .boost, values: boost)
             }
@@ -338,9 +340,12 @@ public enum SidebarSyncProjection {
         for profile in profiles {
             var library = snapshot.boostLibrariesByProfileID[profile.id] ?? BoostLibraryOps.empty(for: profile.id)
             if case .bool(let enabled)? = profileValues[profile.id]?["boostsEnabled"] { library.masterEnabled = enabled }
+            library.adoptLegacyScriptApprovals()
             var pairs: [(BoostPackage, BoostInstallation)] = []
             for (id, values) in boosts where values["profileID"]?.stringValue.flatMap(UUID.init(uuidString:)) == profile.id {
-                guard let package = try? values["package"]?.decoded(as: BoostPackage.self), package.manifest.id == id else { continue }
+                guard var package = try? values["package"]?.decoded(as: BoostPackage.self), package.manifest.id == id else { continue }
+                let hash = BoostLibraryOps.scriptApprovalHash(package)
+                package.scriptBoost?.userScriptEnabled = hash != nil && library.approvedScriptHashes?[id] == hash
                 let installation = values["installation"].flatMap(installation(from:))
                     ?? BoostInstallation(packageID: id, order: pairs.count)
                 pairs.append((package, installation))

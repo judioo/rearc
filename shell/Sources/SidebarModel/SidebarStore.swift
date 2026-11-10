@@ -1267,6 +1267,12 @@ public final class SidebarStore {
         guard package.scriptBoost?.css != css || package.scriptBoost?.js != js else { return [] }
         package.scriptBoost?.css = css
         package.scriptBoost?.js = js
+        // Saving code locally is an explicit edit on this Mac. Approval of
+        // these bytes still cannot travel with the package to another Mac.
+        library.adoptLegacyScriptApprovals()
+        if package.scriptBoost?.userScriptEnabled == true {
+            library.approvedScriptHashes?[packageID] = BoostLibraryOps.scriptApprovalHash(package)
+        }
         package.manifest.updatedAt = now()
         package.manifest.version += 1
         library.upsertPackage(package, installation: install)

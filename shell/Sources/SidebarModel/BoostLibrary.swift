@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum BoostSpacePolicy: String, Codable, Equatable, Sendable {
     case inherit
@@ -33,6 +34,9 @@ public struct ProfileBoostLibrary: Codable, Equatable, Sendable {
     public var masterEnabled: Bool
     public var packages: [BoostPackage]
     public var installations: [BoostInstallation]
+    /// Per-device consent. Never included in sync records or exported packages.
+    /// Optional so snapshots written before script approvals still decode.
+    public var approvedScriptHashes: [UUID: String]?
 
     public init(
         profileID: Profile.ID,
@@ -44,6 +48,7 @@ public struct ProfileBoostLibrary: Codable, Equatable, Sendable {
         self.masterEnabled = masterEnabled
         self.packages = packages
         self.installations = installations
+        self.approvedScriptHashes = [:]
     }
 
     public func package(id: UUID) -> BoostPackage? {
@@ -70,6 +75,18 @@ public struct ProfileBoostLibrary: Codable, Equatable, Sendable {
     public mutating func removePackage(id: UUID) {
         packages.removeAll { $0.manifest.id == id }
         installations.removeAll { $0.packageID == id }
+        approvedScriptHashes?[id] = nil
+    }
+
+    /// A library saved before per-device approvals: the scripts this Mac
+    /// already runs count as approved here, so the first sync keeps them on.
+    public mutating func adoptLegacyScriptApprovals() {
+        guard approvedScriptHashes == nil else { return }
+        var approved: [UUID: String] = [:]
+        for package in packages where package.scriptBoost?.userScriptEnabled == true {
+            approved[package.manifest.id] = BoostLibraryOps.scriptApprovalHash(package)
+        }
+        approvedScriptHashes = approved
     }
 
     public func nextOrder() -> Int {
@@ -155,6 +172,19 @@ public enum BoostLibraryOps {
         return true
     }
 
+    /// Bind consent to both code and its scope, so changing where code runs
+    /// cannot reuse approval for the same bytes on another site.
+    public static func scriptApprovalHash(_ package: BoostPackage) -> String? {
+        guard let js = package.scriptBoost?.js, !js.isEmpty else { return nil }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let scope = try? encoder.encode(package.manifest.hostScope) else { return nil }
+        var bytes = Data(js.utf8)
+        bytes.append(0)
+        bytes.append(scope)
+        return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+
     public static func setScriptUserEnabled(
         packageID: UUID,
         enabled: Bool,
@@ -162,7 +192,9 @@ public enum BoostLibraryOps {
     ) -> Bool {
         guard let idx = library.packages.firstIndex(where: { $0.manifest.id == packageID }),
               library.packages[idx].scriptBoost != nil else { return false }
+        library.adoptLegacyScriptApprovals()
         library.packages[idx].scriptBoost?.userScriptEnabled = enabled
+        library.approvedScriptHashes?[packageID] = enabled ? scriptApprovalHash(library.packages[idx]) : nil
         library.packages[idx].manifest.updatedAt = Date()
         return true
     }
