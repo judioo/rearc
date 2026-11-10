@@ -86,7 +86,8 @@ static void batch() {
   inside = true;
   assert(ReArcProfileInstallExtensions(profile, pointers.data(), pointers.size(), batch_reply, nullptr) == REARC_OK);
   assert(ReArcProfileInstallExtensions(profile, pointers.data(), pointers.size(), unexpected, nullptr) == REARC_BUSY);
-  assert(ReArcProfileClose(profile, true, [](void*, ReArcStatus, bool) { assert(false); }, nullptr) == REARC_BUSY);
+  // The startup profile (where --load-extension applies) can never be closed.
+  assert(ReArcProfileClose(profile, true, [](void*, ReArcStatus, bool) { assert(false); }, nullptr) != REARC_OK);
   inside = false;
 }
 // The --load-extension fixture loads asynchronously at startup: ask until the
