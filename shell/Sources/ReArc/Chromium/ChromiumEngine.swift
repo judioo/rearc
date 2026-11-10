@@ -170,7 +170,10 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     @ObservationIgnored private var desiredPlan: [ChromiumBoostPlan.Entry] = []
     @ObservationIgnored private var appliedPlan: [ChromiumBoostPlan.Entry] = []
     @ObservationIgnored private var installInFlight = false
-    @ObservationIgnored private var installRetryAvailable = true
+    /// Full replacements left after a failed install; reset by a success.
+    @ObservationIgnored private var installRetriesLeft = ChromiumEngine.installRetryLimit
+    /// A failed install waits for the tab to settle before replacing again.
+    @ObservationIgnored private var installRetryPending = false
     @ObservationIgnored private var reloadAfterInstall = false
     @ObservationIgnored private var pendingNavigations: [() -> Void] = []
     @ObservationIgnored private var navigationFlushScheduled = false
@@ -317,6 +320,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
                 let finished = isLoading && !event.isLoading
                 isLoading = event.isLoading
                 if finished {
+                    retryInstallIfSettled()
                     onNavigationCommit?(currentURL, pageTitle)
                     if runtime.capabilities.pageThemeColor { colorTracker.pageSettled() }
                 }
@@ -363,6 +367,7 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
             resumeCommitWaiters(throwing: ChromiumScriptError.noTab)
             isLoading = false
             installInFlight = false
+            installRetryPending = false
             linkPeekInFlight = false
             appliedPlan = []
             linkPeekApplied = false
@@ -860,21 +865,43 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
         if status == .rearcOK {
             appliedPlan = plan
             boostInstallCount += 1
-            installRetryAvailable = true
+            installRetriesLeft = Self.installRetryLimit
+            installRetryPending = false
             submitPlanIfNeeded()
             return
         }
         lastError = "boosts: \(status.rearcName)"
-        ChromiumLog.info("tab \(tab) boost install failed: \(status.rearcName)")
-        // A failed acknowledged replacement can leave a partial plan: retry the
-        // complete replacement once, then stop so a persistent failure can't loop.
-        if installRetryAvailable {
-            installRetryAvailable = false
-            submitPlanIfNeeded(force: true)
-        } else {
+        ChromiumLog.info("tab \(tab) boost install failed: \(status.rearcName) (\(installRetriesLeft) retries left)")
+        // A replacement sent while a navigation replaces the document can fail
+        // (unsupported: the engine's protocol call errored) and leaves the old
+        // registrations in place, kept by the engine for a later replacement.
+        // Retrying at once lands in the same navigation, and recording the plan
+        // as applied would keep a removed boost on every later page. So the
+        // plan stays unapplied and the complete replacement is retried once the
+        // tab settles, a few times; then stop so a persistent failure can't loop.
+        guard installRetriesLeft > 0 else {
             appliedPlan = plan
             submitPlanIfNeeded()
+            return
         }
+        installRetriesLeft -= 1
+        installRetryPending = true
+        // Deferred navigations and reloads go ahead; the retry follows them.
+        finishInstallCycle()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.installRetryDelay) { [weak self] in
+            self?.retryInstallIfSettled()
+        }
+    }
+
+    static let installRetryLimit = 3
+    static let installRetryDelay: TimeInterval = 0.3
+
+    /// After the retry delay, or when a load finishes: replace the plan again
+    /// unless a load is still running (its end retries) or an install is in flight.
+    private func retryInstallIfSettled() {
+        guard installRetryPending, tabID != 0, !installInFlight, !isLoading else { return }
+        installRetryPending = false
+        submitPlanIfNeeded(force: true)
     }
 
     /// Runs once no install is in flight: optional reload, deferred navigations, CSS refresh.

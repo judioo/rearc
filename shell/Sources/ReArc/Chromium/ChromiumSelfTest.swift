@@ -3443,10 +3443,22 @@ extension ChromiumSelfTest {
             hostScope: [BoostHostRule(host: "127.0.0.1", hostMatch: .exact, pathPrefix: "/a", schemes: ["http"])],
             css: BoostVisualStyle.compose(visual, customCSS: "")
         )
+        // Each check runs on the reloaded document: one made before the reload
+        // committed passed on the old page and left the removal racing the
+        // reload (rc562). The marker lives only in the old document.
+        func reloadAfterInstall(_ label: String, since installs: Int) async throws {
+            try await wait("\(label) acknowledged", timeout: 10) { engine.boostInstallCount > installs }
+            _ = try await engine.evaluate("window.rearcBeforeReload = true", in: .page)
+            engine.reload(ignoringCache: false)
+            try await waitAsync("page A reloaded after \(label)", timeout: 15) {
+                let fresh = (try? await engine.evaluate("window.rearcBeforeReload !== true", in: .page) as? Bool) ?? false
+                return fresh && engine.pageTitle == Self.titleA && !engine.isLoading
+            }
+        }
+        let addInstalls = engine.boostInstallCount
         try check(store.addBoost(visualBoost) == nil, "the visual boost was refused")
         model.syncAllTabBoosts()
-        try await Task.sleep(nanoseconds: 300_000_000)
-        engine.reload(ignoringCache: false)
+        try await reloadAfterInstall("the visual boost install", since: addInstalls)
         var applied = ""
         try await waitAsync("the visual boost on page A", timeout: 15) {
             applied = (try? await engine.evaluate(
@@ -3454,11 +3466,28 @@ extension ChromiumSelfTest {
                 in: .page) as? String) ?? ""
             return applied.hasPrefix("none|") && applied.contains("invert")
         }
+        let removeInstalls = engine.boostInstallCount
         store.removeBoost(packageID: visualBoost.manifest.id)
         model.syncAllTabBoosts()
-        try await Task.sleep(nanoseconds: 300_000_000)
-        engine.reload(ignoringCache: false)
+        try await reloadAfterInstall("the visual boost removal", since: removeInstalls)
         try await waitAsync("page A without the visual boost", timeout: 15) {
+            let display = (try? await engine.evaluate("getComputedStyle(document.querySelector('p')).display", in: .page) as? String) ?? ""
+            return display == "block" && engine.pageTitle == Self.titleA
+        }
+        // The rc562 race on purpose: the removal replaces the plan while a
+        // reload is navigating. The engine may refuse it then; the shell
+        // retries once the tab settles, so the boost still goes.
+        let raceInstalls = engine.boostInstallCount
+        try check(store.addBoost(visualBoost) == nil, "the visual boost was refused the second time")
+        model.syncAllTabBoosts()
+        try await wait("the re-added visual boost acknowledged", timeout: 10) { engine.boostInstallCount > raceInstalls }
+        engine.reload(ignoringCache: false)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let racing = engine.boostInstallCount
+        store.removeBoost(packageID: visualBoost.manifest.id)
+        model.syncAllTabBoosts()
+        try await reloadAfterInstall("the removal during a reload", since: racing)
+        try await waitAsync("page A without the visual boost after the race", timeout: 15) {
             let display = (try? await engine.evaluate("getComputedStyle(document.querySelector('p')).display", in: .page) as? String) ?? ""
             return display == "block" && engine.pageTitle == Self.titleA
         }
