@@ -168,7 +168,7 @@ if [[ $CONFIG == release ]]; then
   plutil -replace ReArcRelease -bool YES "$PLIST"
   plutil -replace SUFeedURL -string "${REARC_APPCAST_URL:-https://rearc.imara.ae/updates/appcast.xml}" "$PLIST"
   plutil -replace SUPublicEDKey -string "$(tr -d '[:space:]' <"$SHELL_DIR/scripts/release/sparkle-public-key.txt")" "$PLIST"
-  for key in SUEnableAutomaticChecks SUAllowsAutomaticUpdates SUAutomaticallyUpdate; do
+  for key in SUEnableAutomaticChecks SUAllowsAutomaticUpdates SUAutomaticallyUpdate SURequireSignedFeed SUVerifyUpdateBeforeExtraction; do
     plutil -replace "$key" -bool YES "$PLIST"
   done
   plutil -replace SUScheduledCheckInterval -integer 86400 "$PLIST"
