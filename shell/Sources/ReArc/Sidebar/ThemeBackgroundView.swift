@@ -143,6 +143,8 @@ struct ThemeChromeColors: Equatable {
     var isDark: Bool
     /// The space is in dark appearance, whatever its chrome text uses.
     var isWindowDark: Bool
+    /// The profile badge beside the space name and in the toolbar.
+    var badge: SidebarBadgeInk
 
     init(theme: SpaceTheme, dark: Bool, windowDark: Bool? = nil) {
         let roles = SpaceThemeRoles(theme: theme)
@@ -164,6 +166,7 @@ struct ThemeChromeColors: Equatable {
         selection = Color(Self.selection(accent: semantic.foregroundPrimary))
         isDark = dark
         isWindowDark = windowDark ?? dark
+        badge = SidebarBadgeInk(chrome: chrome, dark: dark)
     }
 
     static let fallback = ThemeChromeColors(theme: .arcDefault, dark: false)

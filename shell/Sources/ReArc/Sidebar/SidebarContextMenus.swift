@@ -235,6 +235,7 @@ struct SpaceProfileChoices: View {
             .disabled(profile.id == space.profileID)
         }
         Divider()
+        Button("New Profile…") { model.beginProfileCreation(forSpace: space.id) }
         Button("New Container for This Space") { model.createContainerForSpace(space.id) }
     }
 }

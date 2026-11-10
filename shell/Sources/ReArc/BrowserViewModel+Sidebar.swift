@@ -551,18 +551,22 @@ extension BrowserViewModel {
     /// the old profile, and loading creates fresh ones at each tab's URL.
     @discardableResult
     func changeSpaceProfile(_ spaceID: Space.ID, to profileID: Profile.ID) -> SpaceProfileChangeError? {
+        let live = Set(engineHost.allTabEngines().map(\.0))
         if let error = store.changeProfile(ofSpace: spaceID, to: profileID) { return error }
-        reloadSpaceAfterProfileChange(spaceID)
+        reloadSpaceAfterProfileChange(spaceID, live: live)
         return nil
     }
 
     /// Explicitly creating a container also reloads this space's pages in its fresh session.
     func createContainerForSpace(_ spaceID: Space.ID) {
+        let live = Set(engineHost.allTabEngines().map(\.0))
         guard store.createContainer(forSpace: spaceID) != nil else { return }
-        reloadSpaceAfterProfileChange(spaceID)
+        reloadSpaceAfterProfileChange(spaceID, live: live)
     }
 
-    private func reloadSpaceAfterProfileChange(_ spaceID: Space.ID) {
+    /// `live`: the tabs that had a page before the change. Those reload now
+    /// in the new container; the rest load there when first shown.
+    private func reloadSpaceAfterProfileChange(_ spaceID: Space.ID, live: Set<Tab.ID>) {
         let tabs = SidebarTree.tabs(store.content(for: spaceID).pinned + store.content(for: spaceID).today)
         for tab in tabs {
             let id = tab.id
@@ -575,9 +579,9 @@ extension BrowserViewModel {
             releaseEngine(for: id)
         }
         reconcileEngineOwnership()
-        // Reload every tab, including background tabs and split panes. No page
-        // may keep running against the previous container after reassignment.
-        for tab in tabs {
+        // Reload every live tab, including background tabs and split panes. No
+        // page may keep running against the previous container after reassignment.
+        for tab in tabs where live.contains(tab.id) {
             let engine = engineHost.engine(for: tab, profileID: profileID(for: tab))
             configureLinkPeek(on: engine, tab: tab)
             engine.load(tab.url)

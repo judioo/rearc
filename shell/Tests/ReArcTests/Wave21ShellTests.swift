@@ -204,6 +204,7 @@ final class Wave21ShellTests: XCTestCase {
         let a = store.addTab(kind: .today, title: "A", url: URL(string: "https://a.test")!)
         let b = store.addTab(kind: .today, title: "B", url: URL(string: "https://b.test")!)
         let background = store.addTab(kind: .pinned, title: "Background", url: URL(string: "https://background.test")!)
+        let cold = store.addTab(kind: .pinned, title: "Never shown", url: URL(string: "https://cold.test")!)
         let split = try XCTUnwrap(store.splitTab(a.id, with: b.id))
         store.selectTab(a.id)
         model.loadSelectedIfNeeded()
@@ -218,6 +219,7 @@ final class Wave21ShellTests: XCTestCase {
             XCTAssertEqual(engine.pagePrompts.profileID, container)
             XCTAssertEqual((engine as? WKEngine)?.profileContext.profileID, container)
         }
+        XCTAssertNil(model.engineHost.engine(forTabID: cold.id, profileID: container), "loads when first shown")
     }
 
     func testSpaceLinkPeekLittleArcAndSplitKeepOriginContainerWhenAnotherSpaceIsActive() throws {
@@ -251,6 +253,33 @@ final class Wave21ShellTests: XCTestCase {
             XCTAssertEqual(model.profileID(for: pane), originProfile)
             XCTAssertEqual(model.engineHost.engine(forTabID: pane.id, profileID: originProfile)?.pagePrompts.profileID, originProfile)
         }
+    }
+
+    func testNewProfileFromASpaceMenuBecomesThatSpacesContainer() throws {
+        let model = makeModel()
+        let store = model.store
+        let space = store.activeSpaceID
+        let original = store.activeProfileID
+        let tab = store.addTab(kind: .today, title: "A", url: URL(string: "https://a.test")!)
+        model.selectTab(tab.id)
+        model.beginProfileCreation(forSpace: space)
+        let request = try XCTUnwrap(model.profileEditorRequest)
+        XCTAssertEqual(request.spaceID, space)
+        let profile = try XCTUnwrap(model.saveProfile(ProfileDraft(name: "Client B"), id: nil, selecting: true,
+                                                      forSpace: request.spaceID))
+        XCTAssertNil(model.profileEditorRequest)
+        XCTAssertEqual(store.space(withID: space)?.profileID, profile.id)
+        XCTAssertEqual(store.spaces(in: profile.id).map(\.id), [space], "no starter space")
+        XCTAssertEqual(store.spaces.count, 1)
+        XCTAssertEqual(store.profileChoices(forSpace: space).map(\.id), [original, profile.id])
+        XCTAssertNil(model.engineHost.engine(forTabID: tab.id, profileID: original))
+        XCTAssertEqual(model.engineHost.engine(forTabID: tab.id, profileID: profile.id)?.pagePrompts.profileID, profile.id)
+        // New Profile from elsewhere still gets its own starter space.
+        model.beginProfileCreation()
+        XCTAssertNil(model.profileEditorRequest?.spaceID)
+        let plain = try XCTUnwrap(model.saveProfile(ProfileDraft(name: "Plain"), id: nil, selecting: false))
+        XCTAssertEqual(store.spaces(in: plain.id).count, 1)
+        XCTAssertEqual(store.space(withID: space)?.profileID, profile.id)
     }
 
     // MARK: Drag to split
