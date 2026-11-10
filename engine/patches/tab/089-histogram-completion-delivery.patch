@@ -1,0 +1,159 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 histogram completions through ABIPost
+
+Security audit RC-500 note on the C ABI. Bridge 0.70.0.
+ReArcMetricsGetHistogram called the host from the
+FetchHistogramsAsynchronously reply instead of an ABIPost delivery, and a
+reply lost to shutdown never completed. Requests are tracked; the reply posts
+the completion, and ReArcEngineRun cancels the remaining ones after ChromeMain
+returns, so each completes exactly once.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index b166e2d479..2ba98dd80e 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -1002,6 +1002,7 @@ int ReArcEngineRun(int argc, const char* const* argv) {
+   pointers.push_back(nullptr);
+   a.ran = true;
+   const int result = ChromeMain(static_cast<int>(args.size()), pointers.data());
++  rearc::perf::CancelPendingHistograms();
+   // The scheduler no longer exists. Flush any already captured deliveries
+   // directly, then deliver the terminal lifecycle result from this host frame.
+   a.ready = false;
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index add08229f5..deb43439a8 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.69.0";
++  return "0.70.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_perf.h b/chrome/browser/rearc_bridge/rearc_perf.h
+index a3e550b496..d34ffc5e86 100644
+--- a/chrome/browser/rearc_bridge/rearc_perf.h
++++ b/chrome/browser/rearc_bridge/rearc_perf.h
+@@ -71,6 +71,9 @@ void DidResizeView(uint64_t tab_id,
+ // From ABIInitializeTab: attaches page_load_metrics when a page timing
+ // callback is set.
+ void AttachPageTiming(uint64_t tab_id, content::WebContents* contents);
++// After ChromeMain returns: histogram requests whose fetch reply never ran
++// complete with cancelled (exactly once, through ABIPost).
++void CancelPendingHistograms();
+ 
+ }  // namespace rearc::perf
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_perf_metrics.cc b/chrome/browser/rearc_bridge/rearc_perf_metrics.cc
+index 8ef7c7cc25..eabf2fdb98 100644
+--- a/chrome/browser/rearc_bridge/rearc_perf_metrics.cc
++++ b/chrome/browser/rearc_bridge/rearc_perf_metrics.cc
+@@ -538,6 +538,27 @@ void DidResizeView(uint64_t tab_id,
+                                                             attachment_id);
+ }
+ 
++struct HistogramRequest {
++  ReArcHistogramCallback completion;
++  raw_ptr<void> context;
++};
++std::map<uint64_t, HistogramRequest>& HistogramRequests() {
++  static base::NoDestructor<std::map<uint64_t, HistogramRequest>> requests;
++  return *requests;
++}
++void CancelPendingHistograms() {
++  CHECK(pthread_main_np());
++  auto requests = std::move(HistogramRequests());
++  HistogramRequests().clear();
++  for (auto& [id, request] : requests) {
++    ABIPost(base::BindOnce(
++        [](ReArcHistogramCallback completion, void* context) {
++          completion(context, REARC_CANCELLED, nullptr);
++        },
++        request.completion, request.context.get()));
++  }
++}
++
+ }  // namespace perf
+ }  // namespace rearc
+ 
+@@ -573,34 +594,55 @@ ReArcStatus ReArcMetricsGetHistogram(const char* name,
+       !base::IsStringUTF8(histogram)) {
+     return REARC_INVALID_ARGUMENT;
+   }
++  // Bridge 0.70.0: the completion is an ABIPost delivery, like every other
++  // callback, and a reply lost to shutdown is cancelled from ReArcEngineRun.
++  static uint64_t next_request = 1;
++  const uint64_t request = next_request++;
++  rearc::perf::HistogramRequests()[request] = {completion, context};
+   content::FetchHistogramsAsynchronously(
+       base::SingleThreadTaskRunner::GetCurrentDefault(),
+       base::BindOnce(
+-          [](std::string name, ReArcHistogramCallback completion,
+-             void* context) {
++          [](uint64_t request, std::string name) {
++            auto it = rearc::perf::HistogramRequests().find(request);
++            if (it == rearc::perf::HistogramRequests().end()) return;
++            auto pending = it->second;
++            rearc::perf::HistogramRequests().erase(it);
+             base::HistogramBase* found =
+                 base::StatisticsRecorder::FindHistogram(name);
+             std::unique_ptr<base::HistogramSamples> samples =
+                 found ? found->SnapshotSamples() : nullptr;
+-            if (!samples || samples->TotalCount() == 0) {
+-              completion(context, REARC_NOT_FOUND, nullptr);
+-              return;
+-            }
++            ReArcStatus status = REARC_NOT_FOUND;
++            int64_t total = 0, sum = 0;
+             std::vector<ReArcHistogramBucket> buckets;
+-            for (auto it = samples->Iterator(); !it->Done(); it->Next()) {
+-              base::HistogramBase::Sample32 min = 0;
+-              int64_t max = 0;
+-              base::HistogramBase::Count32 count = 0;
+-              it->Get(&min, &max, &count);
+-              buckets.push_back({min, max, count});
++            if (samples && samples->TotalCount() != 0) {
++              status = REARC_OK;
++              total = samples->TotalCount();
++              sum = samples->sum();
++              for (auto i = samples->Iterator(); !i->Done(); i->Next()) {
++                base::HistogramBase::Sample32 min = 0;
++                int64_t max = 0;
++                base::HistogramBase::Count32 count = 0;
++                i->Get(&min, &max, &count);
++                buckets.push_back({min, max, count});
++              }
+             }
+-            ReArcHistogramSnapshot snapshot{name.c_str(),
+-                                            samples->TotalCount(),
+-                                            samples->sum(), buckets.data(),
+-                                            buckets.size()};
+-            completion(context, REARC_OK, &snapshot);
++            rearc::ABIPost(base::BindOnce(
++                [](ReArcHistogramCallback completion, void* context,
++                   ReArcStatus status, std::string name, int64_t total,
++                   int64_t sum, std::vector<ReArcHistogramBucket> buckets) {
++                  if (status) {
++                    completion(context, status, nullptr);
++                    return;
++                  }
++                  ReArcHistogramSnapshot snapshot{name.c_str(), total, sum,
++                                                  buckets.data(),
++                                                  buckets.size()};
++                  completion(context, REARC_OK, &snapshot);
++                },
++                pending.completion, pending.context.get(), status,
++                std::move(name), total, sum, std::move(buckets)));
+           },
+-          std::move(histogram), completion, context),
++          request, std::move(histogram)),
+       base::Seconds(2));
+   return REARC_OK;
+ }

@@ -94,6 +94,7 @@ tab/085-random-isolated-world-names.patch       # P-TAB-001 bridge 0.66.0: per-r
 tab/086-evaluation-origin-gate.patch            # P-TAB-001 bridge 0.67.0: shell evaluation gated by origin (audit F-20)
 tab/087-download-warning-actions.patch          # P-TAB-001 ABI 1.62: dangerous download keep/discard report; scan action (audit F-18)
 tab/088-remove-unpacked-extension-loading.patch # P-TAB-001 ABI 1.63: remove ReArcProfileLoadUnpackedExtension (audit F-05)
+tab/089-histogram-completion-delivery.patch     # P-TAB-001 bridge 0.70.0: histogram completions through ABIPost
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:
