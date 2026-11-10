@@ -15,6 +15,9 @@ code sits behind `#if REARC_CHROMIUM`, which the manifest defines only when
 `REARC_CHROMIUM_OUT` and `REARC_ENGINE_INCLUDE` are set (the bundle script
 does that, with its own scratch path `.build-chromium/`).
 
+Settings → Advanced also offers **Auto-hide address bar** (off by default).
+See [behavior and visual verification](../docs/AUTO-HIDE-ADDRESS-BAR.md).
+
 ## Engines
 
 `WKEngine` (WKWebView) is the default. The Chromium engine (`ChromiumEngine`,
