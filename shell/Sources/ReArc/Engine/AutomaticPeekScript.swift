@@ -14,6 +14,7 @@ enum AutomaticPeekScript {
           if (window.rearcAutoPeekClick) document.removeEventListener('click', window.rearcAutoPeekClick, true);
           var domain = \(encoded);
           window.rearcAutoPeekClick = function(e) {
+            if (!e.isTrusted) return;
             if (!domain || window !== window.top || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
             var link = e.composedPath().find(function(n) { return n.tagName === 'A'; });
             if (!link || link.hasAttribute('download') || (link.target && link.target !== '_self' && link.target !== '_blank')) return;
