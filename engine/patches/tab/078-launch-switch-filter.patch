@@ -1,0 +1,200 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 release engines drop dangerous launch switches (ABI 1.56)
+
+Security audit RC-500 F-03, second layer. Bridge 0.59.0, feature
+launch_switch_filter. ReArcEngineRun passed every argv switch to ChromeMain,
+so any process running as the user could relaunch ReArc on the real profile
+with --remote-debugging-port and read every cookie over CDP (Chrome closes
+that route only for Google Chrome branding). A release (NDEBUG) engine now
+drops the --remote-debugging-* family, --remote-allow-origins, --no-sandbox,
+--disable-gpu-sandbox, --disable-web-security, --disable-site-isolation-
+trials, --js-flags, the *-cmd-prefix, launcher and subprocess-path switches,
+--ignore-certificate-errors, --proxy-server, --proxy-pac-url, --unsafely-
+treat-insecure-origin-as-secure, --allow-running-insecure-content and
+--enable-automation, in --name and -name spellings. --load-extension,
+--disable-extensions-except, --host-resolver-rules and --ignore-certificate-
+errors-spki-list pass only after ReArcEngineAllowTestSwitches, which the shell
+calls for its own self-test. Debug engines pass everything through for
+engine/tests.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index e5240128b2..9ff0a59d6f 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -61,6 +61,7 @@ _ReArcDownloadQueryArchived
+ _ReArcDownloadRemoveArchived
+ _ReArcDownloadGetTimes
+ _ReArcEngineConfigure
++_ReArcEngineAllowTestSwitches
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+ _ReArcEngineDefaultProfile
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 70e9680179..bde9c7ce56 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -68,6 +68,7 @@ _ReArcDownloadQueryArchived
+ _ReArcDownloadRemoveArchived
+ _ReArcDownloadGetTimes
+ _ReArcEngineConfigure
++_ReArcEngineAllowTestSwitches
+ _ReArcEngineRun
+ _ReArcEngineShutdown
+ _ReArcEngineDefaultProfile
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 6eb349dfdf..58e5611803 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 55, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 56, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -109,6 +109,18 @@ ReArcEngineConfigure(uint32_t abi_version,
+ // For browser invocation only; helpers call upstream ChromeMain directly.
+ // Adds --no-startup-window, --no-first-run, --no-default-browser-check and
+ // --profile-directory=Default unless a profile directory was supplied.
++// ABI 1.56 (launch_switch_filter): a release (NDEBUG) engine drops every
++// --remote-debugging-* switch, --remote-allow-origins, --no-sandbox,
++// --disable-gpu-sandbox, --disable-web-security,
++// --disable-site-isolation-trials, --js-flags, the *-cmd-prefix, launcher and
++// subprocess-path switches, --ignore-certificate-errors, --proxy-server,
++// --proxy-pac-url, --unsafely-treat-insecure-origin-as-secure,
++// --allow-running-insecure-content and --enable-automation from argv. It also
++// drops --load-extension, --disable-extensions-except, --host-resolver-rules
++// and --ignore-certificate-errors-spki-list unless the host called
++// ReArcEngineAllowTestSwitches (after Configure, before Run) for its own
++// self-test. Debug engines pass every switch through for engine tests.
++REARC_ENGINE_EXPORT ReArcStatus ReArcEngineAllowTestSwitches(void);
+ REARC_ENGINE_EXPORT int ReArcEngineRun(int argc, const char* const* argv);
+ REARC_ENGINE_EXPORT ReArcStatus ReArcEngineShutdown(bool force,
+                                                     ReArcCompletion completion,
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 3316529c5f..3a6251d731 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -7,6 +7,7 @@
+ #import <AppKit/AppKit.h>
+ 
+ #include <algorithm>
++#include <string_view>
+ #include <cmath>
+ #include <cstdlib>
+ #include <deque>
+@@ -29,6 +30,7 @@
+ #include "base/files/file_util.h"
+ #include "base/task/thread_pool.h"
+ #include "base/functional/bind.h"
++#include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/no_destructor.h"
+ #include "base/strings/utf_string_conversions.h"
+@@ -93,6 +95,7 @@
+   ReArcEarlyWindowCallback early_window = nullptr;
+   raw_ptr<void> early_window_context = nullptr;
+   bool configured = false, ran = false, ready = false, stopping = false;
++  bool allow_test_switches = false;
+   bool draining = false, scheduled = false;
+   std::deque<base::OnceClosure> deliveries;
+   uint64_t posted = 0;
+@@ -362,6 +365,40 @@ void FinishShutdown() {
+   }
+ };
+ 
++// ABI 1.56 (launch_switch_filter). Release (NDEBUG) engines drop switches
++// that hand the profile to another process or turn off the sandbox, web
++// security or certificate checks, whoever launched the app. The test set is
++// kept only after the host's ReArcEngineAllowTestSwitches (its self-test).
++// Chromium reads "--name" and "-name" switches on macOS.
++enum class LaunchSwitch { kKeep, kTest, kNever };
++LaunchSwitch ClassifyLaunchSwitch(const std::string& arg) {
++  std::string_view name(arg);
++  if (name.starts_with("--")) {
++    name.remove_prefix(2);
++  } else if (name.starts_with("-")) {
++    name.remove_prefix(1);
++  } else {
++    return LaunchSwitch::kKeep;
++  }
++  name = name.substr(0, name.find('='));
++  static constexpr std::string_view kNever[] = {
++      "remote-allow-origins", "no-sandbox", "disable-gpu-sandbox",
++      "disable-web-security", "disable-site-isolation-trials", "js-flags",
++      "renderer-cmd-prefix", "utility-cmd-prefix", "gpu-launcher",
++      "browser-subprocess-path", "ignore-certificate-errors",
++      "proxy-server", "proxy-pac-url", "unsafely-treat-insecure-origin-as-secure",
++      "allow-running-insecure-content", "enable-automation"};
++  static constexpr std::string_view kTest[] = {
++      "load-extension", "disable-extensions-except", "host-resolver-rules",
++      "ignore-certificate-errors-spki-list"};
++  if (name.starts_with("remote-debugging-") ||
++      std::ranges::find(kNever, name) != std::end(kNever)) {
++    return LaunchSwitch::kNever;
++  }
++  return std::ranges::find(kTest, name) != std::end(kTest) ? LaunchSwitch::kTest
++                                                           : LaunchSwitch::kKeep;
++}
++
+ bool Terminate(void*) {
+   ABIPost(base::BindOnce([] {
+     auto& a = ABI::Get();
+@@ -708,6 +745,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "devtools_docking" ||
+          std::string(feature) == "extension_bulk_install" ||
+          std::string(feature) == "extension_background_tabs" ||
++         std::string(feature) == "launch_switch_filter" ||
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "history_query" ||
+          std::string(feature) == "search_autocomplete" ||
+@@ -809,6 +847,15 @@ ReArcStatus ReArcEngineSetEarlyWindowCallback(ReArcEarlyWindowCallback callback,
+   a.early_window_context = callback ? context : nullptr;
+   return REARC_OK;
+ }
++ReArcStatus ReArcEngineAllowTestSwitches(void) {
++  CHECK([NSThread isMainThread]);
++  auto& a = ABI::Get();
++  if (!a.configured || a.ran) {
++    return REARC_INVALID_STATE;
++  }
++  a.allow_test_switches = true;
++  return REARC_OK;
++}
+ int ReArcEngineRun(int argc, const char* const* argv) {
+   auto& a = ABI::Get();
+   if (!a.configured || a.ran || argc < 1 || !argv) {
+@@ -826,6 +873,14 @@ int ReArcEngineRun(int argc, const char* const* argv) {
+         arg == "--incognito" || arg == "--guest") {
+       return -REARC_UNSUPPORTED;
+     }
++#if defined(NDEBUG)
++    const auto kind = rearc::ClassifyLaunchSwitch(arg);
++    if (kind == rearc::LaunchSwitch::kNever ||
++        (kind == rearc::LaunchSwitch::kTest && !a.allow_test_switches)) {
++      LOG(WARNING) << "ReArc engine: ignoring launch switch " << arg.substr(0, arg.find('='));
++      continue;
++    }
++#endif
+     if (arg.starts_with("--profile-directory=")) {
+       profile = true;
+     }
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 8600a8fd16..0109f54bcb 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.58.0";
++  return "0.59.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(

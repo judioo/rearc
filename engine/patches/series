@@ -83,6 +83,7 @@ tab/074-dockable-hosted-devtools.patch          # P-TAB-001 ABI 1.54: dockable h
 tab/075-bulk-extension-exports.patch            # P-TAB-001 ABI 1.53 follow-up: list tab/073's exports for the release framework
 tab/076-devtools-toolbox-navigation.patch      # P-TAB-001 ABI 1.54 follow-up: the undocked DevTools toolbox loads its page (device toolbar, page bounds)
 tab/077-extension-background-tabs.patch        # P-TAB-001 ABI 1.55: extension tab requests answered with a background tab (quiet import installs)
+tab/078-launch-switch-filter.patch              # P-TAB-001 ABI 1.56: release engines drop remote-debugging, sandbox and TLS-weakening switches (audit F-03)
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:
