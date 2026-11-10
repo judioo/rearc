@@ -237,11 +237,12 @@ struct OnboardingImportPlan: Sendable {
         chromium = sources.compactMap { s in
             ImportBrowser(rawValue: s.browser.lowercased()).map { ($0, s.directory) }
         }
-        extensionOrigins = Dictionary(uniqueKeysWithValues: sources.compactMap { source in
+        // A profile listed twice keeps its first snapshot rather than trapping.
+        extensionOrigins = Dictionary(sources.compactMap { source in
             ImportBrowser(rawValue: source.browser.lowercased()).map {
                 ("\($0.rawValue)/\(source.directory)", source.extensionOrigins)
             }
-        })
+        }, uniquingKeysWith: { first, _ in first })
         spaces = categories.contains(.spaces)
         bookmarks = categories.contains(.bookmarks)
         history = categories.contains(.history)

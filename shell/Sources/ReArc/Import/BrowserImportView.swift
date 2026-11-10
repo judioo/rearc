@@ -349,7 +349,9 @@ private struct ChromiumProfileImportPane: View {
 
     private var extensionsDetail: String {
         guard session.canReinstallExtensions else { return "Reinstalling extensions needs the Chromium engine" }
-        return "Web Store extensions install in the background; their settings stay in \(profile.browser.name). Unpacked extensions must be loaded manually in chrome://extensions."
+        let text = "Web Store extensions install in the background; their settings stay in \(profile.browser.name)"
+        let hasUnpacked = detail.extensions.contains { if case .unpacked = $0.origin { true } else { false } }
+        return hasUnpacked ? text + ". Load unpacked ones yourself in chrome://extensions." : text
     }
 
     private func extensionNote(_ item: SourceExtension) -> String {
