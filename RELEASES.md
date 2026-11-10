@@ -11,7 +11,7 @@ committed `RELEASES.md` has a heading for the build it is about to make:
 commit before the release, with `echo $(( $(git rev-list --count HEAD) + 1 ))` as the
 number. Details: engine/docs/RELEASE.md, "Release notes".
 
-## ReArc 0.1.0 (562) — 2026-11-10
+## ReArc 0.1.0 (564) — 2026-11-10
 
 **New**
 - Auto-hide address bar: Settings › Advanced › Auto-hide address bar. The address bar slides
@@ -31,6 +31,7 @@ number. Details: engine/docs/RELEASE.md, "Release notes".
   never empty: it always shows your profiles, New Profile… and New Container for This Space.
 - The New Tab row in the sidebar is easier to read on coloured themes.
 - Opening split view while the page has keyboard focus no longer crashes.
+- Removing or editing a boost while its page is loading no longer leaves the old boost applied.
 
 ## ReArc 0.1.0 (544) — 2026-11-10
 
