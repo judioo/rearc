@@ -1,10 +1,12 @@
 import AppKit
 import SidebarModel
 
-/// The File › Import from Arc, Chrome or Brave… window's state
+/// The File › Import from Another Browser… window's state
 /// (PROFILE-IMPORT.md). Discovery and every file read run off the main
 /// thread; nothing is imported until Import is clicked, and nothing in
-/// the source browser is written to or locked.
+/// the source browser is written to or locked. A browser macOS keeps
+/// private shows how to allow ReArc, and opens as soon as ReArc is active
+/// again with the permission in place (`ImportAccessWatch`).
 @Observable
 final class BrowserImportSession {
     enum Source: Hashable {
@@ -27,6 +29,9 @@ final class BrowserImportSession {
 
     private(set) var browsers: [DiscoveredBrowser] = []
     private(set) var isDiscovering = false
+    /// Blocked browsers, and whether the person has been to System Settings for them.
+    private(set) var access = ImportAccessWatch()
+    private var isRecheckingAccess = false
     var selection: Source? {
         didSet { if case .profile(let profile) = selection { loadDetail(profile) } }
     }
@@ -64,17 +69,20 @@ final class BrowserImportSession {
     private(set) var result: String?
 
     @ObservationIgnored let applicationSupport: URL
+    @ObservationIgnored let installed: @Sendable (ImportBrowser) -> Bool
     /// Arc's preferences, read-only (a dictionary in tests).
     @ObservationIgnored let arcDefaults: () -> [String: Any]
     @ObservationIgnored private weak var model: BrowserViewModel?
 
     init(model: BrowserViewModel,
          applicationSupport: URL = BrowserImportDiscovery.applicationSupport,
+         installed: @escaping @Sendable (ImportBrowser) -> Bool = { ImportPrivacyAccess.isInstalled($0) },
          arcDefaults: @escaping () -> [String: Any] = {
              UserDefaults(suiteName: ImportBrowser.arc.defaultsDomain)?.dictionaryRepresentation() ?? [:]
          }) {
         self.model = model
         self.applicationSupport = applicationSupport
+        self.installed = installed
         self.arcDefaults = arcDefaults
         targetProfileID = model.store.activeProfileID
     }
@@ -85,8 +93,9 @@ final class BrowserImportSession {
         isDiscovering = true
         let root = applicationSupport
         let readDefaults = arcDefaults
+        let installed = installed
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let found = BrowserImportDiscovery.discover(in: root)
+            let found = BrowserImportDiscovery.discover(in: root, installed: installed)
             var arc: ArcSidebarImport?
             var problem: String?
             var settings = ArcSettingsImport()
@@ -103,6 +112,7 @@ final class BrowserImportSession {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.browsers = found
+                self.access.update(found)
                 self.arc = arc
                 self.arcProblem = problem
                 self.arcSettings = settings
@@ -131,8 +141,67 @@ final class BrowserImportSession {
         return out
     }
 
-    var unreadableBrowsers: [ImportBrowser] {
-        browsers.filter(\.isBlocked).map(\.browser)
+    /// Blocked browsers by the permission that opens them, in discovery order.
+    var blockedGroups: [(permission: ImportPermission, browsers: [ImportBrowser])] {
+        access.neededPermissions.map { permission in
+            (permission, access.blocked.filter { access.permission(for: $0) == permission })
+        }
+    }
+
+    /// Installed with nothing to import yet.
+    var browsersWithoutProfiles: [ImportBrowser] {
+        browsers.filter { $0.status == .noProfiles }.map(\.browser)
+    }
+
+    /// The button under a blocked browser: System Settings, at its pane.
+    func openSettings(for permission: ImportPermission) {
+        access.openedSettings(permission)
+        ImportPrivacyAccess.openSettings(for: permission)
+    }
+
+    /// Still blocked after a visit to System Settings: macOS may apply the
+    /// switch only to a fresh launch.
+    func offersRelaunch(for permission: ImportPermission) -> Bool {
+        ImportPrivacyAccess.canRelaunch && access.blocked.contains { access.permission(for: $0) == permission && access.offersRelaunch(for: $0) }
+    }
+
+    @MainActor
+    func relaunch() {
+        ImportPrivacyAccess.relaunch(reopenImport: true)
+    }
+
+    /// ReArc is active again (the window calls this while it is open): if
+    /// a browser is blocked, look at just those, and bring in any that opened.
+    func applicationBecameActive() {
+        guard access.becameActive(), !isDiscovering, !isRecheckingAccess else { return }
+        isRecheckingAccess = true
+        let root = applicationSupport
+        let installed = installed
+        let blocked = access.blocked
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let again = blocked.compactMap { BrowserImportDiscovery.discover($0, in: root, installed: installed($0)) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isRecheckingAccess = false
+                var merged = self.browsers.filter { !blocked.contains($0.browser) } + again
+                merged.sort { a, b in
+                    (ImportBrowser.allCases.firstIndex(of: a.browser) ?? 0) < (ImportBrowser.allCases.firstIndex(of: b.browser) ?? 0)
+                }
+                let opened = self.access.update(merged)
+                guard !opened.isEmpty else { return }
+                if opened.contains(.arc) {
+                    // Arc's sidebar comes with its own reading: look again at everything.
+                    self.discover()
+                    return
+                }
+                self.browsers = merged
+                if self.selection == nil {
+                    self.selection = self.sources.first
+                } else if let first = merged.first(where: { opened.contains($0.browser) })?.profiles.first {
+                    self.selection = .profile(first)
+                }
+            }
+        }
     }
 
     func detail(for profile: ImportSourceProfile) -> ProfileDetail? { details[profile.id] }
@@ -151,14 +220,15 @@ final class BrowserImportSession {
         let installed: InstalledExtensionsReader = model?.installedExtensionsReader() ?? { _ in [] }
         let target = targetProfileID
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let chromium = profile.browser.family == .chromium
             var detail = ProfileDetail(
                 inventory: BrowserImportDiscovery.inventory(of: profile),
-                extensions: ExtensionInventoryReader.read(profile: profile.url),
-                setup: ChromiumProfileSetup.read(profile: profile.url)
+                extensions: chromium ? ExtensionInventoryReader.read(profile: profile.url) : [],
+                setup: chromium ? ChromiumProfileSetup.read(profile: profile.url) : ChromiumProfileSetup()
             )
-            detail.bookmarks = (try? ChromiumBookmarksReader.read(profile.url.appendingPathComponent(ChromiumBookmarksReader.fileName))) ?? []
+            detail.bookmarks = (try? profile.readBookmarks()) ?? []
             detail.newHistoryPages = historyThrough == nil ? detail.inventory.historyPages
-                : ChromiumHistoryReader.pageCount(profile.url.appendingPathComponent(ChromiumHistoryReader.fileName), after: historyThrough)
+                : profile.historyPageCount(after: historyThrough)
             detail.installedExtensionIDs = installed(target)
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.targetProfileID == target else { return }
@@ -306,10 +376,8 @@ final class BrowserImportSession {
             let installed = model.installedExtensionsReader()
             let target = targetProfileID
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let bookmarks = wantsBookmarks
-                    ? (try? ChromiumBookmarksReader.read(profile.url.appendingPathComponent(ChromiumBookmarksReader.fileName))) : nil
-                let history = wantsHistory
-                    ? (try? ChromiumHistoryReader.read(profile.url.appendingPathComponent(ChromiumHistoryReader.fileName))) : nil
+                let bookmarks = wantsBookmarks ? (try? profile.readBookmarks()) : nil
+                let history = wantsHistory ? (try? profile.readHistory()) : nil
                 // Read again now: an extension may have finished installing since the pane loaded.
                 let installedIDs = chosen.isEmpty ? [] : installed(target)
                 let snapshot = Dictionary(uniqueKeysWithValues: chosen.map { ($0.id, $0.origin) })
@@ -358,7 +426,7 @@ final class BrowserImportSession {
 }
 
 extension BrowserViewModel {
-    /// File › Import from Arc, Chrome or Brave…
+    /// File › Import from Another Browser…
     func showBrowserImport() {
         if let window = browserImportWindow {
             window.showWindow(nil)
@@ -389,7 +457,7 @@ extension BrowserViewModel {
         if let value = settings.autoArchive { setAutoArchiveThreshold(value) }
     }
 
-    /// A Chrome, Brave or Arc profile's bookmarks (a space in `profileID`,
+    /// A browser profile's bookmarks (a space in `profileID`,
     /// made by the first import and added to by later ones), history
     /// (command-bar suggestions) and search engine, each only what an earlier
     /// import did not bring. Returns one line per thing imported.

@@ -388,6 +388,9 @@ public enum BrowserImportDiscovery {
             // Arc's sidebar alone is still worth importing.
             return sidebar.map { DiscoveredBrowser(browser: browser, status: .available, sidebarFile: $0) } ?? empty
         case .denied:
+            // `stat` still sees inside: a protected folder with no profile is not worth a permission.
+            guard exists(root.appendingPathComponent(dataMarker(of: browser))) else { return sidebar.map {
+                DiscoveredBrowser(browser: browser, status: .available, sidebarFile: $0) } ?? empty }
             return blocked
         case .readable:
             // A readable folder can still hold a protected file (Safari's, without Full Disk Access).
@@ -396,6 +399,12 @@ public enum BrowserImportDiscovery {
         let found = profiles(of: browser, root: root, fileManager: fileManager)
         if found.isEmpty, sidebar == nil { return empty }
         return DiscoveredBrowser(browser: browser, status: .available, profiles: found, sidebarFile: sidebar)
+    }
+
+    /// `stat` says it is there, or cannot tell (EACCES): only ENOENT is absence.
+    static func exists(_ url: URL) -> Bool {
+        var info = stat()
+        return stat(url.path, &info) == 0 || (errno != ENOENT && errno != ENOTDIR)
     }
 
     /// The file whose presence says the browser has made its profiles.

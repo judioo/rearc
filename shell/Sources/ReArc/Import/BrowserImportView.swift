@@ -3,7 +3,7 @@ import SidebarModel
 import SwiftUI
 
 /// The import window: sources on the left (Arc's sidebar, then each
-/// Arc, Chrome and Brave profile), what comes over on the right, Import at
+/// browser's profiles, then the ones macOS keeps private), what comes over on the right, Import at
 /// the bottom. Its controller is the same on both engines.
 final class BrowserImportWindowController: NSWindowController, NSWindowDelegate {
     let session: BrowserImportSession
@@ -22,6 +22,18 @@ final class BrowserImportWindowController: NSWindowController, NSWindowDelegate 
         window.setFrameAutosaveName("ReArcImport")
         super.init(window: window)
         window.delegate = self
+        // Back from System Settings: a browser allowed there opens without a restart.
+        activation = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification,
+                                                            object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.window?.isVisible == true else { return }
+            self.session.applicationBecameActive()
+        }
+    }
+
+    private var activation: NSObjectProtocol?
+
+    deinit {
+        if let activation { NotificationCenter.default.removeObserver(activation) }
     }
 
     @available(*, unavailable)
@@ -78,12 +90,16 @@ struct BrowserImportView: View {
                 }
             }
             if !session.isDiscovering && session.sources.isEmpty {
-                Text("No Arc, Chrome or Brave data was found on this Mac.")
+                Text("No other browser's data was found on this Mac.")
                     .font(.callout).foregroundStyle(.secondary)
             }
-            ForEach(session.unreadableBrowsers) { browser in
-                Label("\(browser.name): allow ReArc in System Settings › Privacy & Security › Full Disk Access",
-                      systemImage: "lock")
+            ForEach(session.blockedGroups, id: \.permission) { group in
+                Section("Needs your permission") {
+                    BlockedBrowsersRow(session: session, permission: group.permission, browsers: group.browsers)
+                }
+            }
+            if !session.browsersWithoutProfiles.isEmpty {
+                Text("Nothing to import yet from " + ListFormatter.localizedString(byJoining: session.browsersWithoutProfiles.map(\.name)) + ".")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -380,6 +396,34 @@ private struct ChromiumProfileImportPane: View {
         return "\(what) are encrypted with \u{201C}\(profile.browser.safeStorageService)\u{201D} in your keychain. "
             + "Importing them will ask your permission first, for this browser only; it is not available yet. "
             + "Until then, export passwords from \(profile.browser.name) as a CSV file and import it in Settings › Passwords."
+    }
+}
+
+/// A browser macOS keeps private: what to do, one button to the pane, and
+/// a relaunch once the person has been there and it is still locked.
+private struct BlockedBrowsersRow: View {
+    let session: BrowserImportSession
+    let permission: ImportPermission
+    let browsers: [ImportBrowser]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(ListFormatter.localizedString(byJoining: browsers.map(\.name)), systemImage: "lock.fill")
+            Text(ImportPrivacyAccess.explanation(for: browsers, permission: permission))
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Allow Access\u{2026}") { session.openSettings(for: permission) }
+                .controlSize(.small)
+                .help("Opens System Settings › Privacy & Security › \(permission.paneName)")
+            if session.offersRelaunch(for: permission) {
+                Text("Switched on and still locked? macOS may need ReArc to start again.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Relaunch ReArc") { session.relaunch() }
+                    .controlSize(.small)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
