@@ -11,6 +11,37 @@ committed `RELEASES.md` has a heading for the build it is about to make:
 commit before the release, with `echo $(( $(git rev-list --count HEAD) + 1 ))` as the
 number. Details: engine/docs/RELEASE.md, "Release notes".
 
+## ReArc 0.1.0 (544) — 2026-11-10
+
+Security release candidate. It fixes the findings of the security review of build 500.
+
+**Security**
+- The engine moves to Chromium 156.0.8078.96, with 65 security fixes from Google, including
+  CVE-2026-125350, which is exploited in the wild. Release builds now refuse an engine that is
+  behind Chrome's latest Mac security release.
+- Safe Browsing works: ReArc warns before known phishing and malware pages and dangerous
+  downloads. Settings says when Safe Browsing is unavailable instead of claiming protection.
+- ReArc ignores debugging and sandbox-weakening launch switches, so another program can no
+  longer relaunch it with remote debugging to read your cookies.
+- Permission prompts ignore clicks and keys for half a second after they appear, and
+  "Remember this decision" starts off. Extension install and permission dialogs work the same
+  way, and Return means Cancel on permission requests.
+- Extensions from another browser install from the Chrome Web Store only, and only the ones
+  counted when you agreed. A Web Store version asking for more permissions than your old copy
+  asks you first. Unpacked extensions are listed with their folder, to load by hand.
+- Onboarding no longer copies the password database, even to count it, and the importer no
+  longer opens Arc's sign-in file.
+- A password found in a data breach now shows a warning.
+- Page full screen names the site that took it over.
+- Links opened from the context menu open as link clicks, from http and https only, and carry
+  the page that linked to them.
+- Automatic Peek ignores clicks a page fakes with script.
+- The call card shows a microphone or camera as live whenever it is recording, whatever the
+  page says.
+- Script boosts that arrive by iCloud sync stay off until you approve them on this Mac.
+- Updates: the Sparkle feed is signed and each update is verified before it is unpacked.
+- Search suggestions are fetched over https only, and prompts show http:// for insecure sites.
+
 ## ReArc 0.1.0 (500) — 2026-11-10
 
 Release candidate. Developer ID signed, notarized, Production iCloud.

@@ -10,8 +10,7 @@ Swift/SwiftUI shell over a lightly patched Chromium that stays easy to update.
 ## Download
 
 ReArc 0.1.0 is an alpha for Apple silicon Macs on macOS 14 or later.
-[Download the DMG](https://rearc.imara.ae/updates/ReArc-0.1.0-500.dmg) from
-[rearc.imara.ae](https://rearc.imara.ae). It is Developer ID signed and notarized,
+Download the DMG from [rearc.imara.ae](https://rearc.imara.ae). It is Developer ID signed and notarized,
 and updates itself through Sparkle (ReArc › Check for Updates…). What changed in
 each release is in [RELEASES.md](RELEASES.md).
 
