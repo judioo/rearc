@@ -58,12 +58,11 @@ struct SidebarToolbarView: View {
                             Button(candidate.name) { model.selectProfile(candidate.id) }
                         }
                     } label: {
-                        ProfileAvatarView(profile: profile, diameter: 18)
+                        ProfileAvatarView(profile: profile, diameter: 18, sidebarGlyph: chrome.glyph, sidebarIsDark: chrome.isDark)
                     }
                         .menuStyle(.borderlessButton)
                         .fixedSize()
                         .accessibilityLabel("Switch Profile: \(profile.name)")
-                        .opacity(0.85)
                         .padding(.trailing, 10)
                         .help(profile.name)
                 }

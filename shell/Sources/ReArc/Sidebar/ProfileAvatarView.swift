@@ -4,6 +4,9 @@ import SidebarModel
 struct ProfileAvatarView: View {
     let profile: Profile
     var diameter: CGFloat = 24
+    /// Sidebar badges follow the space's legible glyph role, regardless of profile colour.
+    var sidebarGlyph: Color?
+    var sidebarIsDark = false
 
     private var tint: Color {
         let theme = profile.themeColor
@@ -21,8 +24,12 @@ struct ProfileAvatarView: View {
                     .font(.system(size: diameter * 0.48))
             }
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(sidebarGlyph ?? .white)
         .frame(width: diameter, height: diameter)
-        .background(Circle().fill(tint.opacity(0.85)))
+        // A neutral backing keeps the glyph readable even when a custom
+        // theme has exactly the same colour as the sidebar's glyph role.
+        .background(Circle().fill(sidebarGlyph == nil ? tint.opacity(0.85)
+                                  : sidebarIsDark ? Color.black.opacity(0.75) : Color.white.opacity(0.88)))
+        .overlay(Circle().strokeBorder(sidebarGlyph?.opacity(0.65) ?? .clear, lineWidth: 1))
     }
 }

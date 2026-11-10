@@ -107,7 +107,10 @@ final class BrowserViewModel {
     var littleArcArchiveAfter: AutoArchiveThreshold = LittleArcArchivePreference.load(from: .standard) {
         didSet { LittleArcArchivePreference.save(littleArcArchiveAfter, to: externalLinkDefaults) }
     }
-    /// Settings › General › Warn before quitting (⌘Q only).
+    /// Settings › General › New spaces: shared profile or a fresh container.
+    var newSpaceContainerPolicy = NewSpaceContainerPolicy.load(from: .standard) {
+        didSet { newSpaceContainerPolicy.save(to: externalLinkDefaults) }
+    }
     var spaceIconStyle = SpaceIconStyle.load(from: .standard) {
         didSet { spaceIconStyle.save(to: externalLinkDefaults) }
     }
@@ -955,7 +958,7 @@ final class BrowserViewModel {
     /// Creates the suggested next space directly (no dialog).
     @discardableResult
     func addSpace() -> Space {
-        let space = store.createSpace(from: SpaceDraft.suggested(in: store)) ?? store.activeSpace
+        let space = store.createSpace(from: SpaceDraft.suggested(in: store, containerPolicy: newSpaceContainerPolicy)) ?? store.activeSpace
         loadSelectedIfNeeded()
         return space
     }
@@ -968,7 +971,7 @@ final class BrowserViewModel {
                             origin: SpaceCreationSession.Origin = .command) {
         let window = window ?? store.keyWindowID
         if librarySection(in: window) != nil { closeLibrary(in: window) }
-        let draft = SpaceDraft.blank(in: store, profileID: profileID ?? space(in: window).profileID)
+        let draft = SpaceDraft.blank(in: store, profileID: profileID, containerPolicy: newSpaceContainerPolicy)
         swapCreationPage(SpaceCreationSession(draft: draft, window: window, origin: origin), origin: origin)
     }
 
@@ -1340,12 +1343,12 @@ final class BrowserViewModel {
 
     func configureLinkPeek(on engine: any WebEngine, tab: Tab? = nil) {
         engine.automaticPeekSourceURL = automaticPeekEnabled && tab?.kind != .today ? tab.map { $0.savedURL ?? $0.url } : nil
-        let profileID = tab.map { self.profileID(for: $0) }
+        let profileID = tab.map { self.profileID(for: $0) } ?? engine.pagePrompts.profileID ?? store.activeProfileID
         engine.linkPeekHandler = { [weak self] url in
             self?.showPeek(url: url, profileID: profileID)
         }
         (engine as? ShiftClickPeekConfigurable)?.shiftClickPeekEnabled = peekOnShiftClick
-        configureLittleArcClicks(on: engine)
+        configureLittleArcClicks(on: engine, profileID: profileID)
     }
 
     /// After a Links setting changes: every tab's engine again.

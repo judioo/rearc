@@ -115,7 +115,7 @@ struct SidebarView: View {
         guard let id else { return }
         let creating = model.isCreatingSpace(in: window)
         if id == SpaceCreationSession.pageID {
-            if !creating { model.beginSpaceCreation(profileID: focusedSpace.profileID, in: window, origin: .overscroll) }
+            if !creating { model.beginSpaceCreation(in: window, origin: .overscroll) }
             return
         }
         if id != model.space(in: window).id { model.selectSpace(id) }
@@ -313,8 +313,15 @@ struct SpaceHeaderView: View {
             }
             Spacer(minLength: 0)
             if let profile = model.store.profile(withID: space.profileID) {
-                ProfileAvatarView(profile: profile, diameter: 16)
-                    .help("Profile: \(profile.name)")
+                Menu {
+                    SpaceProfileChoices(model: model, space: space)
+                } label: {
+                    ProfileAvatarView(profile: profile, diameter: 18, sidebarGlyph: chrome.glyph, sidebarIsDark: chrome.isDark)
+                }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Profile: \(profile.name) — choose a container")
                     .accessibilityLabel("Profile: \(profile.name)")
                     .padding(.trailing, 6)
             }
@@ -401,7 +408,7 @@ struct TodayHeaderView: View {
 }
 
 /// Arc's persistent "+ New Tab" cell at the head of Today (`NewTabCellView`):
-/// a 12 pt plus and faded 14 pt text on the row pitch.
+/// a 12 pt plus and readable secondary text on the row pitch.
 struct NewTabRowView: View {
     let action: () -> Void
     @State private var isHovering = false
@@ -415,7 +422,7 @@ struct NewTabRowView: View {
                 .frame(width: SidebarMetrics.iconSize, height: SidebarMetrics.iconSize)
             Text("New Tab")
                 .font(.system(size: SidebarMetrics.titleSize))
-                .foregroundStyle(chrome.tertiaryText)
+                .foregroundStyle(chrome.secondaryText)
             Spacer(minLength: 0)
         }
         .padding(.leading, SidebarMetrics.iconLeading)

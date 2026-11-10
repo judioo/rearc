@@ -185,7 +185,7 @@ struct SpaceContextMenu: View {
         Button("Edit Theme and Icon…") { model.spaceEditorID = space.id }
         SpaceProfileMenu(model: model, space: space)
         Divider()
-        Button("New Space…") { model.beginSpaceCreation(profileID: space.profileID) }
+        Button("New Space…") { model.beginSpaceCreation() }
         Button("Reset All Tabs in This Space") {
             if model.store.activeSpaceID != space.id { model.selectSpace(space.id) }
             model.resetPinnedTabs()
@@ -214,22 +214,37 @@ struct SpaceContextMenu: View {
     }
 }
 
-/// Change Profile submenu: the profiles this space can move to (Arc
-/// `changeProfileForCurrentSpace`). Moving asks for confirmation first.
+/// The same complete container choices in the header, space menu and edit sheet.
+struct SpaceProfileChoices: View {
+    let model: BrowserViewModel
+    let space: Space
+    var onSelect: ((Profile.ID) -> Void)? = nil
+
+    var body: some View {
+        ForEach(model.store.profileChoices(forSpace: space.id)) { profile in
+            Button {
+                if let onSelect { onSelect(profile.id) }
+                else { model.requestSpaceProfileChange(space.id, to: profile.id) }
+            } label: {
+                if profile.id == space.profileID {
+                    Label(profile.name, systemImage: "checkmark")
+                } else {
+                    Text(profile.name)
+                }
+            }
+            .disabled(profile.id == space.profileID)
+        }
+        Divider()
+        Button("New Container for This Space") { model.createContainerForSpace(space.id) }
+    }
+}
+
 struct SpaceProfileMenu: View {
     let model: BrowserViewModel
     let space: Space
 
     var body: some View {
-        let choices = model.store.profileChoices(forSpace: space.id)
-        Menu("Change Profile") {
-            ForEach(choices) { profile in
-                Button(profile.name) { model.requestSpaceProfileChange(space.id, to: profile.id) }
-            }
-        }
-        .disabled(choices.isEmpty)
-        .help(model.store.spaces(in: space.profileID).count > 1
-              ? "Move this space and its tabs to another profile"
-              : "A profile keeps at least one space")
+        Menu("Change Profile") { SpaceProfileChoices(model: model, space: space) }
+            .help("Choose the cookies, sign-ins and site storage used by this space")
     }
 }

@@ -204,7 +204,7 @@ struct BottomBarView: View {
     /// Arc's rows and shortcuts in Arc's order, then ReArc's extras.
     private func plusMenu(current: Space, profile: Profile) -> [[PlusMenuPanel.Row]] {
         [
-            [.init("New Space", "plus.rectangle.portrait") { model.beginSpaceCreation(profileID: current.profileID) },
+            [.init("New Space", "plus.rectangle.portrait") { model.beginSpaceCreation() },
              .init("New Folder", "folder.badge.plus") { model.newFolder() }],
             [.init("New Easel", "scribble.variable", shortcut: "⌃⇧E") { _ = model.createEasel() },
              .init("New Boost", "paintbrush.pointed") { model.newBoost() }],
@@ -531,7 +531,7 @@ private struct SpaceListView: View {
             Divider().padding(.vertical, 4)
             Button {
                 isPresented = false
-                model.beginSpaceCreation(profileID: current.profileID)
+                model.beginSpaceCreation()
             } label: {
                 Label("New Space…", systemImage: "plus")
                     .padding(.horizontal, 10)

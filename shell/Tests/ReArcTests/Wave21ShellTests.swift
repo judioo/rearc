@@ -161,12 +161,96 @@ final class Wave21ShellTests: XCTestCase {
         XCTAssertEqual(model.store.spaces(in: home.id).map(\.id), [keep.id])
     }
 
-    func testAProfileKeepsItsLastSpace() {
+    func testASoleSpaceCanChooseAnotherProfile() {
         let model = makeModel()
         let work = model.store.addProfile(name: "Work")
         model.requestSpaceProfileChange(model.store.activeSpaceID, to: work.id)
-        XCTAssertNil(model.pendingSpaceProfileChange, "nothing to confirm when the move is refused")
-        XCTAssertEqual(model.changeSpaceProfile(model.store.activeSpaceID, to: work.id), .lastSpaceInProfile)
+        XCTAssertNotNil(model.pendingSpaceProfileChange)
+        model.confirmSpaceProfileChange()
+        XCTAssertEqual(model.store.activeSpace.profileID, work.id)
+    }
+
+    func testSpaceCreationUsesSettingAndAllowsPerSpaceOverride() throws {
+        let model = makeModel()
+        let suite = "rearc-container-policy-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        model.externalLinkDefaults = defaults
+        model.newSpaceContainerPolicy = .ownContainer
+        XCTAssertEqual(NewSpaceContainerPolicy.load(from: defaults), .ownContainer)
+        model.beginSpaceCreation()
+        XCTAssertEqual(model.spaceCreation?.draft.createsOwnContainer, true)
+        model.cancelSpaceCreation()
+        XCTAssertEqual(model.store.profiles.count, 1)
+        let own = model.addSpace()
+        XCTAssertNotEqual(own.profileID, model.store.profiles[0].id)
+        model.newSpaceContainerPolicy = .sharedDefault
+        model.beginSpaceCreation()
+        XCTAssertEqual(model.spaceCreation?.draft.createsOwnContainer, false)
+        XCTAssertEqual(model.spaceCreation?.draft.profileID, model.store.profiles[0].id)
+        var draft = try XCTUnwrap(model.spaceCreation?.draft)
+        draft.name = "Override"
+        draft.createsOwnContainer = true
+        let space = try XCTUnwrap(model.createSpace(from: draft))
+        XCTAssertNotEqual(space.profileID, model.store.profiles[0].id)
+        XCTAssertNotEqual(space.profileID, own.profileID)
+    }
+
+    func testNewContainerReloadsBackgroundTabsAndEverySplitPane() throws {
+        let model = makeModel()
+        let store = model.store
+        let original = store.activeProfileID
+        let space = store.activeSpaceID
+        let a = store.addTab(kind: .today, title: "A", url: URL(string: "https://a.test")!)
+        let b = store.addTab(kind: .today, title: "B", url: URL(string: "https://b.test")!)
+        let background = store.addTab(kind: .pinned, title: "Background", url: URL(string: "https://background.test")!)
+        let split = try XCTUnwrap(store.splitTab(a.id, with: b.id))
+        store.selectTab(a.id)
+        model.loadSelectedIfNeeded()
+        _ = model.engineHost.engine(for: background, profileID: original)
+        model.createContainerForSpace(space)
+        let container = store.activeProfileID
+        XCTAssertNotEqual(container, original)
+        XCTAssertEqual(store.split(withID: split.id)?.tabs.map(\.id), split.tabs.map(\.id))
+        for tab in [a, b, background] {
+            XCTAssertNil(model.engineHost.engine(forTabID: tab.id, profileID: original))
+            let engine = try XCTUnwrap(model.engineHost.engine(forTabID: tab.id, profileID: container))
+            XCTAssertEqual(engine.pagePrompts.profileID, container)
+            XCTAssertEqual((engine as? WKEngine)?.profileContext.profileID, container)
+        }
+    }
+
+    func testSpaceLinkPeekLittleArcAndSplitKeepOriginContainerWhenAnotherSpaceIsActive() throws {
+        let model = makeModel()
+        let store = model.store
+        let suite = "rearc-container-links-\(UUID())"
+        model.externalLinkDefaults = UserDefaults(suiteName: suite)!
+        defer { model.externalLinkDefaults.removePersistentDomain(forName: suite) }
+        model.littleArcOnModifiedClick = true
+        let originSpace = store.activeSpaceID
+        model.createContainerForSpace(originSpace)
+        let originProfile = store.activeProfileID
+        let tab = store.addTab(kind: .today, title: "Origin", url: URL(string: "https://origin.test")!)
+        model.selectTab(tab.id)
+        let engine = try XCTUnwrap(model.engineHost.engine(forTabID: tab.id, profileID: originProfile))
+        let prompts = engine.pagePrompts
+        let other = store.addSpace(name: "Other", profileID: store.profiles[0].id)
+        model.selectSpace(other.id)
+        let link = URL(string: "https://account.test")!
+        engine.linkPeekHandler?(link)
+        XCTAssertEqual(model.peekSession?.profileID, originProfile)
+        model.dismissPeek()
+        (engine as? LittleArcLinkOpening)?.littleArcLinkHandler?(link)
+        let little = try XCTUnwrap(store.littleArcWindows.last)
+        XCTAssertEqual(little.profileID, originProfile)
+        XCTAssertEqual(model.littleArcEngine(for: little.id).pagePrompts.profileID, originProfile)
+        model.openLinkInNewSplit(link, from: prompts)
+        let split = try XCTUnwrap(store.splitContaining(tabID: tab.id)?.split)
+        for pane in split.tabs {
+            XCTAssertEqual(store.spaceContaining(tabID: pane.id), originSpace)
+            XCTAssertEqual(model.profileID(for: pane), originProfile)
+            XCTAssertEqual(model.engineHost.engine(forTabID: pane.id, profileID: originProfile)?.pagePrompts.profileID, originProfile)
+        }
     }
 
     // MARK: Drag to split

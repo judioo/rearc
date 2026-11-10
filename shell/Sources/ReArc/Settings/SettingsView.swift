@@ -142,6 +142,10 @@ struct GeneralSettingsPane: View {
             if AppUpdater.shared.isEnabled { UpdateSettingsSection() }
             #endif
             SettingsGroup {
+                SettingsLabeledRow(label: "New spaces", detail: "Containers are profiles with separate cookies, sign-ins and site storage. Each space can choose a profile in its menu.") {
+                    SettingsPopUp(label: "New spaces", selection: $model.newSpaceContainerPolicy,
+                                  options: NewSpaceContainerPolicy.allCases.map { ($0, $0.title) })
+                }
                 SettingsLabeledRow(label: "Space icons") {
                     SettingsPopUp(label: "Space icons", selection: $model.spaceIconStyle,
                                   options: SpaceIconStyle.allCases.map { ($0, $0.title) })

@@ -102,22 +102,16 @@ struct SpaceEditorView: View {
     }
 
     private func profileRow(_ space: Space) -> some View {
-        let choices = model.store.profileChoices(forSpace: space.id)
         return HStack {
             Text("Profile").font(.headline)
             Spacer()
             Menu(model.store.profile(withID: space.profileID)?.name ?? "Profile") {
-                ForEach(choices) { profile in
-                    Button("Move to \(profile.name)") {
-                        profileChange = SpaceProfileChange(spaceID: space.id, profileID: profile.id)
-                    }
+                SpaceProfileChoices(model: model, space: space) { profileID in
+                    profileChange = SpaceProfileChange(spaceID: space.id, profileID: profileID)
                 }
             }
             .fixedSize()
-            .disabled(choices.isEmpty)
-            .help(choices.isEmpty && model.store.profiles.count > 1
-                  ? "A profile keeps at least one space"
-                  : "Move this space and its tabs to another profile")
+            .help("Choose this space's session container")
         }
     }
 
