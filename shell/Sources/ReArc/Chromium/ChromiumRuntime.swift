@@ -355,6 +355,8 @@ struct ChromiumFullscreenEvent: Equatable {
     var reason: Reason?
     /// Chromium display ID the page asked for, -1 for none.
     var displayID: Int64
+    /// Serialized origin of the frame that requested fullscreen (ABI 1.59).
+    var origin: String?
 }
 
 private let fullscreenCallback: ReArcFullscreenCallback = { context, event in
@@ -363,6 +365,18 @@ private let fullscreenCallback: ReArcFullscreenCallback = { context, event in
         profileID: e.profile_id, tabID: e.tab_id, contentGeneration: e.content_generation,
         entered: e.phase == 0, reason: e.phase == 0 ? nil : ChromiumFullscreenEvent.Reason(rawValue: e.reason),
         displayID: e.display_id
+    )
+    MainActor.assumeIsolated { runtime(from: context).handleFullscreen(copied) }
+}
+
+/// ABI 1.59 (`fullscreen_origin`): the same event plus the requesting origin.
+private let fullscreenCallback2: ReArcFullscreenCallback2 = { context, event in
+    guard let e = event?.pointee else { return }
+    let copied = ChromiumFullscreenEvent(
+        profileID: e.event.profile_id, tabID: e.event.tab_id, contentGeneration: e.event.content_generation,
+        entered: e.event.phase == 0,
+        reason: e.event.phase == 0 ? nil : ChromiumFullscreenEvent.Reason(rawValue: e.event.reason),
+        displayID: e.event.display_id, origin: e.origin.map { String(cString: $0) }
     )
     MainActor.assumeIsolated { runtime(from: context).handleFullscreen(copied) }
 }
@@ -548,6 +562,17 @@ final class ChromiumRuntime {
     private(set) var readyAt: TimeInterval?
     /// Runs before shutdown starts for an AppKit quit request (persist shell state here).
     var onTerminateRequested: (() -> Void)?
+    /// A leak check found a breached credential for this origin (ABI 1.60).
+    var onCredentialLeak: ((String) -> Void)?
+
+    /// Safe Browsing can work: the engine has a real Google API key (ABI 1.57).
+    /// Older engines cannot say, and none of them had a key: false.
+    var safeBrowsingAvailable: Bool {
+        typealias Available = @convention(c) () -> Bool
+        guard isReady, ReArcEngineHasFeature("safe_browsing_tab_helpers"),
+              let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcEngineSafeBrowsingAvailable") else { return false }
+        return unsafeBitCast(symbol, to: Available.self)()
+    }
     /// Chromium-created contents (popups, target=_blank). Return true to adopt;
     /// unadopted tabs are force-closed.
     var onAdoptedTab: ((ChromiumTabEvent) -> Bool)?
@@ -691,7 +716,10 @@ final class ChromiumRuntime {
 
     /// Configures the ABI and blocks in `ReArcEngineRun` (which calls ChromeMain).
     /// Must run before any NSApplication exists.
-    func run(arguments: [String], keychain: ChromiumLaunchArguments.KeychainMode) -> Int32 {
+    /// `testSwitches`: the self-test and bench only. A release engine drops
+    /// --load-extension, --host-resolver-rules and the other test switches
+    /// unless the host asks for them (ABI 1.56, `launch_switch_filter`).
+    func run(arguments: [String], keychain: ChromiumLaunchArguments.KeychainMode, testSwitches: Bool = false) -> Int32 {
         precondition(Thread.isMainThread && !isConfigured)
         keychainMode = keychain
         userDataDir = ChromiumLaunchArguments.userDataDir(in: arguments).map { URL(fileURLWithPath: $0, isDirectory: true) }
@@ -710,6 +738,11 @@ final class ChromiumRuntime {
             return -status
         }
         isConfigured = true
+        typealias AllowTestSwitches = @convention(c) () -> ReArcStatus
+        if testSwitches, ReArcEngineHasFeature("launch_switch_filter"),
+           let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcEngineAllowTestSwitches") {
+            _ = unsafeBitCast(symbol, to: AllowTestSwitches.self)()
+        }
         // Registered whenever the engine has it, so the self-test sees the stage ran.
         if supportsEarlyWindow {
             ReArcEngineSetEarlyWindowCallback(earlyWindowCallback, context)
@@ -769,7 +802,13 @@ final class ChromiumRuntime {
         // ABI 1.47: extension side panel requests, before any tab.
         registerSidePanelChannel(context: context)
         if capabilities.htmlFullscreen {
-            ReArcEngineSetFullscreenCallback(fullscreenCallback, context)
+            typealias SetFullscreen2 = @convention(c) (ReArcFullscreenCallback2?, UnsafeMutableRawPointer?) -> Void
+            if ReArcEngineHasFeature("fullscreen_origin"),
+               let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcEngineSetFullscreenCallback2") {
+                unsafeBitCast(symbol, to: SetFullscreen2.self)(fullscreenCallback2, context)
+            } else {
+                ReArcEngineSetFullscreenCallback(fullscreenCallback, context)
+            }
         }
         // Wave 30 (ABI 1.42): unconsumed page keys come back to the shell's menu.
         if capabilities.keyEquivalentEvents {

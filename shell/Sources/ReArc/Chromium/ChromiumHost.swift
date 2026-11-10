@@ -57,7 +57,7 @@ enum ChromiumHost {
                 }
                 let code = runtime.run(arguments: ChromiumLaunchArguments.selfTestArguments(arguments, extensionDirs: extensions.map(\.path))
                                            + mutualTLS,
-                                       keychain: keychain)
+                                       keychain: keychain, testSwitches: true)
                 exit(test.exitCode(runResult: code))
             }
             if let bench = options.bench {
@@ -71,7 +71,8 @@ enum ChromiumHost {
                 if let dir = ChromiumLaunchArguments.userDataDir(in: arguments) {
                     ChromiumLaunchArguments.prepareSelfTestUserDataDir(URL(fileURLWithPath: dir, isDirectory: true))
                 }
-                let code = runtime.run(arguments: ChromiumLaunchArguments.benchArguments(arguments), keychain: keychain)
+                let code = runtime.run(arguments: ChromiumLaunchArguments.benchArguments(arguments), keychain: keychain,
+                                       testSwitches: true)
                 exit(runner.exitCode(runResult: code))
             }
             if let path = options.launchProbePath {
@@ -390,6 +391,12 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
                 }
             }
         }
+        // Settings' "Warn if passwords are exposed in a data breach" (audit F-09).
+        runtime.onCredentialLeak = { [weak model] origin in
+            let site = BrowserViewModel.displaySite(origin)
+            model?.showToast("A password you used on \(site) appeared in a data breach. Change it now.",
+                             systemImage: "exclamationmark.shield.fill", duration: 12)
+        }
         if runtime.capabilities.htmlFullscreen {
             runtime.onFullscreenEvent = { [weak self] event in
                 MainActor.assumeIsolated { self?.handleFullscreen(event) }
@@ -679,7 +686,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             passwordLeakCheck: runtime.capabilities.passwordLeakDetection ? Binding(
                 get: { runtime.leakDetectionEnabled },
                 set: { runtime.setLeakDetectionForAllProfiles($0) }
-            ) : nil
+            ) : nil,
+            safeBrowsingAvailable: runtime.safeBrowsingAvailable
         )
     }
 
@@ -930,7 +938,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             let steps = model.pageEnteredFullscreen(
                 tabID: tabID,
                 engineTabID: event.tabID,
-                windowIsFullscreen: window.styleMask.contains(.fullScreen) && wantsNativeFullscreen == nil
+                windowIsFullscreen: window.styleMask.contains(.fullScreen) && wantsNativeFullscreen == nil,
+                origin: event.origin
             )
             fullscreenWindow = window
             apply(steps, window: window, engine: engine)

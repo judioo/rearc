@@ -148,9 +148,21 @@ private let passwordCallback: ReArcPasswordPromptCallback = { context, event in
     MainActor.assumeIsolated { promptRuntime(context).handlePassword(copied) }
 }
 
+/// ABI 1.60 (`credential_leak_events`): Chromium's leak check found the
+/// credential just used in a breach. The password never crosses the ABI.
+private let credentialLeakCallback: ReArcCredentialLeakCallback = { context, event in
+    guard let e = event?.pointee, let origin = e.origin.map({ String(cString: $0) }) else { return }
+    MainActor.assumeIsolated { promptRuntime(context).onCredentialLeak?(origin) }
+}
+
 extension ChromiumRuntime {
     /// Registers each adopted channel; called at `ready`, before any tab exists.
     func registerPromptChannels(context: UnsafeMutableRawPointer) {
+        typealias SetLeak = @convention(c) (ReArcCredentialLeakCallback?, UnsafeMutableRawPointer?) -> Void
+        if ReArcEngineHasFeature("credential_leak_events"),
+           let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcEngineSetCredentialLeakCallback") {
+            unsafeBitCast(symbol, to: SetLeak.self)(credentialLeakCallback, context)
+        }
         if capabilities.javascriptDialogs { ReArcEngineSetJavaScriptDialogCallback(dialogCallback, context) }
         if capabilities.fileChooser { ReArcEngineSetFileChooserCallback(fileChooserCallback, context) }
         if capabilities.permissionPrompts { ReArcEngineSetPermissionCallback(permissionCallback, context) }

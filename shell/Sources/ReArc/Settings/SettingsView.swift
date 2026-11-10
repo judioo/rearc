@@ -7,6 +7,10 @@ struct SettingsCapabilities {
     var pictureInPicture = true
     /// Chrome's "Warn you if passwords are exposed in a data breach" (Chromium only).
     var passwordLeakCheck: Binding<Bool>?
+    /// Whether the engine can run Safe Browsing (a real Google API key; engine
+    /// ABI 1.57). nil: no such engine (WebKit). Settings never claims
+    /// protection a build cannot give (audit F-02).
+    var safeBrowsingAvailable: Bool?
 }
 
 /// Arc's Settings window (FEATURE-SPECS/SETTINGS.md §11). One pane at a
@@ -23,7 +27,7 @@ struct SettingsPaneView: View {
             switch pane {
             case .account: AccountSettingsPane(model: model)
             case .general: GeneralSettingsPane(model: model)
-            case .profiles: ProfilesSettingsPane(model: model)
+            case .profiles: ProfilesSettingsPane(model: model, capabilities: capabilities)
             case .links: LinksSettingsPane(model: model)
             case .shortcuts: ShortcutsSettingsPane(model: model)
             case .icon: IconSettingsPane(model: model)
@@ -175,6 +179,7 @@ struct GeneralSettingsPane: View {
 /// profile's boxes on the right.
 struct ProfilesSettingsPane: View {
     @Bindable var model: BrowserViewModel
+    var capabilities = SettingsCapabilities()
     @State private var editor: ProfileEditorRequest?
     @State private var selection: Profile.ID?
     @State private var renaming: Profile.ID?
@@ -369,6 +374,16 @@ struct ProfilesSettingsPane: View {
         ].filter { model.canOpenBrowserPage($0.0) }
         if !dataRows.isEmpty {
             SettingsHeader(title: "Your Data and Settings")
+            if let available = capabilities.safeBrowsingAvailable {
+                SettingsGroup {
+                    SettingsLabeledRow(label: "Safe Browsing", info: available
+                        ? "Warnings before known phishing and malware sites and downloads. Choose the level in Privacy and security › Security."
+                        : "This build of ReArc has no Safe Browsing key, so it can’t check sites or downloads against Google’s lists of phishing and malware. The protection level in Privacy and security has no effect.") {
+                        Text(available ? "Available" : "Unavailable")
+                            .foregroundStyle(available ? Color.secondary : Color.red)
+                    }
+                }
+            }
             VStack(spacing: 2) {
                 ForEach(dataRows, id: \.0) { page, symbol, color in
                     SettingsLinkRow(title: page.title, systemImage: symbol, color: color) { open(page, in: profile) }

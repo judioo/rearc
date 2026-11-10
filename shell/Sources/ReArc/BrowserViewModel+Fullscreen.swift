@@ -18,8 +18,12 @@ extension BrowserViewModel {
 
     /// A page entered fullscreen. `tabID` is its sidebar tab (nil for a
     /// private or Little Arc window, which only goes native fullscreen).
-    func pageEnteredFullscreen(tabID: Tab.ID?, engineTabID: UInt64, windowIsFullscreen: Bool) -> [HTMLFullscreenSession.Step] {
+    /// `origin` (engine ABI 1.59) is the requesting frame's: every entry then
+    /// names the site, since the hidden sidebar is where ReArc shows the URL.
+    func pageEnteredFullscreen(tabID: Tab.ID?, engineTabID: UInt64, windowIsFullscreen: Bool,
+                               origin: String? = nil) -> [HTMLFullscreenSession.Step] {
         if let current = htmlFullscreen, current.engineTabID == engineTabID { return [] }
+        if let origin { showFullscreenHint(site: Self.displaySite(origin)) }
         let session = HTMLFullscreenSession(
             tabID: tabID,
             engineTabID: engineTabID,
@@ -50,13 +54,24 @@ extension BrowserViewModel {
 extension BrowserViewModel {
     func nativeFullscreenChanged(_ fullscreen: Bool, window: NSWindow) {
         let action = fullscreenEscapes[window.windowNumber, default: FullscreenEscape()].setFullscreen(fullscreen)
-        if action == .showHint { showFullscreenHint() }
+        // A page's entry already showed the hint naming its site.
+        let siteHintShowing = htmlFullscreen != nil && toast?.id == fullscreenHintID && toast != nil
+        if action == .showHint, !siteHintShowing { showFullscreenHint() }
         if !fullscreen, toast?.id == fullscreenHintID { toast = nil }
     }
 
-    private func showFullscreenHint() {
-        showToast("To exit full screen, press esc", systemImage: "", keycaps: ["esc"], placement: .belowToolbar, duration: 2.5)
+    private func showFullscreenHint(site: String? = nil) {
+        let message = site.map { "\($0) is full screen. To exit, press esc" } ?? "To exit full screen, press esc"
+        showToast(message, systemImage: "", keycaps: ["esc"], placement: .belowToolbar, duration: site == nil ? 2.5 : 4)
         fullscreenHintID = toast?.id
+    }
+
+    /// "bank.example" from "https://bank.example", the scheme kept for
+    /// anything but https; an opaque origin ("null") is "This page".
+    nonisolated static func displaySite(_ origin: String) -> String {
+        guard let url = URL(string: origin), let host = url.host, !host.isEmpty else { return "This page" }
+        let port = url.port.map { ":\($0)" } ?? ""
+        return url.scheme == "https" ? host + port : "\(url.scheme ?? "")://\(host)\(port)"
     }
 
     /// Observes the first press without taking it away from the page or a field.
