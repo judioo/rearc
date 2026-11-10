@@ -90,14 +90,17 @@ struct SidebarView: View {
             // Arc's media strips (and ReArc's live video) sit above the bottom bar.
             MediaControlsStackView(model: model)
 
+            // Deferred onboarding's invitation, in the strips' insets and gap.
             if model.onboardingSetupState.showsCard {
                 FinishSetupCard(model: model)
-                    .padding(.horizontal, SidebarMetrics.rowInset)
-                    .padding(.vertical, 6)
+                    .padding(.horizontal, MediaStripMetrics.inset)
+                    .padding(.bottom, MediaStripMetrics.gap)
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .bottom)))
             }
 
             BottomBarView(model: model, draggedItemID: $draggedItemID)
         }
+        .animation(.easeOut(duration: 0.2), value: model.onboardingSetupState)
         .frame(width: model.sidebarWidth)
         .frame(maxHeight: .infinity)
         .overlay(alignment: Alignment(horizontal: model.sidebarPlacement.resizeHandleEdge.horizontalAlignment, vertical: .center)) {
