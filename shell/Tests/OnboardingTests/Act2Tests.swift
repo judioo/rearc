@@ -88,29 +88,29 @@ final class Act2Tests: XCTestCase {
         XCTAssertEqual(log.totals(at: 1).extensions, 0)
     }
 
-    /// Chrome keeps Login Data and History open, often with new rows still in
+    /// Chrome keeps History open, often with new rows still in
     /// the write-ahead log: the scanner counts a copy, so it sees them, and
     /// leaves nothing behind.
     func testTheScannerCountsACopyOfALiveDatabase() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
-        let url = folder.appendingPathComponent("Login Data")
+        let url = folder.appendingPathComponent("History")
         var db: OpaquePointer?
         XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
         defer { sqlite3_close(db) }
         XCTAssertEqual(sqlite3_exec(db, """
             PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
-            CREATE TABLE logins(origin_url VARCHAR NOT NULL, blacklisted_by_user INTEGER NOT NULL);
-            INSERT INTO logins VALUES ('https://a.example.com/', 0), ('https://b.example.com/', 0), ('https://c.example.com/', 1);
+            CREATE TABLE urls(url VARCHAR NOT NULL, hidden INTEGER NOT NULL);
+            INSERT INTO urls VALUES ('https://a.example.com/', 0), ('https://b.example.com/', 0), ('https://c.example.com/', 1);
             """, nil, nil, nil), SQLITE_OK)
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path + "-wal"), "the rows are still in the log")
         let leftovers = { (try? FileManager.default.contentsOfDirectory(atPath: FileManager.default.temporaryDirectory.path))?
             .filter { $0.hasPrefix("ReArcScan-") }.count ?? 0 }
         let before = leftovers()
-        XCTAssertEqual(BrowserScanner.count(url, "SELECT COUNT(*) FROM logins WHERE blacklisted_by_user = 0"), 2)
+        XCTAssertEqual(BrowserScanner.count(url), 3)
         XCTAssertEqual(leftovers(), before, "the copy is removed")
-        XCTAssertEqual(BrowserScanner.count(folder.appendingPathComponent("Missing"), "SELECT 1"), 0)
+        XCTAssertEqual(BrowserScanner.count(folder.appendingPathComponent("Missing")), 0)
     }
 
     /// The scanner reads Chromium-style profiles and Arc's sidebar, read-only.
@@ -124,6 +124,9 @@ final class Act2Tests: XCTestCase {
         func write(_ object: Any, _ url: URL) throws { try JSONSerialization.data(withJSONObject: object).write(to: url) }
         try write(["profile": ["info_cache": ["Default": ["name": "Personal"], "Profile 9": ["name": "Gone"]]]],
                   arc.appendingPathComponent("Local State"))
+        try write(["extensions": ["settings": ["abcdefghijklmnopabcdefghijklmnop": [
+            "location": 1, "from_webstore": true, "manifest": ["name": "Store", "version": "1"],
+        ]]]], profile.appendingPathComponent("Preferences"))
         try write(["roots": ["bookmark_bar": ["type": "folder", "children": [
             ["type": "url"], ["type": "folder", "children": [["type": "url"], ["type": "url"]]],
         ]]]], profile.appendingPathComponent("Bookmarks"))

@@ -32,6 +32,12 @@ extension ChromiumRuntime {
     func installExtensions(_ items: [ExtensionReinstallQueue.Item],
                            completion: @escaping (ExtensionReinstallQueue.Item, Int32, String, Bool) -> Void) {
         guard let first = items.first else { return }
+        guard items.allSatisfy({ $0.origin == .webStore && $0.profileID == first.profileID }) else {
+            for (index, item) in items.enumerated() {
+                completion(item, 4, "Only Chrome Web Store extensions can be imported automatically.", index == items.count - 1)
+            }
+            return
+        }
         withEngineProfile(.persistent(first.profileID)) { [self] profile in
             guard supportsBulkExtensionInstall, let profile else {
                 for (index, item) in items.enumerated() {
@@ -60,16 +66,7 @@ extension ChromiumRuntime {
                     let pointers = strings.map { Optional(UnsafePointer<CChar>($0)) }
                     status = pointers.withUnsafeBufferPointer { install(profile, $0.baseAddress, UInt32(items.count), bulkExtensionReply, context) }
                 }
-            case .unpacked(let path):
-                typealias Load = @convention(c) (UInt64, UnsafePointer<CChar>?, ReArcExtensionInstallCallback?, UnsafeMutableRawPointer?) -> ReArcStatus
-                // Engine ABI 1.63 removed the unpacked loader.
-                if let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcProfileLoadUnpackedExtension") {
-                    let load = unsafeBitCast(symbol, to: Load.self)
-                    status = path.withCString { load(profile, $0, bulkExtensionReply, context) }
-                } else {
-                    status = ReArcStatus(REARC_UNSUPPORTED)
-                }
-            case .other:
+            case .unpacked, .other:
                 status = ReArcStatus(REARC_INVALID_ARGUMENT)
             }
             if status != REARC_OK {

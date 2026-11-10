@@ -118,7 +118,7 @@ final class OnboardingImportTests: XCTestCase {
             INSERT INTO urls(url, title, visit_count, last_visit_time) VALUES ('https://tides.example.org/', 'Tides', 2, \(time - 1_000_000));
             INSERT INTO urls(url, title, visit_count, last_visit_time, hidden) VALUES ('https://frame.example.org/', '', 1, \(time), 1);
             """)
-        // Counted from a copy, never read: no real login and no password.
+        // Existence only: the scanner must never copy or open this database.
         try sqlite("Google/Chrome/Default/Login Data", """
             CREATE TABLE logins(origin_url VARCHAR NOT NULL, blacklisted_by_user INTEGER NOT NULL);
             INSERT INTO logins VALUES ('https://shop.example.com/', 0);
@@ -142,6 +142,21 @@ final class OnboardingImportTests: XCTestCase {
     }
 
     // MARK: Counts
+
+    func testScannerRejectsProfileTraversalAndChecksOnlyLoginPresence() throws {
+        // A directory stands in for Login Data: SQLite could not count it.
+        let login = root.appendingPathComponent("Google/Chrome/Default/Login Data")
+        try FileManager.default.removeItem(at: login)
+        try FileManager.default.createDirectory(at: login, withIntermediateDirectories: false)
+        try write(["profile": ["info_cache": [
+            "Default": ["name": "Valid"], "../../Outside": ["name": "Traversal"],
+            "/absolute": ["name": "Absolute"], "Guest Profile": ["name": "Guest"],
+        ]]], "Google/Chrome/Local State")
+        try write(["roots": ["bookmark_bar": ["children": [["type": "url", "url": "https://example.org"]]]]], "Outside/Bookmarks")
+        let chrome = BrowserScanner.scan(applicationSupport: root).filter { $0.browser == "Chrome" }
+        XCTAssertEqual(chrome.map(\.directory), ["Default"])
+        XCTAssertEqual(chrome.first?.stats.passwords, 1, "presence, without opening Login Data")
+    }
 
     func testActTwoCountsWhatTheImportWillBring() throws {
         let found = sources()
@@ -204,13 +219,44 @@ final class OnboardingImportTests: XCTestCase {
         let card = model.membershipCard.ensureLoaded()
         XCTAssertEqual(card.title, "STATUESQUE HUNTER")
         XCTAssertEqual(card.shape, 4)
-        XCTAssertTrue(card.hasArcHistory)
-        XCTAssertEqual(model.membershipCardName, "Akilu", "Arc's name until Act 1 gives one")
+        XCTAssertFalse(card.hasArcHistory, "Arc dates are not read from its token file")
+        XCTAssertEqual(model.membershipCardName, model.accountName, "profile name until Act 1 gives one")
         model.recordOnboardingName("  Ada ")
         XCTAssertEqual(model.membershipCardName, "Ada")
     }
 
     // MARK: Extensions
+
+    func testApplyInstallsOnlyIDsAndOriginsCountedInEachSourceProfile() throws {
+        let found = sources()
+        let plan = OnboardingImportPlan(sources: found, categories: [.extensions])
+        // An old store ID becomes unpacked, a new store ID appears, and an
+        // old unpacked ID becomes store-backed after the count was displayed.
+        try write(["extensions": ["settings": [
+            Self.notesID: extensionEntry("Notes", location: 4, webStore: false, path: root.path),
+        ]]], "Arc/User Data/Default/Secure Preferences")
+        try write(["extensions": ["settings": [
+            Self.notesID: extensionEntry("Notes", location: 4, webStore: false, path: root.path),
+            Self.readerID: extensionEntry("Reader", location: 1, webStore: true, path: "reader"),
+            Self.unpackedID: extensionEntry("Now Store", location: 1, webStore: true, path: "new"),
+            Self.externalID: extensionEntry("New Store", location: 1, webStore: true, path: "new"),
+        ]]], "Google/Chrome/Default/Secure Preferences")
+        let read = plan.read(applicationSupport: root, arcDefaults: { [:] })
+        let model = makeModel()
+        _ = OnboardingImportPlan.apply(read, model: model)
+        XCTAssertEqual(model.pendingExtensionReinstall?.queue.items.map(\.id), [Self.readerID])
+        XCTAssertEqual(model.pendingExtensionReinstall?.queue.items.map(\.origin), [.webStore])
+    }
+
+    func testUnpackedExtensionsAreNotCountedEvenWhenTheirFolderExists() throws {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("nowhere"), withIntermediateDirectories: true)
+        let found = sources()
+        XCTAssertFalse(found.flatMap(\.extensionIDs).contains(Self.unpackedID))
+        XCTAssertFalse(BrowserScanner.scan(applicationSupport: root).flatMap(\.extensionIDs).contains(Self.unpackedID))
+        let model = makeModel()
+        _ = importForReal(found, [.extensions], model: model)
+        XCTAssertTrue(try XCTUnwrap(model.pendingExtensionReinstall).queue.items.allSatisfy { $0.origin == .webStore })
+    }
 
     func testExtensionsAreQueuedForAfterTheSunriseAndSurviveARelaunch() throws {
         let model = makeModel()

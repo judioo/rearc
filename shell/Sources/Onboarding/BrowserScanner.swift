@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import SidebarModel
 
 public struct ImportStats: Equatable, Sendable {
     public var spaces = 0
@@ -48,6 +49,9 @@ public struct ImportSource: Equatable, Identifiable, Sendable {
     /// The extensions `stats.extensions` counts, by id, so one installed in
     /// two profiles counts once; empty when only the count is known.
     public var extensionIDs: [String]
+    /// Origins consented to at discovery, keyed by the counted IDs. The host
+    /// intersects this snapshot with a fresh inventory before queuing work.
+    public var extensionOrigins: [String: SourceExtension.Origin] = [:]
     /// Arc's bookmarks copy its sidebar, so `stats.bookmarks` counts only
     /// the ones its spaces don't bring; this is the count when its spaces
     /// stay behind (nil: the same).
@@ -104,7 +108,7 @@ public struct ImportSource: Equatable, Identifiable, Sendable {
 /// Finds Arc, Chrome and Brave profiles on this Mac and counts what each holds.
 /// Read-only: SQLite files are counted from a private temporary copy (the
 /// browser may hold them open), nothing is decrypted, and nothing leaves the
-/// machine. Counting logins reads no row of them, let alone a password.
+/// machine. Login Data is checked for existence only; it is never copied or opened.
 public enum BrowserScanner {
     struct Browser { let name: String; let path: String; let colour: RGBA }
     static let browsers = [
@@ -122,14 +126,17 @@ public enum BrowserScanner {
             else { continue }
             let arc = b.name == "Arc" ? arcSidebar(applicationSupport.appendingPathComponent("Arc/StorableSidebar.json")) : [:]
             for (dir, info) in cache.sorted(by: { $0.key < $1.key }) {
+                guard BrowserImportDiscovery.isProfileDirectory(dir) else { continue }
                 let profileDir = root.appendingPathComponent(dir)
                 guard FileManager.default.fileExists(atPath: profileDir.path) else { continue }
                 let info = info as? [String: Any] ?? [:]
                 var stats = ImportStats()
                 stats.bookmarks = bookmarks(profileDir.appendingPathComponent("Bookmarks"))
-                stats.pages = count(profileDir.appendingPathComponent("History"), "SELECT COUNT(*) FROM urls")
-                stats.passwords = count(profileDir.appendingPathComponent("Login Data"), "SELECT COUNT(*) FROM logins WHERE blacklisted_by_user = 0")
-                let extensionIDs = extensions(profileDir.appendingPathComponent("Extensions"))
+                stats.pages = count(profileDir.appendingPathComponent("History"))
+                // Presence only, for the "passwords stay behind" message; never a login count.
+                stats.passwords = FileManager.default.fileExists(atPath: profileDir.appendingPathComponent("Login Data").path) ? 1 : 0
+                let extensionItems = ExtensionConsolidation(ExtensionInventoryReader.read(profile: profileDir)).candidates
+                let extensionIDs = extensionItems.map(\.id)
                 stats.extensions = extensionIDs.count
                 var seeds: [SpaceSeed] = []
                 if let a = arc[dir] {
@@ -140,8 +147,10 @@ public enum BrowserScanner {
                 // A profile with nothing in it is not worth asking about.
                 guard stats != ImportStats() else { continue }
                 let colour = (info["profile_highlight_color"] as? Int).map { RGBA(hex: UInt32(truncatingIfNeeded: $0) & 0xFFFFFF) } ?? b.colour
-                found.append(ImportSource(browser: b.name, directory: dir, profile: info["name"] as? String ?? dir,
-                                          colour: colour, stats: stats, spaces: seeds, extensionIDs: extensionIDs))
+                var source = ImportSource(browser: b.name, directory: dir, profile: info["name"] as? String ?? dir,
+                                          colour: colour, stats: stats, spaces: seeds, extensionIDs: extensionIDs)
+                source.extensionOrigins = Dictionary(uniqueKeysWithValues: extensionItems.map { ($0.id, $0.origin) })
+                found.append(source)
             }
         }
         return found
@@ -165,7 +174,9 @@ public enum BrowserScanner {
     /// One number from a copy of `url` (and its journal) in a private
     /// temporary folder: the browser's own file is never opened, so nothing
     /// locks it and a write in progress cannot be half-read.
-    static func count(_ url: URL, _ sql: String) -> Int {
+    static func count(_ url: URL) -> Int {
+        guard url.lastPathComponent == "History" else { return 0 }
+        let sql = "SELECT COUNT(*) FROM urls"
         let fm = FileManager.default
         guard fm.fileExists(atPath: url.path) else { return 0 }
         let folder = fm.temporaryDirectory.appendingPathComponent("ReArcScan-\(UUID().uuidString)", isDirectory: true)
@@ -185,12 +196,6 @@ public enum BrowserScanner {
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
         defer { sqlite3_finalize(stmt) }
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
-    }
-
-    /// Extension folders, by id (32 letters a–p).
-    static func extensions(_ url: URL) -> [String] {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
-        return names.filter { $0.count == 32 && $0.allSatisfy { ("a" ... "p").contains($0) } }.sorted()
     }
 
     /// Arc keeps spaces and tabs in its sidebar file, each space tagged with

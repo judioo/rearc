@@ -67,6 +67,7 @@ let package = Package(
         // full-screen takeover. `sunrise` runs it on its own and renders previews.
         .target(
             name: "Onboarding",
+            dependencies: ["SidebarModel"],
             resources: [.copy("Resources/voice-placeholder.wav")],
             // The score is synthesised sample by sample on the real-time audio
             // thread. Unoptimised, Act 1 needs more than its 10.7 ms per 512-frame

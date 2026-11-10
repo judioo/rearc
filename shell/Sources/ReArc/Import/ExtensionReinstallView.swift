@@ -14,7 +14,7 @@ final class ExtensionReinstallSession {
     init(model: BrowserViewModel, pending: PendingExtensionReinstall) {
         self.model = model
         self.pending = pending
-        items = Array(pending.queue.items.dropFirst(pending.queue.position))
+        items = Array(pending.queue.items.dropFirst(pending.queue.position)).filter { $0.origin == .webStore }
         hasFinished = pending.outstandingItems.isEmpty
     }
 
@@ -61,8 +61,8 @@ final class ExtensionReinstallSession {
         isInstalling = true
         model?.isExtensionReinstallPresented = false
         progress()
-        // The engine limits store downloads to three. Profiles and unpacked
-        // folders run in turn, so an explicit profile close cannot race a job.
+        // The engine limits store downloads to three. Profiles run in turn,
+        // so an explicit profile close cannot race a job.
         run(chosen)
     }
 
@@ -135,7 +135,7 @@ struct ExtensionReinstallView: View {
                                 }
                             }
                             Spacer()
-                            Button(item.origin == .webStore ? "Open in Web Store" : "Load Unpacked…") { session.openStore(item) }
+                            Button("Open in Web Store") { session.openStore(item) }
                         }
                     }
                     ForEach(session.unavailable, id: \.key) { item in

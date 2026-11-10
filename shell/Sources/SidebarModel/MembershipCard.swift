@@ -506,17 +506,15 @@ public struct MembershipCardPalette: Equatable, Sendable {
 
 // MARK: Import from Arc
 
-/// What ReArc takes from Arc's card (SETTINGS.md §10.4): from
-/// `StorableMembershipCard.json` the title, palette number, shape name and
-/// blob numbers; from `StorableAuthState.json` only `session.user.createdAt`
-/// and `session.user.name`. The auth file also holds an e-mail, tokens and a
-/// user ID: the decoder below names only those two fields, so nothing else
-/// in it is decoded, kept, logged or stored. Read-only; Arc's files are
-/// never written.
+/// Imports title, palette, shape and blob numbers from Arc's membership card.
+/// Never opens StorableAuthState.json: that file holds session tokens. Arc's
+/// name and member-since date are no longer imported; the card uses the
+/// onboarding/profile name and ReArc's own start date. Existing saved Arc
+/// history still works. Arc's files are never written.
 public struct ArcMembershipCardImport: Equatable, Sendable {
     public static let cardFileName = "StorableMembershipCard.json"
     public static let authFileName = "StorableAuthState.json"
-    /// Neither file is near this; a bigger one isn't read.
+    /// The card is small; a bigger file is not read.
     static let maximumFileSize = 1 << 20
 
     public var title: String?
@@ -549,13 +547,12 @@ public struct ArcMembershipCardImport: Equatable, Sendable {
     /// Whether there is an Arc card to import (the files exist; nothing is read).
     public static func exists(in applicationSupport: URL, fileManager: FileManager = .default) -> Bool {
         let folder = folder(in: applicationSupport)
-        return [cardFileName, authFileName].contains { fileManager.isReadableFile(atPath: folder.appendingPathComponent($0).path) }
+        return fileManager.isReadableFile(atPath: folder.appendingPathComponent(cardFileName).path)
     }
 
     public static func load(from applicationSupport: URL) -> ArcMembershipCardImport? {
         let folder = folder(in: applicationSupport)
-        return read(card: smallFile(folder.appendingPathComponent(cardFileName)),
-                    auth: smallFile(folder.appendingPathComponent(authFileName)))
+        return read(card: smallFile(folder.appendingPathComponent(cardFileName)))
     }
 
     static func smallFile(_ url: URL) -> Data? {
@@ -563,21 +560,14 @@ public struct ArcMembershipCardImport: Equatable, Sendable {
         return try? Data(contentsOf: url)
     }
 
-    /// Nil when neither file gives anything.
-    public static func read(card: Data?, auth: Data?) -> ArcMembershipCardImport? {
+    /// Nil when the card gives nothing.
+    public static func read(card: Data?) -> ArcMembershipCardImport? {
         var result = ArcMembershipCardImport()
         if let card, let state = try? JSONDecoder().decode(CardState.self, from: card) {
             result.title = state.title.flatMap(MembershipCardTitle.sanitized)
             result.palette = state.paletteNumber.flatMap { (1...MembershipCard.paletteCount).contains($0) ? $0 : nil }
             result.shape = state.shapeName.flatMap(shapeNumber)
             result.seed = Array((state.backgroundBlobInfo ?? []).prefix(MembershipCard.blobCount)).map { max(0, min($0, 99)) }
-        }
-        if let auth, let user = (try? JSONDecoder().decode(AuthState.self, from: auth))?.session?.user {
-            result.memberSince = user.createdAt.flatMap { $0.isFinite && $0 > 0 ? Date(timeIntervalSinceReferenceDate: $0) : nil }
-            result.name = user.name.flatMap { name in
-                let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                return trimmed.isEmpty ? nil : String(trimmed.prefix(40))
-            }
         }
         return result.isEmpty ? nil : result
     }
@@ -628,37 +618,4 @@ public struct ArcMembershipCardImport: Equatable, Sendable {
         enum CodingKeys: String, CodingKey { case title, paletteNumber, shapeName, backgroundBlobInfo }
     }
 
-    /// Only the path to the two fields; every other key is skipped unread.
-    private struct AuthState: Decodable {
-        var session: Session?
-
-        init(from decoder: Decoder) throws {
-            session = try? decoder.container(keyedBy: CodingKeys.self).decode(Session.self, forKey: .session)
-        }
-
-        enum CodingKeys: String, CodingKey { case session }
-
-        struct Session: Decodable {
-            var user: User?
-
-            init(from decoder: Decoder) throws {
-                user = try? decoder.container(keyedBy: CodingKeys.self).decode(User.self, forKey: .user)
-            }
-
-            enum CodingKeys: String, CodingKey { case user }
-        }
-
-        struct User: Decodable {
-            var createdAt: Double?
-            var name: String?
-
-            init(from decoder: Decoder) throws {
-                let c = try decoder.container(keyedBy: CodingKeys.self)
-                createdAt = try? c.decode(Double.self, forKey: .createdAt)
-                name = try? c.decode(String.self, forKey: .name)
-            }
-
-            enum CodingKeys: String, CodingKey { case createdAt, name }
-        }
-    }
 }

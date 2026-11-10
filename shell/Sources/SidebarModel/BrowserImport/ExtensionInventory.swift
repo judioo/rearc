@@ -32,7 +32,7 @@ public struct SourceExtension: Identifiable, Equatable, Sendable {
     public var canReinstall: Bool {
         switch origin {
         case .webStore: return true
-        case .unpacked(let path): return FileManager.default.fileExists(atPath: path)
+        case .unpacked: return false
         case .other: return false
         }
     }
@@ -49,6 +49,12 @@ public enum ExtensionInventoryReader {
     /// 32 letters a–p.
     public static func isExtensionID(_ id: String) -> Bool {
         id.count == 32 && id.allSatisfy { ("a" ... "p").contains($0) }
+    }
+
+    /// A new inventory can remove consented items, never add IDs or change
+    /// their origin (including an unpacked path) after the discovery snapshot.
+    public static func consented(_ inventory: [SourceExtension], snapshot: [String: SourceExtension.Origin]) -> [SourceExtension] {
+        inventory.filter { snapshot[$0.id] == $0.origin }
     }
 
     /// The profile's extensions, without Chromium's built-in ones, by name.
@@ -114,12 +120,18 @@ public enum ExtensionInventoryReader {
         return true
     }
 
+    /// A locale directory name, such as en, en_US, es_419 or zh_Hant_TW.
+    /// Separators are allowed only between ASCII alphanumeric subtags.
+    static func isLocaleName(_ name: String) -> Bool {
+        name.count <= 64 && name.range(of: "^[A-Za-z]{2,3}(?:[_-][A-Za-z0-9]{2,8})*$", options: .regularExpression) == (name.startIndex..<name.endIndex)
+    }
+
     /// `__MSG_name__` names come from `_locales/<default_locale>/messages.json`.
     static func localized(_ name: String, defaultLocale: String?, folder: URL) -> String? {
         guard name.hasPrefix("__MSG_"), name.hasSuffix("__"), name.count > 8 else { return name }
         let key = String(name.dropFirst(6).dropLast(2)).lowercased()
         let locales = [defaultLocale, "en", "en_US"].compactMap { $0 }
-        for locale in locales {
+        for locale in locales where isLocaleName(locale) {
             let url = folder.appendingPathComponent("_locales/\(locale)/messages.json")
             guard let data = try? Data(contentsOf: url),
                   let messages = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
@@ -173,14 +185,33 @@ public struct ExtensionReinstallQueue: Equatable, Codable, Sendable {
                 }
                 return nil
             }
+            guard source.origin == item.origin else {
+                skipped.append(.init(id: item.id, name: item.name, reason: "source origin changed"))
+                return nil
+            }
             var item = item
-            item.enabledByDefault = true
-            item.origin = source.origin
+            item.enabledByDefault = source.isEnabled
             item.sourceManifest = source.manifestJSON
             return item
         }
         position = 0
         return skipped
+    }
+
+    private enum CodingKeys: String, CodingKey { case items, position }
+
+    /// Persisted queues are untrusted input. Keep store items only, including
+    /// when resuming a queue written before unpacked imports were removed.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decoded = try container.decode([Item].self, forKey: .items)
+        let oldPosition = max(0, min(try container.decodeIfPresent(Int.self, forKey: .position) ?? 0, decoded.count))
+        var seen = Set<String>()
+        let accepted = decoded.enumerated().filter { _, item in
+            item.origin == .webStore && ExtensionInventoryReader.isExtensionID(item.id) && seen.insert(item.key).inserted
+        }
+        items = accepted.map(\.element)
+        position = accepted.filter { $0.offset < oldPosition }.count
     }
 
     public var current: Item? { items.indices.contains(position) ? items[position] : nil }
@@ -239,6 +270,7 @@ public struct ExtensionConsolidation: Sendable {
             else if copies.allSatisfy(\.isBlocklisted) { reason = "blocklisted" }
             else if eligible == nil { reason = "disabled" }
             else if eligible?.manifestVersion == 2 { reason = "retired (Manifest V2)" }
+            else if case .unpacked(let path) = eligible?.origin { reason = "load manually: \(path)" }
             else if eligible?.canReinstall != true { reason = "not portable" }
             else { reason = nil }
             if let reason { skipped.append(.init(id: source.id, name: source.name, reason: reason)) }

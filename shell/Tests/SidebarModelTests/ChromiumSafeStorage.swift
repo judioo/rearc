@@ -1,6 +1,7 @@
 import CommonCrypto
 import Foundation
 import SQLite3
+@testable import SidebarModel
 
 /// Passwords and cookies in a Chromium profile on macOS are encrypted with
 /// a key derived from the browser's Keychain item (`ImportBrowser
@@ -10,7 +11,8 @@ import SQLite3
 /// `keychain_key_provider.mm`). Reading the item shows macOS's Keychain
 /// prompt for that browser, so it happens only after the user asks for
 /// that one browser's passwords (PROFILE-IMPORT §2.3). Nothing in ReArc
-/// reads the Keychain yet: these paths run on test fixtures only.
+/// reads the Keychain: this entire file belongs to SidebarModelTests and is
+/// excluded from every shipping target, in debug and release builds.
 public enum ChromiumSafeStorage {
     static let prefix = Data("v10".utf8)
     static let salt = Data("saltysalt".utf8)

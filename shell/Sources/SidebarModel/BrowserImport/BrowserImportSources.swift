@@ -155,7 +155,7 @@ public enum BrowserImportDiscovery {
         }
     }
 
-    static func isProfileDirectory(_ name: String) -> Bool {
+    public static func isProfileDirectory(_ name: String) -> Bool {
         name == "Default" || (name.hasPrefix("Profile ") && Int(name.dropFirst(8)) != nil)
     }
 
