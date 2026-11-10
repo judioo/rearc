@@ -32,7 +32,9 @@ static void event(void*, const ReArcDownloadEvent* e) {
   if (phase == 0 && warning.is_dangerous && e->received_bytes == 65536) {
     assert(warning.danger_type != 0);
     kept = e->download_id; phase = 1;
-    assert(ReArcDownloadResolveDanger(profile, kept, 2) == REARC_INVALID_ARGUMENT);
+    assert(ReArcDownloadResolveDanger(profile, kept, 3) == REARC_INVALID_ARGUMENT);
+    // ABI 1.62: scan applies to danger type 17 only (this is a manual-blocklist hit).
+    assert(ReArcDownloadResolveDanger(profile, kept, 2) == REARC_INVALID_STATE);
     assert(ReArcDownloadResolveDanger(999999, kept, 0) == REARC_PROFILE_NOT_FOUND);
     assert(ReArcDownloadResolveDanger(profile, kept, 0) == REARC_OK);
     assert(ReArcDownloadResolveDanger(profile, kept, 0) == REARC_INVALID_STATE);

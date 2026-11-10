@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Windowless ABI 1.53 test with loopback metadata; no real profiles or store.
+"""Windowless ABI 1.53/1.61/1.63 test with loopback metadata; no real profiles or store.
 
 Uses the same temporary app bundle, mock keychain and network isolation as
-run_c_abi.py. Metadata 404/410, 500, MV2, already-installed and unpacked loads
-exercise the real Chromium installers, rather than a second queue model.
+run_c_abi.py. Metadata 404/410, 500, MV2, already-installed, a store manifest
+asking for more permissions than the source (1.61 prompt) and shutdown during
+a batch exercise the real Chromium installers, rather than a second queue model.
 """
 import json
 import base64
@@ -50,7 +51,10 @@ class Store(common.Fixture):
                 def field(n, value):
                     value = value.encode()
                     return varint(n << 3 | 2) + varint(len(value)) + value
-                manifest = json.dumps(dict(name='Fixture', version='1.0', manifest_version=3 if key == Store.removed_id else 2, key=Store.public_key))
+                manifest = dict(name='Fixture', version='1.0', manifest_version=3 if key == Store.removed_id else 2, key=Store.public_key)
+                if key == Store.removed_id:
+                    manifest.update(permissions=['tabs'], host_permissions=['<all_urls>'])
+                manifest = json.dumps(manifest)
                 body = field(1, key) + field(2, manifest) + field(3, 'Retired fixture') + field(5, '/bulk-icon.png')
             self.send_response(status)
             self.send_header('Content-Length', str(len(body)))
@@ -89,9 +93,17 @@ def main():
                     str(common.ENGINE / 'tests/c_abi_bulk_extensions_host.mm'), '-framework', 'AppKit',
                     f'-F{common.OUT}', '-framework', 'Chromium Framework', f'-Wl,-rpath,{common.OUT}',
                     '-o', str(executable)], check=True)
+    def extension_key():
+        pem = workspace / f'key-{os.urandom(4).hex()}.pem'
+        subprocess.run(['openssl', 'genrsa', '-out', str(pem), '2048'], check=True, capture_output=True)
+        der = subprocess.run(['openssl', 'rsa', '-in', str(pem), '-pubout', '-outform', 'DER'], check=True, capture_output=True).stdout
+        return base64.b64encode(der).decode(), ''.join(chr(97 + (b >> 4)) + chr(97 + (b & 15)) for b in hashlib.sha256(der).digest()[:16])
+    # Already installed: a --load-extension fixture with a fixed key (1.63
+    # removed ReArcProfileLoadUnpackedExtension).
     unpacked = workspace / 'unpacked'
     unpacked.mkdir()
-    (unpacked / 'manifest.json').write_text(json.dumps(dict(name='Bulk fixture', version='1.0', manifest_version=3)))
+    loaded_key, loaded_id = extension_key()
+    (unpacked / 'manifest.json').write_text(json.dumps(dict(name='Bulk fixture', version='1.0', manifest_version=3, key=loaded_key)))
     key = workspace / 'store-key.pem'
     subprocess.run(['openssl', 'genrsa', '-out', str(key), '2048'], check=True, capture_output=True)
     public = subprocess.run(['openssl', 'rsa', '-in', str(key), '-pubout', '-outform', 'DER'], check=True, capture_output=True).stdout
@@ -107,19 +119,21 @@ def main():
     common.quiet_local_state(profile)
     log = common.ENGINE / 'runtime-abi-bulk-extensions.log'
     netlog = workspace / 'netlog.json'
-    env = dict(os.environ, REARC_BULK_UNPACKED=str(unpacked), REARC_BULK_REMOVED_ID=Store.removed_id)
+    env = dict(os.environ, REARC_BULK_LOADED_ID=loaded_id, REARC_BULK_REMOVED_ID=Store.removed_id)
     args = common.merge_disabled_features([
         'timeout', '-k', '5', '120', str(executable), f'--user-data-dir={profile}', '--use-mock-keychain',
         f'--log-net-log={netlog}', *common.NO_OUTSIDE_NETWORK,
         f'--host-resolver-rules=MAP chromewebstore.googleapis.com 127.0.0.1:{server.server_port}, MAP * ~NOTFOUND, EXCLUDE localhost',
         f'--ignore-certificate-errors-spki-list={spki}',
+        f'--load-extension={unpacked}',
         f'--apps-gallery-url=http://localhost:{plain.server_port}/',
         f'--apps-gallery-update-url=http://localhost:{plain.server_port}/bulk-empty.crx',
     ])
     with log.open('wb') as output:
         result = subprocess.run(args, stdout=output, stderr=subprocess.STDOUT, env=env)
     assert result.returncode == 0, f'bulk extensions: rc={result.returncode}; {log}'
-    assert Store.seen == {c * 32 for c in 'abcdefg'} | {Store.removed_id}, Store.seen
+    assert Store.seen <= {c * 32 for c in 'abcdefg'} | {Store.removed_id, loaded_id}, Store.seen
+    assert Store.seen >= {c * 32 for c in 'abcdefg'} | {Store.removed_id}, Store.seen
     assert 2 <= Store.peak <= 3, f'concurrency: {Store.peak}'
     assert not common.outside_connects(netlog), common.outside_connects(netlog)
     print(f'bulk extensions PASS; maximum concurrent metadata requests={Store.peak}; {log}')
