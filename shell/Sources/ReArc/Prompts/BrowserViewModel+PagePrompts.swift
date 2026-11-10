@@ -123,7 +123,7 @@ struct SitePermissionSummary: Equatable {
     var scope: String
     var rows: [Row]
 
-    var host: String { PageOrigin.displayHost(origin) ?? origin }
+    var host: String { PageOrigin.promptHost(origin) ?? origin }
     /// The indicator's icon: the most significant type answered.
     var symbol: String {
         let priority = ["camera_stream", "mic_stream", "geolocation", "notifications"]

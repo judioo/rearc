@@ -19,7 +19,7 @@ final class Wave22PromptModelTests: XCTestCase {
         XCTAssertTrue(opaque.showsCancel)
 
         let port = JavaScriptDialogRequest(id: 3, kind: .prompt, message: "Name", defaultText: "x", origin: "http://127.0.0.1:8080")
-        XCTAssertEqual(port.title, "127.0.0.1:8080 says")
+        XCTAssertEqual(port.title, "http://127.0.0.1:8080 says")
         XCTAssertTrue(port.showsTextField)
 
         let leave = JavaScriptDialogRequest(id: 4, kind: .beforeUnload, message: "ignored", origin: "https://a.test")

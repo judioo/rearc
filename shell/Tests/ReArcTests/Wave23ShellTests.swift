@@ -348,3 +348,32 @@ final class Wave23ShellTests: XCTestCase {
         XCTAssertNil(controller.warnings["d"], "finished items drop their warning")
     }
 }
+
+final class SuggestHTTPSRedirectTests: XCTestCase {
+    func testRejectsPlainHTTPBeforeStartingARequest() {
+        let done = expectation(description: "rejected")
+        let fetch = URLSessionSuggestFetcher().fetch(URL(string: "http://127.0.0.1:9/?q=secret")!) { data in
+            XCTAssertNil(data)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 1)
+        fetch.cancel()
+    }
+
+    func testRejectsRedirectsToPlainHTTP() {
+        let delegate = SuggestHTTPSRedirects()
+        let source = URL(string: "https://suggest.test/?q=secret")!
+        let response = HTTPURLResponse(url: source, statusCode: 302, httpVersion: nil, headerFields: nil)!
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.dataTask(with: source)
+        defer { session.invalidateAndCancel() }
+        delegate.urlSession(session, task: task, willPerformHTTPRedirection: response,
+                            newRequest: URLRequest(url: URL(string: "http://suggest.test/?q=secret")!)) {
+            XCTAssertNil($0)
+        }
+        delegate.urlSession(session, task: task, willPerformHTTPRedirection: response,
+                            newRequest: URLRequest(url: source)) {
+            XCTAssertEqual($0?.url, source)
+        }
+    }
+}

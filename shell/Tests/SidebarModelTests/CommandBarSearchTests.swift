@@ -60,3 +60,26 @@ final class CommandBarSearchTests: XCTestCase {
         XCTAssertEqual(store.selectedTabID, workTab.id)
     }
 }
+
+final class SuggestTransportSecurityTests: XCTestCase {
+    func testSuggestTemplatesRequireHTTPSIncludingDecodedPreferences() throws {
+        var provider = SearchProvider(id: "custom", name: "Custom", keyword: "c",
+            searchTemplate: "http://search.test/?q=%s", suggestTemplate: "http://suggest.test/?q=%s")
+        XCTAssertNotNil(provider.searchURL(for: "query"))
+        XCTAssertNil(provider.suggestURL(for: "private words"))
+        provider = try JSONDecoder().decode(SearchProvider.self, from: JSONEncoder().encode(provider))
+        XCTAssertNil(provider.suggestURL(for: "private words"))
+        provider.suggestTemplate = "https://suggest.test/?q=%s"
+        XCTAssertEqual(provider.suggestURL(for: "private words")?.absoluteString, "https://suggest.test/?q=private%20words")
+    }
+
+    func testPromptHostDistinguishesInsecureOrigins() {
+        XCTAssertEqual(PageOrigin.promptHost("http://www.bank.test"), "http://bank.test")
+        XCTAssertEqual(PageOrigin.promptHost("http://bank.test:8080"), "http://bank.test:8080")
+        XCTAssertEqual(PageOrigin.promptHost("https://www.bank.test"), "bank.test")
+        XCTAssertEqual(PageOrigin.displayHost("http://www.bank.test"), "bank.test", "site keys stay scheme-free")
+        XCTAssertEqual(PermissionPromptRequest(id: 1, origin: "http://bank.test", types: [.camera]).host, "http://bank.test")
+        XCTAssertEqual(PasswordSavePrompt(id: 1, origin: "http://bank.test", username: "u", isUpdate: false).title,
+                       "Save password for http://bank.test?")
+    }
+}
