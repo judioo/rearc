@@ -1,0 +1,193 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 fullscreen events carry the requesting origin (ABI 1.59)
+
+Security audit RC-500 F-08, engine part. Bridge 0.62.0, feature
+fullscreen_origin. ReArcEngineSetFullscreenCallback2 delivers
+ReArcFullscreenEvent2: the 1.27 event plus the serialized origin of the frame
+that called requestFullscreen(), so the host can name the site on every page
+fullscreen entry. ReArcFullscreenEvent keeps its layout; setting either
+callback replaces the other.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index a848ab3d4a..743a8fdd22 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -127,6 +127,7 @@ _ReArcAutocompleteStop
+ _ReArcTabDiscard
+ _ReArcTabGetDiscardState
+ _ReArcEngineSetFullscreenCallback
++_ReArcEngineSetFullscreenCallback2
+ _ReArcTabExitFullscreen
+ _ReArcTabGetFullscreenState
+ _ReArcEngineSetPrintCallback
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index c3dcd73d8e..91500e4122 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -138,6 +138,7 @@ _ReArcAutocompleteStop
+ _ReArcTabDiscard
+ _ReArcTabGetDiscardState
+ _ReArcEngineSetFullscreenCallback
++_ReArcEngineSetFullscreenCallback2
+ _ReArcTabExitFullscreen
+ _ReArcTabGetFullscreenState
+ _ReArcEngineSetPrintCallback
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index 7309f8d47d..f038c260fa 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 58, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 59, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -399,6 +399,18 @@ typedef void (*ReArcFullscreenCallback)(void* context,
+                                         const ReArcFullscreenEvent* event);
+ REARC_ENGINE_EXPORT void ReArcEngineSetFullscreenCallback(
+     ReArcFullscreenCallback callback, void* context);
++// ABI 1.59 (fullscreen_origin): the same events plus the serialized origin of
++// the frame that requested fullscreen (an iframe's own origin, "null" when
++// opaque), for a notice naming the site on every entry. It is the same on the
++// exit event. Setting either callback replaces the other registration.
++typedef struct ReArcFullscreenEvent2 {
++  ReArcFullscreenEvent event;
++  const char* origin;
++} ReArcFullscreenEvent2;
++typedef void (*ReArcFullscreenCallback2)(void* context,
++                                         const ReArcFullscreenEvent2* event);
++REARC_ENGINE_EXPORT void ReArcEngineSetFullscreenCallback2(
++    ReArcFullscreenCallback2 callback, void* context);
+ // Host-initiated exit (e.g. leaving native fullscreen). Not fullscreen:
+ // invalid_state. The exit event (reason 1) follows, deferred.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcTabExitFullscreen(uint64_t tab_id);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 15314a97fb..38247f1ddc 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -753,6 +753,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "launch_switch_filter" ||
+          std::string(feature) == "safe_browsing_tab_helpers" ||
+          std::string(feature) == "context_menu_link_open" ||
++         std::string(feature) == "fullscreen_origin" ||
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "history_query" ||
+          std::string(feature) == "search_autocomplete" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 052d12195e..f01595ec20 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.61.0";
++  return "0.62.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_fullscreen.cc b/chrome/browser/rearc_bridge/rearc_fullscreen.cc
+index a9a5abef6e..7e5be63785 100644
+--- a/chrome/browser/rearc_bridge/rearc_fullscreen.cc
++++ b/chrome/browser/rearc_bridge/rearc_fullscreen.cc
+@@ -5,6 +5,7 @@
+ 
+ #include <pthread.h>
+ 
++#include <string>
+ #include <vector>
+ 
+ #include "base/check.h"
+@@ -21,10 +22,14 @@
+ #include "content/public/browser/web_contents_observer.h"
+ #include "content/public/browser/web_contents_user_data.h"
+ #include "ui/events/keycodes/keyboard_codes.h"
++#include "url/origin.h"
+ 
+ namespace rearc {
+ namespace {
+ ReArcFullscreenCallback host = nullptr;
++// ABI 1.59: the same events with the requesting origin. One registration at
++// a time: setting either callback clears the other.
++ReArcFullscreenCallback2 host2 = nullptr;
+ void* host_context = nullptr;
+ uint64_t epoch = 0;
+ enum Reason : uint32_t { kPage = 0, kHost = 1, kEscape = 2, kClosed = 3, kHidden = 4 };
+@@ -32,11 +37,12 @@ class State : public content::WebContentsObserver,
+               public content::WebContentsUserData<State> {
+  public:
+   bool fullscreen() const { return fullscreen_; }
+-  void Enter(uint64_t tab_id, int64_t display_id) {
++  void Enter(uint64_t tab_id, int64_t display_id, std::string origin) {
+     // Identity is captured now: the session can be gone by the close event.
+     TabSession* session = TabRegistry::Get().FindSession(tab_id);
+     event_ = {session ? session->profile_id() : 0, tab_id,
+               session ? session->content_generation() : 0, 0, 0, display_id};
++    origin_ = std::move(origin);
+     fullscreen_ = true;
+     Publish(0, 0, display_id);
+     Synchronize();
+@@ -89,12 +95,18 @@ class State : public content::WebContentsObserver,
+     event.reason = reason;
+     event.display_id = display_id;
+     ABIPost(base::BindOnce(
+-        [](uint64_t expected, ReArcFullscreenEvent event) {
+-          if (host && expected == epoch) host(host_context, &event);
++        [](uint64_t expected, ReArcFullscreenEvent event, std::string origin) {
++          if (expected != epoch) return;
++          if (host) host(host_context, &event);
++          if (host2) {
++            ReArcFullscreenEvent2 event2{event, origin.c_str()};
++            host2(host_context, &event2);
++          }
+         },
+-        epoch, event));
++        epoch, event, origin_));
+   }
+   ReArcFullscreenEvent event_{};
++  std::string origin_;
+   bool fullscreen_ = false;
+   Reason reason_ = kPage;
+   WEB_CONTENTS_USER_DATA_KEY_DECL();
+@@ -118,13 +130,15 @@ bool CanEnterHostFullscreen(uint64_t tab_id, content::RenderFrameHost* frame) {
+   CHECK(pthread_main_np());
+   auto* contents = content::WebContents::FromRenderFrameHost(frame);
+   // The host must render the transition; never fullscreen an unpresented tab.
+-  return host && contents && ABIHasVisibilityIntent(tab_id) &&
++  return (host || host2) && contents && ABIHasVisibilityIntent(tab_id) &&
+          contents->GetVisibility() != content::Visibility::HIDDEN;
+ }
+ void EnterHostFullscreen(uint64_t tab_id, content::RenderFrameHost* frame,
+                          int64_t display_id) {
+   auto* contents = content::WebContents::FromRenderFrameHost(frame);
+-  State::GetOrCreateForWebContents(contents)->Enter(tab_id, display_id);
++  // The frame that called requestFullscreen(), possibly a cross-site iframe.
++  State::GetOrCreateForWebContents(contents)->Enter(
++      tab_id, display_id, frame->GetLastCommittedOrigin().Serialize());
+ }
+ void ExitHostFullscreen(content::WebContents* contents) {
+   if (auto* state = State::FromWebContents(contents)) state->Exited();
+@@ -154,6 +168,16 @@ void ReArcEngineSetFullscreenCallback(ReArcFullscreenCallback callback,
+   for (auto* state : rearc::FullscreenStates()) state->Exit(rearc::kHost);
+   ++rearc::epoch;
+   rearc::host = callback;
++  rearc::host2 = nullptr;
++  rearc::host_context = context;
++}
++void ReArcEngineSetFullscreenCallback2(ReArcFullscreenCallback2 callback,
++                                       void* context) {
++  CHECK(pthread_main_np());
++  for (auto* state : rearc::FullscreenStates()) state->Exit(rearc::kHost);
++  ++rearc::epoch;
++  rearc::host = nullptr;
++  rearc::host2 = callback;
+   rearc::host_context = context;
+ }
+ ReArcStatus ReArcTabExitFullscreen(uint64_t tab_id) {

@@ -86,6 +86,7 @@ tab/077-extension-background-tabs.patch        # P-TAB-001 ABI 1.55: extension t
 tab/078-launch-switch-filter.patch              # P-TAB-001 ABI 1.56: release engines drop remote-debugging, sandbox and TLS-weakening switches (audit F-03)
 tab/079-safe-browsing-tab-helpers.patch         # P-TAB-001 ABI 1.57: Safe Browsing tab helpers; ReArcEngineSafeBrowsingAvailable (audit F-02)
 tab/080-context-menu-link-initiator.patch       # P-TAB-001 ABI 1.58: context-menu opens keep the frame as initiator; new-tab/window/split actions (audit F-06)
+tab/081-fullscreen-origin.patch                 # P-TAB-001 ABI 1.59: fullscreen events with the requesting origin (audit F-08)
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:
