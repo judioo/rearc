@@ -1462,6 +1462,7 @@ extension ChromiumEngine: PageClosing {
             canInspect: capabilities.canInspect
         )
         let plan = PageContextMenuPlan.plan(for: event.params, options: options)
+        pagePrompts.engineOpensLinks = capabilities.linkOpenRequests && ReArcEngineHasFeature("context_menu_link_open")
         pagePrompts.showContextMenu(plan, params: event.params, at: event.point) { [weak self] item in
             guard let self else { return }
             if item == .inspect, capabilities.devTools {
@@ -1470,7 +1471,10 @@ extension ChromiumEngine: PageClosing {
                 runtime.onInspectRequested?(self)
                 return
             }
-            finishContextMenu(id, item: item)
+            let status = finishContextMenu(id, item: item)
+            if status == ReArcStatus(REARC_UNSUPPORTED), let item, ChromiumContextCommand(item)?.rawValue ?? 0 >= 13 {
+                pagePrompts.performShellItem(item, params: event.params, engineDeclined: true)
+            }
         }
     }
 

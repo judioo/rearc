@@ -76,6 +76,9 @@ final class PagePromptCenter {
     @ObservationIgnored var profileID: Profile.ID?
     /// A private window's session; its permission answers are never saved.
     @ObservationIgnored var privateSession: UUID?
+    /// The engine opens the menu's links itself, keeping the page as
+    /// initiator (Chromium ABI 1.58); the shell opens them otherwise.
+    @ObservationIgnored var engineOpensLinks = false
     @ObservationIgnored var role: EngineRole = .tab
     @ObservationIgnored weak var router: PageLinkRouting?
     @ObservationIgnored weak var sitePermissions: SitePermissionsController?
@@ -507,7 +510,9 @@ final class PagePromptCenter {
 
     /// Runs the items the shell owns. True when `item` was one of them.
     @discardableResult
-    func performShellItem(_ item: PageContextMenuItem, params: PageContextMenuParams) -> Bool {
+    func performShellItem(_ item: PageContextMenuItem, params: PageContextMenuParams, engineDeclined: Bool = false) -> Bool {
+        let opensPage = ([.openLinkInNewTab, .openLinkInLittleArc, .openLinkInNewSplit, .openImageInNewTab] as [PageContextMenuItem]).contains(item)
+        if opensPage, engineOpensLinks, privateSession == nil, !engineDeclined { return false }
         switch item {
         case .openLinkInNewTab:
             if let url = params.openableLink { router?.openLinkInNewTab(url, from: self) }

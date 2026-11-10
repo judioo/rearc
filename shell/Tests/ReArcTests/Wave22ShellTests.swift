@@ -108,9 +108,14 @@ final class Wave22ShellTests: XCTestCase {
         XCTAssertEqual(ChromiumContextCommand(.inspect)?.rawValue, 8)
         XCTAssertEqual(ChromiumContextCommand(.reload)?.rawValue, 11)
         XCTAssertEqual(ChromiumContextCommand.dismiss.rawValue, 12)
-        for shellItem: PageContextMenuItem in [.openLinkInNewTab, .openLinkInLittleArc, .openLinkInNewSplit, .searchFor("x"), .copyImageAddress, .viewSource] {
+        for shellItem: PageContextMenuItem in [.searchFor("x"), .copyImageAddress, .viewSource] {
             XCTAssertNil(ChromiumContextCommand(shellItem), "\(shellItem) is the shell's")
         }
+        // Engine ABI 1.58: opens keep the page as initiator (link-open dispositions 2, 4, 5).
+        XCTAssertEqual(ChromiumContextCommand(.openLinkInNewTab)?.rawValue, 13)
+        XCTAssertEqual(ChromiumContextCommand(.openLinkInLittleArc)?.rawValue, 15)
+        XCTAssertEqual(ChromiumContextCommand(.openLinkInNewSplit)?.rawValue, 16)
+        XCTAssertEqual(ChromiumContextCommand(.openImageInNewTab)?.rawValue, 17)
     }
 
     // MARK: Dialogs
@@ -315,6 +320,17 @@ final class Wave22ShellTests: XCTestCase {
         XCTAssertEqual(router.opened.last?.1.absoluteString, "view-source:https://a.test/")
         XCTAssertTrue(prompts.performShellItem(.searchFor("pandas"), params: params))
         XCTAssertEqual(router.opened.last?.0, "search")
+
+        // Engine ABI 1.58: the engine opens the link with the page as initiator;
+        // the shell opens it only when the engine declines.
+        prompts.engineOpensLinks = true
+        let count = router.opened.count
+        menus.choice = .openLinkInNewSplit
+        prompts.showContextMenu(plan, params: params, at: .zero) { performed.append($0) }
+        XCTAssertEqual(performed.last, .openLinkInNewSplit, "the engine performs the open")
+        XCTAssertEqual(router.opened.count, count)
+        XCTAssertTrue(prompts.performShellItem(.openLinkInNewSplit, params: params, engineDeclined: true))
+        XCTAssertEqual(router.opened.last?.0, "split")
     }
 
     func testNativeMenuShowsThePlan() {
