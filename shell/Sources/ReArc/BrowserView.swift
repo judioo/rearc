@@ -449,11 +449,10 @@ struct BrowserView: View {
                                                           inset: Double(inset))
         // A split's panes are cards of their own, each with its own row (SPLIT-VIEW §3.1).
         let splitCards = !fullscreen && shownSplit != nil
-        return VStack(spacing: 0) {
-            if showsToolbar, shownSplit == nil {
-                CardToolbarView(model: model, trafficLightsClearance: cardToolbarTrafficLightsClearance)
-                    .zIndex(1)
-            }
+        return AddressBarContainer(
+            showsToolbar: showsToolbar && shownSplit == nil,
+            holdsForAddressEditing: model.addressBarHasKeyboardFocus(for: model.selectedTab(in: windowID)?.id, in: windowID)
+        ) {
             contentArea
                 .overlay {
                     if let session = model.pageCaptureSession,
@@ -469,6 +468,8 @@ struct BrowserView: View {
                         }
                     }
                 }
+        } toolbar: {
+            CardToolbarView(model: model, trafficLightsClearance: cardToolbarTrafficLightsClearance)
         }
         .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil,
                     toolbarHeight: showsCardToolbar ? CardToolbarView.height : 0) { start in

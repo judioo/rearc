@@ -863,6 +863,7 @@ struct AdvancedSettingsPane: View {
     @Bindable var model: BrowserViewModel
     let capabilities: SettingsCapabilities
     @AppStorage(ToolbarURLPreference.key) private var urlInToolbar = ToolbarURLPreference.defaultValue
+    @AppStorage(AutoHideAddressBarPreference.key) private var autoHideAddressBar = AutoHideAddressBarPreference.defaultValue
     @AppStorage(ReorderHapticsPreference.key) private var reorderHaptics = ReorderHapticsPreference.defaultValue
     @AppStorage(ToolbarPageColorPreference.key) private var matchesPageColor = ToolbarPageColorPreference.defaultValue
 
@@ -886,6 +887,10 @@ struct AdvancedSettingsPane: View {
                     ? "Back, forward, reload and the address sit in a strip at the top of the page."
                     : "Back, forward, reload and the address sit at the top of the sidebar.",
                     icon: icon("menubar.rectangle", .red), isOn: $urlInToolbar)
+                SettingsSwitchRow(label: "Auto-hide address bar",
+                                  detail: "Move to the top of a page pane or press ⌘L to reveal its toolbar.",
+                                  icon: icon("menubar.arrow.up.rectangle", .red), isOn: $autoHideAddressBar)
+                    .disabled(!urlInToolbar)
             }
             SettingsGroup {
                 if capabilities.pictureInPicture {

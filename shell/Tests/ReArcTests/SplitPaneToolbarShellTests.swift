@@ -43,6 +43,11 @@ final class SplitPaneToolbarShellTests: XCTestCase {
         XCTAssertTrue(model.isCommandBarPresented)
         XCTAssertEqual(model.commandBarTargetID, tabs[1].id, "⌘L edits the focused pane")
         XCTAssertEqual(model.commandBarText, "https://pane1.test/page")
+        XCTAssertTrue(model.addressBarHasKeyboardFocus(for: tabs[1].id, in: nil))
+        XCTAssertFalse(model.addressBarHasKeyboardFocus(for: tabs[0].id, in: nil), "only the edited pane reveals")
+
+        model.dismissCommandBar()
+        XCTAssertFalse(model.addressBarHasKeyboardFocus(for: tabs[1].id, in: nil), "dismissal releases the toolbar")
     }
 
     func testAPanesAddressEditsThatPane() throws {
@@ -57,9 +62,24 @@ final class SplitPaneToolbarShellTests: XCTestCase {
         XCTAssertTrue(model.isCommandBarPresented, "another pane's address retargets the open bar")
         XCTAssertEqual(model.commandBarTargetID, tabs[0].id)
         XCTAssertEqual(model.commandBarText, "https://pane0.test/page")
+        XCTAssertTrue(model.addressBarHasKeyboardFocus(for: tabs[0].id, in: nil))
+        XCTAssertFalse(model.addressBarHasKeyboardFocus(for: tabs[1].id, in: nil))
 
         model.editAddress(ofPane: tabs[0].id, in: split.id)
         XCTAssertFalse(model.isCommandBarPresented, "the same address again closes it, as ⌘L does")
+        XCTAssertFalse(model.addressBarHasKeyboardFocus(for: tabs[0].id, in: nil))
+    }
+
+    func testAddressEditingRevealsOnlyTheKeyWindowsToolbar() throws {
+        let model = makeModel()
+        let first = SidebarWindowID(), second = SidebarWindowID()
+        model.store.registerWindow(first)
+        model.store.registerWindow(second)
+        model.store.windowBecameKey(first)
+        let (_, tabs) = try makeSplit(model)
+        model.focusLocation()
+        XCTAssertTrue(model.addressBarHasKeyboardFocus(for: tabs[0].id, in: first))
+        XCTAssertFalse(model.addressBarHasKeyboardFocus(for: tabs[0].id, in: second))
     }
 
     func testTheRowsCloseButtonClosesOrSeparatesItsPane() throws {

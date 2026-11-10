@@ -42,6 +42,10 @@ private struct ExtensionActionButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .addressBarControlFocus()
+        .transformPreference(AddressBarFocusPreference.self) {
+            $0 = $0 || controller.openPopupExtensionID == action.id
+        }
         .disabled(!action.isEnabled)
         .opacity(action.isEnabled ? 1 : 0.45)
         .background(AnchorReader { anchor = $0 })

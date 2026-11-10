@@ -108,8 +108,14 @@ struct SplitContentView: View {
         let radius: CGFloat = showsCards ? CGFloat(cardLayout.radius) : 0
         let card = RoundedRectangle(cornerRadius: radius, style: .continuous)
         let focused = ringed && row?.isActive == true && cardLayout.showsDecoration
-        VStack(spacing: 0) {
-            if showsRows, let row {
+        AddressBarContainer(
+            showsToolbar: showsRows && row != nil,
+            holdsForAddressEditing: model.addressBarHasKeyboardFocus(for: tab.id, in: window),
+            revealsAtWindowTop: split.orientation == .horizontal || row?.isAtLeadingCorner == true
+        ) {
+            SplitPanePage(engine: engine, tabID: tab.id, findBar: model.findBar)
+        } toolbar: {
+            if let row {
                 SplitPaneToolbarView(
                     model: model, splitID: split.id, orientation: split.orientation, tab: tab, engine: engine, row: row,
                     trafficLightsClearance: trafficLightsClearance
@@ -117,7 +123,6 @@ struct SplitContentView: View {
                 .equatable()
                 .zIndex(1)
             }
-            SplitPanePage(engine: engine, tabID: tab.id, findBar: model.findBar)
         }
         .clipShape(card)
         .background(card.fill(showsCards ? cardFill : .clear))
