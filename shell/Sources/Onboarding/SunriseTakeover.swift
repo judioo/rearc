@@ -1,4 +1,5 @@
 import AppKit
+import SidebarModel
 import SwiftUI
 
 /// Drives one playback of Act 0: the clock, the score, skip, mute and Begin.
@@ -30,6 +31,11 @@ public final class SunrisePlayer: ObservableObject {
     @Published public private(set) var act2: Act2Log? { didSet { rescore() } }
     /// Other browsers' profiles; scanned (read-only) while Act 1 plays.
     public var sources: [ImportSource]?
+    /// Browsers Act 2 names but cannot bring: blocked by macOS, or empty.
+    public var pending: [PendingBrowser] = []
+    /// Blocked browsers, and whether the person has been to System Settings.
+    var access = ImportAccessWatch()
+    private var rescanning = false
     public var usesDemoSources = false
     /// Act 3, after the blue sweep.
     @Published public private(set) var act3: Act3Log? { didSet { rescore() } }
@@ -137,12 +143,12 @@ public final class SunrisePlayer: ObservableObject {
         guard act1 == nil, exitStart == nil else { return }
         act1 = Act1Log(start: time(at: Date()))
         if sources == nil {
-            if let host {
-                host.discoverSources { [weak self] found in self?.sources = found }
-            } else if usesDemoSources { sources = ImportSource.demo } else {
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    let found = BrowserScanner.scan()
-                    DispatchQueue.main.async { self?.sources = found }
+            if usesDemoSources, host == nil {
+                sources = ImportSource.demo
+            } else {
+                scanBrowsers { [weak self] scan in
+                    self?.sources = scan.sources
+                    self?.pending = scan.pending
                 }
             }
         }
@@ -194,12 +200,52 @@ public final class SunrisePlayer: ObservableObject {
 
     func pickKeyboardSwatch() { if let i = keyboardSwatch ?? act1?.hovers.last?.index { pick(i) } }
 
+    /// The host's scan, or the scanner's own in the prototype.
+    func scanBrowsers(_ done: @escaping (BrowserScan) -> Void) {
+        let finish = { [weak self] (scan: BrowserScan) in
+            self?.access.update(scan.discovered)
+            done(scan)
+        }
+        if let host {
+            host.discoverSources(finish)
+        } else {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let scan = BrowserScanner.survey().trimmed()
+                DispatchQueue.main.async { finish(scan) }
+            }
+        }
+    }
+
+    /// "Allow access…": System Settings, at the pane that opens them all.
+    public func allowAccess() {
+        guard let permission = act2?.neededPermission else { return }
+        access.openedSettings(permission)
+        NSWorkspace.shared.open(permission.settingsURL)
+    }
+
+    public func relaunchForAccess() { host?.relaunchForAccess() }
+
+    /// ReArc is active again: while Act 2 still asks, look at the browsers
+    /// again, and bring in any that macOS now lets through.
+    public func applicationBecameActive() {
+        guard let log = act2, log.choice == nil, access.becameActive(), !rescanning else { return }
+        rescanning = true
+        scanBrowsers { [weak self] scan in
+            guard let self else { return }
+            self.rescanning = false
+            guard var log = self.act2, log.choice == nil else { return }
+            log.merge(scan, at: self.time(at: Date()))
+            log.offersRelaunch = self.access.offersRelaunch && (self.host?.canRelaunch ?? false)
+            if log != self.act2 { self.act2 = log }
+        }
+    }
+
     func startAct2() {
         guard act2 == nil, exitStart == nil else { return }
         let log = Act2Log(start: time(at: Date()), sources: sources ?? [],
-                          offered: host?.importCategories ?? ImportCategory.allCases)
+                          offered: host?.importCategories ?? ImportCategory.allCases, pending: pending)
         act2 = log
-        if log.sources.isEmpty {
+        if log.sources.isEmpty, log.blockedNames == nil {
             // Nothing to bring: a clean start, without asking.
             DispatchQueue.main.asyncAfter(deadline: .now() + Act2Timeline.ready) { [weak self] in self?.choose(false) }
         }
@@ -246,7 +292,7 @@ public final class SunrisePlayer: ObservableObject {
 
     var act2Controls: Act2Controls {
         Act2Controls(toggleSource: { self.toggleSource($0) }, toggleCategory: { self.toggleCategory($0) },
-                     choose: { self.choose($0) })
+                     choose: { self.choose($0) }, allowAccess: { self.allowAccess() }, relaunch: { self.relaunchForAccess() })
     }
 
     var yourColour: RGBA {
@@ -539,6 +585,8 @@ public final class SunriseTakeover {
             MainActor.assumeIsolated {
                 guard let window = self?.window, window.isVisible else { return }
                 window.makeKeyAndOrderFront(nil)
+                // Back from System Settings, perhaps with a browser allowed.
+                self?.player.applicationBecameActive()
             }
         }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in

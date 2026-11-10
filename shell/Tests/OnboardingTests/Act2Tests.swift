@@ -1,5 +1,6 @@
 import CoreGraphics
 @testable import Onboarding
+import SidebarModel
 import SQLite3
 import XCTest
 
@@ -169,5 +170,53 @@ final class Act2TrailLayoutTests: XCTestCase {
                 }
             }
         }
+    }
+}
+
+/// Browsers macOS keeps private sit on the trail with a lock, and one that
+/// is allowed while Act 2 asks joins it, saying "Found".
+final class Act2PendingBrowserTests: XCTestCase {
+    func testABlockedBrowserFlipsToFoundOnTheRescan() {
+        let arc = ImportSource.demo[0]
+        let chrome = ImportSource.demo[2]
+        let pending = [PendingBrowser(browser: .chrome, state: .needsPermission(.appData)),
+                       PendingBrowser(browser: .safari, state: .needsPermission(.fullDiskAccess)),
+                       PendingBrowser(browser: .edge, state: .noData)]
+        var log = Act2Log(start: 0, sources: [arc], pending: pending)
+        XCTAssertEqual(log.nodeCount, 4)
+        XCTAssertEqual(log.blockedNames, "Chrome and Safari")
+        XCTAssertEqual(log.neededPermission, .fullDiskAccess, "one button: the pane that covers both")
+        let A = Act2Layout(size: CGSize(width: 1440, height: 900))
+        XCTAssertGreaterThan(Act2Timeline.frame(log, Act2Timeline.ready, A).permission, 0.9)
+
+        log.toggles = [(Act2Timeline.ready + 0.5, 0)]
+        XCTAssertTrue(log.merge(BrowserScan(sources: [arc, chrome], pending: [pending[1], pending[2]]), at: 10))
+        XCTAssertEqual(log.sources.map(\.id), [arc.id, chrome.id], "Arc keeps index 0, so its toggle stays")
+        XCTAssertFalse(log.isOn(source: 0, at: 11))
+        XCTAssertEqual(log.pending.map(\.browser), [.safari, .edge])
+        XCTAssertEqual(log.arrivals, [1: 10])
+        XCTAssertEqual(log.blockedNames, "Safari")
+        let frame = Act2Timeline.frame(log, 11, A)
+        XCTAssertEqual(frame.nodes.count, 4)
+        XCTAssertGreaterThan(frame.found[1], 0.9, "Chrome rings and reads Found")
+        XCTAssertEqual(Act2Timeline.frame(log, 14, A).found[1], 0, "then its profile again")
+        XCTAssertFalse(log.merge(BrowserScan(sources: [arc, chrome], pending: [pending[1], pending[2]]), at: 12), "nothing new")
+
+        log.choice = (20, true)
+        XCTAssertFalse(log.merge(BrowserScan(sources: [arc, chrome, ImportSource.demo[3]]), at: 21), "the choice is made")
+    }
+
+    func testTheSurveyNamesBlockedAndEmptyBrowsers() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("Library/Application Support")
+        defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent().deletingLastPathComponent()) }
+        let brave = root.appendingPathComponent("BraveSoftware/Brave-Browser")
+        try FileManager.default.createDirectory(at: brave, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: brave.appendingPathComponent("Local State"))
+        let scan = BrowserScanner.survey(applicationSupport: root, installed: { $0 == .brave || $0 == .edge },
+                                         probe: { $0.path.hasPrefix(brave.path) ? .denied : ImportAccessProbes.system($0) })
+        XCTAssertTrue(scan.sources.isEmpty)
+        XCTAssertEqual(scan.pending, [PendingBrowser(browser: .brave, state: .needsPermission(.appData)),
+                                      PendingBrowser(browser: .edge, state: .noData)])
     }
 }

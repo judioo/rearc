@@ -116,16 +116,25 @@ final class FirstRunOnboarding: OnboardingHost {
 
     private var canReinstallExtensions: Bool { model?.canOpenBrowserPage(.extensions) ?? false }
 
-    func discoverSources(_ done: @escaping ([ImportSource]) -> Void) {
+    func discoverSources(_ done: @escaping (BrowserScan) -> Void) {
         let extensions = canReinstallExtensions
         let installed = model?.installedExtensionsReader()
         let main = model?.store.activeProfileID
         DispatchQueue.global(qos: .userInitiated).async {
-            let found = OnboardingImportPlan.counted(BrowserScanner.scan(), applicationSupport: BrowserImportDiscovery.applicationSupport,
-                                                     extensions: extensions,
+            let root = BrowserImportDiscovery.applicationSupport
+            let scan = BrowserScanner.survey(applicationSupport: root, installed: { ImportPrivacyAccess.isInstalled($0) })
+            let found = OnboardingImportPlan.counted(scan.sources, applicationSupport: root, extensions: extensions,
                                                      installedIDs: main.flatMap { id in installed?(id) } ?? [])
-            DispatchQueue.main.async { done(found) }
+            DispatchQueue.main.async { done(OnboardingImportPlan.withEmptyBrowsers(scan, counted: found).trimmed()) }
         }
+    }
+
+    /// A relaunch from Act 2 comes back to the sunrise: `onboarding-pending` (first run) or `--onboarding`.
+    var canRelaunch: Bool { ImportPrivacyAccess.canRelaunch && kind != .replay }
+
+    func relaunchForAccess() {
+        guard canRelaunch else { return }
+        ImportPrivacyAccess.relaunch(reopenImport: false)
     }
 
     func bring(_ sources: [ImportSource], categories: [ImportCategory], done: @escaping (OnboardingImportOutcome) -> Void) {
@@ -234,13 +243,13 @@ struct OnboardingImportPlan: Sendable {
     var extensionOrigins: [String: [String: SourceExtension.Origin]]
 
     init(sources: [ImportSource], categories: [ImportCategory]) {
-        arcDirectories = Set(sources.filter { $0.browser == "Arc" }.map(\.directory))
+        arcDirectories = Set(sources.filter { $0.importBrowser == .arc }.map(\.directory))
         chromium = sources.compactMap { s in
-            ImportBrowser(rawValue: s.browser.lowercased()).map { ($0, s.directory) }
+            s.importBrowser.map { ($0, s.directory) }
         }
         // A profile listed twice keeps its first snapshot rather than trapping.
         extensionOrigins = Dictionary(sources.compactMap { source in
-            ImportBrowser(rawValue: source.browser.lowercased()).map {
+            source.importBrowser.map {
                 ("\($0.rawValue)/\(source.directory)", source.extensionOrigins)
             }
         }, uniquingKeysWith: { first, _ in first })
@@ -282,7 +291,7 @@ struct OnboardingImportPlan: Sendable {
     func read(applicationSupport root: URL, arcDefaults: () -> [String: Any] = {
         UserDefaults(suiteName: ImportBrowser.arc.defaultsDomain)?.dictionaryRepresentation() ?? [:]
     }) -> Read {
-        let found = BrowserImportDiscovery.discover(in: root)
+        let found = BrowserImportDiscovery.discover(in: root, installed: { _ in false })
         var arc: ArcSidebarImport?
         var settings: ArcSettingsImport?
         var card: ArcMembershipCardImport?
@@ -298,7 +307,7 @@ struct OnboardingImportPlan: Sendable {
                 if bookmarks || history {
                     profiles.append((profile, bookmarks ? Self.bookmarks(profile) : nil, history ? Self.history(profile) : nil))
                 }
-                if self.extensions {
+                if self.extensions, profile.browser.family == .chromium {
                     let snapshot = extensionOrigins["\(profile.browser.rawValue)/\(profile.directory)"] ?? [:]
                     extensions += ExtensionInventoryReader.consented(ExtensionInventoryReader.read(profile: profile.url),
                                                                     snapshot: snapshot).map { (profile.browser, $0) }
@@ -309,11 +318,23 @@ struct OnboardingImportPlan: Sendable {
     }
 
     static func bookmarks(_ profile: ImportSourceProfile) -> [BookmarkNode]? {
-        try? ChromiumBookmarksReader.read(profile.url.appendingPathComponent(ChromiumBookmarksReader.fileName))
+        try? profile.readBookmarks()
     }
 
     static func history(_ profile: ImportSourceProfile) -> [VisitRecord]? {
-        try? ChromiumHistoryReader.read(profile.url.appendingPathComponent(ChromiumHistoryReader.fileName))
+        try? profile.readHistory()
+    }
+
+    /// A browser whose every profile `counted` left out has nothing to bring: Act 2 names it as empty.
+    static func withEmptyBrowsers(_ scan: BrowserScan, counted: [ImportSource]) -> BrowserScan {
+        var result = BrowserScan(sources: counted, pending: scan.pending)
+        let kept = Set(counted.compactMap(\.importBrowser))
+        for source in scan.sources {
+            guard let browser = source.importBrowser, !kept.contains(browser),
+                  !result.pending.contains(where: { $0.browser == browser }) else { continue }
+            result.pending.append(PendingBrowser(browser: browser, state: .noData))
+        }
+        return result
     }
 
     /// The scanner's sources, each counted as the import would bring it:
@@ -328,18 +349,18 @@ struct OnboardingImportPlan: Sendable {
     /// extensions the main profile already has, which don't count.
     static func counted(_ sources: [ImportSource], applicationSupport root: URL, extensions: Bool,
                         installedIDs: Set<String> = []) -> [ImportSource] {
-        let profiles = BrowserImportDiscovery.discover(in: root).flatMap(\.profiles)
-        let arc = sources.contains { $0.browser == "Arc" } ? try? ArcSidebarImport.load(from: root) : nil
+        let profiles = BrowserImportDiscovery.discover(in: root, installed: { _ in false }).flatMap(\.profiles)
+        let arc = sources.contains { $0.importBrowser == .arc } ? try? ArcSidebarImport.load(from: root) : nil
         return sources.compactMap { source in
             var stats = ImportStats()
             var counted = source
             counted.extensionIDs = []
             counted.extensionOrigins = [:]
-            if source.browser == "Arc", let arc = arc?.only(directories: [source.directory]) {
+            if source.importBrowser == .arc, let arc = arc?.only(directories: [source.directory]) {
                 stats.spaces = arc.export.spaces.count
                 stats.tabs = arc.export.spaces.reduce(0) { $0 + $1.pinnedTabCount } + arc.favoritesToImport()
             }
-            if let browser = ImportBrowser(rawValue: source.browser.lowercased()),
+            if let browser = source.importBrowser,
                let profile = profiles.first(where: { $0.browser == browser && $0.directory == source.directory }) {
                 let nodes = bookmarks(profile) ?? []
                 stats.bookmarks = nodes.reduce(0) { $0 + $1.linkCount }
@@ -349,7 +370,7 @@ struct OnboardingImportPlan: Sendable {
                                                               mirrorsArcSidebar: true).newLinks
                 }
                 stats.pages = history(profile)?.count ?? 0
-                if extensions {
+                if extensions, browser.family == .chromium {
                     let items = ExtensionReinstallQueue(ExtensionInventoryReader.read(profile: profile.url), into: UUID(),
                                                         installedIDs: installedIDs).items
                     counted.extensionIDs = items.map(\.id)

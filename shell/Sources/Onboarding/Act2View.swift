@@ -4,9 +4,14 @@ public struct Act2Controls {
     public var toggleSource: (Int) -> Void
     public var toggleCategory: (ImportCategory) -> Void
     public var choose: (Bool) -> Void
+    /// "Allow access…": System Settings, at the pane that opens the blocked browsers.
+    public var allowAccess: () -> Void
+    public var relaunch: () -> Void
 
-    public init(toggleSource: @escaping (Int) -> Void, toggleCategory: @escaping (ImportCategory) -> Void, choose: @escaping (Bool) -> Void) {
+    public init(toggleSource: @escaping (Int) -> Void, toggleCategory: @escaping (ImportCategory) -> Void, choose: @escaping (Bool) -> Void,
+                allowAccess: @escaping () -> Void = {}, relaunch: @escaping () -> Void = {}) {
         self.toggleSource = toggleSource; self.toggleCategory = toggleCategory; self.choose = choose
+        self.allowAccess = allowAccess; self.relaunch = relaunch
     }
 }
 
@@ -69,8 +74,16 @@ extension SunrisePainter {
             guard appear > 0.001 else { continue }
             var c = ctx
             c.opacity *= appear
-            let p = A.point(A.nodeAngle(i, of: log.sources.count))
+            let p = A.point(A.nodeAngle(i, of: log.nodeCount))
             let r = A.nodeRadius * CGFloat(0.7 + 0.3 * appear)
+            let found = i < g.found.count ? g.found[i] : 0
+            if found > 0.001 {
+                // Just allowed: one soft ring goes out from it.
+                let k = CGFloat(Ease.progress(found, 0, 1))
+                let ring = r * (1.15 + 0.9 * k)
+                c.stroke(Path(ellipseIn: CGRect(x: p.x - ring, y: p.y - ring, width: ring * 2, height: ring * 2)),
+                         with: .color(source.colour.alpha(0.55 * (1 - Double(k)) + 0.1).color), lineWidth: 1.5)
+            }
             let on = g.nodeOn[i]
             let disk = Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2))
             c.fill(disk, with: .color(RGBA(1, 1, 1, 0.55).mix(source.colour, on).color))
@@ -78,24 +91,52 @@ extension SunrisePainter {
             c.draw(Text(String(source.profile.first ?? source.browser.first ?? "?").uppercased())
                 .font(.system(size: r * 0.9, weight: .semibold, design: .rounded))
                 .foregroundColor(RGBA(hex: 0x1D2160).mix(RGBA(1, 1, 1), on).color), at: p, anchor: .center)
-            let showsProfile = source.profile != "Default" && source.profile != source.browser
+            let showsProfile = found > 0.05 || (source.profile != "Default" && source.profile != source.browser)
             var label = c
             label.opacity *= 0.45 + 0.55 * on
             let x = p.x - r - H * 0.014
             label.draw(Text(source.browser).font(.system(size: H * 0.017, weight: .semibold)).foregroundColor(ink),
                        at: CGPoint(x: x, y: showsProfile ? p.y - H * 0.011 : p.y), anchor: .trailing)
             if showsProfile {
-                label.draw(Text(source.profile).font(.system(size: H * 0.015)).foregroundColor(ink.opacity(0.6)),
-                           at: CGPoint(x: x, y: p.y + H * 0.012), anchor: .trailing)
+                let sub = found > 0.05 ? Text("Found").foregroundColor(MarkPalette.sun.mix(MarkPalette.ink, 0.35).color)
+                    : Text(source.profile).foregroundColor(ink.opacity(0.6))
+                label.draw(sub.font(.system(size: H * 0.015)), at: CGPoint(x: x, y: p.y + H * 0.012), anchor: .trailing)
             }
+        }
+
+        // Browsers it cannot bring: a quiet outline, a lock if macOS keeps it private.
+        for (j, item) in log.pending.enumerated() {
+            let i = log.sources.count + j
+            let appear = i < g.nodes.count ? g.nodes[i] : 0
+            guard appear > 0.001 else { continue }
+            var c = ctx
+            c.opacity *= appear
+            let p = A.point(A.nodeAngle(i, of: log.nodeCount))
+            let r = A.nodeRadius * CGFloat(0.7 + 0.3 * appear)
+            let disk = Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2))
+            let locked = item.needsPermission
+            c.fill(disk, with: .color(RGBA(1, 1, 1, locked ? 0.5 : 0.28).color))
+            c.stroke(disk, with: .color(item.colour.alpha(locked ? 0.55 : 0.25).color),
+                     style: StrokeStyle(lineWidth: 1.5, dash: locked ? [] : [3, 3]))
+            let glyph = locked ? Text(Image(systemName: "lock.fill")).font(.system(size: r * 0.7, weight: .semibold))
+                : Text(String(item.name.first ?? "?")).font(.system(size: r * 0.9, weight: .semibold, design: .rounded))
+            c.draw(glyph.foregroundColor(ink.opacity(locked ? 0.55 : 0.3)), at: p, anchor: .center)
+            var label = c
+            label.opacity *= locked ? 0.85 : 0.5
+            let x = p.x - r - H * 0.014
+            label.draw(Text(item.name).font(.system(size: H * 0.017, weight: .semibold)).foregroundColor(ink),
+                       at: CGPoint(x: x, y: p.y - H * 0.011), anchor: .trailing)
+            label.draw(Text(locked ? "Needs permission" : "No data yet").font(.system(size: H * 0.015)).foregroundColor(ink.opacity(0.6)),
+                       at: CGPoint(x: x, y: p.y + H * 0.012), anchor: .trailing)
         }
 
         let mid = CGPoint(x: W / 2, y: A.line), sub = CGPoint(x: W / 2, y: A.subline)
         let small = Font.system(size: H * 0.017)
         line(&ctx, Text("Coming from another browser?").font(lineFont).foregroundColor(ink), at: mid, opacity: g.ask)
         line(&ctx, Text("Bring what matters. Leave the rest.").font(small).foregroundColor(ink.opacity(0.6)), at: sub, opacity: g.ask)
+        let shift = log.blockedNames != nil && g.passwordsLeftBehind != nil ? H * 0.03 : 0
         line(&ctx, Text(g.totals.summary).font(.system(size: H * 0.016)).foregroundColor(ink.opacity(0.55)),
-             at: CGPoint(x: W / 2, y: A.buttons + H * 0.062), opacity: g.buttons)
+             at: CGPoint(x: W / 2, y: A.buttons + H * 0.062 + shift), opacity: g.buttons)
 
         line(&ctx, Text("Bringing it home.").font(lineFont).foregroundColor(ink), at: mid, opacity: g.bringingLine)
         line(&ctx, Text(g.shown.summary).font(.system(size: H * 0.018).monospacedDigit()).foregroundColor(ink.opacity(0.7)),
@@ -152,6 +193,34 @@ struct Act2ControlsView: View {
                     .position(x: layout.size.width / 2, y: layout.chips + H * 0.037)
             }
 
+            // One line and one button for every browser macOS keeps private.
+            if let names = log.blockedNames {
+                HStack(spacing: H * 0.012) {
+                    Text("macOS keeps \(names) private until you allow ReArc.")
+                        .font(.system(size: H * 0.0145))
+                        .foregroundStyle(ink.opacity(0.55))
+                    Text("Allow access\u{2026}")
+                        .font(.system(size: H * 0.0145, weight: .medium))
+                        .foregroundStyle(ink.opacity(0.85))
+                        .padding(.horizontal, H * 0.012).padding(.vertical, H * 0.005)
+                        .background(Capsule().fill(Color.white.opacity(0.55)))
+                        .overlay(Capsule().strokeBorder(ink.opacity(0.15), lineWidth: 1))
+                        .contentShape(Capsule())
+                        .sunriseButton("Allow access") { controls?.allowAccess() }
+                    if log.offersRelaunch {
+                        Text("Still locked? Relaunch ReArc")
+                            .font(.system(size: H * 0.0145, weight: .medium))
+                            .foregroundStyle(ink.opacity(0.6))
+                            .underline()
+                            .contentShape(Rectangle())
+                            .sunriseButton("Relaunch ReArc") { controls?.relaunch() }
+                    }
+                }
+                .opacity(frame.permission)
+                .position(x: layout.size.width / 2, y: layout.chips + H * (frame.passwordsLeftBehind == nil ? 0.037 : 0.07))
+                .sunriseControlsActive(controls != nil && frame.permission > 0.5)
+            }
+
             HStack(spacing: H * 0.03) {
                 Text("Start fresh")
                     .font(.system(size: H * 0.018, weight: .medium))
@@ -168,7 +237,7 @@ struct Act2ControlsView: View {
                     .sunriseButton("Bring them over") { controls?.choose(true) }
             }
             .opacity(frame.buttons)
-            .position(x: layout.size.width / 2, y: layout.buttons)
+            .position(x: layout.size.width / 2, y: layout.buttons + (log.blockedNames != nil && frame.passwordsLeftBehind != nil ? H * 0.03 : 0))
             .sunriseControlsActive(controls != nil && frame.buttons > 0.5)
 
             if let controls, frame.buttons > 0.5 {
@@ -178,7 +247,7 @@ struct Act2ControlsView: View {
                         .contentShape(Circle())
                         .sunriseButton("\(log.sources[i].browser) \(log.sources[i].profile)") { controls.toggleSource(i) }
                         .accessibilityValue(frame.nodeOn[i] > 0.5 ? "on" : "off")
-                        .position(layout.point(layout.nodeAngle(i, of: log.sources.count)))
+                        .position(layout.point(layout.nodeAngle(i, of: log.nodeCount)))
                 }
             }
         }
