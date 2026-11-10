@@ -35,7 +35,9 @@ public struct SearchProvider: Codable, Hashable, Sendable {
     }
 
     public func suggestURL(for terms: String) -> URL? {
-        suggestTemplate.flatMap { Self.fill($0, with: terms) }
+        guard let template = suggestTemplate, let url = Self.fill(template, with: terms),
+              url.scheme?.lowercased() == "https" else { return nil }
+        return url
     }
 
     /// Replaces `%s` with the percent-encoded terms.

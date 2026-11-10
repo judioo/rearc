@@ -74,6 +74,8 @@ protocol WebEngine: AnyObject {
     var automaticPeekSourceURL: URL? { get set }
 
     func load(_ url: URL)
+    /// A page-sourced context-menu navigation, never a typed visit.
+    func loadPageLink(_ url: URL)
     /// `ignoringCache` is the hard reload (Shift+Cmd+R).
     func reload(ignoringCache: Bool)
     func stopLoading()
@@ -113,6 +115,7 @@ protocol WebEngine: AnyObject {
 }
 
 extension WebEngine {
+    func loadPageLink(_ url: URL) { load(url) }
     func reload() { reload(ignoringCache: false) }
 
     /// Loading or crashed, for the sidebar row and the content bar.

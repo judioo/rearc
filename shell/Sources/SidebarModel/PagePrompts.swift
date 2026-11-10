@@ -19,6 +19,13 @@ public enum PageOrigin {
         return bare
     }
 
+    /// `displayHost` for a prompt's wording: an insecure origin keeps its
+    /// `http://`, so it never reads like the https site of the same name.
+    public static func promptHost(_ origin: String) -> String? {
+        guard let host = displayHost(origin) else { return nil }
+        return URLComponents(string: origin)?.scheme?.lowercased() == "http" ? "http://" + host : host
+    }
+
     /// The origin of a page URL (scheme://host[:port]); nil without a host.
     public static func of(_ url: URL) -> String? {
         guard let scheme = url.scheme?.lowercased(), let host = url.host()?.lowercased(), !host.isEmpty else { return nil }
@@ -60,7 +67,7 @@ public struct JavaScriptDialogRequest: Identifiable, Equatable, Sendable {
 
     public var title: String {
         if kind == .beforeUnload { return isReload ? "Reload site?" : "Leave site?" }
-        return PageOrigin.displayHost(origin).map { "\($0) says" } ?? "This page says"
+        return PageOrigin.promptHost(origin).map { "\($0) says" } ?? "This page says"
     }
 
     /// Page text is untrusted: shown as plain text, capped.
@@ -217,7 +224,7 @@ public struct FileChooserRequest: Identifiable, Equatable, Sendable {
     /// The panel's message line: the page's title, else who is asking.
     public var message: String? {
         if !title.isEmpty { return title }
-        guard let host = PageOrigin.displayHost(origin) else { return nil }
+        guard let host = PageOrigin.promptHost(origin) else { return nil }
         switch mode {
         case .uploadFolder: return "Choose a folder to upload to \(host). Every file in it will be shared."
         case .openDirectory: return "Choose a folder for \(host)."
@@ -362,7 +369,7 @@ public struct PermissionPromptRequest: Identifiable, Equatable, Sendable {
         self.types = types
     }
 
-    public var host: String { PageOrigin.displayHost(origin) ?? "This page" }
+    public var host: String { PageOrigin.promptHost(origin) ?? "This page" }
 
     /// "Use your camera and microphone", or one line per type.
     public var phrases: [String] {
@@ -380,7 +387,7 @@ public struct PermissionPromptRequest: Identifiable, Equatable, Sendable {
     /// An iframe asking on behalf of a different top-level site.
     public var embeddedNote: String? {
         guard !embeddingOrigin.isEmpty, embeddingOrigin != origin,
-              let embedder = PageOrigin.displayHost(embeddingOrigin) else { return nil }
+              let embedder = PageOrigin.promptHost(embeddingOrigin) else { return nil }
         return "Embedded in \(embedder)"
     }
 
@@ -530,14 +537,15 @@ public struct PageContextMenuParams: Equatable, Sendable {
         self.hasImageContents = hasImageContents
     }
 
-    /// A link the shell may open elsewhere (http, https, file, data).
+    /// Page-sourced opens are limited to web URLs.
     public var openableLink: URL? { Self.openable(linkURL) }
     public var openableImage: URL? { mediaType == .image ? Self.openable(srcURL) : nil }
     public var trimmedSelection: String { selectionText.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     private static func openable(_ string: String) -> URL? {
-        guard !string.isEmpty, let url = URL(string: string), NavigationURLPolicy.allows(url),
-              url.scheme?.lowercased() != "about" else { return nil }
+        guard !string.isEmpty, let url = URL(string: string),
+              let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              url.host() != nil, NavigationURLPolicy.allows(url) else { return nil }
         return url
     }
 }
@@ -707,7 +715,7 @@ public struct PasswordSavePrompt: Identifiable, Equatable, Sendable {
     }
 
     public var title: String {
-        let host = PageOrigin.displayHost(origin) ?? "this site"
+        let host = PageOrigin.promptHost(origin) ?? "this site"
         return isUpdate ? "Update password for \(host)?" : "Save password for \(host)?"
     }
 

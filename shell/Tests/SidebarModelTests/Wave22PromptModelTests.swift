@@ -19,7 +19,7 @@ final class Wave22PromptModelTests: XCTestCase {
         XCTAssertTrue(opaque.showsCancel)
 
         let port = JavaScriptDialogRequest(id: 3, kind: .prompt, message: "Name", defaultText: "x", origin: "http://127.0.0.1:8080")
-        XCTAssertEqual(port.title, "127.0.0.1:8080 says")
+        XCTAssertEqual(port.title, "http://127.0.0.1:8080 says")
         XCTAssertTrue(port.showsTextField)
 
         let leave = JavaScriptDialogRequest(id: 4, kind: .beforeUnload, message: "ignored", origin: "https://a.test")
@@ -261,5 +261,21 @@ final class Wave22PromptModelTests: XCTestCase {
         XCTAssertNil(contents.askWhereToSave)
         try DownloadListFile.save(.init(directory: "/tmp/d", askWhereToSave: true), to: url)
         XCTAssertEqual(DownloadListFile.load(from: url).askWhereToSave, true)
+    }
+}
+
+final class ContextMenuOpenSecurityTests: XCTestCase {
+    func testPageSourcedLinksAndImagesOnlyOpenHTTPAndHTTPS() {
+        for string in ["data:text/html,test", "file:///tmp/test.html", "javascript:alert(1)",
+                       "about:blank", "chrome://settings", "https:missing-host"] {
+            let params = PageContextMenuParams(linkURL: string, srcURL: string, mediaType: .image)
+            XCTAssertNil(params.openableLink, string)
+            XCTAssertNil(params.openableImage, string)
+        }
+        for string in ["http://example.test/a", "https://example.test/a"] {
+            let params = PageContextMenuParams(linkURL: string, srcURL: string, mediaType: .image)
+            XCTAssertEqual(params.openableLink?.absoluteString, string)
+            XCTAssertEqual(params.openableImage?.absoluteString, string)
+        }
     }
 }

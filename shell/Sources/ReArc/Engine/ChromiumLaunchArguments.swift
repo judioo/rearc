@@ -41,14 +41,38 @@ enum ChromiumLaunchArguments {
     static func browserArguments(
         _ arguments: [String],
         defaultUserDataDir: () -> String,
-        keychain: KeychainMode
+        keychain: KeychainMode,
+        isRelease: Bool = Bundle.main.object(forInfoDictionaryKey: "ReArcRelease") as? Bool == true
     ) -> [String] {
-        var result = arguments
+        var result = isRelease ? releaseArguments(arguments) : arguments
         if !result.contains(where: { $0.hasPrefix(userDataDirFlag) }) {
             result.append(userDataDirFlag + defaultUserDataDir())
         }
         if keychain == .devMock, !result.contains(mockKeychainSwitch) {
             result.append(mockKeychainSwitch)
+        }
+        return result
+    }
+
+    /// LaunchServices arguments are untrusted in shipping bundles. Only profile
+    /// selection crosses this boundary; feature switches and test fixtures are
+    /// appended by shell code after filtering, never accepted from argv.
+    static func releaseArguments(_ arguments: [String]) -> [String] {
+        var result = Array(arguments.prefix(1))
+        var index = 1
+        while index < arguments.count {
+            let argument = arguments[index]
+            for prefix in [userDataDirFlag, profileDirectoryFlag] {
+                if argument.hasPrefix(prefix), argument.count > prefix.count {
+                    result.append(argument)
+                } else if argument == String(prefix.dropLast()), index + 1 < arguments.count,
+                          !arguments[index + 1].isEmpty, !arguments[index + 1].hasPrefix("-") {
+                    index += 1
+                    result.append(prefix + arguments[index])
+                    break
+                }
+            }
+            index += 1
         }
         return result
     }

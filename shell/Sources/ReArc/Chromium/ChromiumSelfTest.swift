@@ -2404,6 +2404,7 @@ extension ChromiumSelfTest {
         try await wait("permissions fixture") { engine.pageTitle == "permissions" && !engine.isLoading }
         func waitRequest(_ key: String) async throws -> PermissionPromptRequest {
             try await wait("\(key) permission request", timeout: 10) { prompts.permission?.request.types.map(\.key) == [key] }
+            try await wait("permission interaction delay") { prompts.permissionInteractionAllowed }
             return prompts.permission!.request
         }
         func reset() async throws { _ = try await engine.evaluate("(document.title = 'permissions', true)", in: .page) }

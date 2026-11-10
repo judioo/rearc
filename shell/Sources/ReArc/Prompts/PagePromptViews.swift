@@ -245,6 +245,12 @@ private struct PermissionPromptCard: View {
         .padding(.leading, 12)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(request.host) wants to \(request.phrases.joined(separator: ", "))")
+        .disabled(!prompts.permissionInteractionEnabled)
+        .onAppear { prompts.rearmPermissionInteractionDelay() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { notification in
+            guard let window = notification.object as? NSWindow, window === prompts.hostWindow else { return }
+            prompts.rearmPermissionInteractionDelay()
+        }
     }
 }
 

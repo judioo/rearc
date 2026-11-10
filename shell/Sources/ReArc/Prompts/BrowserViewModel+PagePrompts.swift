@@ -13,7 +13,7 @@ extension BrowserViewModel: PageLinkRouting {
 
     func openLinkInLittleArc(_ url: URL, from prompts: PagePromptCenter) {
         guard prompts.privateSession == nil else { return openLinkInNewTab(url, from: prompts) }
-        openLittleArc(url: url, profileID: prompts.profileID)
+        openLittleArc(url: url, profileID: prompts.profileID, pageLink: true)
     }
 
     /// The link in a new pane next to the page (Arc "Open in Split View").
@@ -30,6 +30,8 @@ extension BrowserViewModel: PageLinkRouting {
             if store.isSplitFull(joining: anchorID) { showSplitFullToast() }
             return openLinkTab(url, from: prompts, select: true)
         }
+        let engine = engineHost.engine(for: pane, profileID: profileID(for: pane))
+        engine.loadPageLink(url)
         loadSelectedIfNeeded()
     }
 
@@ -64,20 +66,20 @@ extension BrowserViewModel: PageLinkRouting {
 
     private func openLinkTab(_ url: URL, from prompts: PagePromptCenter, select: Bool) {
         if let session = prompts.privateSession {
-            openPrivateWindow(session: session, parentProfileID: prompts.profileID, url: url)
+            let window = openPrivateWindow(session: session, parentProfileID: prompts.profileID)
+            window.engine.loadPageLink(url)
             return
         }
         let space = prompts.ownerTabID.flatMap { store.spaceContaining(tabID: $0) }
         let tab = store.addTab(kind: .today, title: url.host() ?? "New Tab", url: url, in: space)
+        let engine = engineHost.engine(for: tab, profileID: profileID(for: tab))
+        configureLinkPeek(on: engine)
+        engine.loadPageLink(url)
+        syncBoosts(for: tab)
         if select {
             store.selectTab(tab.id)
             loadSelectedIfNeeded()
-            return
         }
-        let engine = engineHost.engine(for: tab, profileID: profileID(for: tab))
-        configureLinkPeek(on: engine)
-        engine.load(url)
-        syncBoosts(for: tab)
     }
 
     // MARK: Closing through the page
@@ -121,7 +123,7 @@ struct SitePermissionSummary: Equatable {
     var scope: String
     var rows: [Row]
 
-    var host: String { PageOrigin.displayHost(origin) ?? origin }
+    var host: String { PageOrigin.promptHost(origin) ?? origin }
     /// The indicator's icon: the most significant type answered.
     var symbol: String {
         let priority = ["camera_stream", "mic_stream", "geolocation", "notifications"]

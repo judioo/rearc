@@ -36,7 +36,7 @@ final class AutomaticPeekScriptTests: XCTestCase {
           var prevented = false;
           var link = { tagName: 'A', href: href, target: options.target || '',
                        hasAttribute: function(name) { return name === 'download' && !!options.download; } };
-          var event = Object.assign({ button: 0, composedPath: function() { return [link]; },
+          var event = Object.assign({ isTrusted: true, button: 0, composedPath: function() { return [link]; },
             preventDefault: function() { prevented = true; }, stopImmediatePropagation: function() {} }, options);
           if (document.listener) document.listener(event);
           return prevented;
@@ -47,6 +47,7 @@ final class AutomaticPeekScriptTests: XCTestCase {
         XCTAssertEqual(context.evaluateScript("click('https://other.org/a')")?.toBool(), true)
         XCTAssertEqual(context.evaluateScript("messages[0].href")?.toString(), "https://other.org/a")
         for expression in [
+            "click('https://other.org/a', {isTrusted:false})",
             "click('https://www.example.com/a')",
             "click('https://other.org/a', {metaKey:true})",
             "click('https://other.org/a', {shiftKey:true})",

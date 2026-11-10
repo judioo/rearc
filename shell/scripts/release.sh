@@ -150,7 +150,7 @@ if [[ $VERIFY == 1 ]]; then
   PROFILE="$(mktemp -d "${TMPDIR:-/tmp}/rearc-release-selftest.XXXXXX")"
   echo "==> self-test, real Keychain (log: $LOG, watchdog ${SELFTEST_TIMEOUT}s)"
   t0=$SECONDS
-  MallocNanoZone=0 "$APP/Contents/MacOS/ReArc" --rearc-selftest --user-data-dir="$PROFILE" >"$LOG" 2>&1 &
+  REARC_RELEASE_VERIFICATION=1 MallocNanoZone=0 "$APP/Contents/MacOS/ReArc" --rearc-selftest --user-data-dir="$PROFILE" >"$LOG" 2>&1 &
   pid=$!
   while kill -0 "$pid" 2>/dev/null && (( SECONDS - t0 < SELFTEST_TIMEOUT )); do sleep 1; done
   if kill -0 "$pid" 2>/dev/null; then

@@ -37,7 +37,21 @@ protocol SuggestFetching {
 
 extension URLSessionDataTask: SuggestFetch {}
 
+/// Suggestions carry what the user is typing: a redirect off https is refused.
+final class SuggestHTTPSRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(request.url?.scheme?.lowercased() == "https" ? request : nil)
+    }
+}
+
+private final class RejectedSuggestFetch: SuggestFetch {
+    func cancel() {}
+}
+
 /// Ephemeral session: no cookies, cache or credentials reach the provider.
+/// Only https URLs are fetched.
 struct URLSessionSuggestFetcher: SuggestFetching {
     static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
@@ -45,10 +59,14 @@ struct URLSessionSuggestFetcher: SuggestFetching {
         configuration.httpShouldSetCookies = false
         configuration.urlCache = nil
         configuration.timeoutIntervalForRequest = 4
-        return URLSession(configuration: configuration)
+        return URLSession(configuration: configuration, delegate: SuggestHTTPSRedirects(), delegateQueue: nil)
     }()
 
     func fetch(_ url: URL, completion: @escaping (Data?) -> Void) -> SuggestFetch {
+        guard url.scheme?.lowercased() == "https" else {
+            DispatchQueue.main.async { completion(nil) }
+            return RejectedSuggestFetch()
+        }
         var request = URLRequest(url: url)
         request.setValue("application/x-suggestions+json, application/json", forHTTPHeaderField: "Accept")
         let task = Self.session.dataTask(with: request) { data, response, _ in

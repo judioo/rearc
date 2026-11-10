@@ -312,3 +312,12 @@ final class Wave27LinkOpenTests: XCTestCase {
         XCTAssertTrue(LinkOpenPlacement.littleArc.isActive)
     }
 }
+
+final class ExtensionPromptSecurityTests: XCTestCase {
+    func testCancelIsDefaultForPermissionsAndReEnable() {
+        for kind: ExtensionPromptKind in [.permissions, .reEnable] {
+            XCTAssertTrue(ExtensionPromptRequest(id: 1, kind: kind, extensionID: "x", name: "X").cancelIsDefault)
+        }
+        XCTAssertFalse(ExtensionPromptRequest(id: 1, kind: .install, extensionID: "x", name: "X").cancelIsDefault)
+    }
+}

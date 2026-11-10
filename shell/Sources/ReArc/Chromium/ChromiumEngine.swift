@@ -471,6 +471,11 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
         enqueueNavigation { [weak self] in self?.navigateNow(url) }
     }
 
+    func loadPageLink(_ url: URL) {
+        currentURL = url
+        enqueueNavigation { [weak self] in self?.navigateNow(url, transition: 1) }
+    }
+
     func reload(ignoringCache: Bool) {
         let name = ignoringCache ? "reload ignoring cache" : "reload"
         enqueueNavigation { [weak self] in self?.command(name) { ReArcTabReload($0, ignoringCache) } }
@@ -495,9 +500,9 @@ final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding,
     /// older engines admit http(s) and about:blank only. Other URLs return invalid_url.
     /// Before the tab exists this is engine_not_ready; `load` waits instead.
     @discardableResult
-    func navigateNow(_ url: URL) -> ReArcStatus {
+    func navigateNow(_ url: URL, transition: UInt32 = 0) -> ReArcStatus {
         command("navigate \(url.absoluteString)") { tab in
-            PerfSignposts.engineCall("TabLoad") { url.absoluteString.withCString { ReArcTabNavigate(tab, $0, 0) } }
+            PerfSignposts.engineCall("TabLoad") { url.absoluteString.withCString { ReArcTabNavigate(tab, $0, transition) } }
         }
     }
 

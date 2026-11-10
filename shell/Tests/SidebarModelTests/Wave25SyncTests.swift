@@ -906,3 +906,61 @@ final class Wave28ThemeSyncTests: XCTestCase {
         ), "a style record with only some fields still reads")
     }
 }
+
+@MainActor
+final class SyncedScriptApprovalTests: XCTestCase {
+    func testScriptsNeedLocalApprovalAndChangedCodeNeedsNewApproval() async throws {
+        let server = InMemorySyncServer(), clock = TestClock()
+        let a = Device("A", server: server, clock: clock)
+        let package = BoostPackage.newScript(name: "Script", hostScope: [BoostHostRule(host: "example.test")], js: "document.title = 'a'")
+        let id = package.manifest.id
+        XCTAssertNil(a.store.addBoost(package))
+        a.store.setBoostScriptUserEnabled(packageID: id, enabled: true)
+        await a.sync()
+        let b = Device("B", server: server, clock: clock)
+        await b.sync()
+        XCTAssertEqual(b.store.boostLibrary().package(id: id)?.scriptBoost?.userScriptEnabled, false)
+        b.store.setBoostScriptUserEnabled(packageID: id, enabled: true)
+        b.edited()
+        b.restart()
+        await b.sync()
+        XCTAssertEqual(b.store.boostLibrary().package(id: id)?.scriptBoost?.userScriptEnabled, true, "approval survives restart and unchanged sync")
+        XCTAssertTrue(a.store.updateBoostScript(packageID: id, css: "", js: "document.title = 'changed'").isEmpty)
+        a.edited()
+        await a.sync()
+        await b.sync()
+        XCTAssertEqual(b.store.boostLibrary().package(id: id)?.scriptBoost?.js, "document.title = 'changed'")
+        XCTAssertEqual(b.store.boostLibrary().package(id: id)?.scriptBoost?.userScriptEnabled, false, "approval of the previous hash cannot authorize new code")
+        b.store.setBoostScriptUserEnabled(packageID: id, enabled: true)
+        await b.sync()
+        XCTAssertEqual(b.store.boostLibrary().package(id: id)?.scriptBoost?.userScriptEnabled, true)
+        let exported = try XCTUnwrap(b.records[SyncRecordKind.boost.recordName(for: id)]?.values["package"])
+        XCTAssertEqual(try exported.decoded(as: BoostPackage.self).scriptBoost?.userScriptEnabled, false, "consent never syncs")
+    }
+
+    func testLibrariesSavedBeforeApprovalsKeepTheirEnabledScripts() throws {
+        var package = BoostPackage.newScript(name: "Script", hostScope: [BoostHostRule(host: "a.test")], js: "void 0")
+        package.scriptBoost?.userScriptEnabled = true
+        let off = BoostPackage.newScript(name: "Off", hostScope: [BoostHostRule(host: "b.test")], js: "void 1")
+        var library = ProfileBoostLibrary(profileID: UUID(), packages: [package, off], installations: [
+            BoostInstallation(packageID: package.manifest.id, order: 0), BoostInstallation(packageID: off.manifest.id, order: 1),
+        ])
+        library.approvedScriptHashes = nil
+        var legacy = try JSONDecoder().decode(ProfileBoostLibrary.self, from: JSONEncoder().encode(library))
+        XCTAssertNil(legacy.approvedScriptHashes, "older snapshots have no approvals key")
+        legacy.adoptLegacyScriptApprovals()
+        XCTAssertEqual(legacy.approvedScriptHashes, [package.manifest.id: BoostLibraryOps.scriptApprovalHash(package)!])
+        legacy.approvedScriptHashes?[package.manifest.id] = nil
+        legacy.adoptLegacyScriptApprovals()
+        XCTAssertEqual(legacy.approvedScriptHashes, [:], "adopted once, never again")
+    }
+
+    func testApprovalHashIncludesCodeAndHostScope() {
+        var package = BoostPackage.newScript(name: "Script", hostScope: [BoostHostRule(host: "a.test")], js: "void 0")
+        let original = BoostLibraryOps.scriptApprovalHash(package)
+        package.manifest.name = "Rename"
+        XCTAssertEqual(original, BoostLibraryOps.scriptApprovalHash(package))
+        package.manifest.hostScope = [BoostHostRule(host: "bank.test")]
+        XCTAssertNotEqual(original, BoostLibraryOps.scriptApprovalHash(package))
+    }
+}

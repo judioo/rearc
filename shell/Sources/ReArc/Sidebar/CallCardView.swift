@@ -113,6 +113,9 @@ struct CallCardToggle: View {
 
     private var help: String {
         let name = device == .camera ? "Camera" : "Microphone"
+        if capture.pageReportsOffWhileLive(device) {
+            return "\(name) Live (Page Says \(device == .camera ? "Off" : "Muted"))"
+        }
         guard enabled else { return "\(name) \(isOff ? "Off" : "On")" }
         return device == .camera ? (isOff ? "Turn On Camera" : "Turn Off Camera")
             : (isOff ? "Unmute Microphone" : "Mute Microphone")
