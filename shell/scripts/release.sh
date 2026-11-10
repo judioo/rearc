@@ -17,6 +17,8 @@
 #   --notarize        notarize app before DMG and DMG before appcast (opt-in)
 #   --dmg             also make the signed DMG
 #   --allow-outdated-engine  override the Mac Stable/Extended security release gate
+#   --allow-no-safe-browsing  make a DMG from an engine without a real Google API key
+#                     (Safe Browsing cannot work; warns loudly). See RELEASE.md.
 #   --selftest-timeout SECONDS  watchdog for the self-test (default 300)
 # Signing settings: see sign-release.sh (REARC_RELEASE_IDENTITY, REARC_TEAM_ID, iCloud).
 set -euo pipefail
@@ -30,6 +32,7 @@ FROM_HEAD=1
 VERIFY=1
 DMG=0
 ALLOW_OUTDATED_ENGINE=0
+ALLOW_NO_SAFE_BROWSING=0
 APPCAST=""
 CHANNEL=""
 NOTARIZE=0
@@ -43,11 +46,12 @@ while [[ $# -gt 0 ]]; do
     --no-verify) VERIFY=0 ;;
     --dmg) DMG=1 ;;
     --allow-outdated-engine) ALLOW_OUTDATED_ENGINE=1 ;;
+    --allow-no-safe-browsing) ALLOW_NO_SAFE_BROWSING=1 ;;
     --appcast) mkdir -p "$2"; APPCAST="$(cd "$2" && pwd)"; DMG=1; shift ;;
     --channel) CHANNEL="$2"; [[ $CHANNEL == beta ]] || die "only --channel beta is supported"; shift ;;
     --notarize) NOTARIZE=1 ;;
     --selftest-timeout) SELFTEST_TIMEOUT="$2"; shift ;;
-    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
@@ -59,9 +63,15 @@ done
 [[ -d "$OUT/Chromium.app" ]] || die "no release engine at $OUT (scripts/build-engine-release.sh)"
 [[ ! -e "$OUT/libchrome_dll.dylib" ]] || die "$OUT is a component (dev) build"
 if [[ $DMG == 1 ]]; then
+  # ${a[@]+...}: an empty array is "unbound" under set -u in macOS bash 3.2.
   pin_gate=()
   [[ $ALLOW_OUTDATED_ENGINE == 0 ]] || pin_gate+=(--allow-outdated-engine)
-  python3 "$REPO/engine/scripts/check-release-pin.py" "${pin_gate[@]}"
+  python3 "$REPO/engine/scripts/check-release-pin.py" ${pin_gate[@]+"${pin_gate[@]}"}
+  # Safe Browsing needs a real Google API key in the engine (RELEASE.md, "Safe Browsing key").
+  key_gate=()
+  [[ $ALLOW_NO_SAFE_BROWSING == 0 ]] || key_gate+=(--allow-no-safe-browsing)
+  python3 "$REPO/engine/scripts/google-api-keys.py" check "$OUT" ${key_gate[@]+"${key_gate[@]}"} \
+    || die "the release engine has no real Google API key, so Safe Browsing cannot work; rebuild it with the key (RELEASE.md) or pass --allow-no-safe-browsing"
   pinned="$(awk '!/^[[:space:]]*(#|$)/ {v=$0} END {print v}' "$REPO/engine/CHROMIUM_PIN")"
   built="$(plutil -extract CFBundleShortVersionString raw "$OUT/Chromium.app/Contents/Info.plist")"
   [[ "$built" == "$pinned" ]] || die "engine output $built does not match CHROMIUM_PIN $pinned; rebuild the release engine"

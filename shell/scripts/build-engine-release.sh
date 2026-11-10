@@ -83,7 +83,11 @@ GN_ARGS=(
   "branding_file_path=\"$GENERATED_BRANDING\""
 )
 printf '=== gn gen %s (overlay %s) ===\nargs: %s\n' "$OUT_DIR" "$(git rev-parse --short=10 HEAD)" "${GN_ARGS[*]}"
-gn gen "$OUT_DIR" --fail-on-unused-args --args="${GN_ARGS[*]}"
+mkdir -p "$OUT_DIR"
+printf '%s\n' "${GN_ARGS[@]}" > "$OUT_DIR/args.gn"
+chmod 600 "$OUT_DIR/args.gn"
+python3 "$ENGINE_DIR/scripts/google-api-keys.py" append "$OUT_DIR/args.gn"
+gn gen "$OUT_DIR" --fail-on-unused-args
 [[ $GEN_ONLY == 0 ]] || exit 0
 "${BUILD_COMMAND[@]}" -C "$OUT_DIR" chrome_framework chrome
 FRAMEWORK="$CHROMIUM_SRC/$OUT_DIR/Chromium Framework.framework"

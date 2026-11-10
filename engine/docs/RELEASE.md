@@ -54,6 +54,41 @@ currently uses Extended Stable); an unsupported milestone or unavailable release
 data fails closed. `--allow-outdated-engine` explicitly bypasses the freshness
 check with a prominent warning. It does not bypass the built-version check.
 
+`release.sh --dmg` also refuses an engine built without a real Google API key, because
+Safe Browsing cannot work without one (next section). `--allow-no-safe-browsing` makes the
+DMG anyway and prints a loud warning. Such a build shows Safe Browsing as unavailable in
+Settings › Privacy. Never distribute it to users.
+
+## Safe Browsing key
+
+Safe Browsing puts the build's Google API key (`google_apis::GetAPIKey()`) on every list
+update and hash lookup. With no key Chromium sends `dummytoken`. Google answers that with
+HTTP 400 `API_KEY_INVALID`, the threat lists never download, and phishing and malware pages
+load with no warning. The release engine therefore needs ReArc's own key:
+
+- It comes from ReArc's Google Cloud project, with the key restricted to the **Safe Browsing
+  API** only. ReArc does not use Google sign-in: leave `google_default_client_id` and
+  `google_default_client_secret` unset.
+- It lives outside the repository, in `~/.config/rearc/google-api-keys.gn` (mode 600),
+  as one line: `google_api_key = "AIza…"`. `REARC_GOOGLE_API_KEYS_FILE` points elsewhere,
+  and a `google_api_key` environment variable overrides the file. Never commit the key or
+  paste it into a log or report.
+- `build-engine-release.sh` writes `out/ReArc-release-arm64/args.gn` (mode 600) and appends
+  the key with `engine/scripts/google-api-keys.py append`. That script refuses a key file
+  inside the repo and accepts only quoted credential assignments. It prints a warning,
+  never the key, when no real key (`AIza` plus 35 characters) is configured. The build
+  still runs.
+- `release.sh --dmg` runs `google-api-keys.py check`: the engine's `google_api_key` GN arg
+  must be a real key, and the release framework must contain it. Otherwise it stops
+  unless `--allow-no-safe-browsing` is given.
+- At run time the shell asks the engine (`ReArcEngineSafeBrowsingAvailable`, ABI 1.57).
+  Dev engines (`engine/scripts/build.sh`) are built without a key, so they show Safe
+  Browsing as unavailable, like any keyless build.
+
+The key passes to the compiler as a define on `google_apis` compiles only, so it appears in
+the local `out/ReArc-release-arm64` build files and compiler command lines, which are never
+committed. Filter `AIza` out of anything copied from a build log.
+
 ## Engine build
 
 `out/ReArc-release-arm64` args (`gn args --list --short --overrides-only`):
@@ -65,6 +100,7 @@ symbol_level=1 treat_warnings_as_errors=false
 is_debug=false is_component_build=false dcheck_always_on=false
 enable_dsyms=true enable_stripping=true
 branding_file_path="<repo>/shell/.build-release/BRANDING"   (generated, carries MAC_TEAM_ID)
+google_api_key="…"   (appended from ~/.config/rearc/google-api-keys.gn, "Safe Browsing key")
 ```
 
 - These are the dev args, which set no other branding arguments, with the release
