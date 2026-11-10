@@ -232,6 +232,9 @@ public struct ExtensionPromptRequest: Identifiable, Equatable, Sendable {
 
     public var displayCancelLabel: String { cancelLabel.isEmpty ? "Cancel" : cancelLabel }
 
+    /// Permission expansion and re-enable always require an explicit choice.
+    public var cancelIsDefault: Bool { kind == .permissions || kind == .reEnable }
+
     public var isDestructive: Bool { kind == .uninstall }
 
     /// The alert's body: what the extension can do, one bullet per line.
