@@ -6,7 +6,7 @@ Subject: [PATCH] P-TAB-001 wave 18f: route extension install and uninstall
 
 In embedded mode Chromium's extension install, re-enable and permission confirmations (ShowExtensionInstallDialogImpl: Web Store, CRX, chrome://extensions) and its uninstall confirmation (ExtensionUninstallDialog::Create) become host requests answered with accept or cancel; no Views dialog is created. ExtensionInstallUIDesktop reports install success and failure to the host instead of opening a Browser window, installed bubble or infobar. Extension tabs.create and runtime.openOptionsPage no longer create a Browser window (they fail as with no window). Requests cancel on tab close, profile release and callback replacement; without a callback install prompts abort and uninstall confirmations cancel. ABI 1.32 / bridge 0.34.0 (extension_install_prompts); builds p79-p80, native webstorePrivate cancel/replace/accept through a loopback gallery override, a locally signed CRX dropped on chrome://extensions installing with notification, confirmed uninstall cancel/accept and no Chromium window pass.
 
-Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
@@ -73,7 +73,7 @@ diff --git a/chrome/browser/extensions/open_tab_helper.cc b/chrome/browser/exten
 index 9ee4de85f5..4ab26ba08d 100644
 --- a/chrome/browser/extensions/open_tab_helper.cc
 +++ b/chrome/browser/extensions/open_tab_helper.cc
-@@ -3,6 +3,9 @@
+@@ -3,7 +3,10 @@
  // found in the LICENSE file.
  
  #include "chrome/browser/extensions/open_tab_helper.h"
@@ -81,6 +81,7 @@ index 9ee4de85f5..4ab26ba08d 100644
 +#include "chrome/browser/rearc_bridge/engine_mode.h"
 +#endif
  
+ #include "base/memory/weak_ptr.h"
  #include "base/strings/string_number_conversions.h"
  #include "base/types/expected_macros.h"
 @@ -48,6 +51,13 @@ namespace {

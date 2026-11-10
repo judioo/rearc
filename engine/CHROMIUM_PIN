@@ -24,4 +24,4 @@
 #
 # NOTE: the IPC contract version is versioned independently of this pin.
 # A Chromium bump does not imply an IPC contract bump.
-156.0.8078.74
+156.0.8078.96

@@ -4,7 +4,8 @@ from pathlib import Path
 import os, subprocess, tempfile
 from run_c_abi import ENGINE, SRC, build_gate
 build_gate()
-pin = 'd331de35ca8ab1358c7a17e4bd41627d55eaef51'
+pin = [line.strip() for line in (ENGINE / 'CHROMIUM_PIN').read_text().splitlines()
+       if line.strip() and not line.lstrip().startswith('#')][-1]
 series = []
 for line in (ENGINE / 'patches/series').read_text().splitlines():
     name = line.split('#', 1)[0].strip()

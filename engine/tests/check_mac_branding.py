@@ -2,13 +2,15 @@
 """Inspect generated branding and built bundle IDs, without Keychain access."""
 from pathlib import Path
 import plistlib, subprocess
-from run_c_abi import OUT
+from run_c_abi import ENGINE, OUT
+pin = [l.strip() for l in (ENGINE / 'CHROMIUM_PIN').read_text().splitlines()
+       if l.strip() and not l.lstrip().startswith('#')][-1]
 header = (OUT / 'gen/components/os_crypt/common/keychain_branding.h').read_text()
 assert '#define OS_CRYPT_BRANDED_SERVICE_NAME "ReArc Safe Storage"' in header
 assert '#define OS_CRYPT_BRANDED_ACCOUNT_NAME "ReArc"' in header
 print('Generated Safe Storage service=ReArc Safe Storage account=ReArc PASS')
 app = OUT / 'Chromium.app'
-framework = app / 'Contents/Frameworks/Chromium Framework.framework/Versions/156.0.8078.74'
+framework = app / 'Contents/Frameworks/Chromium Framework.framework/Versions' / pin
 def bundle(path, expected):
     with path.open('rb') as file:
         data = plistlib.load(file)

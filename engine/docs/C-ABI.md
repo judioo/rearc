@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.55** (major remains 1 for existing hosts), bridge **0.58.0**, compiled Chromium **156.0.8078.74**. Public header:
+ABI **1.55** (major remains 1 for existing hosts), bridge **0.58.0**, compiled Chromium **156.0.8078.96**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -40,7 +40,7 @@ when a header function is missing from `nm -gU` of the framework). Release
 packaging and its validation are in RELEASE.md.
 
 Use the upstream `.app/Contents/Frameworks/Chromium Framework.framework/Versions/
-156.0.8078.74` layout, including resources and all helper bundles and their
+156.0.8078.96` layout, including resources and all helper bundles and their
 Info.plists. Preserve helper `LSUIElement`, executable names, entitlements,
 sandbox and framework-relative paths. The shell's executable must be in an
 app bundle; pass its real argv, selecting `--user-data-dir` before startup.

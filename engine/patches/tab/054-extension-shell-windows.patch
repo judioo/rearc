@@ -6,7 +6,7 @@ Subject: [PATCH] P-TAB-001 wave 18g: route extension tabs and logical shell
 
 Expose host-reported extension window membership, active tab and focus, and bounded host creation/activation requests. Route registry tabs through tabs query/get/update/remove and read-only windows APIs with Chromium permission scrubbing; options and single-URL normal windows use the host instead of stock Browser creation. Removal joins the veto-aware tab close pipeline. ABI 1.36 / bridge 0.38.0 (extension_windows); build p89 and local MV3 routing fixture pass with no outside connections. Geometry, multi-URL windows, tab groups/move and windows mutations remain unsupported.
 
-Last rebased: 2026-11-04 onto Chromium 156.0.8078.74 (d331de35ca).
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
 
 Co-Authored-By: Codex <noreply@openai.com>
 ---
@@ -67,7 +67,7 @@ diff --git a/chrome/browser/extensions/api/tabs/tabs_api.cc b/chrome/browser/ext
 index 2a631eb9fc..4721918e09 100644
 --- a/chrome/browser/extensions/api/tabs/tabs_api.cc
 +++ b/chrome/browser/extensions/api/tabs/tabs_api.cc
-@@ -3,6 +3,13 @@
+@@ -3,7 +3,14 @@
  // found in the LICENSE file.
  
  #include "chrome/browser/extensions/api/tabs/tabs_api.h"
@@ -79,6 +79,7 @@ index 2a631eb9fc..4721918e09 100644
 +#include "chrome/browser/rearc_bridge/tab_session.h"
 +#endif
  
+ #include "base/memory/weak_ptr.h"
  #include "base/metrics/histogram_functions.h"
  #include "base/metrics/histogram_macros.h"
 @@ -887,6 +894,17 @@ ExtensionFunction::ResponseAction WindowsGetFunction::Run() {
