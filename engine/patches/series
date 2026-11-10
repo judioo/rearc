@@ -90,6 +90,7 @@ tab/081-fullscreen-origin.patch                 # P-TAB-001 ABI 1.59: fullscreen
 tab/082-credential-leak-events.patch            # P-TAB-001 ABI 1.60: host credential leak events (audit F-09)
 tab/083-extension-install-sources.patch         # P-TAB-001 ABI 1.61: store imports prompt when permissions grew (audit F-13)
 tab/084-shutdown-cancels-extension-installs.patch # P-TAB-001 bridge 0.65.0: shutdown cancels bulk store installs (audit F-19)
+tab/085-random-isolated-world-names.patch       # P-TAB-001 bridge 0.66.0: per-run random isolated world names (audit F-16)
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:

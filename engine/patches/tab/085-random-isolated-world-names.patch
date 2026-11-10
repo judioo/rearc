@@ -1,0 +1,150 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 per-run random isolated world names
+
+Security audit RC-500 F-16. Bridge 0.66.0. An extension's content-script world
+takes the extension's name, and Runtime.addBinding with executionContextName
+binds every context of that name, so an extension named rearc.host got
+rearcLinkPeek and one named rearc.boost.<id> got __rearcPostJSON. ReArc's
+world names now carry a 128-bit random token chosen once per run, unknown to
+pages and extensions.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index f5587fe9a0..3ea0092beb 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.65.0";
++  return "0.66.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_services_abi.cc b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+index 2e9fce9206..12113d5314 100644
+--- a/chrome/browser/rearc_bridge/rearc_services_abi.cc
++++ b/chrome/browser/rearc_bridge/rearc_services_abi.cc
+@@ -17,6 +17,8 @@
+ 
+ #include "base/base64.h"
+ #include "base/check.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/rand_util.h"
+ #include "base/functional/bind.h"
+ #include "base/json/json_reader.h"
+ #include "base/json/json_writer.h"
+@@ -58,6 +60,25 @@
+ 
+ namespace rearc {
+ namespace {
++// Bridge 0.66.0: an extension's content-script world takes the
++// extension's name, and Runtime.addBinding with executionContextName binds
++// every context of that name. A per-run random token in ReArc's world names
++// keeps an extension called "rearc.host" or "rearc.boost.<id>" from getting
++// the peek or message binding, or posting as a boost.
++const std::string& WorldToken() {
++  static const base::NoDestructor<std::string> token(
++      base::ToLowerASCII(base::HexEncode(base::RandBytesAsVector(16))));
++  return *token;
++}
++std::string HostWorld() {
++  return "rearc.host." + WorldToken();
++}
++std::string BoostWorldPrefix() {
++  return "rearc.boost." + WorldToken() + ".";
++}
++std::string BoostWorld(const std::string& id) {
++  return BoostWorldPrefix() + id;
++}
+ 
+ ReArcPageMessageCallback message_callback = nullptr;
+ void* message_context = nullptr;
+@@ -434,13 +455,14 @@ class PageServices : public content::DevToolsAgentHostClient,
+       const auto* name = c->FindString("name");
+       const auto* aux = c->FindDict("auxData");
+       auto id = c->FindInt("id");
+-      if (name && name->starts_with("rearc.boost.") && aux && id &&
++      if (name && name->starts_with(BoostWorldPrefix()) && aux && id &&
+           !aux->FindBool("isDefault").value_or(true)) {
+         if (const auto* frame = aux->FindString("frameId")) {
+-          message_contexts_[*id] = {*frame, name->substr(12)};
++          message_contexts_[*id] = {*frame,
++                                    name->substr(BoostWorldPrefix().size())};
+         }
+       }
+-      if (name && *name == "rearc.host" && aux && id) {
++      if (name && *name == HostWorld() && aux && id) {
+         if (const auto* frame = aux->FindString("frameId")) {
+           contexts_[*id] = *frame;
+         }
+@@ -553,9 +575,9 @@ class PageServices : public content::DevToolsAgentHostClient,
+         "'data-rearc-abi-plan',JSON.stringify(Array.from(ids)));"
+         "document.querySelectorAll('style[data-rearc-abi]').forEach(n=>"
+         "{if(!ids.has(n.id))n.remove();});})();";
+-    Evaluate("rearc.host", cleanup);
++    Evaluate(HostWorld(), cleanup);
+     for (const auto& s : scripts_) {
+-      Evaluate("rearc.boost." + s.id, ScriptSource(s, true));
++      Evaluate(BoostWorld(s.id), ScriptSource(s, true));
+     }
+   }
+   void SetPeek(bool enabled, ReArcCompletion completion, void* context) {
+@@ -671,7 +693,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+         Send("Runtime.enable", {}, {});
+         Send("Runtime.addBinding", base::DictValue()
+                  .Set("name", "rearcLinkPeek")
+-                 .Set("executionContextName", "rearc.host"), {});
++                 .Set("executionContextName", HostWorld()), {});
+       }
+     }
+     if (!attached_) {
+@@ -834,7 +856,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+     const auto& s = desired_scripts_[scripts_.size()];
+     Send("Runtime.addBinding", base::DictValue()
+         .Set("name", "__rearcPostJSON")
+-        .Set("executionContextName", "rearc.boost." + s.id),
++        .Set("executionContextName", BoostWorld(s.id)),
+         base::BindOnce([](base::WeakPtr<PageServices> self, ReArcStatus status,
+                          base::DictValue) {
+           if (!self) return;
+@@ -847,7 +869,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+     Send("Page.addScriptToEvaluateOnNewDocument",
+          base::DictValue()
+              .Set("source", ScriptSource(s, false))
+-             .Set("worldName", "rearc.boost." + s.id),
++             .Set("worldName", BoostWorld(s.id)),
+          base::BindOnce(
+              [](base::WeakPtr<PageServices> self, ReArcStatus status,
+                 base::DictValue result) {
+@@ -935,7 +957,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+     peek_script_id_.clear();
+     Send("Page.addScriptToEvaluateOnNewDocument",
+          base::DictValue()
+-             .Set("worldName", "rearc.host")
++             .Set("worldName", HostWorld())
+              .Set("source", PeekSource(enabled)),
+          base::BindOnce(
+              [](base::WeakPtr<PageServices> self, bool enabled,
+@@ -950,7 +972,7 @@ class PageServices : public content::DevToolsAgentHostClient,
+                if (!status && id) {
+                  self->peek_script_id_ = *id;
+                  self->peek_enabled_ = enabled;
+-                 self->Evaluate("rearc.host", PeekSource(enabled));
++                 self->Evaluate(HostWorld(), PeekSource(enabled));
+                } else if (!status) {
+                  status = REARC_INTERNAL;
+                }
+@@ -1413,7 +1435,7 @@ static ReArcStatus EvaluateScript(uint64_t id, const char* source,
+   if (page->navigation_pending()) return REARC_INVALID_STATE;
+   if (!page->evaluation_allowed()) return REARC_UNSUPPORTED;
+   if (page->evaluation_busy()) return REARC_BUSY;
+-  page->EvaluateScript(source, world ? std::string() : "rearc.boost." + name,
++  page->EvaluateScript(source, world ? std::string() : rearc::BoostWorld(name),
+                        timeout_ms, completion, context, callback2);
+   return REARC_OK;
+ }
