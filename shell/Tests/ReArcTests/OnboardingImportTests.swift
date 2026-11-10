@@ -118,7 +118,7 @@ final class OnboardingImportTests: XCTestCase {
             INSERT INTO urls(url, title, visit_count, last_visit_time) VALUES ('https://tides.example.org/', 'Tides', 2, \(time - 1_000_000));
             INSERT INTO urls(url, title, visit_count, last_visit_time, hidden) VALUES ('https://frame.example.org/', '', 1, \(time), 1);
             """)
-        // Counted from a copy, never read: no real login and no password.
+        // Existence only: the scanner must never copy or open this database.
         try sqlite("Google/Chrome/Default/Login Data", """
             CREATE TABLE logins(origin_url VARCHAR NOT NULL, blacklisted_by_user INTEGER NOT NULL);
             INSERT INTO logins VALUES ('https://shop.example.com/', 0);
@@ -142,6 +142,21 @@ final class OnboardingImportTests: XCTestCase {
     }
 
     // MARK: Counts
+
+    func testScannerRejectsProfileTraversalAndChecksOnlyLoginPresence() throws {
+        // A directory stands in for Login Data: SQLite could not count it.
+        let login = root.appendingPathComponent("Google/Chrome/Default/Login Data")
+        try FileManager.default.removeItem(at: login)
+        try FileManager.default.createDirectory(at: login, withIntermediateDirectories: false)
+        try write(["profile": ["info_cache": [
+            "Default": ["name": "Valid"], "../../Outside": ["name": "Traversal"],
+            "/absolute": ["name": "Absolute"], "Guest Profile": ["name": "Guest"],
+        ]]], "Google/Chrome/Local State")
+        try write(["roots": ["bookmark_bar": ["children": [["type": "url", "url": "https://example.org"]]]]], "Outside/Bookmarks")
+        let chrome = BrowserScanner.scan(applicationSupport: root).filter { $0.browser == "Chrome" }
+        XCTAssertEqual(chrome.map(\.directory), ["Default"])
+        XCTAssertEqual(chrome.first?.stats.passwords, 1, "presence, without opening Login Data")
+    }
 
     func testActTwoCountsWhatTheImportWillBring() throws {
         let found = sources()

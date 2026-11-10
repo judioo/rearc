@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import SidebarModel
 
 public struct ImportStats: Equatable, Sendable {
     public var spaces = 0
@@ -104,7 +105,7 @@ public struct ImportSource: Equatable, Identifiable, Sendable {
 /// Finds Arc, Chrome and Brave profiles on this Mac and counts what each holds.
 /// Read-only: SQLite files are counted from a private temporary copy (the
 /// browser may hold them open), nothing is decrypted, and nothing leaves the
-/// machine. Counting logins reads no row of them, let alone a password.
+/// machine. Login Data is checked for existence only; it is never copied or opened.
 public enum BrowserScanner {
     struct Browser { let name: String; let path: String; let colour: RGBA }
     static let browsers = [
@@ -122,13 +123,15 @@ public enum BrowserScanner {
             else { continue }
             let arc = b.name == "Arc" ? arcSidebar(applicationSupport.appendingPathComponent("Arc/StorableSidebar.json")) : [:]
             for (dir, info) in cache.sorted(by: { $0.key < $1.key }) {
+                guard BrowserImportDiscovery.isProfileDirectory(dir) else { continue }
                 let profileDir = root.appendingPathComponent(dir)
                 guard FileManager.default.fileExists(atPath: profileDir.path) else { continue }
                 let info = info as? [String: Any] ?? [:]
                 var stats = ImportStats()
                 stats.bookmarks = bookmarks(profileDir.appendingPathComponent("Bookmarks"))
                 stats.pages = count(profileDir.appendingPathComponent("History"), "SELECT COUNT(*) FROM urls")
-                stats.passwords = count(profileDir.appendingPathComponent("Login Data"), "SELECT COUNT(*) FROM logins WHERE blacklisted_by_user = 0")
+                // Presence only, for the "passwords stay behind" message; never a login count.
+                stats.passwords = FileManager.default.fileExists(atPath: profileDir.appendingPathComponent("Login Data").path) ? 1 : 0
                 let extensionIDs = extensions(profileDir.appendingPathComponent("Extensions"))
                 stats.extensions = extensionIDs.count
                 var seeds: [SpaceSeed] = []
