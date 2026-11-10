@@ -16,6 +16,7 @@
 #   --channel beta    tag new appcast entries beta (requires --appcast)
 #   --notarize        notarize app before DMG and DMG before appcast (opt-in)
 #   --dmg             also make the signed DMG
+#   --allow-outdated-engine  override the Mac Stable/Extended security release gate
 #   --selftest-timeout SECONDS  watchdog for the self-test (default 300)
 # Signing settings: see sign-release.sh (REARC_RELEASE_IDENTITY, REARC_TEAM_ID, iCloud).
 set -euo pipefail
@@ -28,6 +29,7 @@ DIST="$SHELL_DIR/dist/release"
 FROM_HEAD=1
 VERIFY=1
 DMG=0
+ALLOW_OUTDATED_ENGINE=0
 APPCAST=""
 CHANNEL=""
 NOTARIZE=0
@@ -40,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     --worktree) FROM_HEAD=0 ;;
     --no-verify) VERIFY=0 ;;
     --dmg) DMG=1 ;;
+    --allow-outdated-engine) ALLOW_OUTDATED_ENGINE=1 ;;
     --appcast) mkdir -p "$2"; APPCAST="$(cd "$2" && pwd)"; DMG=1; shift ;;
     --channel) CHANNEL="$2"; [[ $CHANNEL == beta ]] || die "only --channel beta is supported"; shift ;;
     --notarize) NOTARIZE=1 ;;
@@ -55,6 +58,14 @@ done
   || die "refusing to write $DIST (development bundles live there)"
 [[ -d "$OUT/Chromium.app" ]] || die "no release engine at $OUT (scripts/build-engine-release.sh)"
 [[ ! -e "$OUT/libchrome_dll.dylib" ]] || die "$OUT is a component (dev) build"
+if [[ $DMG == 1 ]]; then
+  pin_gate=()
+  [[ $ALLOW_OUTDATED_ENGINE == 0 ]] || pin_gate+=(--allow-outdated-engine)
+  python3 "$REPO/engine/scripts/check-release-pin.py" "${pin_gate[@]}"
+  pinned="$(awk '!/^[[:space:]]*(#|$)/ {v=$0} END {print v}' "$REPO/engine/CHROMIUM_PIN")"
+  built="$(plutil -extract CFBundleShortVersionString raw "$OUT/Chromium.app/Contents/Info.plist")"
+  [[ "$built" == "$pinned" ]] || die "engine output $built does not match CHROMIUM_PIN $pinned; rebuild the release engine"
+fi
 
 # shellcheck source=release/signing-env.sh
 source "$SHELL_DIR/scripts/release/signing-env.sh"

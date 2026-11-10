@@ -47,6 +47,13 @@ shell/scripts/notarize.sh shell/dist/release/ReArc-<version>.dmg
 `release.sh --worktree` builds the uncommitted working tree for local testing; its
 `ReArcSourceRevision` gets a `-dirty` suffix. Do not distribute such a build.
 
+`release.sh --dmg` checks Chromiumdash's latest **Mac Stable and Extended Stable**
+releases before packaging, and requires the engine output version to match
+`engine/CHROMIUM_PIN`. The pin must be current on its supported milestone (156
+currently uses Extended Stable); an unsupported milestone or unavailable release
+data fails closed. `--allow-outdated-engine` explicitly bypasses the freshness
+check with a prominent warning. It does not bypass the built-version check.
+
 ## Engine build
 
 `out/ReArc-release-arm64` args (`gn args --list --short --overrides-only`):
