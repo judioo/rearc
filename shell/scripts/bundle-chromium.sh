@@ -305,7 +305,7 @@ if [[ $SELFTEST == 1 ]]; then
   if [[ $DEV_MOCK_KEYCHAIN == 1 && -f "$CERTS/client_root_ca.pem" ]]; then
     export REARC_SELFTEST_CLIENT_CERT_DIR="$CERTS"
   fi
-  MallocNanoZone=0 "$APP/Contents/MacOS/ReArc" --rearc-selftest --user-data-dir="$PROFILE" >"$LOG" 2>&1
+  REARC_RELEASE_VERIFICATION=1 MallocNanoZone=0 "$APP/Contents/MacOS/ReArc" --rearc-selftest --user-data-dir="$PROFILE" >"$LOG" 2>&1
   status=$?
   set -e
   echo "exit status: $status" >>"$LOG"

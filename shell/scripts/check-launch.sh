@@ -24,7 +24,7 @@ probe() {
   local result="$WORK/$name.txt" log="$WORK/$name.log"
   # The probe quits by itself after ready. `open -W` can keep waiting after the app
   # exited (first launch of a freshly signed copy), so the probe's own log decides.
-  open -n -W -a "$APP" --stderr "$log" --stdout "$log" "$@" \
+  open -n -W --env REARC_RELEASE_VERIFICATION=1 -a "$APP" --stderr "$log" --stdout "$log" "$@" \
     --args --rearc-launch-probe="$result" --user-data-dir="$WORK/profile-$name" &
   local opener=$! waited=0
   while (( waited < 120 )); do

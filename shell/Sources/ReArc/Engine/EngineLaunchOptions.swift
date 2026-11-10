@@ -26,6 +26,11 @@ struct EngineLaunchOptions: Equatable {
         case applicationClass
     }
 
+    /// Opt-in for release verification, supplied by release/check-launch scripts
+    /// through the process environment (never via open --args). This enables
+    /// self-test and probe modes only; release argv filtering still applies.
+    static let releaseVerificationEnvironmentKey = "REARC_RELEASE_VERIFICATION"
+
     static let engineFlagPrefix = "--rearc-engine="
     static let selfTestFlag = "--rearc-selftest"
     /// `--rearc-launch-probe=PATH`: start like a normal launch, write what
@@ -133,6 +138,8 @@ struct EngineLaunchOptions: Equatable {
             engine = Engine(rawValue: value.lowercased()) ?? .webkit
             source = .environment
         }
+        let isRelease = infoDictionary?["ReArcRelease"] as? Bool == true
+        let verificationAllowed = !isRelease || environment[releaseVerificationEnvironmentKey] == "1"
         var selfTest = false
         var probe: String?
         for argument in arguments.dropFirst() {
@@ -140,13 +147,13 @@ struct EngineLaunchOptions: Equatable {
                 let value = argument.dropFirst(engineFlagPrefix.count).lowercased()
                 engine = Engine(rawValue: value) ?? .webkit
                 source = .argument
-            } else if argument == selfTestFlag {
+            } else if verificationAllowed, argument == selfTestFlag {
                 selfTest = true
-            } else if argument.hasPrefix(launchProbeFlagPrefix) {
+            } else if verificationAllowed, argument.hasPrefix(launchProbeFlagPrefix) {
                 probe = String(argument.dropFirst(launchProbeFlagPrefix.count))
             }
         }
-        let bench = selfTest ? nil : BenchOptions.parse(Array(arguments.dropFirst()))
+        let bench = selfTest || isRelease ? nil : BenchOptions.parse(Array(arguments.dropFirst()))
         if selfTest {
             engine = .chromium
             source = .selfTest

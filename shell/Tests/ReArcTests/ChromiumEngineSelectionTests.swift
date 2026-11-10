@@ -198,3 +198,33 @@ final class ChromiumBoostPlanTests: XCTestCase {
         XCTAssertEqual(plan[0].scopes, [.init(host: "me.github.io", pathPrefix: "", includeSubdomains: false, schemeMask: 2)])
     }
 }
+
+final class ReleaseLaunchSecurityTests: XCTestCase {
+    func testReleaseOnlyPassesProfileSelectionToChromium() {
+        let attacks = ["--remote-debugging-port=9222", "--remote-debugging-pipe", "--no-sandbox",
+                       "--disable-web-security", "--enable-features=Evil", "--load-extension=/tmp/x",
+                       "--host-resolver-rules=MAP * evil", "--rearc-selftest", "https://evil.test"]
+        let result = ChromiumLaunchArguments.browserArguments(
+            ["ReArc"] + attacks + ["--user-data-dir=/isolated", "--profile-directory", "Profile 2"],
+            defaultUserDataDir: { XCTFail("explicit profile"); return "/unused" }, keychain: .system, isRelease: true)
+        XCTAssertEqual(result, ["ReArc", "--user-data-dir=/isolated", "--profile-directory=Profile 2"])
+        XCTAssertEqual(ChromiumLaunchArguments.browserArguments(["ReArc"] + attacks,
+            defaultUserDataDir: { "/isolated" }, keychain: .system, isRelease: true),
+                       ["ReArc", "--user-data-dir=/isolated"])
+    }
+
+    func testReleaseIgnoresDiagnosticFlagsUnlessVerificationEnvironmentIsSet() {
+        let flags = ["ReArc", "--rearc-selftest", "--rearc-launch-probe=/tmp/probe", "--rearc-bench"]
+        let info: [String: Any] = ["ReArcRelease": true, "ReArcDefaultEngine": "chromium"]
+        let shipping = EngineLaunchOptions.parse(arguments: flags, environment: [:], infoDictionary: info)
+        XCTAssertFalse(shipping.selfTest)
+        XCTAssertNil(shipping.launchProbePath)
+        XCTAssertNil(shipping.bench)
+        let verification = EngineLaunchOptions.parse(arguments: flags,
+            environment: [EngineLaunchOptions.releaseVerificationEnvironmentKey: "1"], infoDictionary: info)
+        XCTAssertTrue(verification.selfTest)
+        XCTAssertEqual(verification.launchProbePath, "/tmp/probe")
+        XCTAssertNil(EngineLaunchOptions.parse(arguments: ["ReArc", "--rearc-bench"],
+            environment: [EngineLaunchOptions.releaseVerificationEnvironmentKey: "1"], infoDictionary: info).bench)
+    }
+}
