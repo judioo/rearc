@@ -530,14 +530,15 @@ public struct PageContextMenuParams: Equatable, Sendable {
         self.hasImageContents = hasImageContents
     }
 
-    /// A link the shell may open elsewhere (http, https, file, data).
+    /// Page-sourced opens are limited to web URLs.
     public var openableLink: URL? { Self.openable(linkURL) }
     public var openableImage: URL? { mediaType == .image ? Self.openable(srcURL) : nil }
     public var trimmedSelection: String { selectionText.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     private static func openable(_ string: String) -> URL? {
-        guard !string.isEmpty, let url = URL(string: string), NavigationURLPolicy.allows(url),
-              url.scheme?.lowercased() != "about" else { return nil }
+        guard !string.isEmpty, let url = URL(string: string),
+              let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              url.host() != nil, NavigationURLPolicy.allows(url) else { return nil }
         return url
     }
 }

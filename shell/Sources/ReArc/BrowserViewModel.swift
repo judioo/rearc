@@ -1471,14 +1471,15 @@ final class BrowserViewModel {
     }
 
     @discardableResult
-    func openLittleArc(url: URL, title: String? = nil, profileID: Profile.ID? = nil) -> LittleArcWindow {
+    func openLittleArc(url: URL, title: String? = nil, profileID: Profile.ID? = nil, pageLink: Bool = false) -> LittleArcWindow {
         PerfSignposts.interaction(.littleArcOpen)
         let originProfile = profileID ?? store.activeProfileID
         let preparedID = engineHost.takePreparedLittleArc(profileID: originProfile)
         let record = store.createLittleArcWindow(id: preparedID ?? UUID(), url: url, title: title, profileID: originProfile)
         scheduleTransientWarmup()
+        if pageLink { loadLittleArcIfNeeded(record.id, pageLink: true) }
         requestLittleArcWindow(record.id)
-        loadLittleArcIfNeeded(record.id)
+        if !pageLink { loadLittleArcIfNeeded(record.id) }
         return record
     }
 
@@ -1489,12 +1490,12 @@ final class BrowserViewModel {
         return engineHost.engine(forLittleArc: id, profileID: record.profileID)
     }
 
-    func loadLittleArcIfNeeded(_ id: LittleArcWindow.ID) {
+    func loadLittleArcIfNeeded(_ id: LittleArcWindow.ID, pageLink: Bool = false) {
         guard let record = store.littleArcWindow(withID: id) else { return }
         let engine = engineHost.engine(forLittleArc: id, profileID: record.profileID)
         engine.linkPeekHandler = nil
         if engine.currentURL != record.url {
-            engine.load(record.url)
+            if pageLink { engine.loadPageLink(record.url) } else { engine.load(record.url) }
         }
         if let wk = engine as? NavigationCommitReporting {
             wk.onNavigationCommit = { [weak self] url, title in

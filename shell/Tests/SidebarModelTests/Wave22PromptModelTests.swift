@@ -263,3 +263,19 @@ final class Wave22PromptModelTests: XCTestCase {
         XCTAssertEqual(DownloadListFile.load(from: url).askWhereToSave, true)
     }
 }
+
+final class ContextMenuOpenSecurityTests: XCTestCase {
+    func testPageSourcedLinksAndImagesOnlyOpenHTTPAndHTTPS() {
+        for string in ["data:text/html,test", "file:///tmp/test.html", "javascript:alert(1)",
+                       "about:blank", "chrome://settings", "https:missing-host"] {
+            let params = PageContextMenuParams(linkURL: string, srcURL: string, mediaType: .image)
+            XCTAssertNil(params.openableLink, string)
+            XCTAssertNil(params.openableImage, string)
+        }
+        for string in ["http://example.test/a", "https://example.test/a"] {
+            let params = PageContextMenuParams(linkURL: string, srcURL: string, mediaType: .image)
+            XCTAssertEqual(params.openableLink?.absoluteString, string)
+            XCTAssertEqual(params.openableImage?.absoluteString, string)
+        }
+    }
+}
