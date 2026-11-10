@@ -88,9 +88,20 @@ struct FindBarView: View {
 extension View {
     /// Overlays the find bar on a page view when the bar targets `engine`.
     func findBar(_ find: FindBarModel, for engine: (any WebEngine)?) -> some View {
-        overlay(alignment: .topTrailing) {
+        modifier(FindBarOverlay(find: find, engine: engine))
+    }
+}
+
+private struct FindBarOverlay: ViewModifier {
+    let find: FindBarModel
+    let engine: (any WebEngine)?
+    @Environment(\.addressBarOverlayInset) private var toolbarInset
+
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .topTrailing) {
             if find.isShown(for: engine) {
                 FindBarView(find: find)
+                    .padding(.top, toolbarInset)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }

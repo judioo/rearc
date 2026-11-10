@@ -24,6 +24,7 @@ struct AddressBarContainer<Page: View, Toolbar: View>: View {
         ZStack(alignment: .top) {
             page()
                 .padding(.top, showsToolbar && !autoHide ? CardToolbarView.height : 0)
+                .environment(\.addressBarOverlayInset, autoHide && isVisible ? CardToolbarView.height : 0)
             if showsToolbar {
                 toolbar()
                     .background { if autoHide { Rectangle().fill(.regularMaterial) } }
@@ -69,6 +70,12 @@ struct AddressBarContainer<Page: View, Toolbar: View>: View {
         // under Reduce Motion. Never animate a web view's frame.
         withAnimation(reduceMotion ? nil : BrowserViewModel.sidebarAnimation, change)
     }
+}
+
+extension EnvironmentValues {
+    /// How far a revealed auto-hiding toolbar covers the page's top; the
+    /// find bar moves down by it instead of sitting under the strip.
+    @Entry var addressBarOverlayInset: CGFloat = 0
 }
 
 /// Focus from actual toolbar buttons/menus, plus any presented site controls
