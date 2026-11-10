@@ -90,6 +90,12 @@ struct SidebarView: View {
             // Arc's media strips (and ReArc's live video) sit above the bottom bar.
             MediaControlsStackView(model: model)
 
+            if model.onboardingSetupState.showsCard {
+                FinishSetupCard(model: model)
+                    .padding(.horizontal, SidebarMetrics.rowInset)
+                    .padding(.vertical, 6)
+            }
+
             BottomBarView(model: model, draggedItemID: $draggedItemID)
         }
         .frame(width: model.sidebarWidth)

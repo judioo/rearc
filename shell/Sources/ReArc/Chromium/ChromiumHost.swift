@@ -1094,6 +1094,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             app.addItem(.separator())
         }
         app.addItem(target.item("Set ReArc as Default Browser…", "") { model.setAsDefaultBrowser() })
+        target.add(ShellMenus.finishSetup(model), to: app)
         // Picture in Picture, password leak checks, external links and the
         // Little Arc hotkey moved to Settings (wave 35).
         app.addItem(target.item("Air Traffic Control…", "") { [weak self] in self?.presentAirTrafficControl() })
@@ -1264,7 +1265,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     }
 }
 
-final class ChromiumMenuTarget: NSObject, NSMenuItemValidation {
+final class ChromiumMenuTarget: NSObject, NSMenuItemValidation, NSMenuDelegate {
     private var actions: [Int: () -> Void] = [:]
     /// Checkmark state, read each time the menu opens.
     private var checks: [Int: () -> Bool] = [:]
@@ -1292,6 +1293,14 @@ final class ChromiumMenuTarget: NSObject, NSMenuItemValidation {
             return current != nil
         }
         return true
+    }
+
+    /// Hidden items need refreshing too: setup can be deferred after the
+    /// menu was built, and completed while its Import window is open.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        for item in menu.items where titles[item.tag] != nil {
+            _ = validateMenuItem(item)
+        }
     }
 
     func item(
@@ -1323,6 +1332,7 @@ final class ChromiumMenuTarget: NSObject, NSMenuItemValidation {
                 menuItem.isHidden = entry.isAlternate
                 menuItem.allowsKeyEquivalentWhenHidden = entry.isAlternate
                 if let live = entry.liveTitle {
+                    menu.delegate = self
                     titles[menuItem.tag] = live
                     menuItem.title = live() ?? entry.title
                     menuItem.isHidden = live() == nil

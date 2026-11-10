@@ -13,7 +13,7 @@ import SidebarModel
 /// same flow, nothing imported or changed. For a real first run on a test
 /// install, launch with `REARC_DATA_DIR` set to an empty folder.
 /// `--no-onboarding` skips it, and the first run is over on the starter's
-/// one empty space; "Onboard later" leaves it a first run.
+/// one empty space; “Onboard later” leaves a reminder inside the browser.
 @MainActor
 final class FirstRunOnboarding: OnboardingHost {
     enum Kind: Equatable { case firstRun, rehearsal, replay }
@@ -203,8 +203,8 @@ final class FirstRunOnboarding: OnboardingHost {
         onDone?()
     }
 
-    /// "Onboard later": the browser comes back on the starter, and the next
-    /// launch is still a first run.
+    /// “Onboard later”: the browser comes back with a persistent setup
+    /// reminder. An interruption without this choice still resumes the sunrise.
     func onboardingDeferred() {
         for window in hidden where !window.isVisible { window.orderFront(nil) }
         hidden.first?.makeKeyAndOrderFront(nil)
@@ -212,6 +212,7 @@ final class FirstRunOnboarding: OnboardingHost {
         takeover?.dismiss()
         takeover = nil
         if applies {
+            model?.deferFirstRunOnboarding()
             // What an earlier, interrupted import queued goes on as it would have.
             model?.releaseExtensionFeedback()
             model?.installPendingExtensions()

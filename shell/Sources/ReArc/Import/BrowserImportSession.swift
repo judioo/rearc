@@ -273,6 +273,16 @@ final class BrowserImportSession {
         model?.canOpenBrowserPage(.extensions) ?? false
     }
 
+    var canFinishSetup: Bool { model?.onboardingSetupState.showsMenuItem == true }
+
+    /// An explicit choice for people who no longer want to import, including
+    /// those with no source browser. Closing the window alone defers setup.
+    func finishWithoutImporting() {
+        guard !isImporting, canFinishSetup else { return }
+        model?.finishFirstRunOnboarding()
+        result = "You're all set."
+    }
+
     func performImport(completion: (() -> Void)? = nil) {
         guard canImport, let model, let selection else { return }
         switch selection {
@@ -284,6 +294,7 @@ final class BrowserImportSession {
             importedArcExtras = true
             refreshArcSummary()
             result = BrowserImportSession.describe(summary, settings: includeArcSettings ? arcSettings.count : 0, card: card != nil)
+            if canFinishSetup { model.finishFirstRunOnboarding() }
             completion?()
         case .profile(let profile):
             guard let detail = details[profile.id] else { return }
@@ -316,6 +327,7 @@ final class BrowserImportSession {
                         lines.append("\(queue.items.count) extension\(queue.items.count == 1 ? "" : "s") installing in the background")
                     }
                     self.result = lines.isEmpty ? "Nothing new to import." : lines.joined(separator: " · ")
+                    if !lines.isEmpty, self.canFinishSetup { model.finishFirstRunOnboarding() }
                     self.isImporting = false
                     // The pane shows what is left (nothing, usually) against the new state.
                     self.details[profile.id] = nil

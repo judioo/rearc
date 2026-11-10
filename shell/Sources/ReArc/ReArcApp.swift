@@ -44,6 +44,7 @@ struct ReArcApp: App {
                 Button("About ReArc") { AboutWindowController.shared.present() }
             }
             CommandGroup(after: .appInfo) {
+                ShellMenuButtons(groups: ShellMenus.finishSetup(model), overrides: model.shortcutOverrides)
                 Button("Set ReArc as Default Browser…") { model.setAsDefaultBrowser() }
                 Button("Air Traffic Control…") { model.showAirTrafficControl() }
             }

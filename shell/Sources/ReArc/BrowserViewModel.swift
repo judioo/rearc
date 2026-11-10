@@ -519,6 +519,7 @@ final class BrowserViewModel {
     /// starter stands in until the onboarding makes the person's spaces
     /// (Onboarding/FirstRunOnboarding.swift).
     let isFirstRun: Bool
+    private(set) var onboardingSetupState: OnboardingSetupState
     @ObservationIgnored let historyFileURL: URL?
     @ObservationIgnored var historySaveWorkItem: DispatchWorkItem?
     @ObservationIgnored let historySaveQueue = DispatchQueue(label: "net.rearc.history.persistence", qos: .utility)
@@ -557,6 +558,7 @@ final class BrowserViewModel {
         self.store = store ?? SidebarFilePersistence.loadStore(persistence: persistence)
         self.sidebarRecoveredFromCorruption = persistence.loadOutcome == .recoveredFromCorruptFile
         self.isFirstRun = persistence.isFirstRun
+        self.onboardingSetupState = persistence.onboardingSetupState
         let historyFile = Self.siblingFile(VisitHistoryFile.fileName, of: persistence.fileURL)
         self.historyFileURL = historyFile
         self.visitHistory = preparedStartup?.history ?? VisitHistoryFile.load(from: historyFile)
@@ -648,12 +650,26 @@ final class BrowserViewModel {
         return starter
     }
 
-    /// The first run's onboarding completed or was skipped. The sidebar is
-    /// written first: a skipped first run may not have changed it yet, and
+    /// “Onboard later” keeps setup available inside the browser, including
+    /// after a restart, without playing the takeover on each launch.
+    func deferFirstRunOnboarding() {
+        persistence.flush()
+        persistence.deferOnboarding()
+        onboardingSetupState = persistence.onboardingSetupState
+    }
+
+    func dismissOnboardingCard() {
+        persistence.dismissOnboardingCard()
+        onboardingSetupState = persistence.onboardingSetupState
+    }
+
+    /// The first run's onboarding completed or was explicitly skipped by a
+    /// launch flag. The sidebar is written first: it may not have changed yet, and
     /// without the file the next launch would be a first run again.
     func finishFirstRunOnboarding() {
         persistence.flush()
         persistence.finishOnboarding()
+        onboardingSetupState = persistence.onboardingSetupState
     }
 
     /// The cached sidebar can render before page/profile creation, archive,

@@ -131,6 +131,13 @@ struct ShellMenuItem: Identifiable {
 /// (SIDEBAR-SPEC §6); since wave 30 the keys are Arc's own (`ArcShortcuts`,
 /// docs/SHORTCUTS.md).
 enum ShellMenus {
+    /// ReArc menu: remains available after dismissing the sidebar card.
+    static func finishSetup(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
+        [[ShellMenuItem("Finish Setting Up ReArc…", liveTitle: {
+            model.onboardingSetupState.showsMenuItem ? "Finish Setting Up ReArc…" : nil
+        }) { model.showBrowserImport() }]]
+    }
+
     /// View menu: page navigation (Arc keeps these in the sidebar, not a toolbar).
     static func navigation(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [[

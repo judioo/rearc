@@ -124,6 +124,46 @@ final class BrowserImportShellTests: XCTestCase {
         XCTAssertEqual(command?.isEnabled(in: context), true)
     }
 
+    @MainActor
+    func testDeferredSetupCompletesAfterAnArcImport() {
+        let model = makeModel()
+        _ = FirstRunOnboarding.forLaunch(model, arguments: [], automated: false)
+        model.deferFirstRunOnboarding()
+        let session = discoveredSession(model)
+        session.selection = .arcSidebar
+        XCTAssertTrue(session.canImport)
+        XCTAssertTrue(session.canFinishSetup)
+        session.performImport()
+        XCTAssertFalse(model.onboardingSetupState.showsCard)
+        XCTAssertFalse(model.onboardingSetupState.showsMenuItem)
+        model.persistence.stop()
+        let reloaded = SidebarFilePersistence.prepareLoad(from: model.persistence.fileURL)
+        XCTAssertFalse(reloaded.isFirstRun)
+        XCTAssertFalse(reloaded.onboardingSetupState.showsMenuItem)
+    }
+
+    @MainActor
+    func testDeferredSetupCompletesAfterAChromiumProfileImport() throws {
+        let model = makeModel()
+        _ = FirstRunOnboarding.forLaunch(model, arguments: [], automated: false)
+        model.deferFirstRunOnboarding()
+        model.dismissOnboardingCard()
+        let session = discoveredSession(model)
+        let profile = try XCTUnwrap(session.sources.compactMap { source -> ImportSourceProfile? in
+            if case .profile(let profile) = source, profile.browser == .chrome { return profile }
+            return nil
+        }.first)
+        session.selection = .profile(profile)
+        waitForDetail(session, profile)
+        let imported = expectation(description: "imported and setup completed")
+        session.performImport { imported.fulfill() }
+        wait(for: [imported], timeout: 10)
+        XCTAssertFalse(model.onboardingSetupState.showsCard)
+        XCTAssertFalse(model.onboardingSetupState.showsMenuItem)
+        model.persistence.stop()
+        XCTAssertFalse(SidebarFilePersistence.prepareLoad(from: model.persistence.fileURL).onboardingSetupState.showsMenuItem)
+    }
+
     /// Arc's card files beside its sidebar; the auth file with fields ReArc must not keep.
     private func writeArcCard() throws {
         try write(["title": "STATUESQUE HUNTER", "paletteNumber": 6, "shapeName": "Shape2",

@@ -129,6 +129,11 @@ struct BrowserImportView: View {
             }
             Spacer()
             if session.isImporting { ProgressView().controlSize(.small) }
+            if session.canFinishSetup {
+                Button("Start Fresh") { session.finishWithoutImporting() }
+                    .disabled(session.isImporting)
+                    .help("Finish setting up ReArc without importing from another browser")
+            }
             Button(session.isUpToDate ? "Imported" : "Import") { session.performImport() }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!session.canImport)

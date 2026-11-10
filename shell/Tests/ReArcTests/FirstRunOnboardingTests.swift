@@ -76,12 +76,73 @@ final class FirstRunOnboardingTests: XCTestCase {
         XCTAssertNil(FirstRunOnboarding.forLaunch(third, arguments: [], automated: false))
     }
 
-    func testOnboardLaterLeavesItAFirstRun() {
+    func testOnboardLaterShowsAReminderInsteadOfReplayingTheSunrise() {
         let model = launch()
         XCTAssertEqual(FirstRunOnboarding.forLaunch(model, arguments: [], automated: false), .firstRun)
         FirstRunOnboarding(kind: .firstRun, model: model) { [] }.onboardingDeferred()
+        XCTAssertTrue(model.onboardingSetupState.showsCard)
+        XCTAssertTrue(model.onboardingSetupState.showsMenuItem)
+        XCTAssertEqual(ShellMenus.finishSetup(model).first?.first?.shownTitle, "Finish Setting Up ReArc…")
         quit(model)
-        XCTAssertTrue(launch().isFirstRun)
+        let relaunched = launch()
+        XCTAssertFalse(relaunched.isFirstRun)
+        XCTAssertTrue(relaunched.onboardingSetupState.showsCard)
+        XCTAssertNil(FirstRunOnboarding.forLaunch(relaunched, arguments: [], automated: false))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "deferral is not completion")
+    }
+
+    func testDismissingTheCardKeepsTheMenuAcrossRestartsUntilCompletion() {
+        let model = launch()
+        _ = FirstRunOnboarding.forLaunch(model, arguments: [], automated: false)
+        FirstRunOnboarding(kind: .firstRun, model: model) { [] }.onboardingDeferred()
+        model.dismissOnboardingCard()
+        XCTAssertFalse(model.onboardingSetupState.showsCard)
+        XCTAssertTrue(model.onboardingSetupState.showsMenuItem)
+        let menuItem = ShellMenus.finishSetup(model).first?.first
+        XCTAssertEqual(menuItem?.shownTitle, "Finish Setting Up ReArc…")
+        model.persistence.stop()
+
+        let second = launch()
+        XCTAssertFalse(second.onboardingSetupState.showsCard)
+        XCTAssertTrue(second.onboardingSetupState.showsMenuItem)
+        XCTAssertNil(FirstRunOnboarding.forLaunch(second, arguments: [], automated: false))
+        second.finishFirstRunOnboarding()
+        XCTAssertFalse(second.onboardingSetupState.showsMenuItem)
+        second.persistence.stop()
+
+        let third = launch()
+        XCTAssertFalse(third.onboardingSetupState.showsCard)
+        XCTAssertFalse(third.onboardingSetupState.showsMenuItem)
+        XCTAssertNil(ShellMenus.finishSetup(third).first?.first?.shownTitle)
+        XCTAssertNil(FirstRunOnboarding.forLaunch(third, arguments: [], automated: false))
+    }
+
+    func testStartFreshExplicitlyFinishesDeferredSetupWithoutASourceBrowser() {
+        let model = launch()
+        _ = FirstRunOnboarding.forLaunch(model, arguments: [], automated: false)
+        FirstRunOnboarding(kind: .firstRun, model: model) { [] }.onboardingDeferred()
+        let menuItem = ShellMenus.finishSetup(model).first?.first
+        let session = BrowserImportSession(model: model, applicationSupport: data.appendingPathComponent("no-browsers"), arcDefaults: { [:] })
+        XCTAssertTrue(session.canFinishSetup)
+        session.performImport()
+        XCTAssertTrue(model.onboardingSetupState.showsMenuItem, "opening or attempting an empty import does not finish setup")
+        session.finishWithoutImporting()
+        XCTAssertFalse(session.canFinishSetup)
+        XCTAssertFalse(model.onboardingSetupState.showsCard)
+        XCTAssertNil(menuItem?.shownTitle, "the existing menu entry updates on completion")
+        model.persistence.stop()
+        XCTAssertFalse(launch().onboardingSetupState.showsMenuItem)
+    }
+
+    func testAnUneditedFirstRunStillResumesAfterQuittingImmediately() {
+        let first = launch()
+        XCTAssertEqual(FirstRunOnboarding.forLaunch(first, arguments: [], automated: false), .firstRun)
+        let profileID = first.store.activeProfileID
+        first.persistence.stop()
+        let second = launch()
+        XCTAssertEqual(FirstRunOnboarding.forLaunch(second, arguments: [], automated: false), .firstRun)
+        XCTAssertEqual(second.store.activeProfileID, profileID)
+        XCTAssertFalse(second.onboardingSetupState.showsMenuItem)
     }
 
     func testAnExistingSidebarWithoutTheMarkerIsNotOnboarded() {
@@ -92,6 +153,9 @@ final class FirstRunOnboardingTests: XCTestCase {
 
         let model = launch()
         XCTAssertFalse(model.isFirstRun)
+        XCTAssertFalse(model.onboardingSetupState.showsCard)
+        XCTAssertFalse(model.onboardingSetupState.showsMenuItem)
+        XCTAssertNil(ShellMenus.finishSetup(model).first?.first?.shownTitle)
         XCTAssertNil(FirstRunOnboarding.forLaunch(model, arguments: [], automated: false))
         XCTAssertEqual(FirstRunOnboarding.forLaunch(model, arguments: ["--onboarding"], automated: false), .rehearsal,
                        "--onboarding only rehearses")
