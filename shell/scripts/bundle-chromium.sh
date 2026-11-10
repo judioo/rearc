@@ -15,6 +15,7 @@
 #                       engine argument, with and without a link) and check it reaches ready on
 #                       the Chromium path (scripts/check-launch.sh; throwaway profile).
 #   REARC_CHROMIUM_OUT  engine output dir (default: engine/chromium/src/out/ReArc-dev-arm64);
+#   REARC_ENGINE_BRIDGE  public bridge header directory (for source-less worktrees).
 #   --engine-out DIR    the same, as an option. A monolithic (non-component) engine build such
 #                       as out/ReArc-release-arm64 (scripts/build-engine-release.sh) has no
 #                       dylib closure: the framework is self-contained. Release-sign that bundle
@@ -43,7 +44,7 @@ set -euo pipefail
 SHELL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="$(cd "$SHELL_DIR/.." && pwd)"
 OUT="${REARC_CHROMIUM_OUT:-$REPO/engine/chromium/src/out/ReArc-dev-arm64}"
-BRIDGE="$REPO/engine/chromium/src/chrome/browser/rearc_bridge"
+BRIDGE="${REARC_ENGINE_BRIDGE:-$REPO/engine/chromium/src/chrome/browser/rearc_bridge}"
 # REARC_SHELL_SCRATCH: another scratch path, so parallel builds do not share one.
 SCRATCH="${REARC_SHELL_SCRATCH:-$SHELL_DIR/.build-chromium}"
 DIST="$SHELL_DIR/dist/chromium"

@@ -175,13 +175,18 @@ public final class SidebarStore {
     public func addProfile(
         name: String,
         avatar: ProfileAvatarDescriptor = .personalDefault(),
-        themeColor: SpaceTheme = .default
+        themeColor: SpaceTheme = .default,
+        createInitialSpace: Bool = true
     ) -> Profile {
         let profile = Profile(name: name, avatar: avatar, themeColor: themeColor)
         profiles.append(profile)
         boostLibrariesByProfileID[profile.id] = BoostLibraryOps.empty(for: profile.id)
         favoritesByProfile[profile.id] = []
         topAppsContainerIDByProfile[profile.id] = UUID()
+        guard createInitialSpace else {
+            notifyMutation()
+            return profile
+        }
         let space = Space(name: "Space 1", theme: themeColor, profileID: profile.id, sortRank: rankForNewSpace())
         spaces.append(space)
         contentBySpace[space.id] = SpaceContent()
@@ -273,11 +278,10 @@ public final class SidebarStore {
             lastActiveSpaceByProfile[activeProfileID] = activeSpaceID
         }
         activeProfileID = id
-        let candidates = spaces(in: id)
-        if candidates.isEmpty {
-            selectedItemID = nil
-            notifyMutation()
-            return
+        // A profile may be empty after its last space chose another container.
+        // Selecting it creates a landing space without repurposing another profile's space.
+        if spaces(in: id).isEmpty {
+            _ = addSpace(name: "Space 1", profileID: id)
         }
         activateProfileSpaceMemory(for: id)
         notifyMutation()

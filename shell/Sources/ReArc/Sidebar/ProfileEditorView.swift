@@ -6,16 +6,30 @@ struct ProfileEditorRequest: Identifiable {
     let id = UUID()
     var profileID: Profile.ID?
     var draft: ProfileDraft
+    /// New Profile… from a space's profile menu: the new profile becomes
+    /// that space's container instead of getting a starter space.
+    var spaceID: Space.ID?
 
-    init(profile: Profile? = nil) {
+    init(profile: Profile? = nil, forSpace spaceID: Space.ID? = nil) {
         profileID = profile?.id
         draft = profile.map(ProfileDraft.init(profile:)) ?? ProfileDraft()
+        self.spaceID = profile == nil ? spaceID : nil
     }
 }
 
 extension BrowserViewModel {
-    func beginProfileCreation() {
-        profileEditorRequest = ProfileEditorRequest()
+    func beginProfileCreation(forSpace spaceID: Space.ID? = nil) {
+        let request = ProfileEditorRequest(forSpace: spaceID)
+        guard spaceEditorID != nil else {
+            profileEditorRequest = request
+            return
+        }
+        // From the Edit Theme and Icon sheet: a window shows one sheet at a
+        // time, so the profile editor opens once that sheet has gone.
+        spaceEditorID = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.profileEditorRequest = request
+        }
     }
 
     func beginProfileEditing(_ profile: Profile) {
@@ -23,17 +37,22 @@ extension BrowserViewModel {
     }
 
     @discardableResult
-    func saveProfile(_ draft: ProfileDraft, id: Profile.ID?, selecting: Bool) -> Profile? {
+    func saveProfile(_ draft: ProfileDraft, id: Profile.ID?, selecting: Bool, forSpace spaceID: Space.ID? = nil) -> Profile? {
         let profile: Profile?
         if let id {
             guard store.updateProfile(id, from: draft) == nil else { return nil }
             profile = store.profile(withID: id)
         } else {
-            profile = store.createProfile(from: draft)
+            let assigning = spaceID.flatMap { store.space(withID: $0) } != nil
+            profile = store.createProfile(from: draft, createInitialSpace: !assigning)
         }
         guard let profile else { return nil }
         profileEditorRequest = nil
-        if selecting {
+        if id == nil, let spaceID, store.space(withID: spaceID) != nil {
+            // Choosing New Profile… for this space is the confirmation:
+            // its tabs reload signed out in the new container.
+            changeSpaceProfile(spaceID, to: profile.id)
+        } else if selecting {
             store.selectProfile(profile.id)
             loadSelectedIfNeeded()
         }
@@ -129,7 +148,8 @@ struct SidebarPersonalizationSheets: ViewModifier {
                 set: { model.profileEditorRequest = $0 }
             )) { request in
                 ProfileEditorView(draft: request.draft, isCreating: request.profileID == nil) { draft in
-                    model.saveProfile(draft, id: request.profileID, selecting: request.profileID == nil) != nil
+                    model.saveProfile(draft, id: request.profileID, selecting: request.profileID == nil,
+                                      forSpace: request.spaceID) != nil
                 }
             }
 

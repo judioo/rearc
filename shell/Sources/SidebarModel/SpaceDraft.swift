@@ -7,6 +7,7 @@ public struct SpaceDraft: Equatable {
     public var theme: SpaceTheme
     public var iconName: String
     public var profileID: Profile.ID
+    public var createsOwnContainer: Bool = false
 
     public init(name: String, theme: SpaceTheme, iconName: String, profileID: Profile.ID) {
         self.name = name
@@ -22,21 +23,25 @@ public struct SpaceDraft: Equatable {
 
     /// Defaults for the next space in a profile: "Space N", the next preset
     /// theme and icon.
-    public static func suggested(in store: SidebarStore, profileID: Profile.ID? = nil) -> SpaceDraft {
-        let profile = profileID.flatMap { store.profile(withID: $0)?.id } ?? store.activeProfileID
+    public static func suggested(in store: SidebarStore, profileID: Profile.ID? = nil,
+                                 containerPolicy: NewSpaceContainerPolicy = .sharedDefault) -> SpaceDraft {
+        let profile = profileID.flatMap { store.profile(withID: $0)?.id } ?? store.profiles[0].id
         let index = store.spaces(in: profile).count
-        return SpaceDraft(
+        var draft = SpaceDraft(
             name: "Space \(index + 1)",
             theme: SpaceTheme.presets[index % SpaceTheme.presets.count],
             iconName: iconCycle[index % iconCycle.count],
             profileID: profile
         )
+        draft.createsOwnContainer = containerPolicy == .ownContainer
+        return draft
     }
 
     /// Arc's Create a Space opens blank: no name, so Create stays off until
     /// one is typed, no icon (the space gets the plain dot) and the built-in theme.
-    public static func blank(in store: SidebarStore, profileID: Profile.ID? = nil) -> SpaceDraft {
-        var draft = suggested(in: store, profileID: profileID)
+    public static func blank(in store: SidebarStore, profileID: Profile.ID? = nil,
+                             containerPolicy: NewSpaceContainerPolicy = .sharedDefault) -> SpaceDraft {
+        var draft = suggested(in: store, profileID: profileID, containerPolicy: containerPolicy)
         draft.name = ""
         draft.iconName = ""
         draft.theme = .arcDefault
@@ -45,9 +50,9 @@ public struct SpaceDraft: Equatable {
 
     public var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-    /// A name is required and the profile must exist.
+    /// A name is required, and an existing profile unless creating a container.
     public func canCreate(in store: SidebarStore) -> Bool {
-        !trimmedName.isEmpty && store.profile(withID: profileID) != nil
+        !trimmedName.isEmpty && (createsOwnContainer || store.profile(withID: profileID) != nil)
     }
 }
 
@@ -56,9 +61,11 @@ extension SidebarStore {
     @discardableResult
     public func createSpace(from draft: SpaceDraft) -> Space? {
         guard draft.canCreate(in: self) else { return nil }
+        let profileID = draft.createsOwnContainer
+            ? createContainerProfile(name: draft.trimmedName, theme: draft.theme).id : draft.profileID
         let space = draft.iconName.isEmpty
-            ? addSpace(name: draft.trimmedName, theme: draft.theme, profileID: draft.profileID)
-            : addSpace(name: draft.trimmedName, theme: draft.theme, iconName: draft.iconName, profileID: draft.profileID)
+            ? addSpace(name: draft.trimmedName, theme: draft.theme, profileID: profileID)
+            : addSpace(name: draft.trimmedName, theme: draft.theme, iconName: draft.iconName, profileID: profileID)
         if !draft.iconName.isEmpty { setSpaceIcon(space.id, iconName: draft.iconName) }
         selectSpace(space.id)
         return self.space(withID: space.id)

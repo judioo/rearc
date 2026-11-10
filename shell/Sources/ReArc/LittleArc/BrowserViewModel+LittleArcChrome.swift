@@ -93,15 +93,15 @@ extension BrowserViewModel {
         return true
     }
 
-    /// ⌥⌘-click in a sidebar tab's page: Little Arc in the current profile.
+    /// ⌥⌘-click in a sidebar tab's page: Little Arc in the source page's profile.
     /// Off in Settings › Links: the click follows the link as usual.
-    func configureLittleArcClicks(on engine: any WebEngine) {
+    func configureLittleArcClicks(on engine: any WebEngine, profileID: Profile.ID) {
         guard littleArcOnModifiedClick else {
             (engine as? LittleArcLinkOpening)?.littleArcLinkHandler = nil
             return
         }
         (engine as? LittleArcLinkOpening)?.littleArcLinkHandler = { [weak self] url in
-            self?.openLittleArc(url: url)
+            self?.openLittleArc(url: url, profileID: profileID)
         }
     }
 

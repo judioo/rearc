@@ -22,8 +22,9 @@ public struct ProfileDraft: Equatable {
 
 extension SidebarStore {
     @discardableResult
-    public func createProfile(from draft: ProfileDraft) -> Profile? {
+    public func createProfile(from draft: ProfileDraft, createInitialSpace: Bool = true) -> Profile? {
         guard draft.canSave else { return nil }
-        return addProfile(name: draft.trimmedName, avatar: draft.avatar, themeColor: draft.themeColor)
+        return addProfile(name: draft.trimmedName, avatar: draft.avatar, themeColor: draft.themeColor,
+                          createInitialSpace: createInitialSpace)
     }
 }

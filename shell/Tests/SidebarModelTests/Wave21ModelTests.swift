@@ -191,10 +191,10 @@ final class Wave21ModelTests: XCTestCase {
         XCTAssertEqual(store.changeProfile(ofSpace: a.id, to: UUID()), .profileNotFound)
         XCTAssertEqual(store.changeProfile(ofSpace: UUID(), to: work.id), .spaceNotFound)
         let workSpace = store.spaces(in: work.id)[0]
-        XCTAssertEqual(store.changeProfile(ofSpace: workSpace.id, to: home.id), .lastSpaceInProfile)
-        XCTAssertEqual(store.profileChoices(forSpace: a.id).map(\.id), [work.id])
-        XCTAssertTrue(store.profileChoices(forSpace: workSpace.id).isEmpty)
-        XCTAssertEqual(store.space(withID: workSpace.id)?.profileID, work.id, "a refused change changes nothing")
+        XCTAssertNil(store.changeProfile(ofSpace: workSpace.id, to: home.id))
+        XCTAssertEqual(store.profileChoices(forSpace: a.id).map(\.id), [home.id, work.id])
+        XCTAssertEqual(store.profileChoices(forSpace: workSpace.id).count, 2)
+        XCTAssertEqual(store.space(withID: workSpace.id)?.profileID, home.id)
     }
 
     func testMoveSpaceToProfileCommand() {

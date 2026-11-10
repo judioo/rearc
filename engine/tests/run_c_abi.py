@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ENGINE = Path(__file__).resolve().parents[1]
 SRC = ENGINE / "chromium/src"
-OUT = SRC / "out/ReArc-dev-arm64"
+OUT = Path(os.environ.get("REARC_CHROMIUM_OUT", SRC / "out/ReArc-dev-arm64"))
 BRIDGE = Path(os.environ.get("REARC_TEST_ABI_HEADER_DIR", SRC / "chrome/browser/rearc_bridge"))
 
 
@@ -589,7 +589,7 @@ def main():
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
-        for kind in (sys.argv[1:] or ("launch", "devtools", "client_certificates", "links", "interstitials", "auth", "save", "leak", "autofill", "extensions", "pip", "pip_embedded", "perf", "drops", "print", "fullscreen", "search", "history", "danger", "discard", "passwords", "context", "permissions", "files", "dialogs", "helpers", "find", "downloads", "webui", "migration", "shutdown", "shutdown_veto", "core", "services", "urls", "eval", "scheme_return", "profiles", "identity", "zoom", "messages", "branding", "theme")):
+        for kind in (sys.argv[1:] or ("launch", "devtools", "client_certificates", "links", "interstitials", "auth", "save", "leak", "autofill", "extensions", "pip", "pip_embedded", "perf", "drops", "print", "fullscreen", "search", "history", "danger", "discard", "passwords", "context", "permissions", "files", "dialogs", "helpers", "find", "downloads", "webui", "migration", "shutdown", "shutdown_veto", "core", "services", "urls", "eval", "scheme_return", "profiles", "containers", "identity", "zoom", "messages", "branding", "theme")):
             source = ENGINE / f"tests/c_abi_{kind}_host.mm"
             subprocess.run([
                 "xcrun", "clang++", "-std=c++20", "-fobjc-arc", f"-I{BRIDGE}",
@@ -626,7 +626,7 @@ def main():
                 downloads = (workspace / f"downloads-{kind}").resolve()
                 downloads.mkdir(exist_ok=True)
                 env["REARC_DOWNLOAD_DIR"] = str(downloads)
-            phases = range(4) if kind == "devtools" else range(3) if kind == "shutdown" else range(2) if kind in ("discard", "profiles", "zoom", "migration", "leak") else range(1)
+            phases = range(4) if kind == "devtools" else range(3) if kind == "shutdown" else range(2) if kind in ("discard", "profiles", "containers", "zoom", "migration", "leak") else range(1)
             for phase in phases:
                 if kind == "devtools":
                     env["REARC_DEVTOOLS_MODE"] = str(phase)
@@ -636,7 +636,7 @@ def main():
                 if kind == "shutdown":
                     env["REARC_SHUTDOWN_MODE"] = str(phase)
                 elif phase and kind != "discard":
-                    env["REARC_MIGRATION_SECOND" if kind == "migration" else "REARC_PROFILE_SECOND" if kind == "profiles" else "REARC_LEAK_SECOND" if kind == "leak" else "REARC_ZOOM_SECOND"] = "1"
+                    env["REARC_CONTAINER_SECOND" if kind == "containers" else "REARC_MIGRATION_SECOND" if kind == "migration" else "REARC_PROFILE_SECOND" if kind == "profiles" else "REARC_LEAK_SECOND" if kind == "leak" else "REARC_ZOOM_SECOND"] = "1"
                 if kind == "migration" and phase:
                     (profile / "alias").symlink_to("Default", target_is_directory=True)
                 suffix = "-disabled" if kind == "discard" and phase else f"-mode{phase}" if kind in ("shutdown", "devtools") else '-reopen' if phase else ''

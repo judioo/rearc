@@ -48,7 +48,7 @@ struct SpaceCreationPage: View {
 
             VStack(spacing: 8) {
                 nameField(current)
-                if model.store.profiles.count > 1 { profileRow(current) }
+                profileRow(current)
                 ChooseThemeRow(theme: draft.theme, arrowEdge: .trailing, height: 34)
             }
             .padding(.top, 26)
@@ -174,17 +174,22 @@ struct SpaceCreationPage: View {
             Spacer(minLength: 4)
             Menu {
                 ForEach(model.store.profiles) { profile in
-                    Button(profile.name) { draft.wrappedValue.profileID = profile.id }
+                    Button(profile.name) {
+                        draft.wrappedValue.profileID = profile.id
+                        draft.wrappedValue.createsOwnContainer = false
+                    }
                 }
+                Divider()
+                Button("New Container for This Space") { draft.wrappedValue.createsOwnContainer = true }
             } label: {
-                Text(model.store.profile(withID: current.profileID)?.name ?? "Profile")
+                Text(current.createsOwnContainer ? "New Container" : model.store.profile(withID: current.profileID)?.name ?? "Profile")
                     .font(.system(size: 11, weight: .semibold))
                     .lineLimit(1)
             }
             .menuStyle(.button)
             .buttonStyle(.accessoryBar)
             .fixedSize()
-            .frame(maxWidth: 96, alignment: .trailing)
+            .frame(maxWidth: 120, alignment: .trailing)
             Image(systemName: "info.circle")
                 .font(.system(size: 11))
                 .foregroundStyle(chrome.secondaryText)

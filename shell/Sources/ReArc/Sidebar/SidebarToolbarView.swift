@@ -58,12 +58,14 @@ struct SidebarToolbarView: View {
                             Button(candidate.name) { model.selectProfile(candidate.id) }
                         }
                     } label: {
-                        ProfileAvatarView(profile: profile, diameter: 18)
+                        ProfileAvatarView(profile: profile, diameter: 18, sidebarBadge: chrome.badge)
                     }
-                        .menuStyle(.borderlessButton)
+                        // A plain button draws the badge as is (the borderless style dims it).
+                        .menuStyle(.button)
+                        .buttonStyle(.plain)
+                        .menuIndicator(.hidden)
                         .fixedSize()
                         .accessibilityLabel("Switch Profile: \(profile.name)")
-                        .opacity(0.85)
                         .padding(.trailing, 10)
                         .help(profile.name)
                 }
