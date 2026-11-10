@@ -225,6 +225,14 @@ final class ChromiumHostView: NSView {
         guard let lease else { return }
         self.lease = nil
         ChromiumRuntime.shared.unregisterLease(lease.attachmentID)
+        // Detach hides the page's view. Hiding the first responder makes AppKit
+        // walk the key-view loop for a successor, which reads SwiftUI's focus
+        // responders; inside the graph update that is dismantling this host
+        // (single page -> split) that hits views being destroyed and aborts in
+        // AttributeGraph. Resigning first gives the window focus with no walk.
+        let window = window
+        let pageHadFocus = window.map { Self.contains(lease.view, firstResponderOf: $0) } ?? false
+        if pageHadFocus { window?.makeFirstResponder(nil) }
         if detach {
             let status = PerfSignposts.engineCall("ViewDetach") { ReArcViewDetach(lease.tabID, lease.attachmentID) }
             if status != .rearcOK, status != ReArcStatus(REARC_STALE_ATTACHMENT) {
@@ -234,6 +242,20 @@ final class ChromiumHostView: NSView {
         lease.view.removeFromSuperview()
         ReArcViewRelease(lease.retained)
         engine.leaseChanged(nil, host: self)
+        if pageHadFocus, let window {
+            // The tab's next host (the split pane now showing it) attaches in
+            // the same update; give its page the focus back after that update,
+            // unless something else took focus meanwhile.
+            DispatchQueue.main.async { [engine] in
+                guard window.firstResponder === window, engine.leaseHolder?.window === window else { return }
+                engine.focusPage()
+            }
+        }
+    }
+
+    private static func contains(_ view: NSView, firstResponderOf window: NSWindow) -> Bool {
+        guard let responder = window.firstResponder as? NSView else { return false }
+        return responder === view || responder.isDescendant(of: view)
     }
 
     /// reason: 0 tab_closed, 1 window_closed, 2 content_replaced, 3 engine_stopped.

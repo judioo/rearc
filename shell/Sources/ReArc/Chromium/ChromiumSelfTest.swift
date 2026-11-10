@@ -1115,6 +1115,9 @@ final class ChromiumSelfTest {
             + "after window 2 closed); one live attachment throughout; app still running")
 
         // Split view: both panes attach at once, each its own tab and lease.
+        // With the page focused: its host's detach used to hide the first
+        // responder mid-update and abort in AttributeGraph (QA 2026-11-10).
+        try check(engineA.focusPage(), "tab A's page took no keyboard focus before Add Split View")
         model.addSplitView(orientation: .horizontal)
         guard let split = store.splitContaining(tabID: tabA.id)?.split,
               let companionTab = split.tabs.first(where: { $0.id != tabA.id }) else {
@@ -1127,6 +1130,9 @@ final class ChromiumSelfTest {
         }
         try checkOneLease(engineA, "split pane A")
         try checkOneLease(companion, "split companion")
+        try await wait("tab A's page focused again in its split pane", timeout: 5) {
+            engineA.leaseHolder?.pageKeyView.map { first.firstResponder === $0 } ?? false
+        }
         log("PASS Split View: tab \(engineA.tabID) lease \(engineA.attachmentID ?? 0) and companion tab \(companion.tabID) "
             + "lease \(companion.attachmentID ?? 0) attached side by side in window 1")
         try await splitPaneRowChecks(model: model, store: store, splitID: split.id, focused: engineA, other: companion,
