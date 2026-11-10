@@ -346,6 +346,10 @@ final class BrowserImportTests: XCTestCase {
         XCTAssertTrue(notes.isEnabled)
         XCTAssertTrue(notes.isPinned)
         XCTAssertEqual(notes.version, "1.2.0")
+        // Engine ABI 1.61 compares the store's manifest with this one.
+        let manifest = try XCTUnwrap(notes.manifestJSON.flatMap { $0.data(using: .utf8) })
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: manifest) as? [String: Any])?["version"] as? String, "1.2.0")
+        XCTAssertEqual(ExtensionReinstallQueue([notes], into: UUID()).current?.sourceManifest, notes.manifestJSON)
         let quiet = try XCTUnwrap(extensions.first { $0.id == BrowserImportFixture.disabledID })
         XCTAssertFalse(quiet.isEnabled)
         XCTAssertEqual(quiet.origin, .webStore, "a Web Store update URL counts")

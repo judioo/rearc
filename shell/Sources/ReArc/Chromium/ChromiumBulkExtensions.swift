@@ -26,8 +26,7 @@ private let bulkExtensionReply: ReArcExtensionInstallCallback = { context, id, s
 extension ChromiumRuntime {
     var supportsBulkExtensionInstall: Bool {
         isReady && !isStopping && capabilities.extensionBulkInstall &&
-        dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcProfileInstallExtensions") != nil &&
-        dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcProfileLoadUnpackedExtension") != nil
+        dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcProfileInstallExtensions") != nil
     }
 
     func installExtensions(_ items: [ExtensionReinstallQueue.Item],
@@ -45,15 +44,31 @@ extension ChromiumRuntime {
             switch first.origin {
             case .webStore:
                 typealias Install = @convention(c) (UInt64, UnsafePointer<UnsafePointer<CChar>?>?, UInt32, ReArcExtensionInstallCallback?, UnsafeMutableRawPointer?) -> ReArcStatus
-                let install = unsafeBitCast(dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcProfileInstallExtensions")!, to: Install.self)
+                typealias InstallSources = @convention(c) (UInt64, UnsafePointer<ReArcExtensionInstallSource>?, UInt32, ReArcExtensionInstallCallback?, UnsafeMutableRawPointer?) -> ReArcStatus
                 let strings = items.map { strdup($0.id)! }
                 defer { strings.forEach { free($0) } }
-                let pointers = strings.map { Optional(UnsafePointer<CChar>($0)) }
-                status = pointers.withUnsafeBufferPointer { install(profile, $0.baseAddress, UInt32(items.count), bulkExtensionReply, context) }
+                let manifests = items.compactMap { $0.sourceManifest.map { strdup($0)! } }
+                defer { manifests.forEach { free($0) } }
+                if manifests.count == items.count, ReArcEngineHasFeature("extension_install_sources"),
+                   let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcProfileInstallExtensionSources") {
+                    // ABI 1.61: a store version asking for more than the source's gets the install prompt.
+                    let install = unsafeBitCast(symbol, to: InstallSources.self)
+                    let sources = zip(strings, manifests).map { ReArcExtensionInstallSource(id: $0, manifest_json: $1) }
+                    status = sources.withUnsafeBufferPointer { install(profile, $0.baseAddress, UInt32(items.count), bulkExtensionReply, context) }
+                } else {
+                    let install = unsafeBitCast(dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcProfileInstallExtensions")!, to: Install.self)
+                    let pointers = strings.map { Optional(UnsafePointer<CChar>($0)) }
+                    status = pointers.withUnsafeBufferPointer { install(profile, $0.baseAddress, UInt32(items.count), bulkExtensionReply, context) }
+                }
             case .unpacked(let path):
                 typealias Load = @convention(c) (UInt64, UnsafePointer<CChar>?, ReArcExtensionInstallCallback?, UnsafeMutableRawPointer?) -> ReArcStatus
-                let load = unsafeBitCast(dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcProfileLoadUnpackedExtension")!, to: Load.self)
-                status = path.withCString { load(profile, $0, bulkExtensionReply, context) }
+                // Engine ABI 1.63 removed the unpacked loader.
+                if let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcProfileLoadUnpackedExtension") {
+                    let load = unsafeBitCast(symbol, to: Load.self)
+                    status = path.withCString { load(profile, $0, bulkExtensionReply, context) }
+                } else {
+                    status = ReArcStatus(REARC_UNSUPPORTED)
+                }
             case .other:
                 status = ReArcStatus(REARC_INVALID_ARGUMENT)
             }

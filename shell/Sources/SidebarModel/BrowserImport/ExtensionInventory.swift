@@ -25,6 +25,9 @@ public struct SourceExtension: Identifiable, Equatable, Sendable {
     public var isActiveTheme = false
     public var isBlocklisted = false
     public var origin: Origin
+    /// The source browser's installed manifest, as JSON: the engine prompts
+    /// when the store's current one asks for more (engine ABI 1.61).
+    public var manifestJSON: String? = nil
 
     public var canReinstall: Bool {
         switch origin {
@@ -95,7 +98,8 @@ public enum ExtensionInventoryReader {
                 isDefaultApp: entry["was_installed_by_default"] as? Bool == true || entry["was_installed_by_oem"] as? Bool == true,
                 isActiveTheme: (((preferences["extensions"] as? [String: Any])?["theme"] as? [String: Any])?["id"] as? String) == id,
                 isBlocklisted: (entry["blocklist_state"] as? Int ?? entry["blacklist_state"] as? Int ?? 0) != 0,
-                origin: origin
+                origin: origin,
+                manifestJSON: (try? JSONSerialization.data(withJSONObject: manifest)).flatMap { String(data: $0, encoding: .utf8) }
             )
         }
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -136,6 +140,8 @@ public struct ExtensionReinstallQueue: Equatable, Codable, Sendable {
         public var origin: SourceExtension.Origin
         public var profileID: Profile.ID
         public var enabledByDefault: Bool? = nil
+        /// `SourceExtension.manifestJSON`; absent in queues saved before it.
+        public var sourceManifest: String? = nil
 
         public var key: String { "\(profileID):\(id)" }
     }
@@ -148,7 +154,8 @@ public struct ExtensionReinstallQueue: Equatable, Codable, Sendable {
     /// says the ReArc profile has already.
     public init(_ extensions: [SourceExtension], into profileID: Profile.ID, installedIDs: Set<String> = []) {
         items = ExtensionConsolidation(extensions, installedIDs: installedIDs).candidates
-            .map { Item(id: $0.id, name: $0.name, origin: $0.origin, profileID: profileID, enabledByDefault: $0.isEnabled) }
+            .map { Item(id: $0.id, name: $0.name, origin: $0.origin, profileID: profileID, enabledByDefault: $0.isEnabled,
+                        sourceManifest: $0.manifestJSON) }
     }
 
     /// Old queues omitted source enablement. Re-read their inventory before
@@ -169,6 +176,7 @@ public struct ExtensionReinstallQueue: Equatable, Codable, Sendable {
             var item = item
             item.enabledByDefault = true
             item.origin = source.origin
+            item.sourceManifest = source.manifestJSON
             return item
         }
         position = 0
