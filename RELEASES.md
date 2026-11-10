@@ -11,6 +11,27 @@ committed `RELEASES.md` has a heading for the build it is about to make:
 commit before the release, with `echo $(( $(git rev-list --count HEAD) + 1 ))` as the
 number. Details: engine/docs/RELEASE.md, "Release notes".
 
+## ReArc 0.1.0 (562) — 2026-11-10
+
+**New**
+- Auto-hide address bar: Settings › Advanced › Auto-hide address bar. The address bar slides
+  away when you move onto the page and comes back when the pointer reaches the top of the page
+  or you press ⌘L. In split view each pane's bar hides and shows on its own. It is off by default.
+- Containers: a space can have its own profile, with its own cookies and sign-ins, so the same
+  site can be signed in with different accounts in different spaces. Choose it from the profile
+  badge next to the space name, the space menu's Change Profile, or the space's edit sheet.
+  Settings › General › New spaces decides whether new spaces share the default profile (the
+  default) or get their own container.
+- Onboard later: if you choose Onboard later, a card at the bottom of the sidebar and
+  ReArc › Finish Setting Up ReArc… bring you back to importing from Arc, Chrome or Brave.
+  Closing the card keeps the menu item; importing or choosing Start Fresh removes both.
+
+**Fixes**
+- The profile badge next to the space name is legible on every theme, and the profile list is
+  never empty: it always shows your profiles, New Profile… and New Container for This Space.
+- The New Tab row in the sidebar is easier to read on coloured themes.
+- Opening split view while the page has keyboard focus no longer crashes.
+
 ## ReArc 0.1.0 (544) — 2026-11-10
 
 Security release candidate. It fixes the findings of the security review of build 500.
