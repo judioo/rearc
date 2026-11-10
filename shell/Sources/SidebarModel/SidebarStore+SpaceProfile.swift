@@ -4,8 +4,6 @@ public enum SpaceProfileChangeError: Error, Equatable {
     case spaceNotFound
     case profileNotFound
     case sameProfile
-    /// A profile keeps at least one space; delete the profile instead.
-    case lastSpaceInProfile
 }
 
 /// Changing an existing space's profile (Arc `changeProfileForCurrentSpace`,
@@ -21,13 +19,34 @@ extension SidebarStore {
         guard let space = space(withID: id) else { return .spaceNotFound }
         guard profile(withID: profileID) != nil else { return .profileNotFound }
         guard space.profileID != profileID else { return .sameProfile }
-        guard spaces(in: space.profileID).count > 1 else { return .lastSpaceInProfile }
         return nil
     }
 
-    /// Profiles a space can move to, in profile order.
+    /// All profiles, including the current/default profile, in picker order.
     public func profileChoices(forSpace id: Space.ID) -> [Profile] {
-        profiles.filter { profileChangeBlocker(forSpace: id, to: $0.id) == nil }
+        space(withID: id) == nil ? [] : profiles
+    }
+
+    /// A fresh persistent profile, without the extra starter space used by New Profile.
+    /// Name collisions are disambiguated; identity is always a new UUID.
+    public func createContainerProfile(name: String, theme: SpaceTheme) -> Profile {
+        let base = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stem = base.isEmpty ? "Container" : base
+        var name = stem
+        var suffix = 2
+        while profiles.contains(where: { $0.name == name }) {
+            name = "\(stem) \(suffix)"
+            suffix += 1
+        }
+        return addProfile(name: name, themeColor: theme, createInitialSpace: false)
+    }
+
+    @discardableResult
+    public func createContainer(forSpace id: Space.ID) -> Profile? {
+        guard let space = space(withID: id) else { return nil }
+        let profile = createContainerProfile(name: space.name, theme: space.theme)
+        _ = changeProfile(ofSpace: id, to: profile.id)
+        return profile
     }
 
     @discardableResult

@@ -102,3 +102,26 @@ public enum SpaceIconStyle: String, CaseIterable, Sendable {
         defaults.set(rawValue, forKey: Self.defaultsKey)
     }
 }
+
+/// New spaces either share the first/default profile or get a persistent profile of their own.
+/// Existing spaces keep their explicit profile association when this preference changes.
+public enum NewSpaceContainerPolicy: String, CaseIterable, Sendable {
+    case sharedDefault, ownContainer
+
+    public static let defaultsKey = "rearc.newSpaceContainerPolicy"
+
+    public var title: String {
+        switch self {
+        case .sharedDefault: return "Share the default profile"
+        case .ownContainer: return "Give each space its own container"
+        }
+    }
+
+    public static func load(from defaults: UserDefaults) -> Self {
+        defaults.string(forKey: defaultsKey).flatMap(Self.init(rawValue:)) ?? .sharedDefault
+    }
+
+    public func save(to defaults: UserDefaults) {
+        defaults.set(rawValue, forKey: Self.defaultsKey)
+    }
+}
