@@ -66,13 +66,19 @@ public struct MediaCaptureState: Equatable, Sendable {
         isCapturingVideo || isCapturingAudio
     }
 
-    /// Off as the card draws it: the page's report when it gives one, else no live stream.
+    /// A live capture always wins over the page's untrusted muted report.
     public func isOff(_ device: Device) -> Bool {
-        switch state(of: device) {
+        if device == .camera ? isCapturingVideo : isCapturingAudio { return false }
+        return switch state(of: device) {
         case .on: false
         case .off: true
         case .unknown: !(device == .camera ? isCapturingVideo : isCapturingAudio)
         }
+    }
+
+    /// The page reports the device off while its stream is still live.
+    public func pageReportsOffWhileLive(_ device: Device) -> Bool {
+        state(of: device) == .off && (device == .camera ? isCapturingVideo : isCapturingAudio)
     }
 
     /// The toggle works: the page handles the action and reports the state it flips.
@@ -87,6 +93,6 @@ public struct MediaCaptureState: Equatable, Sendable {
     /// What a toggle press asks for: `muted` for `ReArcTabSetCaptureMuted`, nil
     /// when the toggle does nothing.
     public func toggleRequest(_ device: Device) -> Bool? {
-        canToggle(device) ? !isOff(device) : nil
+        canToggle(device) ? state(of: device) == .on : nil
     }
 }

@@ -29,12 +29,14 @@ final class MediaCaptureStateTests: XCTestCase {
         XCTAssertTrue(MediaCaptureState(camera: .off, microphone: .off).isInCall)
     }
 
-    func testThePageReportWinsOverTheStream() {
+    func testLiveCaptureWinsOverThePageReport() {
         var state = meet
         state.microphone = .off
-        XCTAssertTrue(state.isOff(.microphone), "a muted mic keeps its stream live")
-        XCTAssertFalse(state.isOff(.camera))
+        XCTAssertFalse(state.isOff(.microphone), "a page cannot hide live capture with its muted report")
+        XCTAssertTrue(state.pageReportsOffWhileLive(.microphone))
+        XCTAssertFalse(meet.pageReportsOffWhileLive(.microphone))
         state.camera = .off
+        XCTAssertFalse(state.isOff(.camera))
         state.isCapturingVideo = false
         XCTAssertTrue(state.isOff(.camera))
     }
@@ -55,7 +57,7 @@ final class MediaCaptureStateTests: XCTestCase {
         XCTAssertFalse(MediaCaptureState(microphone: .on, canToggleCamera: true).canToggle(.microphone))
     }
 
-    func testAToggleAsksForTheOppositeOfWhatTheCardShows() {
+    func testAToggleStillUsesThePagesReportedState() {
         XCTAssertEqual(meet.toggleRequest(.camera), true, "on: mute")
         var muted = meet
         muted.microphone = .off
