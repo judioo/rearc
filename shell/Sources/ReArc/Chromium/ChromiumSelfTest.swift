@@ -2285,7 +2285,7 @@ extension ChromiumSelfTest {
 
         try await run("alert")
         let alert = try await shown(.alert)
-        try check(alert.message == "hello from ReArc" && alert.title.hasPrefix("127.0.0.1") && alert.origin.hasPrefix("http://127.0.0.1"),
+        try check(alert.message == "hello from ReArc" && alert.title.hasPrefix("http://127.0.0.1") && alert.origin.hasPrefix("http://127.0.0.1"),
                   "alert '\(alert.message)' title '\(alert.title)' origin '\(alert.origin)'")
         try check(prompts.dialog?.offersSuppression == false, "the first dialog offered the dialog limit")
         prompts.answerDialog(accept: true)
