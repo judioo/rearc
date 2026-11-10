@@ -145,7 +145,11 @@ echo "==> bundle ready in $((SECONDS - START))s: $APP ($(du -sh "$APP" | cut -f1
 # 5. Verification: LaunchServices launch to ready, then the self-test on the real Keychain
 #    (no --use-mock-keychain; release shells ignore the dev marker anyway).
 if [[ $VERIFY == 1 ]]; then
-  "$SHELL_DIR/scripts/check-launch.sh" "$APP" 2>&1 | tee "$DIST/check-launch.log" || die "launch check failed"
+  # The first launch of a freshly signed copy can outlast the teardown watchdog while the
+  # system assesses the new code; one retry tells that apart from a real failure.
+  "$SHELL_DIR/scripts/check-launch.sh" "$APP" 2>&1 | tee "$DIST/check-launch.log" \
+    || { echo "==> launch check failed; retrying once"; "$SHELL_DIR/scripts/check-launch.sh" "$APP" 2>&1 | tee -a "$DIST/check-launch.log"; } \
+    || die "launch check failed twice"
   LOG="$DIST/selftest-release.log"
   PROFILE="$(mktemp -d "${TMPDIR:-/tmp}/rearc-release-selftest.XXXXXX")"
   echo "==> self-test, real Keychain (log: $LOG, watchdog ${SELFTEST_TIMEOUT}s)"
