@@ -1,0 +1,152 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 remove unpacked extension loading (ABI 1.63)
+
+Security audit RC-500 F-05, engine part. Bridge 0.69.0.
+ReArcProfileLoadUnpackedExtension (tab/073) loaded any absolute path through
+UnpackedInstaller, and the importer fed it paths read from another browser's
+preferences. The shell no longer calls it; the export, its implementation and
+its framework export entries are gone. chrome://extensions Load unpacked is
+unchanged.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/app/framework.exports b/chrome/app/framework.exports
+index 1547ba0e1d..58e682ddb2 100644
+--- a/chrome/app/framework.exports
++++ b/chrome/app/framework.exports
+@@ -106,7 +106,6 @@ _ReArcTabGetThemeColor
+ _ReArcEngineSetThemeColorCallback
+ _ReArcProfileInstallExtensions
+ _ReArcProfileInstallExtensionSources
+-_ReArcProfileLoadUnpackedExtension
+ _ReArcTabSetZoomFactor
+ _ReArcTabGetDocumentIdentity
+ _ReArcTabEvaluateScript2
+diff --git a/chrome/app/framework.order b/chrome/app/framework.order
+index 42dc8c0b61..1899fd2f92 100644
+--- a/chrome/app/framework.order
++++ b/chrome/app/framework.order
+@@ -117,7 +117,6 @@ _ReArcTabGetThemeColor
+ _ReArcEngineSetThemeColorCallback
+ _ReArcProfileInstallExtensions
+ _ReArcProfileInstallExtensionSources
+-_ReArcProfileLoadUnpackedExtension
+ _ReArcTabSetZoomFactor
+ _ReArcTabGetDocumentIdentity
+ _ReArcTabEvaluateScript2
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index f43cbc28a8..d478080a52 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 62, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 63, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -159,7 +159,7 @@ ReArcEngineSetEarlyWindowCallback(ReArcEarlyWindowCallback callback,
+ // Each OTR call creates a unique in-memory profile under a persistent parent.
+ typedef void (*ReArcProfileCallback)(void* context, ReArcStatus status,
+                                      uint64_t profile_id, bool off_the_record);
+-// ABI 1.53, extension_bulk_install. Calling either function affirms that the
++// ABI 1.53, extension_bulk_install. Calling an install function affirms that the
+ // host obtained consent for these extensions. Main thread, persistent profiles
+ // only. At most one operation per profile; at most three store installs at once.
+ // Each input receives exactly one deferred callback, in completion order. The
+@@ -187,8 +187,9 @@ typedef struct ReArcExtensionInstallSource {
+ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileInstallExtensionSources(
+     uint64_t profile_id, const ReArcExtensionInstallSource* sources,
+     uint32_t count, ReArcExtensionInstallCallback callback, void* context);
+-REARC_ENGINE_EXPORT ReArcStatus ReArcProfileLoadUnpackedExtension(uint64_t profile_id,
+-    const char* path, ReArcExtensionInstallCallback callback, void* context);
++// ABI 1.63 removes 1.53's ReArcProfileLoadUnpackedExtension: an import no
++// longer loads unpacked extensions (chrome://extensions "Load unpacked" stays).
++// Hosts resolve it with dlsym and must treat its absence as unsupported.
+ 
+ REARC_ENGINE_EXPORT ReArcStatus ReArcProfileOpen(
+     const char* name, ReArcProfileCallback completion, void* context);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 9c1c7c8ad0..b166e2d479 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -26,7 +26,6 @@
+ #include "extensions/browser/extensions_browser_client.h"
+ #include "extensions/browser/management_policy.h"
+ #include "extensions/browser/blocklist.h"
+-#include "extensions/browser/unpacked_installer.h"
+ #include "extensions/common/extension.h"
+ #include "extensions/common/manifest_handlers/permissions_parser.h"
+ #include "extensions/common/permissions/permission_message_provider.h"
+@@ -1053,11 +1052,8 @@ ReArcStatus ReArcEngineShutdown(bool force,
+   if (!a.ready) {
+     return REARC_ENGINE_NOT_READY;
+   }
+-  // An unpacked load is short and has no abort: wait for it. Store batches
+-  // are cancelled; their results arrive before the shutdown completion.
+-  for (uint64_t profile : rearc::ExtensionInstallProfiles()) {
+-    if (!rearc::ExtensionInstallBatches().contains(profile)) return REARC_BUSY;
+-  }
++  // Store batches are cancelled; their results arrive before the shutdown
++  // completion.
+   auto batches = rearc::ExtensionInstallBatches();
+   for (auto& [profile, batch] : batches) {
+     batch->Cancel();
+@@ -1149,40 +1145,6 @@ ReArcStatus ReArcProfileInstallExtensionSources(uint64_t profile_id,
+                                        context);
+ }
+ 
+-ReArcStatus ReArcProfileLoadUnpackedExtension(uint64_t profile_id,
+-    const char* path, ReArcExtensionInstallCallback callback, void* context) {
+-  CHECK([NSThread isMainThread]);
+-  if (auto status = rearc::Available()) return status;
+-  if (!path || !base::FilePath(path).IsAbsolute() || !callback)
+-    return REARC_INVALID_ARGUMENT;
+-  auto* profile = rearc::FindBridgeProfile(profile_id);
+-  if (!profile) return REARC_PROFILE_NOT_FOUND;
+-  if (profile->IsOffTheRecord()) return REARC_INVALID_ARGUMENT;
+-  if (ABI::Get().closing_profile == profile_id ||
+-      rearc::ExtensionInstallProfiles().contains(profile_id)) return REARC_BUSY;
+-  rearc::ExtensionInstallProfiles().insert(profile_id);
+-  rearc::ABIPost(base::BindOnce([](uint64_t profile_id, base::FilePath path,
+-      ReArcExtensionInstallCallback callback, void* context) {
+-    auto installer = extensions::UnpackedInstaller::Create(
+-        rearc::FindBridgeProfile(profile_id));
+-    installer->set_completion_callback(base::BindOnce(
+-        [](uint64_t profile_id, ReArcExtensionInstallCallback callback,
+-           void* context, const extensions::Extension* extension,
+-           const base::FilePath&, const std::u16string& error) {
+-          std::string id = extension ? extension->id() : "";
+-          rearc::ABIPost(base::BindOnce([](uint64_t profile_id,
+-              ReArcExtensionInstallCallback callback, void* context,
+-              std::string id, std::string error) {
+-            rearc::ExtensionInstallProfiles().erase(profile_id);
+-            callback(context, id.c_str(), error.empty() ? 0 : 3,
+-                     error.c_str(), 1, 1);
+-          }, profile_id, callback, context, id, base::UTF16ToUTF8(error)));
+-        }, profile_id, callback, context));
+-    installer->Load(path);
+-  }, profile_id, base::FilePath(path), callback, context));
+-  return REARC_OK;
+-}
+-
+ ReArcStatus ReArcProfileOpen(const char* name, ReArcProfileCallback completion,
+                                void* context) {
+   if (auto status = rearc::Available()) return status;
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 4d9d678bfe..add08229f5 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.68.0";
++  return "0.69.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
