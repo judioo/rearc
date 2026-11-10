@@ -116,12 +116,18 @@ public enum ExtensionInventoryReader {
         return true
     }
 
+    /// A locale directory name, such as en, en_US, es_419 or zh_Hant_TW.
+    /// Separators are allowed only between ASCII alphanumeric subtags.
+    static func isLocaleName(_ name: String) -> Bool {
+        name.count <= 64 && name.range(of: "^[A-Za-z]{2,3}(?:[_-][A-Za-z0-9]{2,8})*$", options: .regularExpression) == (name.startIndex..<name.endIndex)
+    }
+
     /// `__MSG_name__` names come from `_locales/<default_locale>/messages.json`.
     static func localized(_ name: String, defaultLocale: String?, folder: URL) -> String? {
         guard name.hasPrefix("__MSG_"), name.hasSuffix("__"), name.count > 8 else { return name }
         let key = String(name.dropFirst(6).dropLast(2)).lowercased()
         let locales = [defaultLocale, "en", "en_US"].compactMap { $0 }
-        for locale in locales {
+        for locale in locales where isLocaleName(locale) {
             let url = folder.appendingPathComponent("_locales/\(locale)/messages.json")
             guard let data = try? Data(contentsOf: url),
                   let messages = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }

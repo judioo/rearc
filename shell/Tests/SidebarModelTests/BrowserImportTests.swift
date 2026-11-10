@@ -277,6 +277,31 @@ final class BrowserImportTests: XCTestCase {
 
     // MARK: Bookmarks and history
 
+    func testBookmarkAndArcTabImportsRejectCredentialsInURLs() throws {
+        for href in ["https://user:pass@example.org/", "https://user@example.org/", "https://:pass@example.org/", "https://@example.org/"] {
+            let bookmarks: [String: Any] = ["roots": ["bookmark_bar": ["children": [["type": "url", "url": href]]]]]
+            XCTAssertTrue(try ChromiumBookmarksReader.parse(JSONSerialization.data(withJSONObject: bookmarks)).isEmpty, href)
+            // Replace a known web tab wherever the fixture stores it, including
+            // inside Arc's alternating ID/value arrays.
+            let original = try JSONSerialization.data(withJSONObject: BrowserImportFixture.arcSidebar(), options: [.withoutEscapingSlashes])
+            let json = String(decoding: original, as: UTF8.self).replacingOccurrences(of: "https://docs.example.com/start", with: href)
+            let arc = try ArcSidebarReader.parse(Data(json.utf8))
+            XCTAssertEqual(arc.dropped.nonWebTabs, 2, href)
+        }
+    }
+
+    func testExtensionLocaleNamesCannotEscapeTheLocalesDirectory() throws {
+        for locale in ["en", "en_US", "es_419", "zh_Hant_TW", "pt-BR"] { XCTAssertTrue(ExtensionInventoryReader.isLocaleName(locale), locale) }
+        for locale in ["", "..", "../../outside", "/en", "en/US", "en_US/..", "en@US", "en_US\n"] {
+            XCTAssertFalse(ExtensionInventoryReader.isLocaleName(locale), locale)
+        }
+        let extensionFolder = try fixture.folder("Extension/_locales").deletingLastPathComponent()
+        try fixture.write(["name": ["message": "Outside"]], to: "outside/messages.json")
+        XCTAssertNil(ExtensionInventoryReader.localized("__MSG_name__", defaultLocale: "../../outside", folder: extensionFolder))
+        try fixture.write(["name": ["message": "Fallback"]], to: "Extension/_locales/en/messages.json")
+        XCTAssertEqual(ExtensionInventoryReader.localized("__MSG_name__", defaultLocale: "../../outside", folder: extensionFolder), "Fallback")
+    }
+
     func testChromiumBookmarksBecomeTheBarThenOtherBookmarks() throws {
         let nodes = try ChromiumBookmarksReader.parse(JSONSerialization.data(withJSONObject: BrowserImportFixture.bookmarks))
         XCTAssertEqual(nodes, [
