@@ -47,6 +47,9 @@ public struct Act2Log: Equatable, Sendable {
     public var offersRelaunch = false
     /// System Settings' window came up on another display than the onboarding.
     public var settingsElsewhere = false
+    /// Settings' "Quit & Reopen" brings back this copy (one install), so the
+    /// step can say to choose it; otherwise Later, then Relaunch ReArc here.
+    public var quitAndReopenIsSafe = false
 
     public init(start: Double, sources: [ImportSource], offered: [ImportCategory] = ImportCategory.allCases,
                 pending: [PendingBrowser] = []) {
@@ -73,7 +76,10 @@ public struct Act2Log: Equatable, Sendable {
         }
         if settingsElsewhere { return (explanation, "System Settings opened on your other display.") }
         switch permission {
-        case .fullDiskAccess: return (explanation, "Switch on ReArc in Full Disk Access, then come back.")
+        case .fullDiskAccess:
+            return (explanation, quitAndReopenIsSafe
+                ? "Switch on ReArc in Full Disk Access. If macOS offers Quit & Reopen, choose it."
+                : "Switch on ReArc in Full Disk Access. If macOS offers Quit & Reopen, choose Later, then come back.")
         case .appData: return (explanation, "Under ReArc in Files & Folders, switch on \(names), then come back.")
         }
     }
@@ -119,7 +125,7 @@ public struct Act2Log: Equatable, Sendable {
             && a.choice?.time == b.choice?.time && a.choice?.bring == b.choice?.bring
             && a.offered == b.offered && a.outcome == b.outcome
             && a.pending == b.pending && a.arrivals == b.arrivals && a.offersRelaunch == b.offersRelaunch
-            && a.settingsElsewhere == b.settingsElsewhere
+            && a.settingsElsewhere == b.settingsElsewhere && a.quitAndReopenIsSafe == b.quitAndReopenIsSafe
     }
 
     public func isOn(source i: Int, at t: Double) -> Bool {

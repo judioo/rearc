@@ -65,6 +65,9 @@ public protocol OnboardingHost: AnyObject {
     /// Quit and start again: macOS applies some privacy switches only to a
     /// new launch. The onboarding resumes by itself.
     func relaunchForAccess()
+    /// System Settings' "Quit & Reopen" (after Full Disk Access) reopens by
+    /// bundle id: true when that is this very copy (a normal install).
+    var macOSReopensThisCopy: Bool { get }
     /// Remember Act 1's answers: ReArc may quit for a permission (System
     /// Settings' "Quit & Reopen"), and the next launch resumes at Act 2.
     func saveResumePoint(name: String, colourIndex: Int)
@@ -86,4 +89,5 @@ public extension OnboardingHost {
     var canRelaunch: Bool { false }
     func relaunchForAccess() {}
     func saveResumePoint(name: String, colourIndex: Int) {}
+    var macOSReopensThisCopy: Bool { false }
 }

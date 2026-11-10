@@ -158,6 +158,8 @@ final class FirstRunOnboarding: OnboardingHost {
         ImportPrivacyAccess.relaunch(reopenImport: false)
     }
 
+    var macOSReopensThisCopy: Bool { ImportPrivacyAccess.macOSReopensThisCopy }
+
     func saveResumePoint(name: String, colourIndex: Int) {
         guard kind != .replay else { return }
         let dir = ShellDataLocation.isOverridden ? ShellDataLocation.root.path : nil

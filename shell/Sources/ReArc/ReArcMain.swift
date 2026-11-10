@@ -7,6 +7,8 @@ import Foundation
 enum ReArcMain {
     @MainActor
     static func main() {
+        // A relaunch helper only waits for the old ReArc to quit and opens this bundle again.
+        ReArcRelaunch.runHelperIfAsked()
         PerfSignposts.launchEvent("Main")
         // Before anything reads ShellDataLocation (a reopen from System Settings carries no environment).
         FirstRunOnboarding.restoreDataDirectoryForResume()

@@ -25,13 +25,14 @@ final class SettingsAccessTests: XCTestCase {
     let chromeLocked = PendingBrowser(browser: .chrome, state: .needsPermission(.appData))
     let safariLocked = PendingBrowser(browser: .safari, state: .needsPermission(.fullDiskAccess))
 
+    private var restored = 0
+
     private func player(_ host: Host, opened: @escaping (ImportPermission) -> Void = { _ in }, elsewhere: Bool = false) -> SunrisePlayer {
         let player = SunrisePlayer(variant: .horizon, reduced: true)
         player.audio = nil
         player.host = host
-        player.onToggleWindow = { [unowned player] in player.windowed.toggle() }
         player.presentSettings = { permission, done in opened(permission); done(elsewhere) }
-        player.hideSettingsHelper = {}
+        player.restoreAfterSettings = { [unowned self] in self.restored += 1 }
         return player
     }
 
@@ -62,14 +63,13 @@ final class SettingsAccessTests: XCTestCase {
 
         player.allowAccess()
         XCTAssertEqual(opened, [.appData])
-        XCTAssertTrue(player.windowed, "out of full screen, so Settings comes up in front")
         XCTAssertEqual(host.saved?.0, "Kai")
         XCTAssertEqual(host.saved?.1, 1)
         XCTAssertEqual(player.act2?.settingsElsewhere, true)
         XCTAssertEqual(player.act2?.permissionLines?.steps, "System Settings opened on your other display.")
 
         player.applicationBecameActive()
-        XCTAssertFalse(player.windowed, "full screen again")
+        XCTAssertEqual(restored, 1, "its own presentation again")
         let act2 = try XCTUnwrap(player.act2)
         XCTAssertEqual(act2.sources.map(\.id), [ImportSource.demo[0].id, chrome.id])
         XCTAssertTrue(act2.pending.isEmpty)
@@ -84,12 +84,14 @@ final class SettingsAccessTests: XCTestCase {
         let player = player(host, opened: { opened.append($0) })
         player.resumeAtBrowsers(name: "Kai", colourIndex: 0)
         XCTAssertEqual(player.act2?.permissionLines?.explanation, "macOS keeps Chrome and Safari private.")
-        XCTAssertEqual(player.act2?.permissionLines?.steps, "Switch on ReArc in Full Disk Access, then come back.")
+        XCTAssertEqual(player.act2?.permissionLines?.steps,
+                       "Switch on ReArc in Full Disk Access. If macOS offers Quit & Reopen, choose Later, then come back.")
         XCTAssertEqual(player.act2?.offersRelaunch, false, "no relaunch before Settings was visited")
         player.allowAccess()
         XCTAssertEqual(opened, [.fullDiskAccess], "one pane covers Chrome and Safari")
         player.applicationBecameActive()
         let act2 = try XCTUnwrap(player.act2)
+        XCTAssertEqual(restored, 1)
         XCTAssertTrue(act2.offersRelaunch)
         XCTAssertEqual(act2.permissionButton, "Relaunch ReArc")
         XCTAssertEqual(act2.permissionLines?.steps, "Switched on? macOS applies it when ReArc starts again.")
@@ -106,11 +108,47 @@ final class SettingsAccessTests: XCTestCase {
         XCTAssertEqual(SettingsAccess.screenIndex(of: settings, in: screens), 1)
         XCTAssertEqual(SettingsAccess.screenIndex(of: NSRect(x: 100, y: 100, width: 300, height: 300), in: screens), 0)
         XCTAssertNil(SettingsAccess.screenIndex(of: NSRect(x: -5000, y: 0, width: 10, height: 10), in: screens))
-        let size = NSSize(width: 300, height: 92)
-        XCTAssertEqual(SettingsAccess.helperOrigin(size: size, near: settings, screen: nil, displays: screens),
-                       NSPoint(x: 1800, y: 96), "under System Settings")
-        let low = NSRect(x: 100, y: 20, width: 700, height: 600)
-        XCTAssertEqual(SettingsAccess.helperOrigin(size: size, near: low, screen: nil, displays: screens),
-                       NSPoint(x: -212, y: 44), "beside it when there is no room below")
+        XCTAssertEqual(SettingsAccess.screenIndex(of: NSRect(x: 0, y: 0, width: 1440, height: 900), in: screens), 0)
+    }
+
+    func testTheSceneAndHelperShareTheFreeColumnBesideSettings() {
+        let screen = NSRect(x: 0, y: 0, width: 1728, height: 1079)
+        // Settings where it usually opens, centred: the right column is as wide as the left; right wins.
+        let centred = SettingsCompanionLayout.layout(screen: screen, settings: nil, helper: SettingsAccess.helperSize)
+        let assumed = NSRect(x: 1728 / 2 - 357.5, y: 1079 / 2 - 345, width: 715, height: 690)
+        XCTAssertFalse(centred.scene.intersects(assumed))
+        XCTAssertGreaterThanOrEqual(centred.scene.minX, assumed.maxX)
+        let helper = try! XCTUnwrap(centred.helper)
+        XCTAssertFalse(helper.intersects(assumed))
+        XCTAssertFalse(helper.intersects(centred.scene), "the helper sits above the scene")
+        XCTAssertEqual(centred.scene.width / centred.scene.height, 1.6, accuracy: 0.01)
+        XCTAssertTrue(screen.contains(centred.scene) && screen.contains(helper))
+
+        // Settings near the right edge: the column is on the left.
+        let right = NSRect(x: 1000, y: 200, width: 715, height: 690)
+        let left = SettingsCompanionLayout.layout(screen: screen, settings: right, helper: nil)
+        XCTAssertLessThanOrEqual(left.scene.maxX, right.minX)
+        XCTAssertNil(left.helper, "no helper for Files & Folders")
+
+        // A small display with Settings in the middle: over its sidebar at most, never its list.
+        let small = NSRect(x: 0, y: 0, width: 1280, height: 777)
+        let middle = NSRect(x: 280, y: 40, width: 715, height: 690)
+        let tight = SettingsCompanionLayout.layout(screen: small, settings: middle, helper: SettingsAccess.helperSize)
+        XCTAssertEqual(tight.scene.minX, 16)
+        XCTAssertLessThanOrEqual(tight.scene.maxX, middle.minX + 230, "Settings' sidebar is about 230 pt")
+
+        // Settings on a second display: the column is on that display.
+        let second = NSRect(x: 1728, y: 0, width: 1920, height: 1055)
+        let there = SettingsCompanionLayout.layout(screen: second, settings: NSRect(x: 2200, y: 200, width: 715, height: 690),
+                                                   helper: SettingsAccess.helperSize)
+        XCTAssertTrue(second.contains(there.scene) && second.contains(there.helper!))
+    }
+
+    func testQuitAndReopenIsRecommendedOnlyForASingleInstall() {
+        var log = Act2Log(start: 0, sources: [], pending: [safariLocked])
+        XCTAssertEqual(log.permissionLines?.steps,
+                       "Switch on ReArc in Full Disk Access. If macOS offers Quit & Reopen, choose Later, then come back.")
+        log.quitAndReopenIsSafe = true
+        XCTAssertEqual(log.permissionLines?.steps, "Switch on ReArc in Full Disk Access. If macOS offers Quit & Reopen, choose it.")
     }
 }

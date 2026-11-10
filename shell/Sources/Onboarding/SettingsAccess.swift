@@ -73,13 +73,15 @@ public enum SettingsAccess {
 
     private static var helper: NSPanel?
 
+    /// The drag helper's size.
+    public static let helperSize = NSSize(width: 300, height: 92)
+
     /// A small floating card beside System Settings: ReArc's icon to drag
     /// into the Full Disk Access list, as other Mac apps offer. It does not
     /// take focus, so using it keeps System Settings in front.
-    public static func showDragHelper(near settings: NSRect?, fallback screen: NSScreen?) {
+    public static func showDragHelper(at frame: NSRect) {
         hideDragHelper()
-        let size = NSSize(width: 300, height: 92)
-        let panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+        let panel = NSPanel(contentRect: NSRect(origin: .zero, size: frame.size),
                             styleMask: [.nonactivatingPanel, .titled, .closable, .fullSizeContentView, .utilityWindow],
                             backing: .buffered, defer: false)
         panel.titleVisibility = .hidden
@@ -91,10 +93,18 @@ public enum SettingsAccess {
         panel.becomesKeyOnlyIfNeeded = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = NSHostingView(rootView: DragHelperView(appURL: Bundle.main.bundleURL))
-        panel.setFrameOrigin(helperOrigin(size: size, near: settings, screen: (screen ?? NSScreen.main)?.visibleFrame,
-                                          displays: NSScreen.screens.map(\.visibleFrame)))
+        panel.setFrame(frame, display: false)
         panel.orderFrontRegardless()
         helper = panel
+    }
+
+    /// The display System Settings uses: its window's, else the main one
+    /// (the one with the menu bar, where it opens). Visible frames.
+    public static func settingsScreen(for settings: NSRect?) -> NSRect {
+        let screens = NSScreen.screens.map(\.visibleFrame)
+        let main = screens.first ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        guard let settings, let i = screenIndex(of: settings, in: NSScreen.screens.map(\.frame)) else { return main }
+        return screens[i]
     }
 
     public static func hideDragHelper() {
@@ -102,17 +112,47 @@ public enum SettingsAccess {
         helper = nil
     }
 
-    /// Under System Settings' window, centred, if there is room on its
-    /// display; else at the bottom of `screen`.
-    public nonisolated static func helperOrigin(size: NSSize, near settings: NSRect?, screen: NSRect?, displays: [NSRect]) -> NSPoint {
-        if let settings {
-            let below = NSPoint(x: settings.midX - size.width / 2, y: settings.minY - size.height - 12)
-            let display = displays.first { $0.intersects(settings) }
-            if display.map({ below.y >= $0.minY }) ?? true { return below }
-            return NSPoint(x: settings.minX - size.width - 12, y: settings.minY + 24)
+}
+
+/// Where the onboarding's window and the drag helper go while System
+/// Settings is open: on Settings' display, in the larger free column beside
+/// its window, the helper on top and the scene under it, so neither covers
+/// Settings. When a column is too narrow they still stay clear of Settings'
+/// right-hand list: only its sidebar, on the left, may be covered.
+public struct SettingsCompanionLayout: Equatable, Sendable {
+    public var scene: NSRect
+    public var helper: NSRect?
+
+    static let margin: CGFloat = 16
+    static let minSceneWidth: CGFloat = 420
+    /// Where System Settings is expected before its window is seen: centred, its usual size.
+    static let assumedSettings = NSSize(width: 715, height: 690)
+
+    /// `screen` is a visible frame; `settings` nil means not seen yet.
+    public static func layout(screen: NSRect, settings: NSRect?, helper: NSSize?) -> SettingsCompanionLayout {
+        let settings = settings ?? NSRect(x: screen.midX - assumedSettings.width / 2, y: screen.midY - assumedSettings.height / 2,
+                                          width: assumedSettings.width, height: assumedSettings.height)
+        let m = margin
+        let leftRoom = settings.minX - screen.minX - 2 * m
+        let rightRoom = screen.maxX - settings.maxX - 2 * m
+        let useRight = rightRoom >= leftRoom
+        var width = max(useRight ? rightRoom : leftRoom, 0)
+        var x = useRight ? settings.maxX + m : screen.minX + m
+        if width < minSceneWidth {
+            // Too narrow beside it: take the left edge, over Settings' sidebar at most, never its list.
+            width = min(minSceneWidth, screen.width - 2 * m)
+            x = screen.minX + m
         }
-        let area = screen ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        return NSPoint(x: area.midX - size.width / 2, y: area.minY + 40)
+        let helperFrame = helper.map { size in
+            NSRect(x: x + max(0, (width - size.width) / 2), y: screen.maxY - m - size.height, width: min(size.width, width), height: size.height)
+        }
+        let top = (helperFrame?.minY ?? screen.maxY) - m
+        // The scene keeps its 16:10 shape inside the rest of the column.
+        let height = min(top - screen.minY - m, width * 10 / 16)
+        let sceneWidth = min(width, height * 16 / 10)
+        let scene = NSRect(x: (x + (width - sceneWidth) / 2).rounded(), y: (top - height).rounded(),
+                           width: sceneWidth.rounded(), height: height.rounded())
+        return SettingsCompanionLayout(scene: scene, helper: helperFrame)
     }
 }
 

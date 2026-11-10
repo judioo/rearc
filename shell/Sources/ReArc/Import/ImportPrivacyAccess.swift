@@ -25,13 +25,16 @@ enum ImportPrivacyAccess {
     @MainActor
     static func openSettings(for permission: ImportPermission) {
         SettingsAccess.open(permission)
-        // macOS never lists ReArc in Full Disk Access by itself: offer its icon to drag in.
+        // macOS never lists ReArc in Full Disk Access by itself: offer its icon to drag in, beside Settings.
         guard permission == .fullDiskAccess else { return }
-        let screen = NSApp.keyWindow?.screen
-        SettingsAccess.whenSettingsAppears { frame in SettingsAccess.showDragHelper(near: frame, fallback: screen) }
+        SettingsAccess.whenSettingsAppears { frame in
+            let layout = SettingsCompanionLayout.layout(screen: SettingsAccess.settingsScreen(for: frame), settings: frame,
+                                                        helper: SettingsAccess.helperSize)
+            if let helper = layout.helper { SettingsAccess.showDragHelper(at: helper) }
+        }
     }
 
-    /// "Allow ReArc to read Brave's data in System Settings › Privacy & Security › Files & Folders."
+    /// "macOS keeps Brave private. Under ReArc in Privacy & Security › Files & Folders, switch on Brave, then come back."
     static func explanation(for browsers: [ImportBrowser], permission: ImportPermission) -> String {
         let names = ListFormatter.localizedString(byJoining: browsers.map(\.name))
         switch permission {
@@ -39,9 +42,18 @@ enum ImportPrivacyAccess {
             return "macOS keeps \(names) private. Under ReArc in Privacy & Security › Files & Folders, "
                 + "switch on \(names), then come back."
         case .fullDiskAccess:
-            return "macOS keeps \(names) private. Switch on ReArc in Privacy & Security › Full Disk Access, "
-                + "then come back. macOS applies it when ReArc starts again."
+            return "macOS keeps \(names) private. Switch on ReArc in Privacy & Security › Full Disk Access. "
+                + (macOSReopensThisCopy ? "If macOS offers Quit & Reopen, choose it."
+                    : "If macOS offers Quit & Reopen, choose Later, then come back and relaunch ReArc here.")
         }
+    }
+
+    /// System Settings' "Quit & Reopen" opens ReArc by bundle id, so it
+    /// reopens this copy only when it is the one copy Launch Services knows
+    /// (a normal install). A test build beside /Applications/ReArc.app is not.
+    static var macOSReopensThisCopy: Bool {
+        let copies = NSWorkspace.shared.urlsForApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+        return copies.count == 1 && copies[0].standardizedFileURL == Bundle.main.bundleURL.standardizedFileURL
     }
 
     /// Tells the relaunched ReArc to open the Import window again.
@@ -50,31 +62,88 @@ enum ImportPrivacyAccess {
     /// Only a bundled ReArc can be launched again (not `swift run`).
     static var canRelaunch: Bool { Bundle.main.bundleURL.pathExtension == "app" }
 
-    /// Quits and opens this same bundle again once this process has gone,
-    /// on the same `REARC_DATA_DIR` and arguments. A first run's onboarding
-    /// resumes by itself (`onboarding-pending`); `reopenImport` brings the
-    /// Import window back.
+    /// Quits and opens this very copy again (`ReArcRelaunch`), on the same
+    /// `REARC_DATA_DIR` and arguments. A first run's onboarding resumes by
+    /// itself; `reopenImport` brings the Import window back.
     @MainActor
     static func relaunch(reopenImport: Bool) {
-        guard canRelaunch else { return }
-        var open = ["-n", Bundle.main.bundleURL.path]
-        if let dir = ProcessInfo.processInfo.environment[ShellDataLocation.environmentKey] {
-            open += ["--env", "\(ShellDataLocation.environmentKey)=\(dir)"]
-        }
-        var arguments = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-psn_") && $0 != reopenImportFlag }
-        if reopenImport { arguments.append(reopenImportFlag) }
-        if !arguments.isEmpty { open += ["--args"] + arguments }
-        // Waits up to a minute for this process to exit, then opens the bundle.
-        let script = "pid=$1; shift; i=0; while [ $i -lt 600 ]; do kill -0 \"$pid\" 2>/dev/null || exec /usr/bin/open \"$@\"; sleep 0.1; i=$((i+1)); done"
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/sh")
-        task.arguments = ["-c", script, "rearc-relaunch", String(ProcessInfo.processInfo.processIdentifier)] + open
-        do {
-            try task.run()
-        } catch {
-            return
-        }
+        guard canRelaunch, ReArcRelaunch.start(arguments: ReArcRelaunch.arguments(CommandLine.arguments, reopenImport: reopenImport))
+        else { return }
         NSApp.terminate(nil)
+    }
+}
+
+/// Relaunching exactly this bundle, never "the app with this bundle id"
+/// (which may be /Applications/ReArc.app). A helper, this same executable
+/// started with `helperFlag` in its own session, waits until this process
+/// has gone, then opens `Bundle.main.bundleURL` with
+/// `NSWorkspace.openApplication(at:configuration:)` as a new instance.
+enum ReArcRelaunch {
+    static let helperFlag = "--rearc-relaunch-helper"
+    static let separator = "--"
+
+    /// The relaunched app's arguments: this launch's, without the process
+    /// serial number, the helper's own flag or a stale reopen flag.
+    static func arguments(_ current: [String], reopenImport: Bool) -> [String] {
+        var out = current.dropFirst().filter { !$0.hasPrefix("-psn_") && $0 != ImportPrivacyAccess.reopenImportFlag && $0 != helperFlag }
+        if reopenImport { out.append(ImportPrivacyAccess.reopenImportFlag) }
+        return out
+    }
+
+    /// `<exe> --rearc-relaunch-helper <pid> <bundle path> -- <arguments…>`
+    static func helperArguments(pid: pid_t, bundle: URL, arguments: [String]) -> [String] {
+        [helperFlag, String(pid), bundle.path, separator] + arguments
+    }
+
+    struct Request: Equatable {
+        var pid: pid_t
+        var bundle: URL
+        var arguments: [String]
+    }
+
+    static func request(from argv: [String]) -> Request? {
+        guard argv.count >= 5, argv[1] == helperFlag, let pid = pid_t(argv[2]), argv[4] == separator else { return nil }
+        return Request(pid: pid, bundle: URL(fileURLWithPath: argv[3], isDirectory: true), arguments: Array(argv.dropFirst(5)))
+    }
+
+    /// The environment the new instance gets: the data folder, if this one had its own.
+    static func environment(_ current: [String: String]) -> [String: String] {
+        current[ShellDataLocation.environmentKey].map { [ShellDataLocation.environmentKey: $0] } ?? [:]
+    }
+
+    /// Starts the helper detached (its own session, so nothing ReArc does on
+    /// the way out reaches it). False if it could not start.
+    static func start(arguments: [String]) -> Bool {
+        guard let exe = Bundle.main.executableURL?.path else { return false }
+        let argv = [exe] + helperArguments(pid: ProcessInfo.processInfo.processIdentifier, bundle: Bundle.main.bundleURL, arguments: arguments)
+        var attributes = posix_spawnattr_t(nil as OpaquePointer?)
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID))
+        var cArgs = argv.map { strdup($0) } + [nil]
+        defer { cArgs.forEach { free($0) } }
+        var pid: pid_t = 0
+        return posix_spawn(&pid, exe, nil, &attributes, &cArgs, environ) == 0
+    }
+
+    /// In the helper: wait (up to a minute) until the old ReArc has quit and
+    /// Launch Services has let go of it, then open the bundle by its URL.
+    static func runHelperIfAsked(_ argv: [String] = CommandLine.arguments) {
+        guard let request = request(from: argv) else { return }
+        let deadline = Date().addingTimeInterval(60)
+        while Date() < deadline, kill(request.pid, 0) == 0 || NSRunningApplication(processIdentifier: request.pid) != nil {
+            usleep(100_000)
+        }
+        usleep(300_000)
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        configuration.activates = true
+        configuration.arguments = request.arguments
+        configuration.environment = environment(ProcessInfo.processInfo.environment)
+        let done = DispatchSemaphore(value: 0)
+        NSWorkspace.shared.openApplication(at: request.bundle, configuration: configuration) { _, _ in done.signal() }
+        _ = done.wait(timeout: .now() + 30)
+        exit(0)
     }
 }
 

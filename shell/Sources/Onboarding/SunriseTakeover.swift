@@ -218,8 +218,6 @@ public final class SunrisePlayer: ObservableObject {
 
     /// The scene's window, to tell which display it is on.
     var sceneWindow: (() -> NSWindow?)?
-    /// Full screen was left so System Settings comes up in front; it comes back on return.
-    private var leftFullScreenForSettings = false
 
     /// "Allow access…": out of full screen, so System Settings is not behind
     /// the scene or on another Space; then its pane, a drag helper for Full
@@ -230,10 +228,6 @@ public final class SunrisePlayer: ObservableObject {
         guard var log = act2, let permission = log.neededPermission else { return }
         access.openedSettings(permission)
         if let name = act1?.submitted?.name, let colour = act1?.picked?.index { host?.saveResumePoint(name: name, colourIndex: colour) }
-        if !windowed {
-            leftFullScreenForSettings = true
-            toggleWindow()
-        }
         log.settingsElsewhere = false
         act2 = log
         presentSettings(permission) { [weak self] elsewhere in
@@ -243,16 +237,14 @@ public final class SunrisePlayer: ObservableObject {
         }
     }
 
-    /// Opens the pane; calls back with whether its window came up on another
-    /// display than the scene. Tests replace it (nothing opens System Settings).
-    lazy var presentSettings: (ImportPermission, @escaping @MainActor (Bool) -> Void) -> Void = { [weak self] permission, done in
+    /// Shrinks the scene beside System Settings, opens the pane, and calls
+    /// back with whether Settings came up on another display than the main
+    /// one. The takeover sets it; tests replace it (nothing opens Settings).
+    var presentSettings: (ImportPermission, @escaping @MainActor (Bool) -> Void) -> Void = { permission, _ in
         SettingsAccess.open(permission)
-        let screen = self?.sceneWindow?()?.screen
-        SettingsAccess.whenSettingsAppears { [weak self] frame in
-            if permission == .fullDiskAccess { SettingsAccess.showDragHelper(near: frame, fallback: screen) }
-            done(frame != nil && SettingsAccess.settingsIsElsewhere(than: self?.sceneWindow?()) == true)
-        }
     }
+    /// Back from System Settings: the scene's own presentation and screen, no helper.
+    var restoreAfterSettings: () -> Void = { SettingsAccess.hideDragHelper() }
 
     public func relaunchForAccess() {
         if let name = act1?.submitted?.name, let colour = act1?.picked?.index { host?.saveResumePoint(name: name, colourIndex: colour) }
@@ -263,11 +255,7 @@ public final class SunrisePlayer: ObservableObject {
     /// goes, and while Act 2 still asks, look at the browsers again and
     /// bring in any that macOS now lets through.
     public func applicationBecameActive() {
-        if leftFullScreenForSettings {
-            leftFullScreenForSettings = false
-            if windowed { toggleWindow() }
-        }
-        hideSettingsHelper()
+        restoreAfterSettings()
         guard let log = act2, log.choice == nil, access.becameActive(), !rescanning else { return }
         rescanning = true
         scanBrowsers { [weak self] scan in
@@ -280,8 +268,6 @@ public final class SunrisePlayer: ObservableObject {
             if log != self.act2 { self.act2 = log }
         }
     }
-
-    lazy var hideSettingsHelper: () -> Void = { SettingsAccess.hideDragHelper() }
 
     /// Straight to the browser step with Act 1's name and colour, as if the
     /// sunrise and Act 1 had just played: after a relaunch for a permission.
@@ -306,8 +292,9 @@ public final class SunrisePlayer: ObservableObject {
 
     func startAct2() {
         guard act2 == nil, exitStart == nil else { return }
-        let log = Act2Log(start: time(at: Date()), sources: sources ?? [],
+        var log = Act2Log(start: time(at: Date()), sources: sources ?? [],
                           offered: host?.importCategories ?? ImportCategory.allCases, pending: pending)
+        log.quitAndReopenIsSafe = host?.macOSReopensThisCopy ?? false
         act2 = log
         if log.sources.isEmpty, log.blockedNames == nil {
             // Nothing to bring: a clean start, without asking.
@@ -596,6 +583,8 @@ public final class SunriseTakeover {
         self.window = window
         player.onReveal = { [weak self] in self?.reveal() }
         player.sceneWindow = { [weak self] in self?.window }
+        player.presentSettings = { [weak self] permission, done in self?.presentSettings(permission, done) }
+        player.restoreAfterSettings = { [weak self] in self?.restoreAfterSettings() }
         player.onToggleWindow = { [weak self] in
             guard let self else { return }
             self.setWindowed(!self.windowed)
@@ -617,6 +606,53 @@ public final class SunriseTakeover {
         let size = NSSize(width: (1440 * scale).rounded(), height: (900 * scale).rounded())
         return NSRect(x: (area.midX - size.width / 2).rounded(), y: (area.midY - size.height / 2).rounded(),
                       width: size.width, height: size.height)
+    }
+
+    // MARK: Beside System Settings
+
+    /// How the scene was shown before System Settings, to come back to.
+    private var beforeSettings: (windowed: Bool, frame: NSRect)?
+
+    /// Out of full screen and into the free column beside System Settings on
+    /// its display (the main one, where it opens), the drag helper above the
+    /// scene for Full Disk Access. Laid out once for where Settings usually
+    /// is, then again where its window really came up.
+    func presentSettings(_ permission: ImportPermission, _ done: @escaping @MainActor (Bool) -> Void) {
+        guard let window else { return }
+        if beforeSettings == nil { beforeSettings = (windowed, window.frame) }
+        let helper = permission == .fullDiskAccess ? SettingsAccess.helperSize : nil
+        place(SettingsCompanionLayout.layout(screen: SettingsAccess.settingsScreen(for: nil), settings: nil, helper: helper))
+        SettingsAccess.open(permission)
+        SettingsAccess.whenSettingsAppears { [weak self] frame in
+            guard let self, self.beforeSettings != nil else { return }
+            let screen = SettingsAccess.settingsScreen(for: frame)
+            self.place(SettingsCompanionLayout.layout(screen: screen, settings: frame, helper: helper))
+            done(frame != nil && screen != SettingsAccess.settingsScreen(for: nil))
+        }
+    }
+
+    private func place(_ layout: SettingsCompanionLayout) {
+        guard let window else { return }
+        windowed = true
+        player.windowed = true
+        window.hasShadow = true
+        if presented { NSApp.presentationOptions = [] }
+        window.setFrame(layout.scene, display: true, animate: true)
+        if revealed, let frame = revealFrame { player.host?.revealBrowser(in: frame, below: window) }
+        if let helper = layout.helper { SettingsAccess.showDragHelper(at: helper) } else { SettingsAccess.hideDragHelper() }
+    }
+
+    /// Back from System Settings: the presentation and screen it had.
+    func restoreAfterSettings() {
+        SettingsAccess.hideDragHelper()
+        guard let before = beforeSettings, let window else { return }
+        beforeSettings = nil
+        if before.windowed {
+            window.setFrame(before.frame, display: true, animate: true)
+        } else {
+            setWindowed(false)
+            window.setFrame(before.frame, display: true, animate: true)
+        }
     }
 
     /// Full screen ⇄ a window centred on the main screen. The scene lays itself
