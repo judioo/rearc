@@ -29,7 +29,7 @@ extension BrowserViewModel {
             case .separator:
                 menu.addItem(.separator())
             case .newLittleArc:
-                menu.addItem(ClosureMenuItem("New Little Arc Window") { [weak self] in
+                menu.addItem(ClosureMenuItem("New Little ReArc Window") { [weak self] in
                     NSApp.activate(ignoringOtherApps: true)
                     self?.openBlankLittleArc()
                 })

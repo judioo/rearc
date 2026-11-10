@@ -30,7 +30,7 @@ struct LittleArcWindowView: View {
                         .findBar(model.findBar, for: engine)
                 }
             } else {
-                Text("Little Arc window unavailable")
+                Text("Little ReArc window unavailable")
                     .foregroundStyle(.secondary)
             }
         }

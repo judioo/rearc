@@ -53,7 +53,7 @@ struct PeekOverlayView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            Button("Open in Little Arc", action: onOpenInLittleArc)
+            Button("Open in Little ReArc", action: onOpenInLittleArc)
             Button("Open in full tab", action: onOpenInTab)
             Button("Copy link", action: onCopyLink)
             Button {

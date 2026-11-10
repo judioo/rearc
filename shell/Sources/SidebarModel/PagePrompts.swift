@@ -575,7 +575,7 @@ public enum PageContextMenuItem: Equatable, Sendable {
     public var title: String {
         switch self {
         case .openLinkInNewTab: return "Open Link in New Tab"
-        case .openLinkInLittleArc: return "Open Link in Little Arc"
+        case .openLinkInLittleArc: return "Open Link in Little ReArc"
         case .openLinkInNewSplit: return "Open Link in New Split"
         case .copyLink: return "Copy Link"
         case .openImageInNewTab: return "Open Image in New Tab"

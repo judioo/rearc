@@ -299,7 +299,7 @@ final class Wave27LinkOpenTests: XCTestCase {
         XCTAssertEqual(LinkOpenPlacement.resolve(disposition: 4, littleArcKeysHeld: false, sourceTab: source), .littleArc)
         XCTAssertEqual(LinkOpenPlacement.resolve(disposition: 5, littleArcKeysHeld: false, sourceTab: source), .split(with: source))
         XCTAssertEqual(LinkOpenPlacement.resolve(disposition: 5, littleArcKeysHeld: false, sourceTab: nil), .foregroundTab,
-                       "a Little Arc or peek source has no sidebar tab to split with")
+                       "a Little ReArc or peek source has no sidebar tab to split with")
         XCTAssertEqual(LinkOpenPlacement.resolve(disposition: 3, littleArcKeysHeld: false, sourceTab: source), .decline("unsupported disposition 3"))
     }
 

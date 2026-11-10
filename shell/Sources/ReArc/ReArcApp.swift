@@ -19,11 +19,11 @@ struct ReArcApp: App {
         }
         .windowStyle(.hiddenTitleBar)
 
-        WindowGroup("Little Arc", id: "littleArc", for: LittleArcWindow.ID.self) { $windowID in
+        WindowGroup("Little ReArc", id: "littleArc", for: LittleArcWindow.ID.self) { $windowID in
             if let windowID {
                 LittleArcWindowView(model: model, windowID: windowID)
             } else {
-                Text("No Little Arc window")
+                Text("No Little ReArc window")
             }
         }
         .windowStyle(.hiddenTitleBar)
@@ -62,7 +62,7 @@ struct ReArcApp: App {
                     .keyboardShortcut("t")
                 Button("New Private Window") { model.openPrivateWindow() }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
-                Button("New Little Arc Window") { model.openBlankLittleArc() }
+                Button("New Little ReArc Window") { model.openBlankLittleArc() }
                     .keyboardShortcut("n", modifiers: [.command, .option])
                 Button("Open Command Bar") { model.focusLocation() }
                     .keyboardShortcut("l")

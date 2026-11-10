@@ -417,18 +417,18 @@ struct LinksSettingsPane: View {
             LittleArcHero(model: model)
                 .padding(.horizontal, -SettingsMetrics.margin)
                 .padding(.bottom, 22)
-            SettingsIntro(text: "Little Arc is a smaller, simpler ReArc window. It’s perfect for quick lookups and reading the links your friends send you.")
+            SettingsIntro(text: "Little ReArc is a smaller, simpler ReArc window. It’s perfect for quick lookups and reading the links your friends send you.")
                 .padding(.bottom, 14)
             SettingsGroup {
-                SettingsSwitchRow(label: "Open Little Arc when I press \(LittleArcHotkeyPreference.display) in any app",
+                SettingsSwitchRow(label: "Open Little ReArc when I press \(LittleArcHotkeyPreference.display) in any app",
                                   isOn: $model.isLittleArcHotkeyEnabled)
-                SettingsSwitchRow(label: "Open Little Arc when clicking on links with ⌥⌘ held", isOn: $model.littleArcOnModifiedClick)
-                SettingsSwitchRow(label: "Links from other apps open in Little Arc", detail: model.externalLinkDestination == .littleArc
+                SettingsSwitchRow(label: "Open Little ReArc when clicking on links with ⌥⌘ held", isOn: $model.littleArcOnModifiedClick)
+                SettingsSwitchRow(label: "Links from other apps open in Little ReArc", detail: model.externalLinkDestination == .littleArc
                                       ? nil : "Off: they open as a new tab in the current space.",
                                   isOn: Binding(get: { model.externalLinkDestination == .littleArc },
                                                 set: { model.externalLinkDestination = $0 ? .littleArc : .activeSpace }))
-                SettingsLabeledRow(label: "Archive Little Arcs after:") {
-                    SettingsPopUp(label: "Archive Little Arcs after", selection: $model.littleArcArchiveAfter,
+                SettingsLabeledRow(label: "Archive Little ReArcs after:") {
+                    SettingsPopUp(label: "Archive Little ReArcs after", selection: $model.littleArcArchiveAfter,
                                   options: AutoArchiveThreshold.options)
                 }
             }
@@ -443,7 +443,7 @@ struct LinksSettingsPane: View {
             }
             SettingsGroup {
                 SettingsLabeledRow(label: "Choose where links open inside ReArc.",
-                                   info: "Air Traffic Control sends links from other apps to a space or a Little Arc of a profile, by site or by the app they come from.") {
+                                   info: "Air Traffic Control sends links from other apps to a space or a Little ReArc of a profile, by site or by the app they come from.") {
                     Button("Air Traffic Control…") { model.showAirTrafficControl() }
                 }
             }
@@ -471,7 +471,7 @@ private struct LittleArcHero: View {
                         .padding(.horizontal, 5).frame(height: 13)
                         .background(.white.opacity(0.7), in: RoundedRectangle(cornerRadius: 3))
                     Spacer()
-                    Label("rearc.net", systemImage: "lock.fill").labelStyle(.titleAndIcon)
+                    Label("rearc.imara.ae", systemImage: "lock.fill").labelStyle(.titleAndIcon)
                         .font(.system(size: 7.5, weight: .medium))
                     Spacer()
                     Text("Open in \(space)  ⌘O")
@@ -494,7 +494,7 @@ private struct LittleArcHero: View {
         .frame(width: SettingsMetrics.windowSize.width, height: 135)
         .clipShape(ScallopedBottom())
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("A Little Arc window")
+        .accessibilityLabel("A Little ReArc window")
     }
 }
 

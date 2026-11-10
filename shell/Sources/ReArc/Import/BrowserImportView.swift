@@ -219,7 +219,7 @@ private struct ArcSidebarImportPane: View {
         if settings.restoreWindows != nil { names.append("reopen windows") }
         if settings.externalLinkDestination != nil { names.append("external links") }
         if settings.autoArchive != nil { names.append("archive tabs after") }
-        if settings.littleArcArchive != nil { names.append("archive Little Arcs after") }
+        if settings.littleArcArchive != nil { names.append("archive Little ReArcs after") }
         return names.joined(separator: ", ").capitalizedFirst
     }
 

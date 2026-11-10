@@ -463,7 +463,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private func prepareLittleArcWindow() {
         guard model != nil, !terminating, preparedLittleArcWindow == nil else { return }
         preparedLittleArcWindow = makeWindow(
-            size: NSSize(width: 520, height: 420), title: "Little Arc",
+            size: NSSize(width: 520, height: 420), title: "Little ReArc",
             content: NSHostingView(rootView: AnyView(Color.clear))
         )
         preparedLittleArcWindow?.isExcludedFromWindowsMenu = true
@@ -613,7 +613,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
                 window.isExcludedFromWindowsMenu = false
             } else {
                 window = makeWindow(
-                    size: NSSize(width: 520, height: 420), title: "Little Arc",
+                    size: NSSize(width: 520, height: 420), title: "Little ReArc",
                     content: NSHostingView(rootView: LittleArcWindowView(model: model, windowID: id))
                 )
             }
@@ -1117,7 +1117,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         file.addItem(target.item("New Window", "n") { [weak self] in self?.openBrowserWindow() })
         // Arc's Blank Window (⌃⌘N): a ReArc window always shows a space, so it is a new window.
         file.addItem(target.item("New Blank Window", "n", [.command, .control]) { [weak self] in self?.openBrowserWindow() })
-        file.addItem(target.item("New Little Arc Window", "n", [.command, .option]) { model.openBlankLittleArc() })
+        file.addItem(target.item("New Little ReArc Window", "n", [.command, .option]) { model.openBlankLittleArc() })
         if runtime.capabilities.profileOffTheRecord {
             file.addItem(target.item("New Private Window", "n", [.command, .shift]) {
                 model.openPrivateWindow()

@@ -365,7 +365,7 @@ final class Wave26AirTrafficModelTests: XCTestCase {
                        .rejected)
 
         XCTAssertEqual(ExternalLinkRouting.describe(.newTab(url, spaceID: work), in: store), "New tab in Work")
-        XCTAssertEqual(ExternalLinkRouting.describe(.littleArc(url, profileID: other.id), in: store), "Little Arc (Other)")
+        XCTAssertEqual(ExternalLinkRouting.describe(.littleArc(url, profileID: other.id), in: store), "Little ReArc (Other)")
         XCTAssertEqual(ExternalLinkRouting.describe(.space(UUID()), in: store), "Deleted space")
     }
 

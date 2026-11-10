@@ -497,21 +497,21 @@ public enum AppCommandRegistry {
             ),
             AppCommand(
                 id: "open-little-arc",
-                title: "Open Little Arc window",
+                title: "Open Little ReArc window",
                 keywords: ["little", "arc", "browser", "window", "mini"],
                 minQueryLength: 2,
                 action: .openLittleArcWindow
             ),
             AppCommand(
                 id: "open-in-little-arc",
-                title: "Open in Little Arc",
+                title: "Open in Little ReArc",
                 keywords: ["little", "arc", "open", "move"],
                 minQueryLength: 2,
                 action: .openInLittleArc
             ),
             AppCommand(
                 id: "promote-little-arc",
-                title: "Promote Little Arc to tab",
+                title: "Promote Little ReArc to tab",
                 keywords: ["little", "arc", "promote", "tab", "window"],
                 minQueryLength: 2,
                 action: .promoteLittleArcToTab

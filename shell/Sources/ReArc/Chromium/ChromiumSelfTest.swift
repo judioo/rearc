@@ -1186,30 +1186,30 @@ final class ChromiumSelfTest {
         let record = model.openLittleArc(url: URL(string: "\(base)/a")!)
         guard let littleWindow = shell.window(forLittleArc: record.id),
               let little = model.littleArcEngine(for: record.id) as? ChromiumEngine else {
-            throw Failure(description: "Little Arc opened no window/engine")
+            throw Failure(description: "Little ReArc opened no window/engine")
         }
-        try await wait("Little Arc attached and loaded", timeout: 20) {
+        try await wait("Little ReArc attached and loaded", timeout: 20) {
             little.attachmentID != nil && little.pageTitle == Self.titleA && !little.isLoading
         }
-        try check(little.role == .littleArc && little.leaseHolder?.window === littleWindow, "Little Arc lease not in its window")
+        try check(little.role == .littleArc && little.leaseHolder?.window === littleWindow, "Little ReArc lease not in its window")
         let littleLease = little.attachmentID ?? 0
         // Wave 26 chrome: the address field loads in the Little Arc; Back (menu) acts on the key Little Arc.
-        try check(model.navigateLittleArc(record.id, to: "\(base)/nav"), "Little Arc address field refused /nav")
-        try await wait("Little Arc address field navigated", timeout: 20) {
+        try check(model.navigateLittleArc(record.id, to: "\(base)/nav"), "Little ReArc address field refused /nav")
+        try await wait("Little ReArc address field navigated", timeout: 20) {
             little.currentURL?.path == "/nav" && !little.isLoading && little.canGoBack
         }
         model.keyLittleArcID = record.id
         model.goBack()
-        try await wait("Back in the key Little Arc", timeout: 20) { little.currentURL?.path == "/a" && !little.isLoading }
-        try check(engineA.currentURL?.path == "/a", "Back moved tab A instead of the Little Arc")
+        try await wait("Back in the key Little ReArc", timeout: 20) { little.currentURL?.path == "/a" && !little.isLoading }
+        try check(engineA.currentURL?.path == "/a", "Back moved tab A instead of the Little ReArc")
         model.keyLittleArcID = nil
-        log("PASS Little Arc chrome: address field -> /nav in the Little Arc, Back on the key Little Arc -> /a (tab A untouched)")
+        log("PASS Little ReArc chrome: address field -> /nav in the Little ReArc, Back on the key Little ReArc -> /a (tab A untouched)")
         shell.dismissLittleArcWindow(record.id)
-        try await wait("Little Arc window closed and archived") {
+        try await wait("Little ReArc window closed and archived") {
             shell.window(forLittleArc: record.id) == nil && store.littleArcWindow(withID: record.id) == nil
         }
-        try check(NSApp.isRunning && first.isVisible, "closing Little Arc changed the app")
-        log("PASS Little Arc: own window with tab \(little.tabID) lease \(littleLease); closed (lease released: "
+        try check(NSApp.isRunning && first.isVisible, "closing Little ReArc changed the app")
+        log("PASS Little ReArc: own window with tab \(little.tabID) lease \(littleLease); closed (lease released: "
             + "\(little.attachmentID == nil)) and archived; app still running")
 
         // Zoom commands: Cmd+= on the focused tab; Chromium's per-host zoom also
@@ -1921,13 +1921,13 @@ final class ChromiumSelfTest {
               let routedEngine = model.littleArcEngine(for: routed.id) as? ChromiumEngine else {
             throw Failure(description: "Air Traffic Control sent the link nowhere (\(store.displayTabs().count - tabsBefore) new tabs)")
         }
-        try await wait("Air Traffic Control Little Arc loaded", timeout: 20) {
+        try await wait("Air Traffic Control Little ReArc loaded", timeout: 20) {
             routedEngine.pageTitle == Self.titleA && !routedEngine.isLoading && routedEngine.attachmentID != nil
         }
         try check(store.displayTabs().count == tabsBefore, "the routed link also opened a tab")
         model.windowPresenter?.dismissLittleArcWindow(routed.id)
-        try await wait("Air Traffic Control Little Arc closed") { store.littleArcWindow(withID: routed.id) == nil }
-        log("PASS Air Traffic Control: a 'URL contains' rule sent a GetURL link to a Little Arc (tab \(routedEngine.tabID)) "
+        try await wait("Air Traffic Control Little ReArc closed") { store.littleArcWindow(withID: routed.id) == nil }
+        log("PASS Air Traffic Control: a 'URL contains' rule sent a GetURL link to a Little ReArc (tab \(routedEngine.tabID)) "
             + "instead of the default (current space)")
 
         // Site Control Center on tab A: the panel's zoom acts on this page; site data lives in Chromium's Site Settings.
@@ -1978,16 +1978,16 @@ final class ChromiumSelfTest {
         }
         if opened, let record = store.littleArcLiveWindows.last,
            let little = model.littleArcEngine(for: record.id) as? ChromiumEngine {
-            try await wait("⌥⌘-clicked link loaded in Little Arc", timeout: 20) {
+            try await wait("⌥⌘-clicked link loaded in Little ReArc", timeout: 20) {
                 little.currentURL?.path == "/a" && little.pageTitle == Self.titleA && !little.isLoading
             }
             try check(little.role == .littleArc && store.displayTabs().count == tabsBefore && engine.pageTitle == "links",
                       "⌥⌘-click: role \(little.role), tabs \(tabsBefore) -> \(store.displayTabs().count), tab A '\(engine.pageTitle ?? "")'")
             model.windowPresenter?.dismissLittleArcWindow(record.id)
-            try await wait("⌥⌘-click Little Arc closed") { store.littleArcWindow(withID: record.id) == nil }
+            try await wait("⌥⌘-click Little ReArc closed") { store.littleArcWindow(withID: record.id) == nil }
             let path = modifiedClick ? "modified click"
                 : "ENGINE-GAP: modified clicks open no contents, so a plain click with ⌥⌘ recorded"
-            log("PASS ⌥⌘-click: Chromium's new contents for the target=_blank link became Little Arc tab \(little.tabID) on /a; "
+            log("PASS ⌥⌘-click: Chromium's new contents for the target=_blank link became Little ReArc tab \(little.tabID) on /a; "
                 + "no sidebar tab; tab A stayed on its page (\(path))")
         } else {
             log("NOTE ⌥⌘-click: the synthesized click opened no tab (app active \(NSApp.isActive), key \(window.isKeyWindow)); not exercised")
@@ -3985,12 +3985,12 @@ extension ChromiumSelfTest {
         let littleBefore = store.littleArcLiveWindows.count
         if await modifiedClick([.command, .option], opened: { store.littleArcLiveWindows.count > littleBefore }),
            let record = store.littleArcLiveWindows.last, let little = model.littleArcEngine(for: record.id) as? ChromiumEngine {
-            try await wait("⌥⌘-clicked ordinary link in Little Arc", timeout: 15) { little.currentURL?.path == "/a" && little.pageTitle == Self.titleA }
-            results.append("⌥⌘-click -> disposition \(runtime.linkOpenEvents.last?.disposition ?? 0), Little Arc on /a")
+            try await wait("⌥⌘-clicked ordinary link in Little ReArc", timeout: 15) { little.currentURL?.path == "/a" && little.pageTitle == Self.titleA }
+            results.append("⌥⌘-click -> disposition \(runtime.linkOpenEvents.last?.disposition ?? 0), Little ReArc on /a")
             model.windowPresenter?.dismissLittleArcWindow(record.id)
-            try await wait("the link's Little Arc closed") { store.littleArcWindow(withID: record.id) == nil }
+            try await wait("the link's Little ReArc closed") { store.littleArcWindow(withID: record.id) == nil }
         } else {
-            results.append("⌥⌘-click: NOTE no Little Arc")
+            results.append("⌥⌘-click: NOTE no Little ReArc")
         }
         let passed = results.filter { !$0.contains("NOTE") }.count
         log("\(passed == results.count ? "PASS" : "NOTE") modified link opens (ABI 1.39) on an ordinary link: \(results.joined(separator: "; ")); "

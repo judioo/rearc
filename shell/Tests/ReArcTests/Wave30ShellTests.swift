@@ -149,7 +149,7 @@ final class Wave30ShellTests: XCTestCase {
             "Copy URL as Quote": "copyCurrentURLAsQuote", "Zoom In": "zoomIn", "Zoom Out": "zoomOut", "Actual Size": "resetZoom",
             "Next Tab": "selectNextTab", "Previous Tab": "selectPreviousTab", "Cycle Tab Backward": "cycleTabBackward",
             "Cycle Tab Forward": "cycleTabForward", "Add Split View": "addSplitView", "Close this Split Pane": "removeSplitView",
-            "New Note": "newNote", "New Easel": "newEasel", "Open Little Arc in Space": "openTabIn", "Tab Switcher (Forward)": "cycleNextTab",
+            "New Note": "newNote", "New Easel": "newEasel", "Open Little ReArc in Space": "openTabIn", "Tab Switcher (Forward)": "cycleNextTab",
             "Tab Switcher (Backward)": "cyclePreviousTab", "Tab 1": "goToSidebarItem1", "Last Tab": "goToSidebarItem9",
             "Next Space": "focusNextSpace", "Previous Space": "focusPreviousSpace", "Space 1": "goToSpace1",
             "Pin/Unpin Tab": "pinTab", "Clear Unpinned Tabs": "clearExplore", "View Library": "viewLibrary",

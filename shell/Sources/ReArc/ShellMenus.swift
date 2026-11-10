@@ -168,7 +168,7 @@ enum ShellMenus {
         [[
             ShellMenuItem("New Note", "n", [.control, .shift]) { _ = model.executeCommand(.newNote, commandID: nil) },
             ShellMenuItem("New Easel", "e", [.control, .shift]) { _ = model.executeCommand(.newEasel, commandID: nil) },
-            ShellMenuItem("Open Little Arc in Space", "o") {
+            ShellMenuItem("Open Little ReArc in Space", "o") {
                 if let id = model.keyLittleArcID { model.promoteLittleArcWindow(id) }
             },
         ]]
@@ -394,8 +394,8 @@ enum ShellMenus {
     /// Window menu (P3.22). Arc binds no keys to these.
     static func littleArcs(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [[
-            ShellMenuItem("Show All Little Arcs") { model.showAllLittleArcs() },
-            ShellMenuItem("Close All Little Arcs") { model.closeAllLittleArcs() },
+            ShellMenuItem("Show All Little ReArcs") { model.showAllLittleArcs() },
+            ShellMenuItem("Close All Little ReArcs") { model.closeAllLittleArcs() },
         ]]
     }
 

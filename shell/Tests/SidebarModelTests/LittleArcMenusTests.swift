@@ -10,12 +10,12 @@ final class LittleArcMenusTests: XCTestCase {
 
     func testDockListsLittleArcsByTitleThenNewWindows() {
         let news = window("Hacker News", "https://news.ycombinator.com/")
-        let blank = window("Little Arc", "about:blank")
+        let blank = window("Little ReArc", "about:blank")
         let untitled = window("  ", "https://example.com/page")
         let entries = LittleArcDockMenu.entries(for: [news, blank, untitled], canOpenBrowserWindow: true)
         XCTAssertEqual(entries, [
             .littleArc(id: news.id, title: "Hacker News"),
-            .littleArc(id: blank.id, title: "Little Arc"),
+            .littleArc(id: blank.id, title: "Little ReArc"),
             .littleArc(id: untitled.id, title: "example.com"),
             .separator,
             .newLittleArc,

@@ -22,7 +22,7 @@ public enum LittleArcDockMenu {
     /// The page title, else its host, else "Little Arc" (a blank one).
     public static func title(of window: LittleArcWindow) -> String {
         let trimmed = window.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty, trimmed != "Little Arc" { return trimmed }
-        return window.url.host() ?? "Little Arc"
+        if !trimmed.isEmpty, trimmed != "Little ReArc", trimmed != "Little Arc" { return trimmed }
+        return window.url.host() ?? "Little ReArc"
     }
 }

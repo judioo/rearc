@@ -156,7 +156,7 @@ extension ExternalLinkRouting {
     public static func describe(_ route: Route, in store: SidebarStore) -> String {
         switch route {
         case .littleArc(_, let profileID):
-            return "Little Arc (\(store.profile(withID: profileID)?.name ?? "profile"))"
+            return "Little ReArc (\(store.profile(withID: profileID)?.name ?? "profile"))"
         case .newTab(_, let spaceID):
             return "New tab in \(store.space(withID: spaceID)?.name ?? "a space")"
         case .focusTab(let id):
@@ -174,7 +174,7 @@ extension ExternalLinkRouting {
             let profile = store.profiles.count > 1 ? store.profile(withID: space.profileID).map { " (\($0.name))" } ?? "" : ""
             return space.name + profile
         case .littleArc(let id):
-            return "Little Arc (\(store.profile(withID: id)?.name ?? "deleted profile"))"
+            return "Little ReArc (\(store.profile(withID: id)?.name ?? "deleted profile"))"
         }
     }
 }

@@ -10,7 +10,7 @@ public enum ExternalLinkDestination: String, CaseIterable, Codable, Sendable {
 
     public var title: String {
         switch self {
-        case .littleArc: return "Open External Links in Little Arc"
+        case .littleArc: return "Open External Links in Little ReArc"
         case .activeSpace: return "Open External Links in the Current Space"
         }
     }
@@ -18,7 +18,7 @@ public enum ExternalLinkDestination: String, CaseIterable, Codable, Sendable {
     /// The External Links menu's wording.
     public var menuTitle: String {
         switch self {
-        case .littleArc: return "Open in Little Arc"
+        case .littleArc: return "Open in Little ReArc"
         case .activeSpace: return "Open in the Current Space"
         }
     }

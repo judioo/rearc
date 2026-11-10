@@ -197,10 +197,10 @@ enum MembershipCardExport {
     }
 }
 
-/// Share ReArc with a Friend. The rearc.net invite service is later
+/// Share ReArc with a Friend. The rearc.imara.ae invite service is later
 /// (SETTINGS.md §13); until then the picker carries the site's address.
 enum ShareReArc {
-    static let link = URL(string: "https://rearc.net")!
+    static let link = URL(string: "https://rearc.imara.ae")!
     static let message = "Try ReArc, a calm browser for the Mac:"
 
     @MainActor static func show(from view: NSView) {

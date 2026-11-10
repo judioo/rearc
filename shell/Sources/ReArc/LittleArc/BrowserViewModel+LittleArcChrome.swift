@@ -21,7 +21,7 @@ extension BrowserViewModel {
     /// with its address field ready for typing.
     @discardableResult
     func openBlankLittleArc() -> LittleArcWindow {
-        let record = openLittleArc(url: URL(string: "about:blank")!, title: "Little Arc")
+        let record = openLittleArc(url: URL(string: "about:blank")!, title: "Little ReArc")
         littleArcFocusRequest = record.id
         return record
     }

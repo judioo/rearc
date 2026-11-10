@@ -289,7 +289,7 @@ final class Wave26ShellTests: XCTestCase {
         model.focusLocation()
         XCTAssertEqual(model.littleArcFocusRequest, record.id)
         XCTAssertFalse(model.isCommandBarPresented)
-        XCTAssertTrue(model.navigationEngine === model.littleArcEngine(for: record.id), "⌘[ / ⌘] act on the Little Arc")
+        XCTAssertTrue(model.navigationEngine === model.littleArcEngine(for: record.id), "⌘[ / ⌘] act on the Little ReArc")
         let tab = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .control, timestamp: 0, windowNumber: 0, context: nil,
                                    characters: "\t", charactersIgnoringModifiers: "\t", isARepeat: false, keyCode: 48)!
         XCTAssertFalse(model.handleTabSwitcherEvent(tab))
@@ -323,7 +323,7 @@ final class Wave26ShellTests: XCTestCase {
         let now = Date()
         model.noteMouseDown(modifiers: [.command, .option], at: now)
         XCTAssertTrue(model.takeLittleArcClick(now: now.addingTimeInterval(0.3)))
-        XCTAssertFalse(model.takeLittleArcClick(now: now.addingTimeInterval(0.4)), "one click, one Little Arc")
+        XCTAssertFalse(model.takeLittleArcClick(now: now.addingTimeInterval(0.4)), "one click, one Little ReArc")
         model.noteMouseDown(modifiers: [.command], at: now)
         XCTAssertFalse(model.takeLittleArcClick(now: now), "⌘-click stays a tab")
         model.noteMouseDown(modifiers: [.command, .option], at: now)
