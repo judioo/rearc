@@ -1,0 +1,197 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 context-menu opens keep the frame as initiator (ABI 1.58)
+
+Security audit RC-500 F-06, engine part. Bridge 0.61.0, feature
+context_menu_link_open. Action 0 navigated to the page-supplied link_url with
+ReArcTabNavigate: no initiator, no referrer, any URL ABIValidateNavigationURL
+admits (data:, file:). It now accepts http(s) only and opens through
+WebContents::OpenURL with the OpenURLParams Chrome's RenderViewContextMenuBase
+builds: link transition, the clicked frame's origin, frame token and site
+instance, its sanitized referrer, started_from_context_menu. New actions 13-16
+open link_url and 17-20 src_url in a new background tab, foreground tab,
+window or split view through the tab/057 link-open requests, which keep those
+parameters. They need a link-open callback.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/rearc_bridge/rearc_context_menu.cc b/chrome/browser/rearc_bridge/rearc_context_menu.cc
+index 44eeda32c0..699f09ce67 100644
+--- a/chrome/browser/rearc_bridge/rearc_context_menu.cc
++++ b/chrome/browser/rearc_bridge/rearc_context_menu.cc
+@@ -15,11 +15,14 @@
+ #include "base/no_destructor.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
++#include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
+ #include "content/public/browser/context_menu_params.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/page_navigator.h"
+ #include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_process_host.h"
+ #include "content/public/browser/weak_document_ptr.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_observer.h"
+@@ -29,6 +32,8 @@
+ #include "third_party/blink/public/common/loader/network_utils.h"
+ #include "third_party/blink/public/mojom/context_menu/context_menu.mojom.h"
+ #include "ui/base/clipboard/scoped_clipboard_writer.h"
++#include "ui/base/page_transition_types.h"
++#include "ui/base/window_open_disposition.h"
+ namespace rearc {
+ namespace {
+ class Menu;
+@@ -95,7 +100,7 @@ class Menu : public content::WebContentsObserver,
+     const auto p = *params_;
+     auto* c = web_contents();
+     uint64_t tab = event_.tab_id;
+-    if (action > 12) {
++    if (action > 20) {
+       return REARC_INVALID_ARGUMENT;
+     }
+     if (action == 8) {
+@@ -110,17 +115,51 @@ class Menu : public content::WebContentsObserver,
+     if (flag && !(p.edit_flags & flag)) {
+       return REARC_INVALID_STATE;
+     }
+-    if ((action < 2 && p.link_url.is_empty()) ||
++    // 13-16 open link_url, 17-20 src_url (image or media), in a new
++    // background tab, foreground tab, window or split view.
++    const bool opens_link = action == 0 || (action >= 13 && action <= 16);
++    const bool opens_media = action >= 17 && action <= 20;
++    if (((action < 2 || opens_link) && p.link_url.is_empty()) ||
++        (opens_media && p.src_url.is_empty()) ||
+         ((action == 6 || action == 7) && !p.has_image_contents)) {
+       return REARC_INVALID_STATE;
+     }
+-    if (action == 0) {
+-      auto status = ABIValidateNavigationURL(p.link_url);
+-      if (status) {
+-        return status;
++    if (opens_link || opens_media) {
++      // The URL is page data, possibly from a cross-site frame: open only
++      // http(s), as Chrome's context menu does (RenderViewContextMenuBase::
++      // GetOpenURLParamsWithExtraHeaders), with the frame as initiator and its
++      // sanitized referrer, so Sec-Fetch-Site and SameSite cookies follow the
++      // page's origin. 13-20 go to the host as link-open requests (1.39).
++      const GURL& url = opens_media ? p.src_url : p.link_url;
++      if (!url.SchemeIsHTTPOrHTTPS()) {
++        return REARC_UNSUPPORTED;
+       }
+-      End(false, p.link_url);
+-      return ReArcTabNavigate(tab, p.link_url.spec().c_str(), 1);
++      if (action != 0 && !HasLinkOpenHost()) {
++        return REARC_UNSUPPORTED;
++      }
++      static constexpr WindowOpenDisposition kNew[] = {
++          WindowOpenDisposition::NEW_BACKGROUND_TAB,
++          WindowOpenDisposition::NEW_FOREGROUND_TAB,
++          WindowOpenDisposition::NEW_WINDOW,
++          WindowOpenDisposition::NEW_SPLIT_VIEW};
++      content::OpenURLParams open = content::OpenURLParams::CreateBrowserInitiated(
++          url,
++          action == 0 ? WindowOpenDisposition::CURRENT_TAB
++                      : kNew[(action - 13) % 4],
++          ui::PAGE_TRANSITION_LINK,
++          content::Referrer::SanitizeForRequest(
++              url, content::Referrer(p.frame_url.GetAsReferrer(),
++                                     p.referrer_policy)),
++          /*started_from_context_menu=*/true);
++      open.source_render_process_id = frame->GetProcess()->GetDeprecatedID();
++      open.source_render_frame_id = frame->GetRoutingID();
++      open.initiator_frame_token = frame->GetFrameToken();
++      open.initiator_process_id = frame->GetProcess()->GetDeprecatedID();
++      open.initiator_origin = p.frame_origin;
++      open.source_site_instance = frame->GetSiteInstance();
++      End(false, opens_link ? p.link_url : GURL());
++      c->OpenURL(open, {});
++      return REARC_OK;
+     }
+     if (action == 9 && !c->GetController().CanGoBack()) {
+       return REARC_INVALID_STATE;
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index b4019757d5..7309f8d47d 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 57, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 58, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -999,8 +999,17 @@ REARC_ENGINE_EXPORT void ReArcEngineSetContextMenuCallback(
+ // 5 select all, 6 save image (Chromium download), 7 copy image,
+ // 8 inspect (unsupported: browser-less DevTools frontend not wired),
+ // 9 back, 10 forward, 11 reload, 12 dismiss. Success consumes the ID.
+-// Invalid/disabled/unsupported actions leave it pending. Shell can Create a
+-// separate tab using link_url for its open-in-new-tab menu item.
++// Invalid/disabled/unsupported actions leave it pending.
++// ABI 1.58 (context_menu_link_open): link_url and src_url are page data.
++// 0 opens link_url in this tab; 13-16 open link_url and 17-20 src_url (the
++// image or media) in a new background tab (13/17), foreground tab (14/18),
++// window (15/19, e.g. Little Arc) or split view (16/20). Only http(s) URLs
++// (else unsupported). They open as Chrome's context menu does: link
++// transition, the clicked frame's origin as initiator, its sanitized
++// referrer. 13-20 arrive as ReArcLinkOpenEvent requests (1.39), dispositions
++// 2, 1, 4 and 5, answered with ReArcLinkOpenRespond; they need a link-open
++// callback (else unsupported). Do not open these URLs with ReArcTabNavigate
++// or ReArcTabCreate: that loads them with no initiator.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcContextMenuCommand(
+     uint64_t request_id, uint32_t action);
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 03005c5ffe..15314a97fb 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -752,6 +752,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "extension_background_tabs" ||
+          std::string(feature) == "launch_switch_filter" ||
+          std::string(feature) == "safe_browsing_tab_helpers" ||
++         std::string(feature) == "context_menu_link_open" ||
+          std::string(feature) == "history_recording" ||
+          std::string(feature) == "history_query" ||
+          std::string(feature) == "search_autocomplete" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index 83c696c252..052d12195e 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.60.0";
++  return "0.61.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_windows.cc b/chrome/browser/rearc_bridge/rearc_extension_windows.cc
+index cd9f68663e..28313cf156 100644
+--- a/chrome/browser/rearc_bridge/rearc_extension_windows.cc
++++ b/chrome/browser/rearc_bridge/rearc_extension_windows.cc
+@@ -257,6 +257,7 @@ void RequestExtensionTab(Profile* p, const std::string& extension, const GURL& r
+   Publish(id,Requests().at(id));
+   base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(FROM_HERE,base::BindOnce(&Cancel,id),base::Seconds(30));
+ }
++bool HasLinkOpenHost() { return link_host != nullptr; }
+ void RequestLinkOpen(uint64_t source_id, content::WebContents* source,
+     const content::OpenURLParams& params,
+     base::OnceCallback<void(content::NavigationHandle&)> callback) {
+diff --git a/chrome/browser/rearc_bridge/rearc_extension_windows.h b/chrome/browser/rearc_bridge/rearc_extension_windows.h
+index dad1cf3cdb..b70bfc85de 100644
+--- a/chrome/browser/rearc_bridge/rearc_extension_windows.h
++++ b/chrome/browser/rearc_bridge/rearc_extension_windows.h
+@@ -25,6 +25,8 @@ content::WebContents* ActiveExtensionContents(Profile*);
+ base::ListValue QueryExtensionTabs(ExtensionFunction*, const extensions::api::tabs::Query::Params::QueryInfo&, const extensions::URLPatternSet&);
+ base::ListValue QueryExtensionWindows(ExtensionFunction*, int window_id, bool populate);
+ void RequestExtensionTab(Profile*, const std::string& extension_id, const GURL&, bool active, uint64_t opener, int window_id, uint32_t kind, uint64_t tab_id, base::OnceCallback<void(content::WebContents*)>);
++// ABI 1.58: whether a link-open callback (1.39) is registered.
++bool HasLinkOpenHost();
+ void RequestLinkOpen(uint64_t source_tab_id, content::WebContents*, const content::OpenURLParams&, base::OnceCallback<void(content::NavigationHandle&)>);
+ void ABICancelExtensionTabs(uint64_t tab_id, uint64_t profile_id);
+ // ABI 1.50 extension_tab_groups: tab groups for registry tabs, kept in the
