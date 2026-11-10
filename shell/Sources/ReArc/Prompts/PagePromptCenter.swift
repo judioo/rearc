@@ -95,7 +95,7 @@ final class PagePromptCenter {
     var suppressDialogs = false
     private(set) var permission: Permission?
     /// "Remember this decision" (sends persist).
-    var rememberPermission = true
+    var rememberPermission = false
     private(set) var password: Password?
     private(set) var autofillSave: AutofillSave?
     private(set) var httpAuth: HTTPAuth?
@@ -132,7 +132,28 @@ final class PagePromptCenter {
     /// Who had the keyboard when a run of dialogs began; it gets it back after the last one.
     @ObservationIgnored weak var keyboardOwnerBeforeDialog: NSResponder?
 
-    init() {}
+    @ObservationIgnored private let permissionClock: () -> TimeInterval
+    @ObservationIgnored private var permissionReadyAt: TimeInterval = .infinity
+    private(set) var permissionInteractionEnabled = false
+
+    init(permissionClock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.permissionClock = permissionClock
+    }
+
+    /// The UI also disables the whole card; checking the deadline here covers
+    /// keys/clicks already queued when the card appeared or the window focused.
+    var permissionInteractionAllowed: Bool { permissionClock() >= permissionReadyAt }
+
+    func rearmPermissionInteractionDelay() {
+        guard permission != nil else { return }
+        permissionInteractionEnabled = false
+        permissionReadyAt = permissionClock() + 0.5
+        let deadline = permissionReadyAt
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, self.permission != nil, self.permissionReadyAt == deadline else { return }
+            self.permissionInteractionEnabled = self.permissionInteractionAllowed
+        }
+    }
 
     var hostWindow: NSWindow? { anchorView?.window }
 
@@ -215,8 +236,9 @@ final class PagePromptCenter {
     func presentPermission(_ request: PermissionPromptRequest, reply: @escaping (PermissionDecision, Bool) -> Void) {
         let entry = Permission(request: request, reply: reply)
         if permission == nil {
-            rememberPermission = true
+            rememberPermission = false
             permission = entry
+            rearmPermissionInteractionDelay()
         } else {
             permissionQueue.append(entry)
         }
@@ -224,7 +246,7 @@ final class PagePromptCenter {
 
     /// Allow / Block (with "Remember" as persist) or the close button (dismiss).
     func answerPermission(_ decision: PermissionDecision) {
-        guard let current = permission else { return }
+        guard permissionInteractionAllowed, let current = permission else { return }
         let persist = decision != .dismiss && rememberPermission
         sitePermissions?.record(decision, remembered: persist, request: current.request, scope: permissionScope)
         count(&answered, "permission")
@@ -244,9 +266,12 @@ final class PagePromptCenter {
 
     private func advancePermission() {
         permission = nil
+        permissionInteractionEnabled = false
+        permissionReadyAt = .infinity
         if !permissionQueue.isEmpty {
-            rememberPermission = true
+            rememberPermission = false
             permission = permissionQueue.removeFirst()
+            rearmPermissionInteractionDelay()
         }
     }
 

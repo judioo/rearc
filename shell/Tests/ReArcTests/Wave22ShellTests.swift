@@ -180,7 +180,8 @@ final class Wave22ShellTests: XCTestCase {
     // MARK: Permissions and passwords
 
     func testPermissionAnswersCarryPersistAndAreRecorded() {
-        let prompts = PagePromptCenter()
+        var now: TimeInterval = 100
+        let prompts = PagePromptCenter(permissionClock: { now })
         let sites = SitePermissionsController(fileURL: nil)
         prompts.sitePermissions = sites
         prompts.profileID = UUID()
@@ -190,12 +191,23 @@ final class Wave22ShellTests: XCTestCase {
         prompts.presentPermission(camera) { replies.append(($0, $1)) }
         prompts.presentPermission(location) { replies.append(($0, $1)) }
         XCTAssertEqual(prompts.permission?.id, 1)
-        XCTAssertTrue(prompts.rememberPermission, "remember is on by default")
+        XCTAssertFalse(prompts.rememberPermission)
+        prompts.answerPermission(.allow)
+        XCTAssertTrue(replies.isEmpty, "ignore early input")
+        now += 0.5
+        prompts.rememberPermission = true
         prompts.answerPermission(.allow)
         XCTAssertEqual(replies.last?.0, .allow)
         XCTAssertEqual(replies.last?.1, true)
         XCTAssertEqual(prompts.permission?.id, 2)
-        prompts.rememberPermission = false
+        XCTAssertFalse(prompts.rememberPermission, "each prompt starts with remember off")
+        prompts.answerPermission(.allow)
+        XCTAssertEqual(replies.count, 1, "double click cannot answer the next prompt")
+        now += 0.5
+        prompts.rearmPermissionInteractionDelay()
+        prompts.answerPermission(.allow)
+        XCTAssertEqual(replies.count, 1, "focus re-arms the guard")
+        now += 0.5
         prompts.answerPermission(.deny)
         XCTAssertEqual(replies.last?.1, false)
         XCTAssertEqual(sites.rememberedDecision(for: camera, scope: prompts.permissionScope), .allow)
@@ -203,6 +215,7 @@ final class Wave22ShellTests: XCTestCase {
         XCTAssertEqual(sites.entries(origin: "https://meet.test", scope: prompts.permissionScope).count, 3)
 
         prompts.presentPermission(PermissionPromptRequest(id: 3, origin: "https://n.test", types: [.notifications])) { replies.append(($0, $1)) }
+        now += 0.5
         prompts.answerPermission(.dismiss)
         XCTAssertEqual(replies.last?.0, .dismiss)
         XCTAssertEqual(replies.last?.1, false, "dismiss never persists")
