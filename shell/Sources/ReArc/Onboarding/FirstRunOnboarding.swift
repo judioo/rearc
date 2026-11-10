@@ -230,12 +230,18 @@ struct OnboardingImportPlan: Sendable {
     var bookmarks: Bool
     var history: Bool
     var extensions: Bool
+    var extensionOrigins: [String: [String: SourceExtension.Origin]]
 
     init(sources: [ImportSource], categories: [ImportCategory]) {
         arcDirectories = Set(sources.filter { $0.browser == "Arc" }.map(\.directory))
         chromium = sources.compactMap { s in
             ImportBrowser(rawValue: s.browser.lowercased()).map { ($0, s.directory) }
         }
+        extensionOrigins = Dictionary(uniqueKeysWithValues: sources.compactMap { source in
+            ImportBrowser(rawValue: source.browser.lowercased()).map {
+                ("\($0.rawValue)/\(source.directory)", source.extensionOrigins)
+            }
+        })
         spaces = categories.contains(.spaces)
         bookmarks = categories.contains(.bookmarks)
         history = categories.contains(.history)
@@ -291,7 +297,9 @@ struct OnboardingImportPlan: Sendable {
                     profiles.append((profile, bookmarks ? Self.bookmarks(profile) : nil, history ? Self.history(profile) : nil))
                 }
                 if self.extensions {
-                    extensions += ExtensionInventoryReader.read(profile: profile.url).map { (profile.browser, $0) }
+                    let snapshot = extensionOrigins["\(profile.browser.rawValue)/\(profile.directory)"] ?? [:]
+                    extensions += ExtensionInventoryReader.consented(ExtensionInventoryReader.read(profile: profile.url),
+                                                                    snapshot: snapshot).map { (profile.browser, $0) }
                 }
             }
         }
@@ -309,8 +317,8 @@ struct OnboardingImportPlan: Sendable {
     /// The scanner's sources, each counted as the import would bring it:
     /// Arc's spaces, pinned tabs and favorites from its sidebar reader,
     /// bookmarks and pages from the readers `read` uses, and extensions as
-    /// the reinstall queue would take them, by id. The scanner's password
-    /// count stays, only to say they stay behind. A source with nothing to
+    /// the reinstall queue would take them, by id and origin. The scanner's
+    /// password-presence flag stays, only to say they stay behind. A source with nothing to
     /// bring is left out.
     /// Arc's bookmarks count only what its spaces don't already bring
     /// (`BookmarkImportPlan.arcMirrorNewShare`); `bookmarksWithoutSpaces`
@@ -324,6 +332,7 @@ struct OnboardingImportPlan: Sendable {
             var stats = ImportStats()
             var counted = source
             counted.extensionIDs = []
+            counted.extensionOrigins = [:]
             if source.browser == "Arc", let arc = arc?.only(directories: [source.directory]) {
                 stats.spaces = arc.export.spaces.count
                 stats.tabs = arc.export.spaces.reduce(0) { $0 + $1.pinnedTabCount } + arc.favoritesToImport()
@@ -339,8 +348,10 @@ struct OnboardingImportPlan: Sendable {
                 }
                 stats.pages = history(profile)?.count ?? 0
                 if extensions {
-                    counted.extensionIDs = ExtensionReinstallQueue(ExtensionInventoryReader.read(profile: profile.url), into: UUID(),
-                                                                   installedIDs: installedIDs).items.map(\.id)
+                    let items = ExtensionReinstallQueue(ExtensionInventoryReader.read(profile: profile.url), into: UUID(),
+                                                        installedIDs: installedIDs).items
+                    counted.extensionIDs = items.map(\.id)
+                    counted.extensionOrigins = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.origin) })
                     stats.extensions = counted.extensionIDs.count
                 }
             }

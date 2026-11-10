@@ -227,6 +227,37 @@ final class OnboardingImportTests: XCTestCase {
 
     // MARK: Extensions
 
+    func testApplyInstallsOnlyIDsAndOriginsCountedInEachSourceProfile() throws {
+        let found = sources()
+        let plan = OnboardingImportPlan(sources: found, categories: [.extensions])
+        // An old store ID becomes unpacked, a new store ID appears, and an
+        // old unpacked ID becomes store-backed after the count was displayed.
+        try write(["extensions": ["settings": [
+            Self.notesID: extensionEntry("Notes", location: 4, webStore: false, path: root.path),
+        ]]], "Arc/User Data/Default/Secure Preferences")
+        try write(["extensions": ["settings": [
+            Self.notesID: extensionEntry("Notes", location: 4, webStore: false, path: root.path),
+            Self.readerID: extensionEntry("Reader", location: 1, webStore: true, path: "reader"),
+            Self.unpackedID: extensionEntry("Now Store", location: 1, webStore: true, path: "new"),
+            Self.externalID: extensionEntry("New Store", location: 1, webStore: true, path: "new"),
+        ]]], "Google/Chrome/Default/Secure Preferences")
+        let read = plan.read(applicationSupport: root, arcDefaults: { [:] })
+        let model = makeModel()
+        _ = OnboardingImportPlan.apply(read, model: model)
+        XCTAssertEqual(model.pendingExtensionReinstall?.queue.items.map(\.id), [Self.readerID])
+        XCTAssertEqual(model.pendingExtensionReinstall?.queue.items.map(\.origin), [.webStore])
+    }
+
+    func testUnpackedExtensionsAreNotCountedEvenWhenTheirFolderExists() throws {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("nowhere"), withIntermediateDirectories: true)
+        let found = sources()
+        XCTAssertFalse(found.flatMap(\.extensionIDs).contains(Self.unpackedID))
+        XCTAssertFalse(BrowserScanner.scan(applicationSupport: root).flatMap(\.extensionIDs).contains(Self.unpackedID))
+        let model = makeModel()
+        _ = importForReal(found, [.extensions], model: model)
+        XCTAssertTrue(try XCTUnwrap(model.pendingExtensionReinstall).queue.items.allSatisfy { $0.origin == .webStore })
+    }
+
     func testExtensionsAreQueuedForAfterTheSunriseAndSurviveARelaunch() throws {
         let model = makeModel()
         let outcome = importForReal(sources(), ImportCategory.allCases, model: model)

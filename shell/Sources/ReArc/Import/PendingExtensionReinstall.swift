@@ -23,7 +23,7 @@ struct PendingExtensionReinstall: Codable, Equatable {
     var skipped: [ExtensionConsolidation.Skipped]? = nil
     var results: [String: Result]? = nil
     var outstandingItems: [ExtensionReinstallQueue.Item] {
-        Array(queue.items.dropFirst(queue.position)).filter { $0.enabledByDefault != false && results?[$0.key] == nil }
+        Array(queue.items.dropFirst(queue.position)).filter { $0.origin == .webStore && $0.enabledByDefault != false && results?[$0.key] == nil }
     }
 
     var queue: ExtensionReinstallQueue

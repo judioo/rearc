@@ -29,7 +29,7 @@ public struct SourceExtension: Identifiable, Equatable, Sendable {
     public var canReinstall: Bool {
         switch origin {
         case .webStore: return true
-        case .unpacked(let path): return FileManager.default.fileExists(atPath: path)
+        case .unpacked: return false
         case .other: return false
         }
     }
@@ -46,6 +46,12 @@ public enum ExtensionInventoryReader {
     /// 32 letters a–p.
     public static func isExtensionID(_ id: String) -> Bool {
         id.count == 32 && id.allSatisfy { ("a" ... "p").contains($0) }
+    }
+
+    /// A new inventory can remove consented items, never add IDs or change
+    /// their origin (including an unpacked path) after the discovery snapshot.
+    public static func consented(_ inventory: [SourceExtension], snapshot: [String: SourceExtension.Origin]) -> [SourceExtension] {
+        inventory.filter { snapshot[$0.id] == $0.origin }
     }
 
     /// The profile's extensions, without Chromium's built-in ones, by name.
@@ -166,13 +172,32 @@ public struct ExtensionReinstallQueue: Equatable, Codable, Sendable {
                 }
                 return nil
             }
+            guard source.origin == item.origin else {
+                skipped.append(.init(id: item.id, name: item.name, reason: "source origin changed"))
+                return nil
+            }
             var item = item
-            item.enabledByDefault = true
-            item.origin = source.origin
+            item.enabledByDefault = source.isEnabled
             return item
         }
         position = 0
         return skipped
+    }
+
+    private enum CodingKeys: String, CodingKey { case items, position }
+
+    /// Persisted queues are untrusted input. Keep store items only, including
+    /// when resuming a queue written before unpacked imports were removed.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decoded = try container.decode([Item].self, forKey: .items)
+        let oldPosition = max(0, min(try container.decodeIfPresent(Int.self, forKey: .position) ?? 0, decoded.count))
+        var seen = Set<String>()
+        let accepted = decoded.enumerated().filter { _, item in
+            item.origin == .webStore && ExtensionInventoryReader.isExtensionID(item.id) && seen.insert(item.key).inserted
+        }
+        items = accepted.map(\.element)
+        position = accepted.filter { $0.offset < oldPosition }.count
     }
 
     public var current: Item? { items.indices.contains(position) ? items[position] : nil }
@@ -231,6 +256,7 @@ public struct ExtensionConsolidation: Sendable {
             else if copies.allSatisfy(\.isBlocklisted) { reason = "blocklisted" }
             else if eligible == nil { reason = "disabled" }
             else if eligible?.manifestVersion == 2 { reason = "retired (Manifest V2)" }
+            else if case .unpacked(let path) = eligible?.origin { reason = "load manually: \(path)" }
             else if eligible?.canReinstall != true { reason = "not portable" }
             else { reason = nil }
             if let reason { skipped.append(.init(id: source.id, name: source.name, reason: reason)) }

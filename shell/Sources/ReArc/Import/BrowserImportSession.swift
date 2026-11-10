@@ -301,14 +301,17 @@ final class BrowserImportSession {
                     ? (try? ChromiumHistoryReader.read(profile.url.appendingPathComponent(ChromiumHistoryReader.fileName))) : nil
                 // Read again now: an extension may have finished installing since the pane loaded.
                 let installedIDs = chosen.isEmpty ? [] : installed(target)
+                let snapshot = Dictionary(uniqueKeysWithValues: chosen.map { ($0.id, $0.origin) })
+                let consented = chosen.isEmpty ? [] : ExtensionInventoryReader.consented(
+                    ExtensionInventoryReader.read(profile: profile.url), snapshot: snapshot)
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     var lines = model.applyChromiumImport(from: profile, bookmarks: bookmarks, history: history,
                                                           searchEngine: engine, into: target)
-                    let queue = ExtensionReinstallQueue(chosen, into: target, installedIDs: installedIDs)
+                    let queue = ExtensionReinstallQueue(consented, into: target, installedIDs: installedIDs)
                     if !queue.isFinished {
                         model.queueExtensionReinstall(queue, from: profile.browser.name,
-                                                      skipped: ExtensionConsolidation(chosen, installedIDs: installedIDs).skipped)
+                                                      skipped: ExtensionConsolidation(consented, installedIDs: installedIDs).skipped)
                         model.installPendingExtensions()
                         lines.append("\(queue.items.count) extension\(queue.items.count == 1 ? "" : "s") installing in the background")
                     }

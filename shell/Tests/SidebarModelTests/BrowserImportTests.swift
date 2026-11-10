@@ -352,7 +352,34 @@ final class BrowserImportTests: XCTestCase {
         let dev = try XCTUnwrap(extensions.first { $0.id == BrowserImportFixture.unpackedID })
         guard case .unpacked(let path) = dev.origin else { return XCTFail("\(dev.origin)") }
         XCTAssertTrue(path.hasSuffix("Developer/my-dev-tool"))
-        XCTAssertTrue(dev.canReinstall)
+        XCTAssertFalse(dev.canReinstall, "unpacked extensions always require a manual load")
+    }
+
+    func testAnExistingUnpackedFolderNeverEntersTheInstallQueue() throws {
+        try fixture.installBrowsers()
+        let inventory = ExtensionInventoryReader.read(profile: fixture.root.appendingPathComponent("Google/Chrome/Default"))
+        let dev = try XCTUnwrap(inventory.first { $0.id == BrowserImportFixture.unpackedID })
+        let consolidation = ExtensionConsolidation([dev])
+        XCTAssertTrue(consolidation.candidates.isEmpty)
+        XCTAssertTrue(consolidation.skipped.first?.reason.hasPrefix("load manually: ") == true)
+        XCTAssertTrue(ExtensionReinstallQueue([dev], into: UUID()).isFinished)
+    }
+
+    func testPersistedQueuesRejectUnpackedItemsAndKeepStoreProgress() throws {
+        let source = SourceExtension(id: BrowserImportFixture.webStoreID, name: "Notes", version: "1", isEnabled: true,
+                                     isPinned: false, isTheme: false, origin: .webStore)
+        let queue = ExtensionReinstallQueue([source], into: UUID())
+        var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(queue)) as? [String: Any])
+        let store = try XCTUnwrap((raw["items"] as? [[String: Any]])?.first)
+        var unpacked = store
+        unpacked["id"] = BrowserImportFixture.unpackedID
+        unpacked["origin"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(SourceExtension.Origin.unpacked(path: fixture.root.path)))
+        raw["items"] = [unpacked, store]
+        raw["position"] = 1
+        let decoded = try JSONDecoder().decode(ExtensionReinstallQueue.self, from: JSONSerialization.data(withJSONObject: raw))
+        XCTAssertEqual(decoded.items.map(\.id), [source.id])
+        XCTAssertEqual(decoded.position, 0, "only the discarded unpacked item was completed")
+        XCTAssertEqual(decoded.current?.origin, .webStore)
     }
 
     func testOlderProfilesKeepTheEnabledStateInState() {
@@ -555,6 +582,22 @@ final class BrowserImportTests: XCTestCase {
         XCTAssertEqual(store.content(for: old.id).pinned.first?.id, oldTab.id)
         XCTAssertNotNil(store.space(withID: old.id)?.arcSourceID)
         XCTAssertTrue(store.importArcSidebar(source, choices: choices).isEmpty)
+    }
+
+    func testLegacyQueueNeverChangesAnOriginAfterConsent() throws {
+        let source = SourceExtension(id: BrowserImportFixture.webStoreID, name: "Notes", version: "1", isEnabled: true,
+                                     isPinned: false, isTheme: false, origin: .webStore)
+        let queue = ExtensionReinstallQueue([source], into: UUID())
+        var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(queue)) as? [String: Any])
+        var rows = try XCTUnwrap(raw["items"] as? [[String: Any]])
+        rows[0].removeValue(forKey: "enabledByDefault")
+        raw["items"] = rows
+        var legacy = try JSONDecoder().decode(ExtensionReinstallQueue.self, from: JSONSerialization.data(withJSONObject: raw))
+        var changed = source
+        changed.origin = .unpacked(path: fixture.root.path)
+        _ = legacy.reconcileLegacyInventory([changed])
+        XCTAssertTrue(legacy.isFinished)
+        XCTAssertTrue(ExtensionInventoryReader.consented([changed], snapshot: [source.id: source.origin]).isEmpty)
     }
 
     func testLegacyQueuesRecheckDisabledCopiesBeforeInstalling() throws {
