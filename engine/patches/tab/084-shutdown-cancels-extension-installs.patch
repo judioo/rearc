@@ -1,0 +1,165 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 shutdown cancels bulk store installs
+
+Security audit RC-500 F-19. Bridge 0.65.0. ReArcEngineShutdown returned busy
+while a bulk store install ran (up to 512 IDs, or one stalled download). It
+now cancels the batches: unstarted IDs finish with result 3, running
+installers end through Chromium's own abort (RunCallback ABORTED, then
+AbortInstall, as OnProfileWillBeDestroyed does), each callback once and before
+the shutdown completion. The blocklist and policy checks hold a reference and
+stop when cancelled, so an abort mid-check leaves no dangling pointer.
+
+Last rebased: 2026-11-10 onto Chromium 156.0.8078.96 (2ad9b7f5a8).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 9ac7fcaf54..dd1a8f640a 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -450,17 +450,20 @@ void OnManifestParsed() override {
+       return;
+     }
+     auto* blocklist = extensions::ExtensionsBrowserClient::Get()->GetBlocklist(profile());
++    // The checks hold a reference: shutdown can cancel the install meanwhile.
+     blocklist->IsBlocklisted(id(), base::BindOnce(
+-        [](ApprovedStoreInstaller* self, scoped_refptr<const extensions::Extension> extension,
++        [](scoped_refptr<ApprovedStoreInstaller> self, scoped_refptr<const extensions::Extension> extension,
+            extensions::BlocklistState state) {
++          if (self->cancelled_) return;
+           if (state != extensions::NOT_BLOCKLISTED && state != extensions::BLOCKLISTED_UNKNOWN) {
+             self->CompleteInstall(extensions::webstore_install::BLOCKLISTED,
+                                   "This extension is on Chromium's blocklist.");
+             return;
+           }
+           extensions::ExtensionSystem::Get(self->profile())->management_policy()->UserMayInstall(
+-              extension, base::BindOnce([](ApprovedStoreInstaller* self,
++              extension, base::BindOnce([](scoped_refptr<ApprovedStoreInstaller> self,
+                   extensions::ManagementPolicy::Decision decision) {
++                if (self->cancelled_) return;
+                 if (!decision.allowed) {
+                   self->CompleteInstall(extensions::webstore_install::BLOCKED_BY_POLICY,
+                                         base::UTF16ToUTF8(decision.error));
+@@ -468,8 +471,8 @@ void OnManifestParsed() override {
+                   self->prompt_ = self->AsksForMore();
+                   self->ProceedWithInstallPrompt();
+                 }
+-              }, base::Unretained(self)));
+-        }, base::Unretained(this), extension));
++              }, self));
++        }, base::WrapRefCounted(this), extension));
+   }
+   bool CheckRequestorAlive() const override { return true; }
+   bool ShouldShowPostInstallUI() const override { return false; }
+@@ -519,13 +522,25 @@ void OnWebstoreRequestFailureWithStatus(const std::string& id, int status) overr
+   }
+  public:
+   bool missing() const { return missing_; }
++  // Engine shutdown: Chromium's own abort, as when the profile is destroyed
++  // (OnProfileWillBeDestroyed). The completion runs now; may delete this.
++  void CancelForShutdown() {
++    cancelled_ = true;
++    RunCallback(false, "Cancelled: the engine is shutting down.",
++                extensions::webstore_install::ABORTED);
++    AbortInstall();
++  }
+  private:
+   bool missing_ = false;
++  bool cancelled_ = false;
+   bool prompt_ = false;
+   std::optional<std::string> source_manifest_;
+   std::unique_ptr<content::WebContents> contents_;
+ };
+ 
++struct ExtensionInstallBatch;
++std::map<uint64_t, ExtensionInstallBatch*>& ExtensionInstallBatches();
++
+ struct ExtensionInstallBatch : base::RefCounted<ExtensionInstallBatch> {
+   uint64_t profile_id;
+   std::vector<std::string> ids;
+@@ -540,13 +555,30 @@ void OnWebstoreRequestFailureWithStatus(const std::string& id, int status) overr
+   void Finish(std::string id, int result, std::string reason) {
+     --active;
+     ++completed;
+-    if (completed == ids.size()) ExtensionInstallProfiles().erase(profile_id);
++    if (completed == ids.size()) {
++      ExtensionInstallProfiles().erase(profile_id);
++      ExtensionInstallBatches().erase(profile_id);
++    }
+     // Deliver before pumping so callbacks are ordered and context has a clear
+     // terminal boundary. Reentrancy cannot start a second batch until terminal.
+     callback(context, id.c_str(), result, reason.c_str(), completed, ids.size());
+     Pump();
+   }
++  // Engine shutdown: unstarted IDs and running installs finish with result 3,
++  // each delivered once, before the shutdown completion.
++  void Cancel() {
++    cancelled = true;
++    while (next < ids.size()) {
++      ++active;
++      ABIPost(base::BindOnce(&ExtensionInstallBatch::Finish,
++                             base::RetainedRef(this), ids[next++], 3,
++                             std::string("Cancelled: the engine is shutting down.")));
++    }
++    auto running = installers;
++    for (auto& [id, installer] : running) installer->CancelForShutdown();
++  }
+   void Pump() {
++    if (cancelled) return;
+     auto* profile = FindBridgeProfile(profile_id);
+     while (active < 3 && next < ids.size()) {
+       std::optional<std::string> manifest = std::move(manifests[next]);
+@@ -584,8 +616,15 @@ void StoreDone(std::string id, bool success, std::string error, bool unavailable
+         std::move(error)));
+   }
+   std::map<std::string, ApprovedStoreInstaller*> installers;
++  bool cancelled = false;
+ };
+ 
++// Store batches in progress, by profile, for shutdown (1.61 follow-up).
++std::map<uint64_t, ExtensionInstallBatch*>& ExtensionInstallBatches() {
++  static base::NoDestructor<std::map<uint64_t, ExtensionInstallBatch*>> batches;
++  return *batches;
++}
++
+ ReArcStatus Available() {
+   auto& a = ABI::Get();
+   return a.ready && !a.stopping ? REARC_OK : REARC_ENGINE_NOT_READY;
+@@ -1013,7 +1052,15 @@ ReArcStatus ReArcEngineShutdown(bool force,
+   if (!a.ready) {
+     return REARC_ENGINE_NOT_READY;
+   }
+-  if (!rearc::ExtensionInstallProfiles().empty()) return REARC_BUSY;
++  // An unpacked load is short and has no abort: wait for it. Store batches
++  // are cancelled; their results arrive before the shutdown completion.
++  for (uint64_t profile : rearc::ExtensionInstallProfiles()) {
++    if (!rearc::ExtensionInstallBatches().contains(profile)) return REARC_BUSY;
++  }
++  auto batches = rearc::ExtensionInstallBatches();
++  for (auto& [profile, batch] : batches) {
++    batch->Cancel();
++  }
+   // Snapshot the bridge's live IDs without exposing pointers across tasks.
+   a.shutdown_tabs.clear();
+   // Id allocation is monotonic, but the registry owns the authoritative set.
+@@ -1063,6 +1110,7 @@ ReArcStatus StartExtensionInstalls(
+   batch->callback = callback;
+   batch->context = context;
+   rearc::ExtensionInstallProfiles().insert(profile_id);
++  rearc::ExtensionInstallBatches()[profile_id] = batch.get();
+   rearc::ABIPost(base::BindOnce(&rearc::ExtensionInstallBatch::Pump, batch));
+   return REARC_OK;
+ }
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index db387d18f4..f5587fe9a0 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.64.0";
++  return "0.65.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(
