@@ -104,7 +104,7 @@ committed. Filter `AIza` out of anything copied from a build log.
 
 ```
 target_os="mac" target_cpu="arm64" is_chrome_branded=false is_official_build=false
-use_system_xcode=true use_remoteexec=false use_siso=true chrome_pgo_phase=0 disable_fieldtrial_testing_config=true
+use_system_xcode=true use_remoteexec=false use_siso=true chrome_pgo_phase=0
 symbol_level=1 treat_warnings_as_errors=false
 is_debug=false is_component_build=false dcheck_always_on=false
 enable_dsyms=true enable_stripping=true
@@ -112,11 +112,10 @@ branding_file_path="<repo>/shell/.build-release/BRANDING"   (generated, carries 
 google_api_key="…"   (appended from ~/.config/rearc/google-api-keys.gn, "Safe Browsing key")
 ```
 
-`disable_fieldtrial_testing_config=true` is required. Without it an unbranded build runs
-Chromium's bot configuration, which switches on hundreds of unlaunched features. One of them
-moves Safe Browsing to the v5 list protocol, which Google answers with 404 for our key, so no
-threat list ever arrives (security review of 544, F-02 and N-01). `release.sh --dmg` refuses an
-engine whose `gen/components/variations/service/buildflags.h` has the testing config on.
+The engine is built WITH Chromium's field-trial testing config (the default for an unbranded
+build), because builds 500 to 564 were and profiles carry its storage formats: see "Stored site
+data" below. `release.sh --dmg` refuses an engine whose
+`gen/components/variations/service/buildflags.h` has the testing config off.
 
 
 - These are the dev args, which set no other branding arguments, with the release
@@ -238,6 +237,23 @@ treats that as a rollback and hits a fatal `NOTREACHED`. The shell now always pa
 `--enable-features=PrepopulatedEnginesMigration,ApplySearchEngineTypeMigration`
 (`ChromiumLaunchArguments.persistedProfileFeatures`). Any change to the engine's feature set
 can do this again: features leave marks in profiles.
+
+### Stored site data
+
+`check-upgrade.sh` only sees crashes. `scripts/release/check-upgrade-data.py PREVIOUS_APP NEW_APP`
+runs next in `release.sh --dmg`: the previous release stores a value in local storage, IndexedDB,
+a cookie and Cache Storage on a loopback page, and the new build must read all four back.
+
+Build 605 is why. Its engine was built with `disable_fieldtrial_testing_config=true`, to get
+Safe Browsing off the v5 list protocol. That also switched off `DomStorageSqliteNewDatabases`
+and `IdbSqliteOnDiskRollout`, so local storage and IndexedDB went back from SQLite to LevelDB:
+profiles from 500 to 564 read both as empty, and each site's IndexedDB data was deleted on its
+first visit. The engine is built with the testing config again, and the shell passes
+`--disable-features=SafeBrowsingLocalListsUseSBv5` (`ChromiumLaunchArguments.disabledEngineFeatures`).
+
+The rule: a build is safe for an existing profile only when every engine feature that was on
+when the profile was written is still on. Never change the engine's feature set, a GN flag that
+changes it, or the Chromium pin without this check passing against the release on the feed.
 
 ## Release notes
 

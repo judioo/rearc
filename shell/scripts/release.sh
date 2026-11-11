@@ -241,6 +241,9 @@ if [[ $DMG == 1 ]]; then
     IFS=: read -r -a upgrade_profiles <<<"${REARC_UPGRADE_PROFILES:-}"
     "$SHELL_DIR/scripts/release/check-upgrade.sh" "$APP" "$PREVIOUS_APP" ${upgrade_profiles[@]+"${upgrade_profiles[@]}"} 2>&1 \
       | tee "$DIST/check-upgrade.log" || die "the upgrade check failed (log $DIST/check-upgrade.log)"
+    # Opening is not enough: 605 opened every older profile and read its site data as empty.
+    "$SHELL_DIR/scripts/release/check-upgrade-data.py" "$PREVIOUS_APP" "$APP" 2>&1 \
+      | tee "$DIST/check-upgrade-data.log" || die "stored site data did not survive the upgrade (log $DIST/check-upgrade-data.log)"
   fi
 fi
 
