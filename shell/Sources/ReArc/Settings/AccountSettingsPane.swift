@@ -73,10 +73,9 @@ struct AccountSettingsPane: View {
     }
 
     private func perform(_ action: CloudAction) {
-        guard let found = model.cloudDetection?.found else { return }
         switch action {
-        case .use: model.chooseCloudSidebar(.useCloud, from: found)
-        case .replace: model.chooseCloudSidebar(.replaceCloud, from: found)
+        case .use: model.chooseCloudSidebarAfterLooking(.useCloud)
+        case .replace: model.chooseCloudSidebarAfterLooking(.replaceCloud)
         case .delete: model.deleteCloudSidebar()
         }
     }

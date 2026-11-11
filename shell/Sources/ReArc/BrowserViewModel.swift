@@ -35,6 +35,7 @@ final class BrowserViewModel {
     /// What the last look at iCloud found (Settings › Account's iCloud box); nil until one ran.
     var cloudDetection: CloudSidebarDetection?
     var isCheckingCloud = false
+    @ObservationIgnored var cloudCheckWaiters: [(CloudSidebarDetection) -> Void] = []
     /// Switching sync on found a sidebar in iCloud: the sheet asking what to do with it.
     var syncCloudChoice: CloudSidebarFound?
     /// Why the switch stayed off, or an iCloud action failed.

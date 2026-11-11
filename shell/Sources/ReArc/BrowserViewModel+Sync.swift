@@ -46,15 +46,33 @@ extension BrowserViewModel {
     }
 
     /// A read-only look at iCloud for Settings › Account; `done` gets it too.
+    /// A look already under way answers this caller too.
     func checkCloudSidebar(_ done: ((CloudSidebarDetection) -> Void)? = nil) {
-        guard let control = syncControl, !isCheckingCloud else { return }
+        guard let control = syncControl else { return }
+        if let done { cloudCheckWaiters.append(done) }
+        guard !isCheckingCloud else { return }
         isCheckingCloud = true
         Task { @MainActor [weak self] in
             let detection = await control.detectCloudSidebar()
             guard let self else { return }
             self.isCheckingCloud = false
             self.cloudDetection = detection
-            done?(detection)
+            let waiters = self.cloudCheckWaiters
+            self.cloudCheckWaiters = []
+            waiters.forEach { $0(detection) }
+        }
+    }
+
+    /// Settings' Use and Replace: what iCloud holds now, not at the last look.
+    func chooseCloudSidebarAfterLooking(_ choice: CloudSidebarChoice) {
+        syncCloudMessage = nil
+        checkCloudSidebar { [weak self] detection in
+            guard let self else { return }
+            switch detection {
+            case .found(let found): self.chooseCloudSidebar(choice, from: found)
+            case .empty: self.syncCloudMessage = "iCloud has no ReArc sidebar any more. Turn Sync Sidebar on to upload this Mac's."
+            case .signedOut(let message), .unreachable(let message), .unavailable(let message): self.syncCloudMessage = message
+            }
         }
     }
 
