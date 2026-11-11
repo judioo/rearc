@@ -9,6 +9,7 @@ extension SidebarStore {
                 mutationJournal.record(mutation)
             }
             settlePendingSelection()
+            validateMultiSelections()
             onDidMutate?()
         }
     }

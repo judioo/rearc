@@ -59,6 +59,10 @@ enum SidebarObservationKey: Hashable {
     case favorites(Profile.ID)
     /// Whether an item is the selection shown for a space.
     case selection(Space.ID, UUID)
+    /// Whether a row is in a window's multi-row selection.
+    case multiSelection(SidebarWindowID?, UUID)
+    /// Whether a window has a multi-row selection at all.
+    case multiSelectionPresence(SidebarWindowID?)
 }
 
 /// One row of a space's outline: what it is and, for a folder, what it holds.
