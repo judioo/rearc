@@ -210,7 +210,7 @@ private struct BoostLibraryRowView: View {
             if row.styleNeedsApproval {
                 Button("Review CSS…", action: onApproveStyle)
                     .controlSize(.small)
-                    .help("This boost's CSS changed on another device; it applies here once you approve it")
+                    .help("This boost's CSS came from another device or a boost file; it applies here once you approve it")
             }
             if row.hasScript {
                 Toggle("Allow Script", isOn: Binding(get: { row.scriptAllowed }, set: onAllowScript))

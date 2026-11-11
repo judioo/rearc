@@ -1191,14 +1191,20 @@ public final class SidebarStore {
     }
 
     @discardableResult
-    public func addBoost(_ package: BoostPackage, enabled: Bool? = nil) -> BoostLibraryMutationError? {
+    public func addBoost(_ package: BoostPackage, enabled: Bool? = nil, approvingStyle: Bool = true) -> BoostLibraryMutationError? {
         var library = boostLibrary(for: activeProfileID)
         library.profileID = activeProfileID
         let defaultEnabled = enabled ?? !package.hasScript
-        if let err = BoostLibraryOps.add(package, to: &library, enabled: defaultEnabled) {
+        if let err = BoostLibraryOps.add(package, to: &library, enabled: defaultEnabled, approvingStyle: approvingStyle) {
             return err
         }
-        updateBoostLibrary(library)
+        if approvingStyle {
+            updateBoostLibrary(library)
+        } else {
+            // Not a local edit: `updateBoostLibrary` would approve the new package's CSS.
+            boostLibrariesByProfileID[library.profileID] = library
+            notifyMutation()
+        }
         return nil
     }
 
@@ -1323,9 +1329,10 @@ public final class SidebarStore {
         return true
     }
 
+    /// A boost file from elsewhere: its CSS applies once reviewed (Review CSS…), its script once allowed.
     public func importBoostPackage(_ package: BoostPackage) -> BoostLibraryMutationError? {
         let enabled = BoostInterchange.defaultEnabledOnImport(package)
-        return addBoost(package, enabled: enabled)
+        return addBoost(package, enabled: enabled, approvingStyle: false)
     }
 
     public func activeBoostEntries(for tab: Tab, isPrivate: Bool = false) -> [BoostRuntimeEntry] {

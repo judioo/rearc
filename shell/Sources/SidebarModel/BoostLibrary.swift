@@ -162,10 +162,13 @@ public enum BoostLibraryOps {
         ProfileBoostLibrary(profileID: profileID)
     }
 
+    /// `approvingStyle`: false for a boost file from elsewhere (RC-0.1.0-602 N-02): its CSS
+    /// waits for Review CSS… like CSS that arrives by sync, so the validator is not its only check.
     public static func add(
         _ package: BoostPackage,
         to library: inout ProfileBoostLibrary,
-        enabled: Bool = true
+        enabled: Bool = true,
+        approvingStyle: Bool = true
     ) -> BoostLibraryMutationError? {
         let errors = BoostSecurity.validatePackage(package)
         if !errors.isEmpty { return .validationFailed(errors) }
@@ -175,7 +178,12 @@ public enum BoostLibraryOps {
             order: library.nextOrder()
         )
         library.upsertPackage(package, installation: install)
-        _ = approveStyle(packageID: package.manifest.id, library: &library)
+        if approvingStyle {
+            _ = approveStyle(packageID: package.manifest.id, library: &library)
+        } else {
+            library.adoptLegacyStyleApprovals()
+            library.approvedStyleHashes?[package.manifest.id] = nil
+        }
         return nil
     }
 

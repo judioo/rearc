@@ -58,7 +58,27 @@ public enum BoostSecurity {
         return errors
     }
 
+    /// CSS's own preprocessing: CR LF, CR and form feed become LF. Blink consumes CR LF as
+    /// one unit after an escape where a naive tokenizer takes one scalar, so the two could
+    /// disagree about where a string ends; normalised text is checked and is what the engine
+    /// receives (RC-0.1.0-602 N-02).
+    public static func normalizedCSS(_ css: String) -> String {
+        var out = String.UnicodeScalarView()
+        var previousCR = false
+        for scalar in css.unicodeScalars {
+            switch scalar {
+            case "\r": out.append("\n"); previousCR = true; continue
+            case "\n": if !previousCR { out.append("\n") }
+            case "\u{0C}": out.append("\n")
+            default: out.append(scalar)
+            }
+            previousCR = false
+        }
+        return String(out)
+    }
+
     public static func validateCSS(_ css: String, allowInStyle: Bool) -> [BoostSecurityError] {
+        let css = normalizedCSS(css)
         var errors: [BoostSecurityError] = []
         if css.count > maxCSSCharacters { errors.append(.cssTooLarge) }
         if css.lowercased().contains("</style>") { errors.append(.styleBreakoutInCSS) }

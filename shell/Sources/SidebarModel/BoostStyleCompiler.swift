@@ -13,9 +13,13 @@ public struct BoostCSSRule: Equatable, Sendable, Codable, Hashable {
 
 public enum BoostStyleCompiler {
     /// Parses a stylesheet into validated rule blocks; returns nil when validation or tab budget fails.
+    /// The rules hold the normalised text, and the text checked is the text the engines get:
+    /// the whole sheet, each rule (WebKit's style elements) and the rules joined with
+    /// newlines (`ChromiumBoostPlan`) (RC-0.1.0-602 N-02).
     public static func compileStylesheet(_ css: String, allowInStyle: Bool = true) -> [BoostCSSRule]? {
-        let trimmed = css.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = BoostSecurity.normalizedCSS(css).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
+        guard BoostSecurity.validateCSS(trimmed, allowInStyle: allowInStyle).isEmpty else { return nil }
         let blocks = parseRuleBlocks(trimmed)
         guard !blocks.isEmpty else { return nil }
         var rules: [BoostCSSRule] = []
@@ -29,7 +33,13 @@ public enum BoostStyleCompiler {
         if !BoostSecurity.tabCSSBudgetOK(combined) {
             return nil
         }
+        guard BoostSecurity.validateCSS(joinedForEngine(rules), allowInStyle: allowInStyle).isEmpty else { return nil }
         return rules
+    }
+
+    /// The one stylesheet the Chromium engine receives for a boost.
+    public static func joinedForEngine(_ rules: [BoostCSSRule]) -> String {
+        rules.map(\.css).filter { !$0.isEmpty }.joined(separator: "\n")
     }
 
     public static func parseRuleBlocks(_ css: String) -> [String] {

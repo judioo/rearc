@@ -38,7 +38,7 @@ enum ChromiumBoostPlan {
     private static func entry(from runtime: BoostRuntimeEntry) -> Entry? {
         let scopes = runtime.hostScope.compactMap(scope(from:))
         guard !scopes.isEmpty else { return nil }
-        let css = runtime.cssRules.map(\.css).filter { !$0.isEmpty }.joined(separator: "\n")
+        let css = BoostStyleCompiler.joinedForEngine(runtime.cssRules)
         let source = runtime.scriptUserEnabled ? (runtime.js ?? "") : ""
         guard !css.isEmpty || !source.isEmpty else { return nil }
         return Entry(
