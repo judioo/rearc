@@ -58,7 +58,8 @@ private let snapshotCallback: ReArcSnapshotCallback = { context, status, _, gene
 @Observable
 final class ChromiumEngine: WebEngine, NavigationCommitReporting, TabDiscarding, PageFullscreenControlling, LiveVideoProviding, MediaCaptureProviding {
     let profileContext: EngineProfileContext
-    @ObservationIgnored let role: EngineRole
+    /// Only a Peek's changes, to `.tab`, when it is expanded (`retag(as:)`).
+    @ObservationIgnored private(set) var role: EngineRole
     @ObservationIgnored let shellID: UUID
     /// Engine profile this tab lives in; fixed for the tab's lifetime (a profile
     /// change recreates the tab rather than relabeling it).
@@ -1584,4 +1585,11 @@ extension ChromiumEngine: PageElementLocating {
 
 extension ChromiumEngine: ShiftClickPeekConfigurable {}
 
+/// The engine's own role label (`ReArcTabCreate`'s `space_id`) stays what it was
+/// made with; only the shell's routing (fullscreen, DevTools, side panels) reads `role`.
+extension ChromiumEngine: EngineRoleRetagging {
+    func retag(as role: EngineRole) {
+        self.role = role
+    }
+}
 #endif

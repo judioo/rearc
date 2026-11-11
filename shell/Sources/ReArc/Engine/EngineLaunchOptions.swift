@@ -249,6 +249,12 @@ enum EngineRole: UInt64 {
     case privateWindow = 4
 }
 
+/// Engines whose shell role can change while their page lives on: a Peek
+/// expanded into a tab keeps its contents, history and shell identity.
+protocol EngineRoleRetagging: AnyObject {
+    func retag(as role: EngineRole)
+}
+
 /// Engines that report main-frame commits/finishes back to the sidebar model.
 protocol NavigationCommitReporting: AnyObject {
     var onNavigationCommit: ((URL?, String?) -> Void)? { get set }

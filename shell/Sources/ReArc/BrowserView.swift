@@ -74,16 +74,21 @@ struct BrowserView: View {
                 .transition(.move(edge: edge).combined(with: .opacity))
             }
 
-            if let session = model.peekSession, let web = model.peekEngineView() {
-                PeekOverlayView(
-                    title: session.title,
-                    url: session.url,
-                    webContent: web,
-                    onOpenInTab: { model.peekOpenInFullTab() },
-                    onOpenInLittleArc: { model.peekOpenInLittleArc() },
-                    onCopyLink: { model.peekCopyLink() },
-                    onDismiss: { model.dismissPeek() }
-                )
+            if model.showsPeek(in: windowID), let session = model.peekSession {
+                GeometryReader { proxy in
+                    PeekOverlayView(model: model, session: session, layout: peekLayout(windowSize: proxy.size),
+                                    bounds: CGRect(origin: .zero, size: proxy.size), accent: model.themeColor(in: windowID))
+                }
+                .ignoresSafeArea()
+                .id(session.engineID)
+            } else if let closing = model.peekClosing, closing.windowID == nil || closing.windowID == windowID {
+                GeometryReader { proxy in
+                    PeekClosingCard(closing: closing, layout: peekLayout(windowSize: proxy.size),
+                                    bounds: CGRect(origin: .zero, size: proxy.size))
+                }
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .id(closing.id)
             }
 
             boostEditorChrome
@@ -163,6 +168,7 @@ struct BrowserView: View {
             WindowKeyObserver(
                 onBecameKey: { model.windowBecameKey(windowID) },
                 onClose: {
+                    if model.peekSession?.windowID == windowID { model.dismissPeek(animated: false) }
                     model.store.unregisterWindow(windowID)
                     model.pinnedSectionCollapse.forgetWindow(windowID)
                     model.splitMaximize.forgetWindow(windowID)
@@ -334,6 +340,19 @@ struct BrowserView: View {
         return model.themeColors.colors(for: id, theme: theme, dark: dark)
     }
 
+    /// The Peek centred beside a laid-out sidebar, else in the whole window;
+    /// a fullscreen Peek page fills the window.
+    private func peekLayout(windowSize: CGSize) -> PeekLayout {
+        let bounds = CGRect(origin: .zero, size: windowSize)
+        if model.isPeekPageFullscreen { return PeekLayout(region: bounds, isFullscreen: true) }
+        let besideSidebar = model.isSidebarVisible && model.isSidebarLaidOut && !isPageFullscreen
+        return PeekLayout(region: PeekLayout.region(
+            windowSize: windowSize,
+            sidebarWidth: besideSidebar ? Double(model.sidebarWidth(in: windowID)) : 0,
+            sidebarOnLeft: placement.side == .left
+        ))
+    }
+
     private var pageCardLayout: PageCardLayout {
         PageCardLayout(isNativeFullscreen: isNativeFullscreen, isPageFullscreen: isPageFullscreen)
     }
@@ -495,6 +514,12 @@ struct BrowserView: View {
         .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil,
                     toolbarHeight: showsCardToolbar ? CardToolbarView.height : 0) { start in
             if start { model.startPendingExtensionReinstall() } else { model.postponePendingExtensionReinstall() }
+        }
+        // The whole card, its toolbar strip too, as in Arc.
+        .overlay {
+            PeekBackdropWash(isShown: model.showsPeek(in: windowID) && !model.isPeekPageFullscreen) {
+                SpaceThemeBackground(model: model, window: windowID, pager: pager)
+            }
         }
         .clipShape(shape)
         .background(shape.fill(splitCards ? .clear : cardFill))
