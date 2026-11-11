@@ -48,6 +48,7 @@ struct SidebarEntryRow: View, Equatable {
     @Binding var draggedItemID: UUID?
     @Binding var dropState: SidebarDropState?
     @Environment(\.sidebarWindow) private var window
+    @Environment(\.isMiniSidebar) private var isMini
 
     static func == (lhs: SidebarEntryRow, rhs: SidebarEntryRow) -> Bool {
         lhs.id == rhs.id && lhs.depth == rhs.depth && lhs.spaceID == rhs.spaceID
@@ -63,10 +64,14 @@ struct SidebarEntryRow: View, Equatable {
                 draggedItemID: $draggedItemID,
                 dropState: $dropState
             ) {
-                entryRow(entry)
+                if isMini {
+                    MiniSidebarEntryContent(entry: entry, spaceID: spaceID, model: model, isDropTarget: isDropInto)
+                } else {
+                    entryRow(entry)
+                }
             }
             .modifier(ItemIconPopover(model: model, itemID: id))
-            .padding(.leading, CGFloat(depth) * 14)
+            .padding(.leading, isMini ? CGFloat(MiniSidebarLayout.indent(depth: depth)) : CGFloat(depth) * 14)
         }
     }
 
@@ -343,14 +348,25 @@ struct SectionEndDropZone: View {
     let model: BrowserViewModel
     @Binding var draggedItemID: UUID?
     @Binding var dropState: SidebarDropState?
+    /// The mini sidebar's stand-in for the placeholder's words.
+    var miniSymbol = "plus"
 
     @State private var isTargeted = false
+    @Environment(\.isMiniSidebar) private var isMini
 
     var body: some View {
         ZStack {
             if let placeholder {
-                Text(placeholder)
-                    .font(.caption)
+                Group {
+                    if isMini {
+                        Image(systemName: miniSymbol)
+                            .font(.system(size: 11, weight: .medium))
+                            .help(placeholder)
+                    } else {
+                        Text(placeholder)
+                            .font(.caption)
+                    }
+                }
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)

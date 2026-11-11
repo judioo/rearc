@@ -29,4 +29,9 @@ public struct SidebarBadgeInk: Hashable, Sendable {
     public func outline(over background: SpaceColor) -> SpaceColor {
         background.mixed(with: glyph, fraction: outlineAlpha)
     }
+
+    /// The mini sidebar's corner marks (audio, Picture in Picture, a split)
+    /// sit over a favicon of any colour, so their disc is opaque: the glyph
+    /// reads on the disc alone, whatever is under it.
+    public var cornerDisc: SpaceColor { disc }
 }

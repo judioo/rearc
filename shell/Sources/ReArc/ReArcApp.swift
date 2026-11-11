@@ -80,6 +80,7 @@ struct ReArcApp: App {
                     model.toggleSidebar()
                 }
                 .keyboardShortcut("s")
+                ShellMenuButtons(groups: [ShellMenus.miniSidebar(model)], overrides: model.shortcutOverrides)
             }
             CommandGroup(replacing: .importExport) {
                 ShellMenuButtons(groups: ShellMenus.importing(model, chromiumImporter: false), overrides: model.shortcutOverrides)

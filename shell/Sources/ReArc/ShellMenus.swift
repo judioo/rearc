@@ -247,6 +247,14 @@ enum ShellMenus {
         ]]
     }
 
+    /// View menu, after Show/Hide Sidebar: ReArc's mini sidebar (⇧⌘S). The
+    /// title names what the key window's sidebar becomes.
+    static func miniSidebar(_ model: BrowserViewModel) -> [ShellMenuItem] {
+        [ShellMenuItem("Show Mini Sidebar", "s", [.command, .shift], liveTitle: { model.miniSidebarMenuTitle }) {
+            model.toggleMiniSidebar()
+        }]
+    }
+
     /// View menu: the sidebar's downloads tray (both engines).
     static func downloads(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [[

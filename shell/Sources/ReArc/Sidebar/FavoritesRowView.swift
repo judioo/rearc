@@ -18,7 +18,7 @@ struct FavoritesRowView: View {
         let favorites = model.store.favorites(in: profileID)
         let selectedID = model.selectedItemID(in: window)
         let layout = FavoritesGridLayout(itemCount: favorites.count,
-                                         availableWidth: Double(model.sidebarWidth - 2 * SidebarMetrics.rowInset))
+                                         availableWidth: Double(model.sidebarListWidth(in: window) - 2 * SidebarMetrics.rowInset))
         VStack(spacing: 0) {
             // Top-aligned: a tile renaming with its field under it doesn't push its neighbours down.
             LazyVGrid(columns: Array(repeating: GridItem(.fixed(layout.tileWidth), spacing: FavoritesGridLayout.spacing, alignment: .top),
@@ -33,7 +33,8 @@ struct FavoritesRowView: View {
                         isInPictureInPicture: model.isPictureInPicture(tab.id),
                         activity: model.tabActivity(tab.id),
                         insertion: insertion(for: tab.id),
-                        width: layout.tileWidth
+                        width: layout.tileWidth,
+                        stacks: layout.stacksVertically
                     )
                     .contextMenu { TabContextMenu(model: model, tab: tab) }
                     .modifier(ItemIconPopover(model: model, itemID: tab.id))
@@ -47,6 +48,7 @@ struct FavoritesRowView: View {
                         delegate: FavoriteDropDelegate(
                             targetTab: tab,
                             tileWidth: layout.tileWidth,
+                            stacks: layout.stacksVertically,
                             model: model,
                             draggedTabID: $draggedTabID,
                             dropState: $dropState
@@ -61,7 +63,8 @@ struct FavoritesRowView: View {
                         ? "Drop here to add to Favorites" : nil,
                     model: model,
                     draggedItemID: $draggedTabID,
-                    dropState: $dropState
+                    dropState: $dropState,
+                    miniSymbol: "star"
                 )
                 .frame(minHeight: favorites.isEmpty ? 34 : 18)
             }
@@ -117,6 +120,8 @@ private struct FavoriteAreaDropDelegate: DropDelegate {
 private struct FavoriteDropDelegate: DropDelegate {
     let targetTab: Tab
     let tileWidth: CGFloat
+    /// One tile per row (the mini sidebar): above or below, not beside.
+    var stacks = false
     let model: BrowserViewModel
     @Binding var draggedTabID: UUID?
     @Binding var dropState: SidebarDropState?
@@ -129,7 +134,8 @@ private struct FavoriteDropDelegate: DropDelegate {
     }
 
     private func position(_ info: DropInfo) -> SidebarDropPosition {
-        info.location.x < tileWidth / 2 ? .before : .after
+        if stacks { return info.location.y < FavoritesGridLayout.tileHeight / 2 ? .before : .after }
+        return info.location.x < tileWidth / 2 ? .before : .after
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
@@ -168,6 +174,7 @@ private struct FavoriteIconView: View {
     var activity: TabActivity = .idle
     let insertion: SidebarDropPosition?
     var width: CGFloat = 34
+    var stacks = false
     @State private var isHovering = false
 
     var body: some View {
@@ -216,14 +223,30 @@ private struct FavoriteIconView: View {
                         .accessibilityLabel("Picture in Picture")
                 }
             }
-            .overlay(alignment: insertion == .before ? .leading : .trailing) {
+            .overlay(alignment: insertionAlignment) {
                 if insertion != nil {
-                    Capsule().fill(Color.accentColor).frame(width: 2).padding(.vertical, 4)
-                        .offset(x: insertion == .before ? -4 : 4)
+                    if stacks {
+                        Capsule().fill(Color.accentColor).frame(height: 2).padding(.horizontal, 4)
+                            .offset(y: insertion == .before ? -4 : 4)
+                    } else {
+                        Capsule().fill(Color.accentColor).frame(width: 2).padding(.vertical, 4)
+                            .offset(x: insertion == .before ? -4 : 4)
+                    }
                 }
             }
-            .help(tab.displayTitle)
+            .help(stacks ? MiniSidebarTooltip.text(title: tab.displayTitle, url: tab.url, isUnloaded: isUnloaded) : tab.displayTitle)
             .onHover { isHovering = $0 }
+    }
+}
+
+extension FavoriteIconView {
+    private var insertionAlignment: Alignment {
+        switch (stacks, insertion == .before) {
+        case (true, true): .top
+        case (true, false): .bottom
+        case (false, true): .leading
+        case (false, false): .trailing
+        }
     }
 }
 
