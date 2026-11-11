@@ -2210,7 +2210,7 @@ extension ChromiumSelfTest {
         var view = content.hitTest(point)
         var hitHost: ChromiumHostView?
         while let current = view {
-            chain.append(String(describing: type(of: current)))
+            chain.append(String(describing: Swift.type(of: current)))
             if let found = current as? ChromiumHostView { hitHost = found; break }
             view = current.superview
         }
