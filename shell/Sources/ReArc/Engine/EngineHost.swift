@@ -246,6 +246,17 @@ final class EngineHost {
         ephemeralEngines[EphemeralEngineKey(id: id, profileID: profileID)] = nil
     }
 
+    /// A Peek's page becomes `tab`'s with its history and state: the engine
+    /// moves out of the ephemeral set rather than a new one loading the URL.
+    /// `tab.id` must be the Peek's id, which is its engine's shell identity.
+    func promoteEphemeral(id: UUID, profileID: Profile.ID, to tab: Tab) -> (any WebEngine)? {
+        let key = EphemeralEngineKey(id: id, profileID: profileID)
+        guard tab.id == id, let engine = ephemeralEngines.removeValue(forKey: key) else { return nil }
+        (engine as? EngineRoleRetagging)?.retag(as: .tab)
+        adopt(engine, for: tab, profileID: profileID)
+        return engine
+    }
+
     func remove(_ id: Tab.ID) {
         removeTabEngines { $0.tabID == id }
     }
