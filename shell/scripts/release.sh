@@ -38,6 +38,7 @@ APPCAST=""
 CHANNEL=""
 NOTARIZE=0
 SELFTEST_TIMEOUT=300
+LAUNCH_RETRIED=0
 die() { echo "release: $*" >&2; exit 1; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -150,10 +151,28 @@ echo "==> bundle ready in $((SECONDS - START))s: $APP ($(du -sh "$APP" | cut -f1
 #    (no --use-mock-keychain; release shells ignore the dev marker anyway).
 if [[ $VERIFY == 1 ]]; then
   # The first launch of a freshly signed copy can outlast the teardown watchdog while the
-  # system assesses the new code; one retry tells that apart from a real failure.
-  "$SHELL_DIR/scripts/check-launch.sh" "$APP" 2>&1 | tee "$DIST/check-launch.log" \
-    || { echo "==> launch check failed; retrying once"; "$SHELL_DIR/scripts/check-launch.sh" "$APP" 2>&1 | tee -a "$DIST/check-launch.log"; } \
-    || die "launch check failed twice"
+  # system assesses the new code; one retry tells that apart from a real failure. Only that
+  # failure (status 2: both probes ready, then the watchdog) is retried, and the crash-report
+  # baseline is taken once, so a crash in the first attempt still fails (RC-0.1.0-564 S-10).
+  CRASH_BASELINE="$DIST/crash-baseline.txt"
+  rm -f "$CRASH_BASELINE"
+  launch_check() {
+    set +e
+    "$SHELL_DIR/scripts/check-launch.sh" --crash-baseline "$CRASH_BASELINE" "$APP" 2>&1 | tee -a "$DIST/check-launch.log"
+    local status=${PIPESTATUS[0]}
+    set -e
+    return "$status"
+  }
+  : >"$DIST/check-launch.log"
+  launch_status=0
+  launch_check || launch_status=$?
+  if [[ $launch_status == 2 ]]; then
+    echo "==> launch check: teardown watchdog only; RETRYING once" | tee -a "$DIST/check-launch.log"
+    LAUNCH_RETRIED=1
+    launch_status=0
+    launch_check || launch_status=$?
+  fi
+  [[ $launch_status == 0 ]] || die "launch check failed (log $DIST/check-launch.log)"
   LOG="$DIST/selftest-release.log"
   PROFILE="$(mktemp -d "${TMPDIR:-/tmp}/rearc-release-selftest.XXXXXX")"
   echo "==> self-test, real Keychain (log: $LOG, watchdog ${SELFTEST_TIMEOUT}s)"
@@ -201,3 +220,6 @@ if [[ -n $APPCAST ]]; then
   cp "$DIST/ReArc-$MARKETING.dmg" "$APPCAST/ReArc-$MARKETING-$BUILD_NUMBER.dmg"
   "$SHELL_DIR/scripts/release/generate-appcast.sh" "$APPCAST" "$CHANNEL"
 fi
+
+# Summary: what this run did not check in full (also in Info.plist, ReArcReleaseGates).
+[[ $LAUNCH_RETRIED == 0 ]] || echo "==> NOTE: the launch check was RETRIED after a teardown-watchdog failure"

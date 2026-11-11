@@ -6,18 +6,29 @@
 # builds the sidebar, so the user's data is untouched; `-n` starts a separate instance, so
 # a ReArc that is already running is left alone.
 #
-# Usage: scripts/check-launch.sh [path/to/ReArc.app]   (default: dist/chromium/ReArc.app)
+# Usage: scripts/check-launch.sh [--crash-baseline FILE] [path/to/ReArc.app]
+#   (default bundle: dist/chromium/ReArc.app)
+#   --crash-baseline FILE  crash reports that existed before; written when FILE is missing.
+#                          release.sh takes it once, so a crash from a first attempt still
+#                          fails a retry (security RC-0.1.0-564 S-10).
+# Exit status: 0 pass; 2 when the only failure was the teardown watchdog after both probes
+# reached ready (the one case release.sh retries); 1 for anything else.
 set -euo pipefail
 
 SHELL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BASELINE=""
+if [[ ${1:-} == --crash-baseline ]]; then BASELINE="${2:?--crash-baseline needs a file}"; shift 2; fi
 APP="$(cd "$(dirname "${1:-$SHELL_DIR/dist/chromium/ReArc.app}")" && pwd)/$(basename "${1:-ReArc.app}")"
 [[ -d $APP ]] || { echo "check-launch: no bundle at $APP" >&2; exit 1; }
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rearc-launch-check.XXXXXX")"
 LINK="http://127.0.0.1:9/rearc-launch-check"
-REPORTS="$HOME/Library/Logs/DiagnosticReports"
-crashes() { ls "$REPORTS" 2>/dev/null | grep -c '^ReArc-' || true; }
-before="$(crashes)"
+REPORTS="${REARC_CRASH_REPORTS:-$HOME/Library/Logs/DiagnosticReports}"
+# The app and its helpers (which keep Chromium's names) and crashpad.
+reports() { ls "$REPORTS" 2>/dev/null | grep -E '^(ReArc|Chromium Helper|chrome_crashpad_handler)' || true; }
+[[ -n $BASELINE ]] || BASELINE="$WORK/crash-baseline"
+[[ -f $BASELINE ]] || reports >"$BASELINE"
 failed=0
+watchdog=0
 
 probe() {
   local name="$1"; shift
@@ -38,8 +49,10 @@ probe() {
       # Seen 2026-11-10: a firewall holding the network service's sockets stalls its exit.
       echo "check-launch: $name: teardown watchdog fired; if a network filter (Little Snitch) is" \
         "asking about this copy's helpers, the network service cannot exit: see RELEASE.md" >&2
+      watchdog=1
+    else
+      failed=1
     fi
-    failed=1
   fi
   kill "$opener" 2>/dev/null || true
   wait "$opener" 2>/dev/null || true
@@ -54,14 +67,19 @@ probe() {
 
 probe plain
 probe link "$LINK"
-after="$(crashes)"
-if [[ $after != "$before" ]]; then
-  echo "check-launch: new ReArc crash report(s) in $REPORTS" >&2
-  failed=1
-fi
-if [[ $failed == 0 ]]; then
+# New reports since the baseline: ReArc's own, or a helper's from a ReArc.app (paths in
+# reports are anonymised, but the bundle name stays).
+while IFS= read -r report; do
+  [[ -n $report ]] || continue
+  if [[ $report == ReArc* ]] || grep -q 'ReArc\.app' "$REPORTS/$report" 2>/dev/null; then
+    echo "check-launch: new crash report $REPORTS/$report" >&2
+    failed=1
+  fi
+done < <(reports | grep -vxF -f "$BASELINE" || true)
+if [[ $failed == 0 && $watchdog == 0 ]]; then
   echo "check-launch: PASS ($APP)"
-else
-  echo "check-launch: FAIL ($APP)" >&2
+  exit 0
 fi
-exit "$failed"
+echo "check-launch: FAIL ($APP)" >&2
+[[ $failed == 1 ]] && exit 1
+exit 2
