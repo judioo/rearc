@@ -256,6 +256,13 @@ final class ReleaseLaunchSecurityTests: XCTestCase {
         XCTAssertEqual(ChromiumLaunchArguments.engineArguments(["ReArc"], defaultUserDataDir: { "/d" }, keychain: .devMock, isRelease: false).last, feature)
     }
 
+    /// RC-0.1.0-544/602 N-03 (environment): a release engine never sees a TLS key log or an API key override.
+    func testReleaseClearsTheEngineEnvironmentOverrides() {
+        XCTAssertEqual(Set(ChromiumLaunchArguments.environmentToClear(isRelease: true)),
+                       ["SSLKEYLOGFILE", "GOOGLE_API_KEY", "GOOGLE_DEFAULT_CLIENT_ID", "GOOGLE_DEFAULT_CLIENT_SECRET"])
+        XCTAssertEqual(ChromiumLaunchArguments.environmentToClear(isRelease: false), [])
+    }
+
     func testShippedIsReleaseWithoutTheVerificationKey() {
         XCTAssertTrue(ShippedBuild.isShipped(infoDictionary: ["ReArcRelease": true]))
         XCTAssertFalse(ShippedBuild.isShipped(infoDictionary: ["ReArcRelease": true, "ReArcReleaseVerification": true]))

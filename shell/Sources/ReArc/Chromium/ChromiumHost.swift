@@ -14,6 +14,10 @@ enum ChromiumHost {
     static func launch(_ options: EngineLaunchOptions) {
         LaunchTimeline.main = ProcessInfo.processInfo.systemUptime
         guard let reason = unavailableReason() else {
+            // Before the engine reads them (RC-0.1.0-544/602 N-03, the environment half).
+            for name in ChromiumLaunchArguments.environmentToClear(isRelease: ShippedBuild.isRelease(infoDictionary: Bundle.main.infoDictionary)) {
+                unsetenv(name)
+            }
             let keychain = ChromiumLaunchArguments.keychainMode(
                 infoDictionary: Bundle.main.infoDictionary,
                 isDebugBuild: ChromiumLaunchArguments.isDebugBuild

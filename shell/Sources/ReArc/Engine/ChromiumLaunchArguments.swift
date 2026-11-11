@@ -62,6 +62,16 @@ enum ChromiumLaunchArguments {
         return result
     }
 
+    /// Variables Chromium reads from the environment that a release build never takes:
+    /// a TLS key log (every session key written to a file), and Google API key and OAuth
+    /// client overrides, which an unbranded build lets replace the built-in key (a bad
+    /// one breaks Safe Browsing while Settings still says on). Development builds keep them.
+    static let releaseClearedEnvironment = ["SSLKEYLOGFILE", "GOOGLE_API_KEY", "GOOGLE_DEFAULT_CLIENT_ID", "GOOGLE_DEFAULT_CLIENT_SECRET"]
+
+    static func environmentToClear(isRelease: Bool) -> [String] {
+        isRelease ? releaseClearedEnvironment : []
+    }
+
     /// What every launch hands the engine: `browserArguments`, then the features each profile
     /// needs on (`persistedProfileFeatures`), in release and development builds alike.
     static func engineArguments(
