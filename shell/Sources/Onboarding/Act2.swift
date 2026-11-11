@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import SidebarModel
 
 /// Act 2, "Where you've been": The Sun's Path, reused. You stand at the apex
 /// of a great arc; your other browsers' profiles sit along its navy side, the
@@ -36,9 +37,85 @@ public struct Act2Log: Equatable, Sendable {
     public var offered: [ImportCategory] = ImportCategory.allCases
     /// What really came over, once the host's import finishes.
     public var outcome: ImportStats?
+    /// Browsers on the trail that cannot come over: blocked by macOS, or empty.
+    /// They sit after `sources`, so a source's index is its node's.
+    public var pending: [PendingBrowser] = []
+    /// When each source that arrived after the act began did (a browser just
+    /// allowed in System Settings), by index: it fades in and says "Found".
+    public var arrivals: [Int: Double] = [:]
+    /// Back from System Settings and still locked: Relaunch ReArc is offered.
+    public var offersRelaunch = false
+    /// System Settings' window came up on another display than the onboarding.
+    public var settingsElsewhere = false
+    /// Settings' "Quit & Reopen" brings back this copy (one install), so the
+    /// step can say to choose it; otherwise Later, then Relaunch ReArc here.
+    public var quitAndReopenIsSafe = false
 
-    public init(start: Double, sources: [ImportSource], offered: [ImportCategory] = ImportCategory.allCases) {
-        self.start = start; self.sources = sources; self.offered = offered
+    public init(start: Double, sources: [ImportSource], offered: [ImportCategory] = ImportCategory.allCases,
+                pending: [PendingBrowser] = []) {
+        self.start = start; self.sources = sources; self.offered = offered; self.pending = pending
+    }
+
+    public var nodeCount: Int { sources.count + pending.count }
+
+    /// The browsers that wait for permission, by name ("Chrome and Brave").
+    public var blockedNames: String? {
+        let names = pending.filter(\.needsPermission).map(\.name)
+        guard let last = names.last else { return nil }
+        return names.count == 1 ? last : names.dropLast().joined(separator: ", ") + " and " + last
+    }
+
+    /// The two calm lines beside the trail: what macOS does, then what to do.
+    public var permissionLines: (explanation: String, steps: String)? {
+        guard let names = blockedNames, let permission = neededPermission else { return nil }
+        let explanation = "macOS keeps \(names) private."
+        if offersRelaunch {
+            return (explanation, permission == .fullDiskAccess
+                ? "Switched on? macOS applies it when ReArc starts again."
+                : "Switched on and still locked? ReArc may need to start again.")
+        }
+        if settingsElsewhere { return (explanation, "System Settings opened on your other display.") }
+        switch permission {
+        case .fullDiskAccess:
+            return (explanation, quitAndReopenIsSafe
+                ? "Switch on ReArc in Full Disk Access. If macOS offers Quit & Reopen, choose it."
+                : "Switch on ReArc in Full Disk Access. If macOS offers Quit & Reopen, choose Later, then come back.")
+        case .appData: return (explanation, "Under ReArc in Files & Folders, switch on \(names), then come back.")
+        }
+    }
+
+    /// The one button: "Allow access…", or "Relaunch ReArc" once a new
+    /// launch is what macOS is waiting for.
+    public var permissionButton: String { offersRelaunch ? "Relaunch ReArc" : "Allow access\u{2026}" }
+
+    /// The pane the one "Allow access…" button opens: Full Disk Access when
+    /// Safari is among them (it covers the others too), else Files & Folders.
+    public var neededPermission: ImportPermission? {
+        let needed = pending.compactMap { item -> ImportPermission? in
+            if case .needsPermission(let permission) = item.state { return permission }
+            return nil
+        }
+        guard !needed.isEmpty else { return nil }
+        return needed.contains(.fullDiskAccess) ? .fullDiskAccess : .appData
+    }
+
+    /// A fresh look at the browsers while the choice is still open: new
+    /// profiles join the trail (at `t`), the pending list is replaced. The
+    /// sources already here keep their indices, so toggles stay put.
+    /// Returns whether anything arrived.
+    @discardableResult
+    public mutating func merge(_ scan: BrowserScan, at t: Double) -> Bool {
+        guard choice == nil else { return false }
+        var arrived = false
+        for source in scan.sources where !sources.contains(where: { $0.id == source.id }) {
+            arrivals[sources.count] = t
+            sources.append(source)
+            arrived = true
+        }
+        let present = Set(sources.compactMap(\.importBrowser))
+        pending = scan.pending.filter { !present.contains($0.browser) }
+        while nodeCount > BrowserScan.maxNodes, let i = pending.lastIndex(where: { $0.state == .noData }) { pending.remove(at: i) }
+        return arrived
     }
 
     public static func == (a: Act2Log, b: Act2Log) -> Bool {
@@ -47,6 +124,8 @@ public struct Act2Log: Equatable, Sendable {
             && a.categories.map(\.time) == b.categories.map(\.time) && a.categories.map(\.category) == b.categories.map(\.category)
             && a.choice?.time == b.choice?.time && a.choice?.bring == b.choice?.bring
             && a.offered == b.offered && a.outcome == b.outcome
+            && a.pending == b.pending && a.arrivals == b.arrivals && a.offersRelaunch == b.offersRelaunch
+            && a.settingsElsewhere == b.settingsElsewhere && a.quitAndReopenIsSafe == b.quitAndReopenIsSafe
     }
 
     public func isOn(source i: Int, at t: Double) -> Bool {
@@ -112,8 +191,13 @@ public struct Act2Frame: Equatable {
     public var trailWidth: CGFloat
     public var trailGlow: Double
     public var ask: Double
+    /// Each node's presence: sources, then pending browsers.
     public var nodes: [Double]
     public var nodeOn: [Double]
+    /// A source that just arrived: its ring and "Found" label, 0…1.
+    public var found: [Double] = []
+    /// The "Allow access…" line under the chips.
+    public var permission: Double = 0
     public var chips: Double
     public var chipOn: [Double]
     public var buttons: Double
@@ -174,11 +258,16 @@ public enum Act2Timeline {
             return on ? k : 1 - k
         }
         let fresh = log.choice?.bring == false || (log.choice != nil && !log.bringing)
-        let nodes = log.sources.indices.map { i -> Double in
-            let appear = ease(s + 2.0 + Double(i) * 0.14, s + 2.6 + Double(i) * 0.14)
-            let kept = log.isOn(source: i, at: c) && !fresh
+        let nodes = (0 ..< log.nodeCount).map { i -> Double in
+            let appear = log.arrivals[i].map { ease($0, $0 + 0.7) } ?? ease(s + 2.0 + Double(i) * 0.14, s + 2.6 + Double(i) * 0.14)
+            let kept = i < log.sources.count && log.isOn(source: i, at: c) && !fresh
             let leave = kept ? out(done, done + 0.8) : out(c, c + 0.6)
             return appear * leave
+        }
+        let found = (0 ..< log.nodeCount).map { i -> Double in
+            guard let arrived = log.arrivals[i] else { return 0 }
+            // Rings out over a second; the label reads "Found" for three.
+            return Ease.smooth(Ease.progress(t, arrived, arrived + 0.5)) * out(arrived + 3, arrived + 3.6)
         }
 
         return Act2Frame(
@@ -189,6 +278,8 @@ public enum Act2Timeline {
             ask: ease(s + 1.2, s + 2.0) * out(c, c + 0.5),
             nodes: nodes,
             nodeOn: nodeOn,
+            found: found,
+            permission: log.neededPermission == nil ? 0 : ease(s + 2.9, s + ready) * out(c, c + 0.4),
             chips: ease(s + 2.6, s + 3.2) * out(c, c + 0.5),
             chipOn: chipOn,
             buttons: ease(s + 2.9, s + ready) * out(c, c + 0.4),
@@ -231,7 +322,7 @@ public enum Act2Timeline {
         var result: [Act2Particle] = []
         let H = A.size.height
         for (i, source) in log.sources.enumerated() where log.isOn(source: i, at: c) {
-            let from = A.nodeAngle(i, of: log.sources.count)
+            let from = A.nodeAngle(i, of: log.nodeCount)
             for j in 0 ..< particlesPerSource {
                 let e = emission(i, j, flowStart)
                 let q = (t - e) / travel
@@ -264,6 +355,9 @@ public struct Act2Layout {
     public var subline: CGFloat { H * 0.405 }
     public var chips: CGFloat { H * 0.475 }
     public var buttons: CGFloat { H * 0.555 }
+    /// The permission note's top left: right of your avatar, opposite the
+    /// browsers on the trail, where the sweep ahead is not drawn yet.
+    public var permissionOrigin: CGPoint { CGPoint(x: W / 2 + avatarRadius * 2.6, y: apex.y - H * 0.02) }
     /// Past on the left: the trail runs from here to the apex.
     public static let trailStart = -156.0
 

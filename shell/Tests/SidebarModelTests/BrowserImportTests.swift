@@ -221,7 +221,7 @@ final class BrowserImportTests: XCTestCase {
 
     func testDiscoveryFindsInstalledBrowsersAndTheirProfiles() throws {
         try fixture.installBrowsers()
-        let found = BrowserImportDiscovery.discover(in: fixture.root)
+        let found = BrowserImportDiscovery.discover(in: fixture.root, installed: { _ in false })
         XCTAssertEqual(found.map(\.browser), [.arc, .chrome])
         let arc = try XCTUnwrap(found.first { $0.browser == .arc })
         XCTAssertNotNil(arc.sidebarFile)

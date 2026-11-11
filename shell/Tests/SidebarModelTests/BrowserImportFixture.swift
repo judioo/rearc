@@ -5,7 +5,10 @@ import SQLite3
 /// A made-up `~/Library/Application Support` holding Arc, Chrome and Brave
 /// data in their real layouts. Every name, URL and title is invented.
 struct BrowserImportFixture {
+    /// `<home>/Library/Application Support`.
     let root: URL
+    /// The fixture's home folder; Safari's data is in `Library/Safari` under it.
+    let home: URL
 
     static let work = "11111111-1111-1111-1111-111111111111"
     static let side = "22222222-2222-2222-2222-222222222222"
@@ -16,12 +19,13 @@ struct BrowserImportFixture {
     static let componentID = "dddddddddddddddddddddddddddddddd"
 
     init() throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent("ReArcImportFixture-\(UUID().uuidString)", isDirectory: true)
+        home = FileManager.default.temporaryDirectory.appendingPathComponent("ReArcImportFixture-\(UUID().uuidString)", isDirectory: true)
+        root = home.appendingPathComponent("Library/Application Support", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     }
 
     func remove() {
-        try? FileManager.default.removeItem(at: root)
+        try? FileManager.default.removeItem(at: home)
     }
 
     func folder(_ path: String) throws -> URL {
@@ -245,5 +249,127 @@ struct BrowserImportFixture {
         // A folder that is not a profile, and one without Preferences.
         _ = try folder("Google/Chrome/Crashpad")
         _ = try folder("Google/Chrome/Profile 9")
+    }
+
+    // MARK: Safari and Firefox
+
+    /// `~/Library/Safari`: a Favorites bar with a folder, a Bookmarks menu,
+    /// the Reading List, and the History proxy, which is not a list.
+    static let safariBookmarks: [String: Any] = [
+        "WebBookmarkType": "WebBookmarkTypeList", "Title": "",
+        "Children": [
+            ["WebBookmarkType": "WebBookmarkTypeProxy", "Title": "History"],
+            ["WebBookmarkType": "WebBookmarkTypeList", "Title": "BookmarksBar", "Children": [
+                leaf("https://bar.example.com/", "Bar Link"),
+                ["WebBookmarkType": "WebBookmarkTypeList", "Title": "Recipes", "Children": [
+                    leaf("https://soup.example.org/", "Soup"),
+                    leaf("javascript:alert(1)", "Bookmarklet"),
+                ]],
+            ]],
+            ["WebBookmarkType": "WebBookmarkTypeList", "Title": "BookmarksMenu", "Children": [
+                leaf("https://menu.example.net/", ""),
+                leaf("https://user:secret@private.example.com/", "Signed In"),
+            ]],
+            ["WebBookmarkType": "WebBookmarkTypeList", "Title": "com.apple.ReadingList", "Children": [
+                leaf("https://long.example.com/essay", "An Essay", readingList: true),
+            ]],
+        ],
+    ]
+
+    static func leaf(_ url: String, _ title: String, readingList: Bool = false) -> [String: Any] {
+        var leaf: [String: Any] = ["WebBookmarkType": "WebBookmarkTypeLeaf", "URLString": url, "URIDictionary": ["title": title]]
+        if readingList { leaf["ReadingList"] = ["PreviewText": "Invented."] }
+        return leaf
+    }
+
+    var safari: URL { home.appendingPathComponent("Library/Safari", isDirectory: true) }
+
+    /// Safari's history: two pages, the first visited twice (renamed since), and a file URL.
+    static func writeSafariHistory(to url: URL, now: Date) throws {
+        let t = now.timeIntervalSinceReferenceDate
+        try sqlite(url, [
+            "CREATE TABLE history_items (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL UNIQUE, domain_expansion TEXT NULL, visit_count INTEGER NOT NULL)",
+            "CREATE TABLE history_visits (id INTEGER PRIMARY KEY AUTOINCREMENT, history_item INTEGER NOT NULL, visit_time REAL NOT NULL, title TEXT NULL, load_successful BOOLEAN NOT NULL DEFAULT 1)",
+            "INSERT INTO history_items(url, visit_count) VALUES ('https://news.example.com/', 2)",
+            "INSERT INTO history_items(url, visit_count) VALUES ('https://maps.example.org/route', 1)",
+            "INSERT INTO history_items(url, visit_count) VALUES ('file:///Users/x/notes.html', 1)",
+            "INSERT INTO history_visits(history_item, visit_time, title) VALUES (1, \(t - 7200), 'Old Title')",
+            "INSERT INTO history_visits(history_item, visit_time, title) VALUES (1, \(t - 60), 'Front Page')",
+            "INSERT INTO history_visits(history_item, visit_time, title) VALUES (2, \(t - 3600), 'Route')",
+            "INSERT INTO history_visits(history_item, visit_time, title) VALUES (3, \(t), 'Notes')",
+        ])
+    }
+
+    func installSafari(now: Date = Date()) throws {
+        try FileManager.default.createDirectory(at: safari, withIntermediateDirectories: true)
+        try PropertyListSerialization.data(fromPropertyList: Self.safariBookmarks, format: .binary, options: 0)
+            .write(to: safari.appendingPathComponent("Bookmarks.plist"))
+        try Self.writeSafariHistory(to: safari.appendingPathComponent("History.db"), now: now)
+    }
+
+    static let profilesINI = """
+        [Profile1]
+        Name=old
+        IsRelative=1
+        Path=Profiles/bbbb.old
+
+        [Profile0]
+        Name=default-release
+        IsRelative=1
+        Path=Profiles/aaaa.default-release
+
+        [Profile2]
+        Name=gone
+        IsRelative=1
+        Path=Profiles/cccc.gone
+
+        [General]
+        StartWithLastProfile=1
+        Version=2
+
+        [Install4F96D1932A9F858E]
+        Default=Profiles/aaaa.default-release
+        Locked=1
+        """
+
+    /// Firefox's places: a toolbar link and folder, a menu link, an unfiled
+    /// link, a tag (not a bookmark) and history with a hidden page.
+    static func writePlaces(to url: URL, now: Date) throws {
+        let us = { (d: Date) in Int64(d.timeIntervalSince1970 * 1_000_000) }
+        try sqlite(url, [
+            "CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url LONGVARCHAR, title LONGVARCHAR, visit_count INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0 NOT NULL, last_visit_date INTEGER, guid TEXT)",
+            "CREATE TABLE moz_bookmarks (id INTEGER PRIMARY KEY, type INTEGER, fk INTEGER DEFAULT NULL, parent INTEGER, position INTEGER, title LONGVARCHAR, guid TEXT)",
+            "CREATE TABLE moz_historyvisits (id INTEGER PRIMARY KEY, from_visit INTEGER, place_id INTEGER, visit_date INTEGER, visit_type INTEGER)",
+            "INSERT INTO moz_places VALUES (1, 'https://fox.example.com/', 'Fox Home', 5, 0, \(us(now.addingTimeInterval(-60))), 'p1')",
+            "INSERT INTO moz_places VALUES (2, 'https://docs.example.org/guide', 'Guide', 1, 0, \(us(now.addingTimeInterval(-3600))), 'p2')",
+            "INSERT INTO moz_places VALUES (3, 'https://menu.example.net/', 'Menu Link', 0, 0, NULL, 'p3')",
+            "INSERT INTO moz_places VALUES (4, 'https://frame.example.com/ad', 'Frame', 1, 1, \(us(now)), 'p4')",
+            "INSERT INTO moz_places VALUES (5, 'place:sort=8&maxResults=10', 'Most Visited', 0, 0, NULL, 'p5')",
+            "INSERT INTO moz_historyvisits VALUES (1, 0, 1, \(us(now.addingTimeInterval(-86400))), 1)",
+            "INSERT INTO moz_historyvisits VALUES (2, 0, 1, \(us(now.addingTimeInterval(-60))), 1)",
+            "INSERT INTO moz_bookmarks VALUES (1, 2, NULL, 0, 0, '', 'root________')",
+            "INSERT INTO moz_bookmarks VALUES (2, 2, NULL, 1, 0, 'menu', 'menu________')",
+            "INSERT INTO moz_bookmarks VALUES (3, 2, NULL, 1, 1, 'toolbar', 'toolbar_____')",
+            "INSERT INTO moz_bookmarks VALUES (4, 2, NULL, 1, 2, 'tags', 'tags________')",
+            "INSERT INTO moz_bookmarks VALUES (5, 2, NULL, 1, 3, 'unfiled', 'unfiled_____')",
+            "INSERT INTO moz_bookmarks VALUES (6, 2, NULL, 1, 4, 'mobile', 'mobile______')",
+            "INSERT INTO moz_bookmarks VALUES (10, 1, 1, 3, 0, 'Fox', 'b10')",
+            "INSERT INTO moz_bookmarks VALUES (11, 2, NULL, 3, 1, 'Work', 'b11')",
+            "INSERT INTO moz_bookmarks VALUES (12, 1, 2, 11, 0, 'The Guide', 'b12')",
+            "INSERT INTO moz_bookmarks VALUES (13, 1, 5, 3, 2, 'Most Visited', 'b13')",
+            "INSERT INTO moz_bookmarks VALUES (14, 3, NULL, 3, 3, '', 'b14')",
+            "INSERT INTO moz_bookmarks VALUES (20, 1, 3, 2, 0, 'Menu Link', 'b20')",
+            "INSERT INTO moz_bookmarks VALUES (30, 2, NULL, 4, 0, 'a-tag', 'b30')",
+            "INSERT INTO moz_bookmarks VALUES (31, 1, 2, 30, 0, '', 'b31')",
+            "INSERT INTO moz_bookmarks VALUES (40, 1, 1, 5, 0, 'Unsorted Fox', 'b40')",
+        ])
+    }
+
+    func installFirefox(now: Date = Date()) throws {
+        let firefox = try folder("Firefox")
+        try Self.profilesINI.write(to: firefox.appendingPathComponent("profiles.ini"), atomically: true, encoding: .utf8)
+        try Self.writePlaces(to: firefox.appendingPathComponent("Profiles/aaaa.default-release/places.sqlite"), now: now)
+        try Self.writePlaces(to: firefox.appendingPathComponent("Profiles/bbbb.old/places.sqlite"), now: now)
+        // Profile2's folder is gone.
     }
 }

@@ -56,8 +56,21 @@ public struct OnboardingResult: Equatable, Sendable {
 public protocol OnboardingHost: AnyObject {
     /// The categories this host can really import; Act 2 offers only these.
     var importCategories: [ImportCategory] { get }
-    /// Other browsers' profiles, found off the main thread.
-    func discoverSources(_ done: @escaping ([ImportSource]) -> Void)
+    /// Other browsers' profiles, and the browsers it can only name (blocked
+    /// by macOS, or empty), found off the main thread. Called again when
+    /// ReArc comes back from System Settings.
+    func discoverSources(_ done: @escaping (BrowserScan) -> Void)
+    /// Whether `relaunchForAccess` can start ReArc again (a bundled app).
+    var canRelaunch: Bool { get }
+    /// Quit and start again: macOS applies some privacy switches only to a
+    /// new launch. The onboarding resumes by itself.
+    func relaunchForAccess()
+    /// System Settings' "Quit & Reopen" (after Full Disk Access) reopens by
+    /// bundle id: true when that is this very copy (a normal install).
+    var macOSReopensThisCopy: Bool { get }
+    /// Remember Act 1's answers: ReArc may quit for a permission (System
+    /// Settings' "Quit & Reopen"), and the next launch resumes at Act 2.
+    func saveResumePoint(name: String, colourIndex: Int)
     /// Bring them over: import now, while the light flows in.
     func bring(_ sources: [ImportSource], categories: [ImportCategory], done: @escaping (OnboardingImportOutcome) -> Void)
     /// Act 4 begins: name the main profile, colour it, shape the spaces.
@@ -73,4 +86,8 @@ public protocol OnboardingHost: AnyObject {
 
 public extension OnboardingHost {
     func onboardingDeferred() { onboardingFinished() }
+    var canRelaunch: Bool { false }
+    func relaunchForAccess() {}
+    func saveResumePoint(name: String, colourIndex: Int) {}
+    var macOSReopensThisCopy: Bool { false }
 }

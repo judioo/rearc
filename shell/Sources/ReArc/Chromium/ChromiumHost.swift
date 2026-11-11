@@ -437,7 +437,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         // The launch window's saved siblings open behind it once the engine is up.
         DispatchQueue.main.async { [weak self] in self?.restoreOtherSessionWindows() }
         // In this same turn, so the first window is put away before it is ever drawn.
-        if let kind = FirstRunOnboarding.forLaunch(model) { runOnboarding(kind) }
+        if let kind = FirstRunOnboarding.forLaunch(model) { runOnboarding(kind) } else { model.reopenImportAfterRelaunchIfAsked() }
         // After the onboarding has started: a resumed first run's queue waits
         // under the sunrise (`holdExtensionFeedback`) instead of installing there.
         model.installPendingExtensions()

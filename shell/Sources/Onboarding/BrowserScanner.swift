@@ -39,7 +39,10 @@ public struct SpaceSeed: Equatable, Sendable {
 /// One profile in another browser that Act 2 offers to bring over.
 public struct ImportSource: Equatable, Identifiable, Sendable {
     public var id: String { "\(browser)/\(directory)" }
+    /// The browser's name as Act 2 shows it ("Chrome").
     public var browser: String
+    /// `ImportBrowser`'s raw value ("chrome", "edgeBeta").
+    public var browserID: String
     public var directory: String
     public var profile: String
     public var colour: RGBA
@@ -61,7 +64,10 @@ public struct ImportSource: Equatable, Identifiable, Sendable {
                 extensionIDs: [String] = [], bookmarksWithoutSpaces: Int? = nil) {
         self.browser = browser; self.directory = directory; self.profile = profile; self.colour = colour; self.stats = stats
         self.spaces = spaces; self.extensionIDs = extensionIDs; self.bookmarksWithoutSpaces = bookmarksWithoutSpaces
+        browserID = ImportBrowser.allCases.first { $0.shortName == browser }?.rawValue ?? browser.lowercased()
     }
+
+    public var importBrowser: ImportBrowser? { ImportBrowser(rawValue: browserID) }
 
     /// What `sources` bring in `categories`: Act 2's line, and the host's
     /// rehearsal, from the same sum. Passwords never come over.
@@ -105,55 +111,158 @@ public struct ImportSource: Equatable, Identifiable, Sendable {
     ]
 }
 
-/// Finds Arc, Chrome and Brave profiles on this Mac and counts what each holds.
-/// Read-only: SQLite files are counted from a private temporary copy (the
-/// browser may hold them open), nothing is decrypted, and nothing leaves the
-/// machine. Login Data is checked for existence only; it is never copied or opened.
-public enum BrowserScanner {
-    struct Browser { let name: String; let path: String; let colour: RGBA }
-    static let browsers = [
-        Browser(name: "Arc", path: "Arc/User Data", colour: RGBA(hex: 0xEC4F99)),
-        Browser(name: "Chrome", path: "Google/Chrome", colour: RGBA(hex: 0x3B8AF6)),
-        Browser(name: "Brave", path: "BraveSoftware/Brave-Browser", colour: RGBA(hex: 0xF5A524)),
-    ]
+/// A browser Act 2 shows on the trail but cannot bring over (yet).
+public struct PendingBrowser: Equatable, Identifiable, Sendable {
+    public enum State: Equatable, Sendable {
+        /// macOS keeps its data private until ReArc is allowed in System Settings.
+        case needsPermission(ImportPermission)
+        /// Installed, with nothing in it to bring.
+        case noData
+    }
 
-    public static func scan(applicationSupport: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]) -> [ImportSource] {
-        var found: [ImportSource] = []
-        for b in browsers {
-            let root = applicationSupport.appendingPathComponent(b.path)
-            guard let state = json(root.appendingPathComponent("Local State")) as? [String: Any],
-                  let cache = (state["profile"] as? [String: Any])?["info_cache"] as? [String: Any]
-            else { continue }
-            let arc = b.name == "Arc" ? arcSidebar(applicationSupport.appendingPathComponent("Arc/StorableSidebar.json")) : [:]
-            for (dir, info) in cache.sorted(by: { $0.key < $1.key }) {
-                guard BrowserImportDiscovery.isProfileDirectory(dir) else { continue }
-                let profileDir = root.appendingPathComponent(dir)
-                guard FileManager.default.fileExists(atPath: profileDir.path) else { continue }
-                let info = info as? [String: Any] ?? [:]
-                var stats = ImportStats()
-                stats.bookmarks = bookmarks(profileDir.appendingPathComponent("Bookmarks"))
-                stats.pages = count(profileDir.appendingPathComponent("History"))
-                // Presence only, for the "passwords stay behind" message; never a login count.
-                stats.passwords = FileManager.default.fileExists(atPath: profileDir.appendingPathComponent("Login Data").path) ? 1 : 0
-                let extensionItems = ExtensionConsolidation(ExtensionInventoryReader.read(profile: profileDir)).candidates
-                let extensionIDs = extensionItems.map(\.id)
-                stats.extensions = extensionIDs.count
-                var seeds: [SpaceSeed] = []
-                if let a = arc[dir] {
-                    stats.spaces = a.spaces.count; stats.tabs = a.tabs
-                    let name = info["name"] as? String
-                    seeds = a.spaces.map { var s = $0; s.profile = dir == "Default" ? nil : name; return s }
-                }
-                // A profile with nothing in it is not worth asking about.
-                guard stats != ImportStats() else { continue }
-                let colour = (info["profile_highlight_color"] as? Int).map { RGBA(hex: UInt32(truncatingIfNeeded: $0) & 0xFFFFFF) } ?? b.colour
-                var source = ImportSource(browser: b.name, directory: dir, profile: info["name"] as? String ?? dir,
-                                          colour: colour, stats: stats, spaces: seeds, extensionIDs: extensionIDs)
-                source.extensionOrigins = Dictionary(uniqueKeysWithValues: extensionItems.map { ($0.id, $0.origin) })
-                found.append(source)
+    public var browser: ImportBrowser
+    public var state: State
+    public var colour: RGBA
+
+    public var id: String { browser.rawValue }
+    public var name: String { browser.shortName }
+    public var needsPermission: Bool { if case .needsPermission = state { true } else { false } }
+
+    public init(browser: ImportBrowser, state: State, colour: RGBA? = nil) {
+        self.browser = browser; self.state = state; self.colour = colour ?? BrowserScanner.colour(of: browser)
+    }
+}
+
+/// What Act 2 finds: profiles to bring, and the browsers it can only name.
+public struct BrowserScan: Equatable, Sendable {
+    public var sources: [ImportSource]
+    public var pending: [PendingBrowser]
+
+    public init(sources: [ImportSource] = [], pending: [PendingBrowser] = []) {
+        self.sources = sources; self.pending = pending
+    }
+
+    /// Act 2's trail holds at most this many nodes; browsers with nothing in them go first.
+    public static let maxNodes = 8
+
+    /// Blocked browsers as discovery reports them, for `ImportAccessWatch`.
+    public var discovered: [DiscoveredBrowser] {
+        var out: [DiscoveredBrowser] = []
+        for source in sources {
+            if let browser = source.importBrowser, !out.contains(where: { $0.browser == browser }) {
+                out.append(DiscoveredBrowser(browser: browser, status: .available))
             }
         }
-        return found
+        for item in pending {
+            switch item.state {
+            case .needsPermission(let permission): out.append(DiscoveredBrowser(browser: item.browser, status: .blocked(permission)))
+            case .noData: out.append(DiscoveredBrowser(browser: item.browser, status: .noProfiles))
+            }
+        }
+        return out
+    }
+
+    /// Keeps the trail to `maxNodes`: drops browsers without data first.
+    public func trimmed() -> BrowserScan {
+        var copy = self
+        while copy.sources.count + copy.pending.count > Self.maxNodes, let i = copy.pending.lastIndex(where: { $0.state == .noData }) {
+            copy.pending.remove(at: i)
+        }
+        return copy
+    }
+}
+
+/// Finds every browser's profiles on this Mac and counts what each holds,
+/// and names the browsers it cannot read: blocked by macOS privacy, or
+/// installed with nothing in them. Read-only: SQLite files are counted from
+/// a private temporary copy (the browser may hold them open), nothing is
+/// decrypted, and nothing leaves the machine. Login Data is checked for
+/// existence only; it is never copied or opened.
+public enum BrowserScanner {
+    static func colour(of browser: ImportBrowser) -> RGBA {
+        switch browser {
+        case .arc: return RGBA(hex: 0xEC4F99)
+        case .chrome, .chromeBeta, .chromeDev, .chromeCanary: return RGBA(hex: 0x3B8AF6)
+        case .brave, .braveBeta, .braveNightly: return RGBA(hex: 0xF5A524)
+        case .edge, .edgeBeta, .edgeDev, .edgeCanary: return RGBA(hex: 0x1BA9B5)
+        case .vivaldi, .vivaldiSnapshot: return RGBA(hex: 0xE5484D)
+        case .opera, .operaGX: return RGBA(hex: 0xD6336C)
+        case .chromium: return RGBA(hex: 0x5B8DEF)
+        case .safari: return RGBA(hex: 0x2F9BF0)
+        case .firefox: return RGBA(hex: 0xF97316)
+        }
+    }
+
+    public static func scan(applicationSupport: URL = BrowserImportDiscovery.applicationSupport) -> [ImportSource] {
+        survey(applicationSupport: applicationSupport).sources
+    }
+
+    /// Every browser: its profiles with something in them, or why not.
+    public static func survey(applicationSupport: URL = BrowserImportDiscovery.applicationSupport,
+                              installed: (ImportBrowser) -> Bool = { $0.isInstalledAtStandardLocation },
+                              probe: ImportAccessProbe = ImportAccessProbes.system) -> BrowserScan {
+        var scan = BrowserScan()
+        for found in BrowserImportDiscovery.discover(in: applicationSupport, installed: installed, probe: probe) {
+            switch found.status {
+            case .blocked(let permission):
+                scan.pending.append(PendingBrowser(browser: found.browser, state: .needsPermission(permission)))
+                continue
+            case .noProfiles:
+                scan.pending.append(PendingBrowser(browser: found.browser, state: .noData))
+                continue
+            case .available:
+                break
+            }
+            let sources = self.sources(found, applicationSupport: applicationSupport)
+            if sources.isEmpty {
+                scan.pending.append(PendingBrowser(browser: found.browser, state: .noData))
+            }
+            scan.sources += sources
+        }
+        return scan
+    }
+
+    static func sources(_ found: DiscoveredBrowser, applicationSupport: URL) -> [ImportSource] {
+        let b = found.browser
+        let state = b.family == .chromium
+            ? json(b.dataFolder(in: applicationSupport).appendingPathComponent("Local State")) as? [String: Any] : nil
+        let cache = (state?["profile"] as? [String: Any])?["info_cache"] as? [String: Any] ?? [:]
+        let arc = b == .arc ? arcSidebar(applicationSupport.appendingPathComponent("Arc/StorableSidebar.json")) : [:]
+        var out: [ImportSource] = []
+        for profile in found.profiles.sorted(by: { b.family == .chromium ? $0.directory < $1.directory : false }) {
+            let dir = profile.directory
+            let info = cache[dir] as? [String: Any] ?? [:]
+            var stats = ImportStats()
+            var extensionItems: [SourceExtension] = []
+            if b.family == .chromium {
+                stats.bookmarks = bookmarks(profile.url.appendingPathComponent("Bookmarks"))
+                stats.pages = count(profile.url.appendingPathComponent("History"))
+                // Presence only, for the "passwords stay behind" message; never a login count.
+                stats.passwords = FileManager.default.fileExists(atPath: profile.url.appendingPathComponent("Login Data").path) ? 1 : 0
+                extensionItems = ExtensionConsolidation(ExtensionInventoryReader.read(profile: profile.url)).candidates
+                stats.extensions = extensionItems.count
+            } else {
+                let inventory = BrowserImportDiscovery.inventory(of: profile)
+                stats.bookmarks = inventory.bookmarks
+                stats.pages = inventory.historyPages ?? 0
+                stats.passwords = inventory.hasPasswords ? 1 : 0
+            }
+            var seeds: [SpaceSeed] = []
+            if let a = arc[dir] {
+                stats.spaces = a.spaces.count; stats.tabs = a.tabs
+                let name = info["name"] as? String
+                seeds = a.spaces.map { var s = $0; s.profile = dir == "Default" ? nil : name; return s }
+            }
+            // A profile with nothing in it is not worth asking about.
+            guard stats != ImportStats() else { continue }
+            let colour = (info["profile_highlight_color"] as? Int).map { RGBA(hex: UInt32(truncatingIfNeeded: $0) & 0xFFFFFF) } ?? colour(of: b)
+            var source = ImportSource(browser: b.shortName, directory: dir, profile: info["name"] as? String ?? profile.name,
+                                      colour: colour, stats: stats, spaces: seeds, extensionIDs: extensionItems.map(\.id))
+            source.browserID = b.rawValue
+            source.extensionOrigins = Dictionary(uniqueKeysWithValues: extensionItems.map { ($0.id, $0.origin) })
+            out.append(source)
+        }
+        return out
     }
 
     static func json(_ url: URL) -> Any? {

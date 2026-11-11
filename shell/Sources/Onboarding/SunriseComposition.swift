@@ -134,11 +134,13 @@ extension SunriseScore {
 
     mutating func compose(_ a: Act2Log, act3Start: Double?, curtain: Double) {
         let L = Act2Layout(size: Self.stage)
-        let s = a.start, n = a.sources.count
+        let s = a.start, n = a.nodeCount
         let nodePan = { (i: Int) in Self.arcPan(L.nodeAngle(i, of: n)) }
         let nodeNote = { (i: Int) in ScoreNotes.colours[(i * 3) % ScoreNotes.colours.count] }
         let c = a.choice?.time ?? .infinity
         let done = a.done ?? .infinity
+        // A browser allowed in System Settings arrives on its own note.
+        for (i, t) in a.arrivals { hits.append(Hit(t + 0.15, nodeNote(i), 0.016, .pluck)) }
 
         // Your avatar walks to the apex; the trail draws in from the past, on the left.
         airs.append(Air(id: 20, s, s + 1.2, cutoff: 500 ... 1300, gain: 0.018))

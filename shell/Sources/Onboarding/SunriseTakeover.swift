@@ -1,4 +1,5 @@
 import AppKit
+import SidebarModel
 import SwiftUI
 
 /// Drives one playback of Act 0: the clock, the score, skip, mute and Begin.
@@ -30,6 +31,11 @@ public final class SunrisePlayer: ObservableObject {
     @Published public private(set) var act2: Act2Log? { didSet { rescore() } }
     /// Other browsers' profiles; scanned (read-only) while Act 1 plays.
     public var sources: [ImportSource]?
+    /// Browsers Act 2 names but cannot bring: blocked by macOS, or empty.
+    public var pending: [PendingBrowser] = []
+    /// Blocked browsers, and whether the person has been to System Settings.
+    var access = ImportAccessWatch()
+    private var rescanning = false
     public var usesDemoSources = false
     /// Act 3, after the blue sweep.
     @Published public private(set) var act3: Act3Log? { didSet { rescore() } }
@@ -136,14 +142,31 @@ public final class SunrisePlayer: ObservableObject {
         if mode == .replay { finish(); return }
         guard act1 == nil, exitStart == nil else { return }
         act1 = Act1Log(start: time(at: Date()))
-        if sources == nil {
-            if let host {
-                host.discoverSources { [weak self] found in self?.sources = found }
-            } else if usesDemoSources { sources = ImportSource.demo } else {
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    let found = BrowserScanner.scan()
-                    DispatchQueue.main.async { self?.sources = found }
-                }
+        if sources == nil, usesDemoSources, host == nil { sources = ImportSource.demo }
+    }
+
+    /// The browsers are looked at when the colour is picked, not when Act 1
+    /// begins: a blocked read makes macOS show "Data Access Blocked", which
+    /// then arrives as Act 2 names the locked browsers, not while the person
+    /// types their name, and is gone by the time they press Allow access….
+    private var scanInFlight = false
+    private var act2WaitsForScan = false
+
+    func startScanIfNeeded() {
+        guard sources == nil, !scanInFlight else { return }
+        scanInFlight = true
+        scanBrowsers { [weak self] scan in
+            guard let self else { return }
+            self.scanInFlight = false
+            self.sources = scan.sources
+            self.pending = scan.pending
+            if self.act2WaitsForScan {
+                self.act2WaitsForScan = false
+                self.startAct2()
+            } else if var log = self.act2, log.choice == nil {
+                // Act 2 could not wait any longer: what the scan found joins it.
+                log.merge(scan, at: self.time(at: Date()))
+                self.act2 = log
             }
         }
     }
@@ -177,6 +200,7 @@ public final class SunrisePlayer: ObservableObject {
         guard choosing, var log = act1 else { return }
         log.picked = (time(at: Date()), index)
         act1 = log
+        startScanIfNeeded()
         DispatchQueue.main.asyncAfter(deadline: .now() + Act1Timeline.confirmHold) { [weak self] in
             guard self?.act1?.picked != nil else { return }
             self?.startAct2()
@@ -194,12 +218,114 @@ public final class SunrisePlayer: ObservableObject {
 
     func pickKeyboardSwatch() { if let i = keyboardSwatch ?? act1?.hovers.last?.index { pick(i) } }
 
-    func startAct2() {
-        guard act2 == nil, exitStart == nil else { return }
-        let log = Act2Log(start: time(at: Date()), sources: sources ?? [],
-                          offered: host?.importCategories ?? ImportCategory.allCases)
+    /// The host's scan, or the scanner's own in the prototype.
+    func scanBrowsers(_ done: @escaping (BrowserScan) -> Void) {
+        let finish = { [weak self] (scan: BrowserScan) in
+            self?.access.update(scan.discovered)
+            done(scan)
+        }
+        if let host {
+            host.discoverSources(finish)
+        } else {
+            DispatchQueue.global(qos: .userInitiated).async {
+                let scan = BrowserScanner.survey().trimmed()
+                DispatchQueue.main.async { finish(scan) }
+            }
+        }
+    }
+
+    /// The scene's window, to tell which display it is on.
+    var sceneWindow: (() -> NSWindow?)?
+
+    /// "Allow access…": out of full screen, so System Settings is not behind
+    /// the scene or on another Space; then its pane, a drag helper for Full
+    /// Disk Access (macOS never lists ReArc there by itself), and a check of
+    /// which display Settings came up on. The host notes where the
+    /// onboarding is, so a "Quit & Reopen" comes back to this step.
+    public func allowAccess() {
+        guard var log = act2, let permission = log.neededPermission else { return }
+        access.openedSettings(permission)
+        if let name = act1?.submitted?.name, let colour = act1?.picked?.index { host?.saveResumePoint(name: name, colourIndex: colour) }
+        log.settingsElsewhere = false
         act2 = log
-        if log.sources.isEmpty {
+        presentSettings(permission) { [weak self] elsewhere in
+            guard let self, elsewhere, var log = self.act2, log.choice == nil else { return }
+            log.settingsElsewhere = true
+            self.act2 = log
+        }
+    }
+
+    /// Shrinks the scene beside System Settings, opens the pane, and calls
+    /// back with whether Settings came up on another display than the main
+    /// one. The takeover sets it; tests replace it (nothing opens Settings).
+    var presentSettings: (ImportPermission, @escaping @MainActor (Bool) -> Void) -> Void = { permission, _ in
+        SettingsAccess.open(permission)
+    }
+    /// Back from System Settings: the scene's own presentation and screen, no helper.
+    var restoreAfterSettings: () -> Void = { SettingsAccess.hideDragHelper() }
+
+    public func relaunchForAccess() {
+        if let name = act1?.submitted?.name, let colour = act1?.picked?.index { host?.saveResumePoint(name: name, colourIndex: colour) }
+        host?.relaunchForAccess()
+    }
+
+    /// ReArc is active again: back to full screen if it was, the helper
+    /// goes, and while Act 2 still asks, look at the browsers again and
+    /// bring in any that macOS now lets through.
+    public func applicationBecameActive() {
+        restoreAfterSettings()
+        guard let log = act2, log.choice == nil, access.becameActive(), !rescanning else { return }
+        rescanning = true
+        scanBrowsers { [weak self] scan in
+            guard let self else { return }
+            self.rescanning = false
+            guard var log = self.act2, log.choice == nil else { return }
+            log.merge(scan, at: self.time(at: Date()))
+            log.offersRelaunch = self.access.offersRelaunch && (self.host?.canRelaunch ?? false)
+            log.settingsElsewhere = false
+            if log != self.act2 { self.act2 = log }
+        }
+    }
+
+    /// Straight to the browser step with Act 1's name and colour, as if the
+    /// sunrise and Act 1 had just played: after a relaunch for a permission.
+    public func resumeAtBrowsers(name: String, colourIndex: Int) {
+        guard act1 == nil, act2 == nil, exitStart == nil, ProfilePalette.colours.indices.contains(colourIndex) else { return }
+        audio?.skip()
+        var log = Act1Log(start: cues.end)
+        log.edits = [(cues.end + 0.5, name)]
+        log.submitted = (cues.end + 1, name)
+        log.picked = (cues.end + 2, colourIndex)
+        self.name = name
+        // The scene clock just past Act 1's hand-off.
+        startDate = Date().addingTimeInterval(-((log.handOff ?? cues.end) + 0.05))
+        act1 = log
+        scanBrowsers { [weak self] scan in
+            guard let self else { return }
+            self.sources = scan.sources
+            self.pending = scan.pending
+            self.startAct2()
+        }
+    }
+
+    func startAct2(waited: Bool = false) {
+        guard act2 == nil, exitStart == nil else { return }
+        if scanInFlight, !waited {
+            // The scan is a moment behind: Act 2 starts when it lands, or after 5 s without it.
+            guard !act2WaitsForScan else { return }
+            act2WaitsForScan = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                guard let self, self.act2WaitsForScan else { return }
+                self.act2WaitsForScan = false
+                self.startAct2(waited: true)
+            }
+            return
+        }
+        var log = Act2Log(start: time(at: Date()), sources: sources ?? [],
+                          offered: host?.importCategories ?? ImportCategory.allCases, pending: pending)
+        log.quitAndReopenIsSafe = host?.macOSReopensThisCopy ?? false
+        act2 = log
+        if log.sources.isEmpty, log.blockedNames == nil {
             // Nothing to bring: a clean start, without asking.
             DispatchQueue.main.asyncAfter(deadline: .now() + Act2Timeline.ready) { [weak self] in self?.choose(false) }
         }
@@ -246,7 +372,7 @@ public final class SunrisePlayer: ObservableObject {
 
     var act2Controls: Act2Controls {
         Act2Controls(toggleSource: { self.toggleSource($0) }, toggleCategory: { self.toggleCategory($0) },
-                     choose: { self.choose($0) })
+                     choose: { self.choose($0) }, allowAccess: { self.allowAccess() }, relaunch: { self.relaunchForAccess() })
     }
 
     var yourColour: RGBA {
@@ -485,6 +611,9 @@ public final class SunriseTakeover {
         window.contentView = TakeoverHostingView(rootView: SunriseLiveView(player: player, showsVariantPicker: showsVariantPicker))
         self.window = window
         player.onReveal = { [weak self] in self?.reveal() }
+        player.sceneWindow = { [weak self] in self?.window }
+        player.presentSettings = { [weak self] permission, done in self?.presentSettings(permission, done) }
+        player.restoreAfterSettings = { [weak self] in self?.restoreAfterSettings() }
         player.onToggleWindow = { [weak self] in
             guard let self else { return }
             self.setWindowed(!self.windowed)
@@ -506,6 +635,53 @@ public final class SunriseTakeover {
         let size = NSSize(width: (1440 * scale).rounded(), height: (900 * scale).rounded())
         return NSRect(x: (area.midX - size.width / 2).rounded(), y: (area.midY - size.height / 2).rounded(),
                       width: size.width, height: size.height)
+    }
+
+    // MARK: Beside System Settings
+
+    /// How the scene was shown before System Settings, to come back to.
+    private var beforeSettings: (windowed: Bool, frame: NSRect)?
+
+    /// Out of full screen and into the free column beside System Settings on
+    /// its display (the main one, where it opens), the drag helper above the
+    /// scene for Full Disk Access. Laid out once for where Settings usually
+    /// is, then again where its window really came up.
+    func presentSettings(_ permission: ImportPermission, _ done: @escaping @MainActor (Bool) -> Void) {
+        guard let window else { return }
+        if beforeSettings == nil { beforeSettings = (windowed, window.frame) }
+        let helper = permission == .fullDiskAccess ? SettingsAccess.helperSize : nil
+        place(SettingsCompanionLayout.layout(screen: SettingsAccess.settingsScreen(for: nil), settings: nil, helper: helper))
+        SettingsAccess.open(permission)
+        SettingsAccess.whenSettingsAppears { [weak self] frame in
+            guard let self, self.beforeSettings != nil else { return }
+            let screen = SettingsAccess.settingsScreen(for: frame)
+            self.place(SettingsCompanionLayout.layout(screen: screen, settings: frame, helper: helper))
+            done(frame != nil && screen != SettingsAccess.settingsScreen(for: nil))
+        }
+    }
+
+    private func place(_ layout: SettingsCompanionLayout) {
+        guard let window else { return }
+        windowed = true
+        player.windowed = true
+        window.hasShadow = true
+        if presented { NSApp.presentationOptions = [] }
+        window.setFrame(layout.scene, display: true, animate: true)
+        if revealed, let frame = revealFrame { player.host?.revealBrowser(in: frame, below: window) }
+        if let helper = layout.helper { SettingsAccess.showDragHelper(at: helper) } else { SettingsAccess.hideDragHelper() }
+    }
+
+    /// Back from System Settings: the presentation and screen it had.
+    func restoreAfterSettings() {
+        SettingsAccess.hideDragHelper()
+        guard let before = beforeSettings, let window else { return }
+        beforeSettings = nil
+        if before.windowed {
+            window.setFrame(before.frame, display: true, animate: true)
+        } else {
+            setWindowed(false)
+            window.setFrame(before.frame, display: true, animate: true)
+        }
     }
 
     /// Full screen ⇄ a window centred on the main screen. The scene lays itself
@@ -539,6 +715,8 @@ public final class SunriseTakeover {
             MainActor.assumeIsolated {
                 guard let window = self?.window, window.isVisible else { return }
                 window.makeKeyAndOrderFront(nil)
+                // Back from System Settings, perhaps with a browser allowed.
+                self?.player.applicationBecameActive()
             }
         }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -621,6 +799,7 @@ public final class SunriseTakeover {
     }
 
     public func dismiss() {
+        SettingsAccess.hideDragHelper()
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
         if let activation { NotificationCenter.default.removeObserver(activation) }
