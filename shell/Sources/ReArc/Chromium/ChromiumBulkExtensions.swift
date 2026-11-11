@@ -53,9 +53,12 @@ extension ChromiumRuntime {
                 typealias InstallSources = @convention(c) (UInt64, UnsafePointer<ReArcExtensionInstallSource>?, UInt32, ReArcExtensionInstallCallback?, UnsafeMutableRawPointer?) -> ReArcStatus
                 let strings = items.map { strdup($0.id)! }
                 defer { strings.forEach { free($0) } }
-                let manifests = items.compactMap { $0.sourceManifest.map { strdup($0)! } }
+                // An item without a source manifest (a queue saved by build 500, or a mixed batch)
+                // goes as "{}", which the engine treats as needing the install prompt; the ID-only
+                // call is left for engines without ABI 1.61 (security RC-0.1.0-544 F-13).
+                let manifests = items.map { strdup($0.installManifestJSON)! }
                 defer { manifests.forEach { free($0) } }
-                if manifests.count == items.count, ReArcEngineHasFeature("extension_install_sources"),
+                if ReArcEngineHasFeature("extension_install_sources"),
                    let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ReArcProfileInstallExtensionSources") {
                     // ABI 1.61: a store version asking for more than the source's gets the install prompt.
                     let install = unsafeBitCast(symbol, to: InstallSources.self)

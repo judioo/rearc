@@ -170,3 +170,20 @@ final class BoostCSSSecurityTests: XCTestCase {
         return SidebarSyncProjection.apply(payloads(records), onto: store.makeSnapshot())
     }
 }
+
+/// Security RC-0.1.0-544 F-13: an install with no source manifest is never consent by ID.
+final class ExtensionInstallManifestTests: XCTestCase {
+    func testItemsWithoutASourceManifestAskForThePrompt() {
+        let profile = UUID()
+        // A build 500 queue item: enabledByDefault set, no manifest.
+        let legacy = ExtensionReinstallQueue.Item(id: "abcdefghijklmnopabcdefghijklmnop", name: "Old", origin: .webStore,
+                                                  profileID: profile, enabledByDefault: true)
+        XCTAssertNil(legacy.sourceManifest)
+        XCTAssertEqual(legacy.installManifestJSON, "{}")
+        var item = legacy
+        item.sourceManifest = ""
+        XCTAssertEqual(item.installManifestJSON, "{}")
+        item.sourceManifest = #"{"name":"New","version":"1"}"#
+        XCTAssertEqual(item.installManifestJSON, #"{"name":"New","version":"1"}"#)
+    }
+}

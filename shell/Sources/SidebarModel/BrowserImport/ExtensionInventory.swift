@@ -156,6 +156,14 @@ public struct ExtensionReinstallQueue: Equatable, Codable, Sendable {
         public var sourceManifest: String? = nil
 
         public var key: String { "\(profileID):\(id)" }
+
+        /// What the engine compares the store version with (ABI 1.61). Without a source
+        /// manifest it is "{}", which the engine cannot read as an extension and so always
+        /// shows the install prompt for; consent by ID alone is never assumed (F-13).
+        public var installManifestJSON: String {
+            guard let sourceManifest, !sourceManifest.isEmpty else { return "{}" }
+            return sourceManifest
+        }
     }
 
     public private(set) var items: [Item]
