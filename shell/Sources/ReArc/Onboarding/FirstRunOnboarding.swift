@@ -433,7 +433,7 @@ struct OnboardingImportPlan: Sendable {
                     let items = ExtensionReinstallQueue(ExtensionInventoryReader.read(profile: profile.url), into: UUID(),
                                                         installedIDs: installedIDs).items
                     counted.extensionIDs = items.map(\.id)
-                    counted.extensionOrigins = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.origin) })
+                    counted.extensionOrigins = Dictionary(items.map { ($0.id, $0.origin) }, uniquingKeysWith: { first, _ in first })
                     stats.extensions = counted.extensionIDs.count
                 }
             }

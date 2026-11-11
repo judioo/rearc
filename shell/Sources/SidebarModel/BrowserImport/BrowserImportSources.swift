@@ -499,8 +499,7 @@ public enum BrowserImportDiscovery {
         static let arcInternalPrefix = "__ARC_"
 
         static func read(_ url: URL) -> LocalState {
-            guard let data = try? Data(contentsOf: url),
-                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            guard let root = try? ImportFile.json(url) as? [String: Any],
                   let profile = root["profile"] as? [String: Any] else { return LocalState() }
             var state = LocalState()
             for (directory, value) in profile["info_cache"] as? [String: Any] ?? [:] {
@@ -520,21 +519,24 @@ public enum BrowserImportDiscovery {
 
 /// Copies a SQLite file (and its write-ahead log) to a private temporary
 /// folder, so the source browser's file is never opened or locked. Chrome
-/// holds History open while it runs.
+/// holds History open while it runs. Only regular files are copied, never
+/// through a link (`copyItem` would copy a link as a link, and SQLite would
+/// then open whatever it names: RC-0.1.0-602 T-08).
 public struct SQLiteSnapshot {
     public let url: URL
     private let folder: URL
 
     public init(copying source: URL, fileManager: FileManager = .default) throws {
         folder = fileManager.temporaryDirectory.appendingPathComponent("ReArcImport-\(UUID().uuidString)", isDirectory: true)
-        try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         url = folder.appendingPathComponent(source.lastPathComponent)
         do {
-            try fileManager.copyItem(at: source, to: url)
+            try ImportFile.copy(source, to: url, maxBytes: ImportFile.maxDatabaseBytes)
             for suffix in ["-wal", "-journal"] {
                 let side = URL(fileURLWithPath: source.path + suffix)
-                if fileManager.fileExists(atPath: side.path) {
-                    try? fileManager.copyItem(at: side, to: URL(fileURLWithPath: url.path + suffix))
+                var info = stat()
+                if lstat(side.path, &info) == 0 {
+                    try ImportFile.copy(side, to: URL(fileURLWithPath: url.path + suffix), maxBytes: ImportFile.maxDatabaseBytes)
                 }
             }
         } catch {

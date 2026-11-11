@@ -60,8 +60,7 @@ public enum ExtensionInventoryReader {
     /// The profile's extensions, without Chromium's built-in ones, by name.
     public static func read(profile: URL) -> [SourceExtension] {
         func json(_ name: String) -> [String: Any] {
-            guard let data = try? Data(contentsOf: profile.appendingPathComponent(name)),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+            guard let object = try? ImportFile.json(profile.appendingPathComponent(name)) as? [String: Any] else { return [:] }
             return object
         }
         return parse(preferences: json("Preferences"), securePreferences: json("Secure Preferences"),
@@ -133,8 +132,7 @@ public enum ExtensionInventoryReader {
         let locales = [defaultLocale, "en", "en_US"].compactMap { $0 }
         for locale in locales where isLocaleName(locale) {
             let url = folder.appendingPathComponent("_locales/\(locale)/messages.json")
-            guard let data = try? Data(contentsOf: url),
-                  let messages = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            guard let messages = try? ImportFile.json(url) as? [String: Any] else { continue }
             for (messageKey, value) in messages where messageKey.lowercased() == key {
                 if let message = (value as? [String: Any])?["message"] as? String, !message.isEmpty { return message }
             }

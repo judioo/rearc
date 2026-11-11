@@ -13,11 +13,12 @@ public enum ChromiumBookmarksReader {
     /// as folders. Same limits as the HTML import: http(s) only,
     /// `BookmarkHTMLImport.maxLinks` links, `maxDepth` levels.
     public static func read(_ url: URL) throws -> [BookmarkNode] {
-        try parse(Data(contentsOf: url))
+        try parse(ImportFile.data(url))
     }
 
     public static func parse(_ data: Data) throws -> [BookmarkNode] {
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard ImportFile.nestsWithin(data, limit: ImportFile.maxJSONNesting),
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let roots = root["roots"] as? [String: Any] else { throw ReadError.notBookmarks }
         var links = 0
         func nodes(_ children: Any?, depth: Int) -> [BookmarkNode] {
@@ -25,6 +26,7 @@ public enum ChromiumBookmarksReader {
             for case let child as [String: Any] in children as? [Any] ?? [] {
                 let title = (child["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 if child["type"] as? String == "folder" {
+                    guard depth < BookmarkTreeBuilder.maxWalkDepth else { continue }
                     let inner = nodes(child["children"], depth: depth + 1)
                     // Past the depth limit a folder's links join its parent.
                     if depth >= BookmarkHTMLImport.maxDepth {
@@ -107,11 +109,7 @@ public enum ChromiumHistoryReader {
     }
 
     static func withDatabase<T>(_ url: URL, _ body: (OpaquePointer) throws -> T) throws -> T {
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else {
-            sqlite3_close(db)
-            throw ReadError.cannotOpen
-        }
+        guard let db = ImportFile.openDatabase(url) else { throw ReadError.cannotOpen }
         defer { sqlite3_close(db) }
         return try body(db)
     }
@@ -185,7 +183,8 @@ public struct ChromiumProfileSetup: Equatable, Sendable {
     public init() {}
 
     public static func read(profile: URL) -> ChromiumProfileSetup {
-        guard let data = try? Data(contentsOf: profile.appendingPathComponent("Preferences")) else { return ChromiumProfileSetup() }
+        guard let data = try? ImportFile.data(profile.appendingPathComponent("Preferences")),
+              ImportFile.nestsWithin(data, limit: ImportFile.maxJSONNesting) else { return ChromiumProfileSetup() }
         return parse(data)
     }
 

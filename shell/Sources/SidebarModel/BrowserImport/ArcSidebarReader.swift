@@ -120,11 +120,12 @@ public enum ArcSidebarReader {
     }
 
     public static func read(_ url: URL) throws -> ArcSidebarExport {
-        try parse(Data(contentsOf: url))
+        try parse(ImportFile.data(url))
     }
 
     public static func parse(_ data: Data) throws -> ArcSidebarExport {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard ImportFile.nestsWithin(data, limit: ImportFile.maxJSONNesting),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let containers = (root["sidebar"] as? [String: Any])?["containers"] as? [Any],
               let main = containers.lazy.compactMap({ $0 as? [String: Any] }).first(where: { $0["spaces"] != nil }) else {
             throw ReadError.notArcSidebar

@@ -259,50 +259,38 @@ public enum BrowserScanner {
             var source = ImportSource(browser: b.shortName, directory: dir, profile: info["name"] as? String ?? profile.name,
                                       colour: colour, stats: stats, spaces: seeds, extensionIDs: extensionItems.map(\.id))
             source.browserID = b.rawValue
-            source.extensionOrigins = Dictionary(uniqueKeysWithValues: extensionItems.map { ($0.id, $0.origin) })
+            source.extensionOrigins = Dictionary(extensionItems.map { ($0.id, $0.origin) }, uniquingKeysWith: { first, _ in first })
             out.append(source)
         }
         return out
     }
 
+    /// Never through a link, size-capped and depth-checked (RC-0.1.0-602 T-08).
     static func json(_ url: URL) -> Any? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONSerialization.jsonObject(with: data)
+        try? ImportFile.json(url)
     }
 
     static func bookmarks(_ url: URL) -> Int {
         guard let roots = (json(url) as? [String: Any])?["roots"] as? [String: Any] else { return 0 }
-        func walk(_ node: Any) -> Int {
-            guard let node = node as? [String: Any] else { return 0 }
+        func walk(_ node: Any, depth: Int) -> Int {
+            guard depth < ImportFile.maxFolderWalkDepth, let node = node as? [String: Any] else { return 0 }
             if node["type"] as? String == "url" { return 1 }
-            return (node["children"] as? [Any] ?? []).reduce(0) { $0 + walk($1) }
+            return (node["children"] as? [Any] ?? []).reduce(0) { $0 + walk($1, depth: depth + 1) }
         }
-        return roots.values.reduce(0) { $0 + walk($1) }
+        return roots.values.reduce(0) { $0 + walk($1, depth: 0) }
     }
 
     /// One number from a copy of `url` (and its journal) in a private
     /// temporary folder: the browser's own file is never opened, so nothing
-    /// locks it and a write in progress cannot be half-read.
+    /// locks it and a write in progress cannot be half-read. The copy is
+    /// `SQLiteSnapshot`'s, which refuses links (RC-0.1.0-602 T-08).
     static func count(_ url: URL) -> Int {
-        guard url.lastPathComponent == "History" else { return 0 }
-        let sql = "SELECT COUNT(*) FROM urls"
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return 0 }
-        let folder = fm.temporaryDirectory.appendingPathComponent("ReArcScan-\(UUID().uuidString)", isDirectory: true)
-        defer { try? fm.removeItem(at: folder) }
-        let copy = folder.appendingPathComponent(url.lastPathComponent)
-        do {
-            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-            try fm.copyItem(at: url, to: copy)
-        } catch { return 0 }
-        for suffix in ["-wal", "-journal"] where fm.fileExists(atPath: url.path + suffix) {
-            try? fm.copyItem(atPath: url.path + suffix, toPath: copy.path + suffix)
-        }
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(copy.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { sqlite3_close(db); return 0 }
+        guard url.lastPathComponent == "History", let snapshot = try? SQLiteSnapshot(copying: url) else { return 0 }
+        defer { snapshot.remove() }
+        guard let db = ImportFile.openDatabase(snapshot.url) else { return 0 }
         defer { sqlite3_close(db) }
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM urls", -1, &stmt, nil) == SQLITE_OK else { return 0 }
         defer { sqlite3_finalize(stmt) }
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
     }

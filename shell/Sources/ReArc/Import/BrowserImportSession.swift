@@ -384,7 +384,7 @@ final class BrowserImportSession {
                 let history = wantsHistory ? (try? profile.readHistory()) : nil
                 // Read again now: an extension may have finished installing since the pane loaded.
                 let installedIDs = chosen.isEmpty ? [] : installed(target)
-                let snapshot = Dictionary(uniqueKeysWithValues: chosen.map { ($0.id, $0.origin) })
+                let snapshot = Dictionary(chosen.map { ($0.id, $0.origin) }, uniquingKeysWith: { first, _ in first })
                 let consented = chosen.isEmpty ? [] : ExtensionInventoryReader.consented(
                     ExtensionInventoryReader.read(profile: profile.url), snapshot: snapshot)
                 DispatchQueue.main.async { [weak self] in

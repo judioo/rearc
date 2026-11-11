@@ -9,15 +9,26 @@ public enum FirefoxProfiles {
 
     /// The default profile first (an install's, then `Default=1`), then the
     /// rest in file order; only those with a `places.sqlite`. A profile's
-    /// `directory` is its `Path` as written.
+    /// `directory` is its `Path` as written. A `Path` that leads outside the
+    /// Firefox folder (absolute, `..`, or through a link) is not a profile
+    /// ReArc reads (RC-0.1.0-602 T-08).
     public static func read(root: URL, fileManager: FileManager = .default) -> [ImportSourceProfile] {
-        guard let text = try? String(contentsOf: root.appendingPathComponent(fileName), encoding: .utf8) else { return [] }
+        guard let data = try? ImportFile.data(root.appendingPathComponent(fileName), maxBytes: 1 << 20),
+              let text = String(data: data, encoding: .utf8) else { return [] }
         return parse(text).compactMap { entry in
             let url = entry.isRelative ? root.appendingPathComponent(entry.path, isDirectory: true)
                 : URL(fileURLWithPath: entry.path, isDirectory: true)
-            guard fileManager.fileExists(atPath: url.appendingPathComponent(FirefoxPlacesReader.fileName).path) else { return nil }
+            guard isInside(url, root: root),
+                  ImportFile.isRegularFile(url.appendingPathComponent(FirefoxPlacesReader.fileName), maxBytes: ImportFile.maxDatabaseBytes) else { return nil }
             return ImportSourceProfile(browser: .firefox, directory: entry.path, name: entry.name, url: url)
         }
+    }
+
+    /// `url`, with links and `..` resolved, is a folder inside `root`.
+    static func isInside(_ url: URL, root: URL) -> Bool {
+        let base = root.standardizedFileURL.resolvingSymlinksInPath().path
+        let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+        return path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
     }
 
     struct Entry: Equatable {
@@ -55,6 +66,8 @@ public enum FirefoxProfiles {
 /// from a copy, with its `-wal`: Firefox holds it open while it runs.
 public enum FirefoxPlacesReader {
     public static let fileName = "places.sqlite"
+    /// More bookmark rows than any real profile has; the rest are not read.
+    static let maxBookmarkRows = 500_000
 
     /// The toolbar's contents at the top level, then the Bookmarks Menu,
     /// Other Bookmarks and Mobile Bookmarks as folders. Tags are not bookmarks.
@@ -66,7 +79,7 @@ public enum FirefoxPlacesReader {
         var children: [Int64: [Int64]] = [:]
         var roots: [String: Int64] = [:]
         try ChromiumHistoryReader.withDatabase(snapshot.url) { db in
-            let sql = "SELECT b.id, b.type, b.parent, b.title, p.url, b.guid FROM moz_bookmarks b LEFT JOIN moz_places p ON p.id = b.fk ORDER BY b.parent, b.position"
+            let sql = "SELECT b.id, b.type, b.parent, b.title, p.url, b.guid FROM moz_bookmarks b LEFT JOIN moz_places p ON p.id = b.fk ORDER BY b.parent, b.position LIMIT \(maxBookmarkRows)"
             try ChromiumHistoryReader.query(db, sql) { row in
                 let id = sqlite3_column_int64(row, 0)
                 rows[id] = Row(type: sqlite3_column_int(row, 1),
@@ -87,6 +100,8 @@ public enum FirefoxPlacesReader {
                 case 1:
                     if let link = builder.link(title: row.title, href: row.url) { out.append(link) }
                 case 2:
+                    // A chain deeper than `maxWalkDepth` is not walked: one level is one stack frame (T-08).
+                    guard depth < BookmarkTreeBuilder.maxWalkDepth else { break }
                     out += builder.folder(title: row.title, children: nodes(id, depth: depth + 1), depth: depth)
                 default:
                     break

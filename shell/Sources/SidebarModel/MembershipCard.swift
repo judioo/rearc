@@ -560,9 +560,9 @@ public struct ArcMembershipCardImport: Equatable, Sendable {
         return read(card: card, auth: smallFile(folder.appendingPathComponent(authFileName)))
     }
 
+    /// Never through a link, and only up to `maximumFileSize` (RC-0.1.0-602 T-08).
     static func smallFile(_ url: URL) -> Data? {
-        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size <= maximumFileSize else { return nil }
-        return try? Data(contentsOf: url)
+        try? ImportFile.data(url, maxBytes: maximumFileSize)
     }
 
     /// Nil when the card gives nothing.

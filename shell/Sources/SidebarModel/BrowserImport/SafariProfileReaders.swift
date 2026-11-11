@@ -6,6 +6,9 @@ import SQLite3
 /// (`VisitHistory.isRecordable`), `BookmarkHTMLImport.maxLinks` of them,
 /// `maxDepth` levels (deeper folders' links join their parent).
 struct BookmarkTreeBuilder {
+    /// Folders below this are not walked at all: a crafted store can nest
+    /// thousands deep, and each level is a stack frame (RC-0.1.0-602 T-08).
+    static let maxWalkDepth = ImportFile.maxFolderWalkDepth
     private(set) var links = 0
 
     mutating func link(title: String, href: String?) -> BookmarkNode? {
@@ -35,7 +38,7 @@ public enum SafariBookmarksReader {
     public enum ReadError: Error { case notBookmarks }
 
     public static func read(_ url: URL) throws -> [BookmarkNode] {
-        try parse(Data(contentsOf: url))
+        try parse(ImportFile.data(url))
     }
 
     public static func parse(_ data: Data) throws -> [BookmarkNode] {
@@ -50,6 +53,8 @@ public enum SafariBookmarksReader {
                     let title = (child["URIDictionary"] as? [String: Any])?["title"] as? String ?? ""
                     if let link = builder.link(title: title, href: child["URLString"] as? String) { out.append(link) }
                 case "WebBookmarkTypeList":
+                    // Past `maxWalkDepth` a crafted file's folders are not walked (T-08).
+                    guard depth < BookmarkTreeBuilder.maxWalkDepth else { break }
                     let inner = nodes(child["Children"], depth: depth + 1)
                     out += builder.folder(title: child["Title"] as? String ?? "", children: inner, depth: depth)
                 default:
