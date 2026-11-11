@@ -81,9 +81,6 @@ public enum BoostActivation {
         guard library.profileID == context.profileID else { return [] }
         guard library.masterEnabled, context.spaceBoostsEnabled else { return [] }
         guard BoostScopeMatcher.urlIsEligibleForBoosts(context.url) else { return [] }
-        var library = library
-        library.adoptLegacyApprovals()
-
         var entries: [BoostRuntimeEntry] = []
         for install in library.installations.sorted(by: { $0.order < $1.order }) {
             guard effectiveEnabled(installation: install, library: library, context: context) else { continue }

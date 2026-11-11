@@ -1183,11 +1183,16 @@ public final class SidebarStore {
     }
 
     /// Applies a boost's CSS as it stands now, after the user has seen it (Boosts library).
-    public func approveBoostStyle(packageID: UUID) {
+    /// `shownHash`: the style approval hash of what the sheet showed; a sync change that
+    /// landed while it was open is not approved unseen (RC-0.1.0-602 F-12).
+    @discardableResult
+    public func approveBoostStyle(packageID: UUID, shownHash: String? = nil) -> Bool {
         var library = boostLibrary(for: activeProfileID)
-        guard BoostLibraryOps.approveStyle(packageID: packageID, library: &library) else { return }
+        if let shownHash, library.package(id: packageID).flatMap(BoostLibraryOps.styleApprovalHash) != shownHash { return false }
+        guard BoostLibraryOps.approveStyle(packageID: packageID, library: &library) else { return false }
         boostLibrariesByProfileID[library.profileID] = library
         notifyMutation()
+        return true
     }
 
     @discardableResult
@@ -1230,12 +1235,16 @@ public final class SidebarStore {
         updateBoostLibrary(library)
     }
 
-    public func setBoostScriptUserEnabled(packageID: UUID, enabled: Bool) {
+    /// `shownHash`: when allowing, the script approval hash of what the sheet showed (F-12).
+    @discardableResult
+    public func setBoostScriptUserEnabled(packageID: UUID, enabled: Bool, shownHash: String? = nil) -> Bool {
         var library = boostLibrary(for: activeProfileID)
+        if enabled, let shownHash, library.package(id: packageID).flatMap(BoostLibraryOps.scriptApprovalHash) != shownHash { return false }
         guard BoostLibraryOps.setScriptUserEnabled(packageID: packageID, enabled: enabled, library: &library) else {
-            return
+            return false
         }
         updateBoostLibrary(library)
+        return true
     }
 
     public func setBoostSpacePolicy(packageID: UUID, spaceID: Space.ID, policy: BoostSpacePolicy) {
@@ -1510,7 +1519,13 @@ public final class SidebarStore {
         let liveProfiles = Set(profiles.map(\.id))
         littleArcWindows = snapshot.littleArcWindows.filter { liveProfiles.contains($0.profileID) }
         archivedLittleArcWindows = snapshot.archivedLittleArcWindows.filter { liveProfiles.contains($0.window.profileID) }
-        boostLibrariesByProfileID = snapshot.boostLibrariesByProfileID
+        // Libraries saved before approvals existed are migrated here, once: what this Mac
+        // applied counts as approved, and the maps are saved with the sidebar (F-12).
+        boostLibrariesByProfileID = snapshot.boostLibrariesByProfileID.mapValues { library in
+            var library = library
+            library.adoptLegacyApprovals()
+            return library
+        }
         easelRefsByID = snapshot.easelRefsByID
         capturesByID = snapshot.capturesByID
         let liveFolderIDs = Set(spaces.flatMap { SidebarTree.folders(contentBySpace[$0.id]?.pinned ?? []).map(\.id) })

@@ -32,4 +32,32 @@ final class BoostRC602Tests: XCTestCase {
         XCTAssertTrue(store.boostLibrary().styleApproved(try XCTUnwrap(store.boostLibrary().package(id: own.manifest.id))),
                       "CSS written on this Mac is its own")
     }
+
+    func testApprovalTakesOnlyWhatTheSheetShowed() throws {
+        let store = SidebarStore()
+        let package = BoostPackage.newStyle(name: "Shared", hostScope: [BoostHostRule(host: "docs.test")], css: "body{color:red}")
+        XCTAssertNil(store.importBoostPackage(package))
+        let shown = try XCTUnwrap(BoostLibraryOps.styleApprovalHash(try XCTUnwrap(store.boostLibrary().package(id: package.manifest.id))))
+        // A sync change lands while the sheet is open.
+        var changed = package
+        changed.styleBoost?.css = "body{color:blue}"
+        var library = store.boostLibrary()
+        library.upsertPackage(changed, installation: try XCTUnwrap(library.installation(for: package.manifest.id)))
+        var snapshot = store.makeSnapshot()
+        snapshot.boostLibrariesByProfileID[store.activeProfileID] = library
+        store.applySnapshot(snapshot)
+        XCTAssertFalse(store.approveBoostStyle(packageID: package.manifest.id, shownHash: shown))
+        XCTAssertFalse(store.boostLibrary().styleApproved(try XCTUnwrap(store.boostLibrary().package(id: package.manifest.id))))
+        let now = try XCTUnwrap(BoostLibraryOps.styleApprovalHash(try XCTUnwrap(store.boostLibrary().package(id: package.manifest.id))))
+        XCTAssertTrue(store.approveBoostStyle(packageID: package.manifest.id, shownHash: now))
+    }
+
+    func testAMissingApprovalsMapApprovesNothing() {
+        var library = ProfileBoostLibrary(profileID: UUID())
+        let package = BoostPackage.newStyle(name: "x", hostScope: [], css: "a{}")
+        _ = BoostLibraryOps.add(package, to: &library)
+        library.approvedStyleHashes = nil
+        library.approvedScriptHashes = nil
+        XCTAssertFalse(library.styleApproved(package))
+    }
 }

@@ -109,7 +109,18 @@ final class BoostCSSSecurityTests: XCTestCase {
         let legacy = try JSONDecoder().decode(ProfileBoostLibrary.self, from: JSONEncoder().encode(library))
         XCTAssertNil(legacy.approvedStyleHashes)
         let context = BoostTabContext(profileID: library.profileID, spaceID: nil, url: page)
-        XCTAssertEqual(BoostActivation.activeEntries(library: legacy, context: context).first?.css, "body{color:red}")
+        // RC-0.1.0-602 F-12: a missing map approves nothing; the migration happens once, at load.
+        XCTAssertNil(BoostActivation.activeEntries(library: legacy, context: context).first?.css)
+        let store = SidebarStore()
+        var snapshot = store.makeSnapshot()
+        var loaded = legacy
+        loaded.profileID = store.activeProfileID
+        snapshot.boostLibrariesByProfileID[store.activeProfileID] = loaded
+        store.applySnapshot(snapshot)
+        let migrated = try XCTUnwrap(store.makeSnapshot().boostLibrariesByProfileID[store.activeProfileID])
+        XCTAssertNotNil(migrated.approvedStyleHashes, "saved with the sidebar from now on")
+        let loadedContext = BoostTabContext(profileID: store.activeProfileID, spaceID: nil, url: page)
+        XCTAssertEqual(BoostActivation.activeEntries(library: migrated, context: loadedContext).first?.css, "body{color:red}")
     }
 
     func testScriptRunsOnlyWithAMatchingApprovalNotOnTheFlagAlone() {

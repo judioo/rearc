@@ -112,17 +112,17 @@ public struct ProfileBoostLibrary: Codable, Equatable, Sendable {
     }
 
     /// The script may run: switched on here and approved here for these exact bytes and hosts.
+    /// No approvals map approves nothing: a library is migrated once, when it loads
+    /// (`SidebarStore.applySnapshot`), and the result saved (RC-0.1.0-602 F-12).
     public func scriptApproved(_ package: BoostPackage) -> Bool {
         guard package.scriptBoost?.userScriptEnabled == true, let hash = BoostLibraryOps.scriptApprovalHash(package) else { return false }
-        guard let approvals = approvedScriptHashes else { return true }
-        return approvals[package.manifest.id] == hash
+        return approvedScriptHashes?[package.manifest.id] == hash
     }
 
     /// The CSS may apply: written or approved on this Mac for these exact bytes and hosts.
     public func styleApproved(_ package: BoostPackage) -> Bool {
         guard let hash = BoostLibraryOps.styleApprovalHash(package) else { return true }
-        guard let approvals = approvedStyleHashes else { return true }
-        return approvals[package.manifest.id] == hash
+        return approvedStyleHashes?[package.manifest.id] == hash
     }
 
     /// Local edits are this Mac's own: every package whose CSS or host rules differ from
