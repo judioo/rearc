@@ -130,6 +130,14 @@ struct ThemeChromeColors: Equatable {
     var accent: Color
     var rowHover: Color
     var rowSelected: Color
+    /// The other rows of a multi-row selection: Arc's grey veil, and the
+    /// title fitted to read on it (`SidebarRowWash.multiSelected`).
+    var rowMultiSelected: Color
+    var multiSelectedTitle: Color
+    /// Glyphs on that veil (a folder's; a mini square's split or easel glyph),
+    /// fitted the same way (`SidebarRowWash.MultiSelected.glyph`).
+    var multiSelectedAccent: Color
+    var multiSelectedSecondaryText: Color
     var focus: Color
     /// Floating panels over the window (command bar, Peek): the theme's
     /// `backgroundExtra` / dark `background` washed over the material.
@@ -164,6 +172,13 @@ struct ThemeChromeColors: Equatable {
         // wash of it (row geometry and fills are still to observe, §8).
         rowSelected = Color(semantic.backgroundExtra).opacity(SidebarRowWash.selectedAlpha(lightInk: dark))
         rowHover = Color(semantic.backgroundExtra).opacity(SidebarRowWash.hoverAlpha(lightInk: dark))
+        // Sampled finely once: the veil can take an ink to its floor.
+        let fine = SidebarBackdrop(theme: theme, dark: windowDark ?? dark, rows: 20, columns: 10)
+        let multi = SidebarRowWash.multiSelected(title: chrome.title, backdrop: fine, lightInk: dark)
+        rowMultiSelected = Color(multi.veil).opacity(multi.alpha)
+        multiSelectedTitle = Color(multi.title)
+        multiSelectedAccent = Color(multi.glyph(chrome.accent, backdrop: fine, lightInk: dark))
+        multiSelectedSecondaryText = Color(multi.glyph(chrome.secondaryText, backdrop: fine, lightInk: dark))
         focus = Color(semantic.focus).opacity(semantic.focusAlpha)
         panel = Color(dark ? semantic.background : semantic.backgroundExtra).opacity(dark ? 0.6 : 0.55)
         toast = Color(semantic.background)

@@ -32,6 +32,8 @@ struct TabRowView<Menu: View>: View {
     var onRename: (() -> Void)? = nil
     /// Set while the title is being renamed in place.
     var rename: SidebarRowRename? = nil
+    /// In a multi-row selection without being the active row: Arc's grey row.
+    var isMultiSelected = false
     @ViewBuilder let menu: () -> Menu
 
     @State private var isHovering = false
@@ -64,7 +66,7 @@ struct TabRowView<Menu: View>: View {
                     } else {
                         Text(tab.displayTitle)
                             .font(.system(size: SidebarMetrics.titleSize))
-                            .foregroundStyle(chrome.title)
+                            .foregroundStyle(isMultiSelected && !isSelected ? chrome.multiSelectedTitle : chrome.title)
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
@@ -159,6 +161,9 @@ struct TabRowView<Menu: View>: View {
             } else if isSelected || rename != nil {
                 shape.fill(chrome.rowSelected)
                     .shadow(color: .black.opacity(chrome.isDark ? 0.3 : 0.08), radius: 1.5, y: 0.5)
+            } else if isMultiSelected {
+                // Arc keeps the grey under the pointer.
+                shape.fill(chrome.rowMultiSelected)
             } else if isHovering {
                 shape.fill(chrome.rowHover)
             }

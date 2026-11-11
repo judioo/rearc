@@ -10,8 +10,9 @@ final class Wave30ShortcutTests: XCTestCase {
         let ids = ArcShortcuts.all.map(\.id)
         XCTAssertEqual(ids.count, Set(ids).count, "binding IDs are unique, as Arc's KeyBindingMenuManager requires")
         // 83 distinct key-bound nib items (its duplicate Zoom In and New Tab… rows
-        // dropped) and the 18 code-defined ⌃1…9 / ⌘1…9 bindings.
-        XCTAssertEqual(ArcShortcuts.all.count, 101)
+        // dropped) less Save Page As, whose ⇧⌘S went to ReArc's Toggle Mini
+        // Sidebar, and the 18 code-defined ⌃1…9 / ⌘1…9 bindings.
+        XCTAssertEqual(ArcShortcuts.all.count, 83 - 1 + 1 + 18)
 
         func check(_ key: ShortcutKey, _ modifiers: ShortcutModifiers, _ id: String, _ priority: ShortcutPriority,
                    file: StaticString = #filePath, line: UInt = #line) {

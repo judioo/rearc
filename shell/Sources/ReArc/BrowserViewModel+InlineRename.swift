@@ -49,7 +49,8 @@ extension BrowserViewModel {
     /// with the sidebar showing.
     /// A rename already under way on another row is saved first.
     func beginInlineRename(_ request: SidebarRenameRequest) -> Bool {
-        guard isSidebarVisible, librarySection(in: store.keyWindowID) == nil else { return false }
+        // A mini column has no room for a field: the rename asks in an alert.
+        guard isSidebarVisible, librarySection(in: store.keyWindowID) == nil, !isMiniSidebar(in: store.keyWindowID) else { return false }
         let name: String
         let rowID: UUID
         switch request {

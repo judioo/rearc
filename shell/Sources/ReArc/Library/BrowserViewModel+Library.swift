@@ -14,7 +14,7 @@ extension BrowserViewModel {
 
     /// The sidebar's width in `window`: wider in the Library, the rail alone on Spaces.
     func sidebarWidth(in window: SidebarWindowID?) -> CGFloat {
-        CGFloat(LibrarySidebarLayout.width(for: librarySection(in: window), sidebarWidth: Double(sidebarWidth)))
+        CGFloat(LibrarySidebarLayout.width(for: librarySection(in: window), sidebarWidth: Double(sidebarListWidth(in: window))))
     }
 
     /// The Library widening `window`'s sidebar, if it is mid-way.

@@ -69,6 +69,9 @@ public struct SavedBrowserWindow: Codable, Equatable, Sendable {
     /// the space is gone).
     public var spaceID: UUID?
     public var profileID: UUID?
+    /// The window's sidebar mode (⇧⌘S). Nil in files from before it, and
+    /// for a full sidebar: older builds ignore the key.
+    public var sidebarMode: SidebarMode?
     /// `-[NSWindow encodeRestorableStateWithCoder:]` output. Handing it back
     /// through `-restoreStateWithCoder:` is what returns the window to its
     /// macOS desktop (Space); see WindowDesktopState.
@@ -82,6 +85,7 @@ public struct SavedBrowserWindow: Codable, Equatable, Sendable {
         isKey: Bool = false,
         spaceID: UUID? = nil,
         profileID: UUID? = nil,
+        sidebarMode: SidebarMode? = nil,
         appKitState: Data? = nil
     ) {
         self.frame = frame
@@ -91,6 +95,7 @@ public struct SavedBrowserWindow: Codable, Equatable, Sendable {
         self.isKey = isKey
         self.spaceID = spaceID
         self.profileID = profileID
+        self.sidebarMode = sidebarMode
         self.appKitState = appKitState
     }
 

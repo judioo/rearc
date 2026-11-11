@@ -32,9 +32,13 @@ public enum SidebarSide: String, CaseIterable, Sendable {
 /// one is its mirror. Offsets are in points, x growing rightwards.
 public struct SidebarPlacement: Equatable, Sendable {
     public var side: SidebarSide
+    /// The window's sidebar is the mini column (⇧⌘S): too narrow for the
+    /// traffic lights, which then sit as they do with the sidebar on the right.
+    public var isMini: Bool
 
-    public init(side: SidebarSide) {
+    public init(side: SidebarSide, isMini: Bool = false) {
         self.side = side
+        self.isMini = isMini
     }
 
     /// From the sidebar towards the page: +1 on the left, −1 on the right.
@@ -49,9 +53,9 @@ public struct SidebarPlacement: Equatable, Sendable {
     public var cardSidebarEdge: SidebarSide { side }
 
     /// macOS draws the traffic lights at the top left whatever the side;
-    /// only on the left do they sit in the sidebar's top row.
+    /// only on the left, at full width, do they sit in the sidebar's top row.
     public var trafficLightsEdge: SidebarSide { .left }
-    public var trafficLightsInSidebar: Bool { side == .left }
+    public var trafficLightsInSidebar: Bool { side == .left && !isMini }
 
     /// The resize handle is on the sidebar's inner edge.
     public var resizeHandleEdge: SidebarSide { side.opposite }

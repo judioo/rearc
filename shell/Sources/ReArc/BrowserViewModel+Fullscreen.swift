@@ -76,6 +76,12 @@ extension BrowserViewModel {
         return scheme + PageOrigin.shortenedHost(host + port, limit: 36 - scheme.count)
     }
 
+    /// A sidebar's ⇧/⌘-click selection holds the keyboard (`SidebarSelectionKeyView`)
+    /// and Esc clears it, so in full screen that Esc is not the first of two to leave.
+    static func sidebarSelectionTakesEscape(in window: NSWindow) -> Bool {
+        (window.firstResponder as? SidebarSelectionKeyView)?.hasSelection() ?? false
+    }
+
     /// Observes the first press without taking it away from the page or a field.
     func handleFullscreenEscape(_ event: NSEvent) -> Bool {
         guard event.type == .keyDown, event.keyCode == 53, !event.isARepeat,
@@ -89,6 +95,7 @@ extension BrowserViewModel {
             || spaceEditorID != nil || profileEditorRequest != nil || isAirTrafficControlPresented
             || downloads.isTrayPresented || librarySection(in: store.keyWindowID) != nil
             || (focus == .text && !findBar.isPresented)
+            || Self.sidebarSelectionTakesEscape(in: window)
         let fullscreen = window.styleMask.contains(.fullScreen)
         _ = fullscreenEscapes[window.windowNumber, default: FullscreenEscape()].setFullscreen(fullscreen)
         let action = fullscreenEscapes[window.windowNumber, default: FullscreenEscape()]

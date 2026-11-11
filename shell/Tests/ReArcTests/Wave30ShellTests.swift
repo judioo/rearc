@@ -140,7 +140,7 @@ final class Wave30ShellTests: XCTestCase {
         let groups = ShellMenus.navigation(model) + ShellMenus.find(model) + ShellMenus.copyLink(model) + ShellMenus.zoom(model)
             + ShellMenus.tabNavigation(model) + ShellMenus.split(model) + ShellMenus.documents(model) + ShellMenus.tabSwitcher(model)
             + ShellMenus.tabPositions(model) + ShellMenus.spaces(model) + ShellMenus.sidebarItems(model) + ShellMenus.library(model)
-            + ShellMenus.developer(model) + ShellMenus.capture(model) + ShellMenus.printing(model)
+            + ShellMenus.developer(model) + ShellMenus.capture(model) + ShellMenus.printing(model) + [ShellMenus.miniSidebar(model)]
         let items = groups.flatMap { $0 }
         let expected: [String: String] = [
             "Back": "goBack", "Forward": "goForward", "Reload Page": "reloadPage", "Reload Ignoring Cache": "forceReloadPage",
@@ -149,12 +149,12 @@ final class Wave30ShellTests: XCTestCase {
             "Copy URL as Quote": "copyCurrentURLAsQuote", "Zoom In": "zoomIn", "Zoom Out": "zoomOut", "Actual Size": "resetZoom",
             "Next Tab": "selectNextTab", "Previous Tab": "selectPreviousTab", "Cycle Tab Backward": "cycleTabBackward",
             "Cycle Tab Forward": "cycleTabForward", "Add Split View": "addSplitView", "Close this Split Pane": "removeSplitView",
-            "New Note": "newNote", "New Easel": "newEasel", "Open Little ReArc in Space": "openTabIn", "Tab Switcher (Forward)": "cycleNextTab",
+            "New Note": "newNote", "New Easel": "newEasel", "Open Little ReArc or Peek in Space": "openTabIn", "Tab Switcher (Forward)": "cycleNextTab",
             "Tab Switcher (Backward)": "cyclePreviousTab", "Tab 1": "goToSidebarItem1", "Last Tab": "goToSidebarItem9",
             "Next Space": "focusNextSpace", "Previous Space": "focusPreviousSpace", "Space 1": "goToSpace1",
             "Pin/Unpin Tab": "pinTab", "Clear Unpinned Tabs": "clearExplore", "View Library": "viewLibrary",
             "Developer Tools": "developerTools", "Inspect Elements": "inspectElements", "JavaScript Console": "javaScriptConsole",
-            "Capture": "capturePage", "Print…": "printPage",
+            "Capture": "capturePage", "Print…": "printPage", "Show Mini Sidebar": "toggleMiniSidebar",
         ]
         for (title, id) in expected {
             let item = items.first { $0.title == title && !$0.isAlternate }

@@ -196,7 +196,7 @@ final class WindowSessionRecorder {
     }
 
     /// One window's record. Its frame is the windowed one when it is full screen.
-    func record(_ window: NSWindow, isKey: Bool, space: Space?) -> SavedBrowserWindow {
+    func record(_ window: NSWindow, isKey: Bool, space: Space?, sidebarMode: SidebarMode? = nil) -> SavedBrowserWindow {
         let fullScreen = window.styleMask.contains(.fullScreen)
         let frame = fullScreen ? (windowedFrames[ObjectIdentifier(window)] ?? window.frame) : window.frame
         let screen = window.screen ?? NSScreen.screens.first { $0.frame.intersects(frame) }
@@ -208,6 +208,7 @@ final class WindowSessionRecorder {
             isKey: isKey,
             spaceID: space?.id,
             profileID: space?.profileID,
+            sidebarMode: sidebarMode == .mini ? .mini : nil,
             appKitState: WindowDesktopState.encode(window)
         )
     }

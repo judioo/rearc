@@ -16,6 +16,8 @@ public enum AppCommandAction: Equatable, Hashable {
     case renameActiveProfile
     case createSpace
     case toggleSidebar
+    /// ⇧⌘S: the key window's sidebar between full and icons only (ReArc).
+    case toggleMiniSidebar
     case addSplitRight
     case addSplitBottom
     case separateFromSplit
@@ -110,6 +112,8 @@ public enum AppCommandAction: Equatable, Hashable {
 public struct CommandBarContext {
     public var store: SidebarStore
     public var isSidebarVisible: Bool
+    /// The key window's sidebar is the mini column.
+    public var isMiniSidebar: Bool
     public var closedTabStack: ClosedTabStack
     /// When a peek overlay is open, URL available for "Open in Little Arc".
     public var peekURL: URL?
@@ -127,6 +131,7 @@ public struct CommandBarContext {
     public init(
         store: SidebarStore,
         isSidebarVisible: Bool,
+        isMiniSidebar: Bool = false,
         closedTabStack: ClosedTabStack,
         peekURL: URL? = nil,
         focusedLittleArcID: LittleArcWindow.ID? = nil,
@@ -140,6 +145,7 @@ public struct CommandBarContext {
         self.pendingExtensionReinstall = pendingExtensionReinstall
         self.store = store
         self.isSidebarVisible = isSidebarVisible
+        self.isMiniSidebar = isMiniSidebar
         self.closedTabStack = closedTabStack
         self.peekURL = peekURL
         self.focusedLittleArcID = focusedLittleArcID
@@ -202,7 +208,7 @@ public struct AppCommand: Equatable, Identifiable {
             return !store.profiles.isEmpty
         case .createSpace:
             return true
-        case .toggleSidebar:
+        case .toggleSidebar, .toggleMiniSidebar:
             return true
         case .addSplitRight, .addSplitBottom:
             guard let tab = store.selectedTab else { return false }
@@ -452,6 +458,13 @@ public enum AppCommandRegistry {
                 keywords: ["sidebar", "hide", "show", "toggle"],
                 minQueryLength: 2,
                 action: .toggleSidebar
+            ),
+            AppCommand(
+                id: "toggle-mini-sidebar",
+                title: context.isMiniSidebar ? "Show Full Sidebar" : "Show Mini Sidebar",
+                keywords: ["sidebar", "mini", "compact", "icons", "narrow", "full", "toggle"],
+                minQueryLength: 2,
+                action: .toggleMiniSidebar
             ),
             AppCommand(
                 id: "split-right",

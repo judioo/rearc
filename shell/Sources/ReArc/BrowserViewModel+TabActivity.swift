@@ -136,6 +136,8 @@ extension BrowserViewModel {
     /// Shift+Cmd+C (plain), Option+Shift+Cmd+C (Markdown) and Copy as Quote.
     /// Quote reads the page's selection first; it falls back to the link.
     func copyURL(of tabID: Tab.ID? = nil, format: PageLinkCopyFormat) {
+        // A selection's links, one per line; a quote needs one page's text.
+        if tabID == nil, format != .quote, let ids = keySelectionIDs { return copyLinks(of: ids, format: format) }
         guard let id = tabID ?? store.selectedTabID, let tab = store.tab(withID: id) else { return }
         let engine = engineHost.engine(forTabID: id, profileID: profileID(for: tab))
         // Arc copies the link "without any trackers".

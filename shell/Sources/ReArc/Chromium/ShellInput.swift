@@ -44,6 +44,7 @@ enum ShellInput {
             NSApp.postEvent(up, atStart: false)
         case .direct:
             if model.handleTabSwitcherEvent(down)
+                || model.handlePeekEscape(down)
                 || model.handleDownloadsTrayEscape(down)
                 || model.handleLibraryEscape(down, pageHasFocus: model.shortcutRouter.pageHasFocus(down))
                 || model.shortcutRouter.handleKeyDown(down) { return timestamp }

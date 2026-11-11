@@ -101,6 +101,7 @@ extension SidebarStore {
 
     /// Recomputes each observed space's selection and notifies the rows that gained or lost it.
     func refreshSelectionObservers() {
+        validateMultiSelections()
         lookup.selectionNeedsRefresh = false
         for (spaceID, seen) in lookup.trackedSelection {
             let current = selectedItemID(inSpace: spaceID)

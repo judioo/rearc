@@ -492,7 +492,14 @@ private struct SpaceIconDropDelegate: DropDelegate {
             return true
         }
         guard let item = icon.draggedItemID else { return false }
-        withAnimation(.easeInOut(duration: 0.15)) { icon.model.moveEntry(item, toSpace: icon.space.id) }
+        withAnimation(.easeInOut(duration: 0.15)) {
+            // A selected row carries the window's whole selection.
+            if let selection = icon.model.draggedSelection(item) {
+                icon.model.moveItems(selection, toSpace: icon.space.id)
+            } else {
+                icon.model.moveEntry(item, toSpace: icon.space.id)
+            }
+        }
         return true
     }
 }

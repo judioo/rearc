@@ -27,6 +27,7 @@ struct SidebarListTable: NSViewRepresentable {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.sidebarCoveredByLibrary) private var covered
+    @Environment(\.isMiniSidebar) private var isMini
 
     func makeCoordinator() -> SidebarListController {
         SidebarListController(model: model, spaceID: spaceID, context: SidebarListCellContext(
@@ -65,6 +66,7 @@ struct SidebarListTable: NSViewRepresentable {
         if cells.pager !== pager { cells.pager = pager }
         if cells.colorScheme != colorScheme { cells.colorScheme = colorScheme }
         if cells.tint != tint { cells.tint = tint }
+        if cells.isMini != isMini { cells.isMini = isMini }
         let dragged = $draggedItemID, drop = $dropState
         cells.writeDragged = { dragged.wrappedValue = $0 }
         cells.writeDropState = { drop.wrappedValue = $0 }
@@ -85,6 +87,8 @@ final class SidebarListCellContext {
     var pager: SpacePagerController?
     var colorScheme: ColorScheme
     var tint: Color
+    /// The mini column (⇧⌘S): rows draw their icons only.
+    var isMini = false
     var draggedItemID: UUID?
     var dropState: SidebarDropState?
     /// The sidebar's own bindings; the mirrors above follow at once so a
@@ -143,6 +147,10 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
     var hostsAllRows: Bool { isDragging || externalDrag }
     /// Tab cards and folder lists for rows under the pointer.
     private(set) lazy var hoverPreview = SidebarHoverPreview(controller: self)
+    /// Holds the keyboard while this list has a multi-row selection, so ⌘C
+    /// copies its links and Esc drops it; the page gets it back after.
+    private let selectionKeys = SidebarSelectionKeyView()
+    private weak var focusBeforeSelection: NSResponder?
 
     static let cellID = NSUserInterfaceItemIdentifier("SidebarListCell")
     static let plainCellID = NSUserInterfaceItemIdentifier("SidebarPlainRow")
@@ -203,6 +211,9 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
         rebuild(animated: false, reloadAll: true)
         trackSelection()
         observeInteraction(scroll)
+        selectionKeys.bind(to: model) { [weak self] in self?.context.window }
+        scroll.addSubview(selectionKeys)
+        trackMultiSelection()
         return scroll
     }
 
@@ -251,6 +262,7 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
                 MainActor.assumeIsolated {
                     self?.isMenuTracking = true
                     self?.hoverPreview.cancel()
+                    self?.dropSelectionForMenuOutsideIt()
                 }
             },
             center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -263,6 +275,41 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
                 }
             },
         ]
+    }
+
+    /// A row's context menu opened on a row outside the selection: the menu
+    /// acts on that row alone (`SidebarStore.menuTargets`) and the selection goes.
+    private func dropSelectionForMenuOutsideIt() {
+        guard let table = tableView, let event = NSApp.currentEvent, event.window === table.window,
+              event.type == .rightMouseDown || (event.type == .leftMouseDown && event.modifierFlags.contains(.control)) else { return }
+        let index = table.row(at: table.convert(event.locationInWindow, from: nil))
+        guard rows.indices.contains(index), case .item(let item, _) = rows[index],
+              model.store.multiSelection(in: context.window)?.spaceID == spaceID,
+              !model.store.isMultiSelected(item.id, in: context.window) else { return }
+        model.clearSelection(in: context.window)
+    }
+
+    // MARK: Keyboard for a selection
+
+    /// Takes the keyboard when this list's window gets a selection in its
+    /// space, and hands it back to what had it when the selection ends.
+    private func trackMultiSelection() {
+        guard isActive else { return }
+        let selected = withObservationTracking {
+            model.store.multiSelection(in: context.window)?.spaceID == spaceID
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { self?.trackMultiSelection() }
+        }
+        guard let window = selectionKeys.window else { return }
+        if selected {
+            guard window.firstResponder !== selectionKeys else { return }
+            focusBeforeSelection = window.firstResponder
+            window.makeFirstResponder(selectionKeys)
+        } else if window.firstResponder === selectionKeys {
+            let previous = (focusBeforeSelection as? NSView).flatMap { $0.window === window ? $0 : nil }
+            window.makeFirstResponder(previous)
+            focusBeforeSelection = nil
+        }
     }
 
     /// Each visible plain row re-reads the pointer and whether it should be live.
@@ -497,6 +544,54 @@ extension SidebarListHeights {
     }()
 }
 
+/// The responder a list's multi-row selection holds the keyboard with:
+/// Edit › Copy (⌘C) copies the selected rows' links, Esc drops the selection.
+/// Other keys go on up the responder chain.
+final class SidebarSelectionKeyView: NSView, NSMenuItemValidation {
+    var onCopy: () -> Bool = { false }
+    var onCancel: () -> Bool = { false }
+    var hasSelection: () -> Bool = { false }
+
+    /// The keys act on `model`'s selection in the window `window` names. A
+    /// Peek in front sets the selection aside (`activeSelectionIDs`): ⌘C
+    /// copies nothing, and Esc never gets here while it is open, since the
+    /// Peek's Esc runs first (`handlePeekEscape`, before the responders).
+    func bind(to model: BrowserViewModel, window: @escaping () -> SidebarWindowID?) {
+        onCopy = { [weak model] in
+            guard let model, let ids = model.activeSelectionIDs(in: window()) else { return false }
+            model.copyLinks(of: ids)
+            return true
+        }
+        onCancel = { [weak model] in
+            guard let model, model.store.multiSelection(in: window()) != nil else { return false }
+            model.clearSelection(in: window())
+            return true
+        }
+        hasSelection = { [weak model] in model?.activeSelectionIDs(in: window()) != nil }
+    }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    @objc func copy(_ sender: Any?) {
+        if !onCopy() { NSSound.beep() }
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if !onCancel() { super.cancelOperation(sender) }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53, onCancel() { return }
+        super.keyDown(with: event)
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        item.action == #selector(copy(_:)) ? hasSelection() : true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 /// A table that never takes keyboard focus or draws a selection, and lets
 /// clicks reach the SwiftUI rows inside its cells.
 /// Responsive scrolling takes a gesture's events after the first straight off
@@ -574,6 +669,7 @@ struct SidebarListCell: View {
             .environment(\.sidebarWindow, context.window)
             .environment(\.spacePager, context.pager)
             .environment(\.colorScheme, context.colorScheme)
+            .environment(\.isMiniSidebar, context.isMini)
             .ignoresSafeArea()
     }
 
@@ -605,16 +701,25 @@ struct SidebarListCell: View {
             )
             .equatable()
         case .todayDivider:
-            SidebarTodayCell(model: model, spaceID: spaceID)
+            if context.isMini {
+                MiniTodayDivider()
+            } else {
+                SidebarTodayCell(model: model, spaceID: spaceID)
+            }
         case .newTab:
-            NewTabRowView { model.newTab() }
+            if context.isMini {
+                MiniNewTabRowView { model.newTab() }
+            } else {
+                NewTabRowView { model.newTab() }
+            }
         case .sectionEnd(let section, let isEmpty):
             SectionEndDropZone(
                 destination: .section(spaceID: spaceID, section: section),
                 placeholder: isEmpty ? (section == .pinned ? "Drop here to pin" : "Drop here to unpin") : nil,
                 model: model,
                 draggedItemID: context.draggedBinding,
-                dropState: context.dropStateBinding
+                dropState: context.dropStateBinding,
+                miniSymbol: section == .pinned ? "pin" : "pin.slash"
             )
         }
     }
@@ -626,17 +731,30 @@ private struct SidebarHeaderCell: View {
     let model: BrowserViewModel
     let spaceID: Space.ID
     @Environment(\.sidebarWindow) private var window
+    @Environment(\.isMiniSidebar) private var isMini
 
     var body: some View {
         let space = model.store.space(withID: spaceID) ?? model.space(in: window)
         let collapsed = model.isPinnedSectionCollapsed(spaceID: space.id, in: window)
-        SpaceHeaderView(
-            model: model,
-            space: space,
-            hasPinned: !model.store.outline(for: space.id).pinned.isEmpty,
-            isPinnedCollapsed: collapsed,
-            onTogglePinned: { model.togglePinnedSection(spaceID: space.id, in: window) }
-        )
+        Group {
+            if isMini {
+                MiniSpaceHeaderView(
+                    model: model,
+                    space: space,
+                    hasPinned: !model.store.outline(for: space.id).pinned.isEmpty,
+                    isPinnedCollapsed: collapsed,
+                    onTogglePinned: { model.togglePinnedSection(spaceID: space.id, in: window) }
+                )
+            } else {
+                SpaceHeaderView(
+                    model: model,
+                    space: space,
+                    hasPinned: !model.store.outline(for: space.id).pinned.isEmpty,
+                    isPinnedCollapsed: collapsed,
+                    onTogglePinned: { model.togglePinnedSection(spaceID: space.id, in: window) }
+                )
+            }
+        }
         .padding(.bottom, SidebarMetrics.headerToFirstRow)
     }
 }

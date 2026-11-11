@@ -162,15 +162,13 @@ enum ShellMenus {
     }
 
     /// File menu: Arc's New Note (⌃⇧N) and New Easel (⌃⇧E), and ⌘O, Arc's
-    /// "Open Little Arc or Peek in…": the key Little Arc moves to a tab in the
-    /// active space (Arc asks which space; ReArc has no chooser yet).
+    /// "Open Little Arc or Peek in…": the Peek, or the key Little Arc, moves to
+    /// a tab in the active space (Arc asks which space; ReArc has no chooser yet).
     static func documents(_ model: BrowserViewModel) -> [[ShellMenuItem]] {
         [[
             ShellMenuItem("New Note", "n", [.control, .shift]) { _ = model.executeCommand(.newNote, commandID: nil) },
             ShellMenuItem("New Easel", "e", [.control, .shift]) { _ = model.executeCommand(.newEasel, commandID: nil) },
-            ShellMenuItem("Open Little ReArc in Space", "o") {
-                if let id = model.keyLittleArcID { model.promoteLittleArcWindow(id) }
-            },
+            ShellMenuItem("Open Little ReArc or Peek in Space", "o") { model.openLittleArcOrPeekInSpace() },
         ]]
     }
 
@@ -247,6 +245,14 @@ enum ShellMenus {
         [[
             ShellMenuItem("Picture in Picture") { model.togglePictureInPicture() },
         ]]
+    }
+
+    /// View menu, after Show/Hide Sidebar: ReArc's mini sidebar (⇧⌘S). The
+    /// title names what the key window's sidebar becomes.
+    static func miniSidebar(_ model: BrowserViewModel) -> [ShellMenuItem] {
+        [ShellMenuItem("Show Mini Sidebar", "s", [.command, .shift], liveTitle: { model.miniSidebarMenuTitle }) {
+            model.toggleMiniSidebar()
+        }]
     }
 
     /// View menu: the sidebar's downloads tray (both engines).

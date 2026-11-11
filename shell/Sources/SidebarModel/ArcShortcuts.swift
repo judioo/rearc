@@ -85,7 +85,10 @@ public struct ArcShortcut: Hashable, Sendable {
 /// MainMenu.nib (its `arcKeyBindingID` and `arcKeyBindingPriority` runtime
 /// attributes; no user overrides in StorableKeyBindings.json), then the
 /// code-defined Space and sidebar-item bindings. docs/SHORTCUTS.md lists
-/// each with ReArc's status.
+/// each with ReArc's status. ReArc's own bindings (`reArcIDs`) sit among
+/// them in menu order, so Settings › Shortcuts and the routing treat them
+/// alike; Arc's Save Page As gave up ⇧⌘S to Toggle Mini Sidebar (ReArc
+/// has no save-page ABI, so the binding never ran).
 public enum ArcShortcuts {
     public static let all: [ArcShortcut] = app + file + edit + view + developer + archive + spaces + tabs + window
 
@@ -106,7 +109,6 @@ public enum ArcShortcuts {
         ArcShortcut("reopenLastClosedTab", "Restore Last Closed Tab", "t", [.shift, .command], .arcWins),
         ArcShortcut("archiveTab", "Archive Tab", "w", .command, .arcWins),
         ArcShortcut("closeWindow", "Close Window", "w", [.shift, .command], .arcWins),
-        ArcShortcut("savePageAs", "Save Page As", "s", [.shift, .command]),
         ArcShortcut("printPage", "Print", "p", .command, .websiteFirst),
         ArcShortcut("capturePage", "Capture…", "2", [.shift, .command]),
         ArcShortcut("newNote", "New Note", "n", [.control, .shift], .websiteFirst),
@@ -139,6 +141,8 @@ public enum ArcShortcuts {
 
     static let view: [ArcShortcut] = [
         ArcShortcut("showSidebar", "Show/Hide Sidebar", "s", .command, .websiteFirst),
+        // ReArc's own, after Arc's sidebar toggle with the same priority.
+        ArcShortcut("toggleMiniSidebar", "Toggle Mini Sidebar", "s", [.shift, .command], .websiteFirst),
         ArcShortcut("toggleToolbar", "Show/Hide Toolbar", "d", [.shift, .command], .websiteFirst),
         ArcShortcut("fullscreen", "Enter/Exit Full Screen", "f", [.control, .command], .websiteFirst),
         ArcShortcut("reloadPage", "Refresh the Page", "r", .command),
@@ -207,6 +211,15 @@ public enum ArcShortcuts {
         ArcShortcut("minimize", "Minimize Window", "m", .command, .arcWins),
         ArcShortcut("viewDownloads", "View Downloads", "j", [.shift, .command]),
         ArcShortcut("viewLibrary", "View Library", "l", [.shift, .command]),
+    ]
+
+    /// Bindings that are ReArc's, not Arc's (not in Arc's nib).
+    public static let reArcIDs: Set<String> = ["toggleMiniSidebar"]
+
+    /// Arc's bindings that ReArc dropped, and the ReArc binding that took
+    /// their keys (docs/SHORTCUTS.md).
+    public static let yieldedToReArc: [(arcID: String, title: String, display: String, takenBy: String)] = [
+        ("savePageAs", "Save Page As", "⇧⌘S", "toggleMiniSidebar"),
     ]
 
     /// Settings › Shortcuts › Learn the Essential Shortcuts (docs/SHORTCUTS.md

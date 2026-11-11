@@ -39,6 +39,9 @@ struct BrowserView: View {
             // is laid out beside it only at rest (`isSidebarLaidOut`).
             ZStack(alignment: Alignment(horizontal: placement.side.horizontalAlignment, vertical: .top)) {
                 contentCard
+                    // ⇧⌘S widening: the sidebar's new rows are laid out at
+                    // once, and the card sliding with its edge covers them.
+                    .zIndex(model.sidebarMorph(in: windowID).map { $0.isNarrowing ? 0 : 1 } ?? 0)
                 if model.isSidebarVisible || model.isSidebarSliding, !isPageFullscreen {
                     let width = model.sidebarWidth(in: windowID)
                     SidebarView(model: model, draggedItemID: $draggedItemID)
@@ -74,16 +77,21 @@ struct BrowserView: View {
                 .transition(.move(edge: edge).combined(with: .opacity))
             }
 
-            if let session = model.peekSession, let web = model.peekEngineView() {
-                PeekOverlayView(
-                    title: session.title,
-                    url: session.url,
-                    webContent: web,
-                    onOpenInTab: { model.peekOpenInFullTab() },
-                    onOpenInLittleArc: { model.peekOpenInLittleArc() },
-                    onCopyLink: { model.peekCopyLink() },
-                    onDismiss: { model.dismissPeek() }
-                )
+            if model.showsPeek(in: windowID), let session = model.peekSession {
+                GeometryReader { proxy in
+                    PeekOverlayView(model: model, session: session, layout: peekLayout(windowSize: proxy.size),
+                                    bounds: CGRect(origin: .zero, size: proxy.size), accent: model.themeColor(in: windowID))
+                }
+                .ignoresSafeArea()
+                .id(session.engineID)
+            } else if let closing = model.peekClosing, closing.windowID == nil || closing.windowID == windowID {
+                GeometryReader { proxy in
+                    PeekClosingCard(closing: closing, layout: peekLayout(windowSize: proxy.size),
+                                    bounds: CGRect(origin: .zero, size: proxy.size))
+                }
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .id(closing.id)
             }
 
             boostEditorChrome
@@ -163,11 +171,13 @@ struct BrowserView: View {
             WindowKeyObserver(
                 onBecameKey: { model.windowBecameKey(windowID) },
                 onClose: {
+                    if model.peekSession?.windowID == windowID { model.dismissPeek(animated: false) }
                     model.store.unregisterWindow(windowID)
                     model.pinnedSectionCollapse.forgetWindow(windowID)
                     model.splitMaximize.forgetWindow(windowID)
                     model.library.forgetWindow(windowID)
                     model.libraryGrowth[windowID] = nil
+                    model.forgetSidebarMode(for: windowID)
                 }
             )
             .frame(width: 0, height: 0)
@@ -183,6 +193,7 @@ struct BrowserView: View {
             .frame(width: 0, height: 0)
         )
         .navigationTitle(contentTitle)
+        .modifier(ProfileMoveAlert(model: model, isOwner: isKeyWindowSheetOwner))
         .sheet(isPresented: $model.isCapturePreviewPresented) {
             if let record = model.lastCapturePreview {
                 CapturePreviewSheet(record: record, model: model)
@@ -208,6 +219,7 @@ struct BrowserView: View {
             ExternalLinkRouter.shared.attach(model)
             model.installTabSwitcherMonitor()
             model.startLittleArcHotkey()
+            model.openSidebarMode(for: windowID)
             model.store.registerWindow(windowID, spaceID: initialSpaceID)
             stripCloseWindowShortcut()
             model.restoreLittleArcWindowsIfNeeded()
@@ -324,16 +336,31 @@ struct BrowserView: View {
         return model.themeColors.colors(for: id, theme: theme, dark: dark)
     }
 
+    /// The Peek centred beside a laid-out sidebar, else in the whole window;
+    /// a fullscreen Peek page fills the window.
+    private func peekLayout(windowSize: CGSize) -> PeekLayout {
+        let bounds = CGRect(origin: .zero, size: windowSize)
+        if model.isPeekPageFullscreen { return PeekLayout(region: bounds, isFullscreen: true) }
+        let besideSidebar = model.isSidebarVisible && model.isSidebarLaidOut && !isPageFullscreen
+        return PeekLayout(region: PeekLayout.region(
+            windowSize: windowSize,
+            sidebarWidth: besideSidebar ? model.peekSidebarWidth(in: windowID) : 0,
+            sidebarOnLeft: placement.side == .left
+        ))
+    }
+
     private var pageCardLayout: PageCardLayout {
         PageCardLayout(isNativeFullscreen: isNativeFullscreen, isPageFullscreen: isPageFullscreen)
     }
 
-    private var placement: SidebarPlacement { model.sidebarPlacement }
+    private var placement: SidebarPlacement { model.sidebarPlacement(in: windowID) }
     private var sidePanelLayout: SidePanelLayout { model.sidePanelLayout }
 
-    /// The card's toolbar strip, when shown (it holds the traffic lights with the sidebar on the right).
+    /// The card's toolbar strip, when shown (it holds the traffic lights with
+    /// the sidebar on the right). A mini sidebar has no room for the URL
+    /// field and buttons, so the strip shows whatever the setting.
     private var showsCardToolbar: Bool {
-        urlInToolbar && !isPageFullscreen
+        (urlInToolbar || model.isMiniSidebar(in: windowID)) && !isPageFullscreen
             && model.librarySection(in: windowID)?.coversPage != true && model.selectedEaselRef(in: windowID) == nil
     }
 
@@ -358,6 +385,7 @@ struct BrowserView: View {
     private var spaceProfileChangeText: (title: String, message: String, action: String) {
         model.pendingSpaceProfileChange.map(model.spaceProfileChangeMessage) ?? ("", "", "")
     }
+
 
     /// Only the key window presents the shared sheets.
     private var isKeyWindowSheetOwner: Bool {
@@ -446,14 +474,16 @@ struct BrowserView: View {
         let sidebarWidth = model.sidebarWidth(in: windowID)
         // The Library widening the sidebar moves the page without laying it out again.
         let growth = fullscreen ? nil : model.sidebarGrowth(in: windowID)
+        // ⇧⌘S moving the sidebar's edge: the page is laid out once, as for ⌘S.
+        let morph = fullscreen || growth != nil ? nil : model.sidebarMorph(in: windowID)
         let slide = fullscreen ? SidebarSlide() : SidebarSlide(
             reveal: model.sidebarReveal, width: sidebarWidth, inset: inset,
-            showing: model.isSidebarVisible, laidOut: model.isSidebarLaidOut
+            showing: model.isSidebarVisible, laidOut: model.isSidebarLaidOut, morph: morph
         )
         let shape = CardShape(radius: radius, sidebarCut: slide.cut, cutEdge: placement.cardSidebarEdge)
         let panelLayout = sidePanelLayout
         let lead = fullscreen ? 0 : SidePanelLayout.lead(sidebarLaidOut: model.isSidebarLaidOut,
-                                                          sidebarWidth: growth.map(\.from) ?? Double(sidebarWidth),
+                                                          sidebarWidth: growth.map(\.from) ?? morph?.layoutWidth ?? Double(sidebarWidth),
                                                           inset: Double(inset))
         // A split's panes are cards of their own, each with its own row (SPLIT-VIEW §3.1).
         let splitCards = !fullscreen && shownSplit != nil
@@ -486,6 +516,12 @@ struct BrowserView: View {
                     toolbarHeight: showsCardToolbar ? CardToolbarView.height : 0) { start in
             if start { model.startPendingExtensionReinstall() } else { model.postponePendingExtensionReinstall() }
         }
+        // The whole card, its toolbar strip too, as in Arc.
+        .overlay {
+            PeekBackdropWash(isShown: model.showsPeek(in: windowID) && !model.isPeekPageFullscreen) {
+                SpaceThemeBackground(model: model, window: windowID, pager: pager)
+            }
+        }
         .clipShape(shape)
         .background(shape.fill(splitCards ? .clear : cardFill))
         .background(CardShadow(shape: shape).opacity(layout.showsDecoration ? 1 : 0))
@@ -502,10 +538,13 @@ struct BrowserView: View {
         .ignoresSafeArea(edges: fullscreen ? .all : [])
     }
 
-    /// With the sidebar on the right the toolbar's first glyph starts after the traffic lights.
+    /// With the sidebar on the right, or a mini one on the left, the
+    /// toolbar's first glyph starts after the traffic lights: past the window
+    /// x they end at, less where the card starts.
     private var cardToolbarTrafficLightsClearance: CGFloat {
-        placement.trafficLightsInSidebar || !showsTrafficLights || !reservesCardToolbar
-            ? 0 : TrafficLightPositioner.titlebarWidth - Self.cardInset
+        guard !placement.trafficLightsInSidebar, showsTrafficLights, reservesCardToolbar else { return 0 }
+        let cardStart = placement.side == .left ? model.sidebarWidth(in: windowID) : Self.cardInset
+        return max(0, TrafficLightPositioner.titlebarWidth - cardStart)
     }
 
     /// The split the content area shows, if it shows one (`contentArea`'s order).
@@ -621,10 +660,16 @@ struct SidebarSlide: Equatable {
 
     init() {}
 
-    init(reveal: Double, width: CGFloat, inset: CGFloat, showing: Bool, laidOut: Bool) {
+    init(reveal: Double, width: CGFloat, inset: CGFloat, showing: Bool, laidOut: Bool, morph: SidebarWidthMorph? = nil) {
         let edge = CGFloat(reveal) * width
         if !showing { cut = max(0, edge - inset) }
         if showing, !laidOut { offset = CGFloat(reveal) * (width - inset) }
+        // ⇧⌘S: a narrowing cuts what the receding edge still covers; a
+        // widening slides the page with it (`SidebarWidthMorph`).
+        if let morph, showing, laidOut {
+            cut = CGFloat(morph.pageCut)
+            offset = CGFloat(morph.pageOffset)
+        }
     }
 }
 
@@ -731,6 +776,26 @@ struct PageZoomBadge: View {
             .padding(10)
             .padding(.top, topInset)
             .help("Page zoom — click to reset to 100% (⌘0)")
+        }
+    }
+}
+
+/// Move to Profile's one confirmation, for one row or a whole selection
+/// (`BrowserViewModel.requestProfileMove`).
+private struct ProfileMoveAlert: ViewModifier {
+    let model: BrowserViewModel
+    let isOwner: Bool
+
+    func body(content: Content) -> some View {
+        let text: (title: String, message: String, action: String) = model.pendingProfileMove.map(model.profileMoveMessage) ?? ("", "", "")
+        content.alert(text.title, isPresented: Binding(
+            get: { model.pendingProfileMove != nil && isOwner },
+            set: { if !$0 { model.pendingProfileMove = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { model.pendingProfileMove = nil }
+            Button(text.action) { model.confirmProfileMove() }
+        } message: {
+            Text(text.message)
         }
     }
 }

@@ -48,6 +48,7 @@ struct SidebarEntryRow: View, Equatable {
     @Binding var draggedItemID: UUID?
     @Binding var dropState: SidebarDropState?
     @Environment(\.sidebarWindow) private var window
+    @Environment(\.isMiniSidebar) private var isMini
 
     static func == (lhs: SidebarEntryRow, rhs: SidebarEntryRow) -> Bool {
         lhs.id == rhs.id && lhs.depth == rhs.depth && lhs.spaceID == rhs.spaceID
@@ -63,16 +64,28 @@ struct SidebarEntryRow: View, Equatable {
                 draggedItemID: $draggedItemID,
                 dropState: $dropState
             ) {
-                entryRow(entry)
+                if isMini {
+                    MiniSidebarEntryContent(entry: entry, spaceID: spaceID, model: model, isDropTarget: isDropInto)
+                } else {
+                    entryRow(entry)
+                }
             }
             .modifier(ItemIconPopover(model: model, itemID: id))
-            .padding(.leading, CGFloat(depth) * 14)
+            .padding(.leading, isMini ? CGFloat(MiniSidebarLayout.indent(depth: depth)) : CGFloat(depth) * 14)
         }
     }
 
     private var isDropInto: Bool { dropPosition == .into }
 
     private func isSelected(_ id: UUID) -> Bool { model.store.isSelected(id, inSpace: spaceID) }
+
+    /// In this window's ⇧/⌘-click selection, drawn grey unless it is the active row.
+    private func isMultiSelected(_ id: UUID) -> Bool { model.store.isMultiSelected(id, in: window) }
+
+    /// A ⇧- or ⌘-click changes the selection instead of `action` (`BrowserViewModel.rowClick`).
+    private func click(_ id: UUID, _ action: @escaping () -> Void) -> () -> Void {
+        model.rowClick(id, in: window, action)
+    }
 
     @ViewBuilder
     private func entryRow(_ entry: SidebarEntry) -> some View {
@@ -88,7 +101,7 @@ struct SidebarEntryRow: View, Equatable {
                 isUnloaded: model.isTabUnloaded(tab.id),
                 isInPictureInPicture: model.isPictureInPicture(tab.id),
                 activity: model.tabActivity(tab.id),
-                onSelect: { model.selectTab(tab.id) },
+                onSelect: click(tab.id) { model.selectTab(tab.id) },
                 onClose: { model.closeTab(tab.id) },
                 onMute: { model.toggleMute(tab.id) },
                 onPictureInPicture: { model.setPictureInPicture(false, tabID: tab.id) },
@@ -97,7 +110,8 @@ struct SidebarEntryRow: View, Equatable {
                 subtitle: model.renameHintSubtitle(for: tab.id),
                 closeKind: model.closeKind(of: tab.id),
                 onRename: { model.beginRename(.tab(tab.id)) },
-                rename: SidebarRowRename(row: tab.id, model: model)
+                rename: SidebarRowRename(row: tab.id, model: model),
+                isMultiSelected: isMultiSelected(tab.id)
             ) {
                 TabContextMenu(model: model, tab: tab)
             }
@@ -109,7 +123,8 @@ struct SidebarEntryRow: View, Equatable {
                 holdsOpenTabs: model.folderHoldsOpenTab(folder.id),
                 onCloseFolder: { model.closeFolderTabs(folder.id) },
                 rename: SidebarRowRename(row: folder.id, model: model),
-                onToggle: { model.store.toggleFolderExpanded(folder.id) }
+                isMultiSelected: isMultiSelected(folder.id),
+                onToggle: click(folder.id) { model.store.toggleFolderExpanded(folder.id) }
             ) {
                 FolderContextMenu(model: model, folder: folder)
             }
@@ -119,7 +134,7 @@ struct SidebarEntryRow: View, Equatable {
                 title: model.easelTitle(for: ref),
                 isNote: model.easelDocumentStore.document(id: ref.easelDocumentID)?.kind == .note,
                 isSelected: isSelected(ref.id),
-                onSelect: { model.selectEasel(ref.id) },
+                onSelect: click(ref.id) { model.selectEasel(ref.id) },
                 onClose: { model.deleteEaselSidebarItem(ref.id) },
                 onRename: { model.renameEasel(documentID: ref.easelDocumentID, title: $0) }
             )
@@ -129,12 +144,13 @@ struct SidebarEntryRow: View, Equatable {
                 split: split,
                 isSelected: isSelected(split.id),
                 isDropTarget: isDropInto,
+                isMultiSelected: isMultiSelected(split.id) && !isSelected(split.id),
                 focusedTabID: split.focusTabID,
                 favicon: { model.favicon(for: $0) },
                 showsAudibleIndicator: { model.showsAudibleIndicator(for: $0) },
                 onMutePane: { model.toggleMute($0) },
-                onSelectSplit: { model.selectSplit(split.id) },
-                onSelectPane: { model.selectSplit(split.id, focusTabID: $0) },
+                onSelectSplit: click(split.id) { model.selectSplit(split.id) },
+                onSelectPane: { pane in click(split.id) { model.selectSplit(split.id, focusTabID: pane) }() },
                 onCloseSplit: { model.closeSplit(split.id) },
                 onClosePane: { option, tabID in
                     if option {
@@ -303,15 +319,18 @@ struct SidebarRowDropDelegate: DropDelegate {
         }
         guard let draggedItemID, let position = position(for: info) else { return false }
         withAnimation(.easeInOut(duration: 0.15)) {
+            // A selected row carries the window's whole selection.
+            let selection = model.draggedSelection(draggedItemID)
             switch (position, target) {
             case (.into, .folder(let folder)):
-                model.moveItem(draggedItemID, intoFolder: folder.id)
+                if let selection { model.moveItems(selection, intoFolder: folder.id) }
+                else { model.moveItem(draggedItemID, intoFolder: folder.id) }
             case (.into, _):
                 model.combineIntoSplit(draggedItemID, onto: target.id)
-            case (.before, _):
-                model.moveItem(draggedItemID, relativeTo: target.id, after: false)
-            case (.after, _):
-                model.moveItem(draggedItemID, relativeTo: target.id, after: true)
+            case (.before, _), (.after, _):
+                let after = position == .after
+                if let selection, model.moveDraggedSelection(selection, relativeTo: target.id, after: after) { break }
+                model.moveItem(draggedItemID, relativeTo: target.id, after: after)
             }
         }
         SidebarDropHaptics.dropped(moved: true)
@@ -327,14 +346,25 @@ struct SectionEndDropZone: View {
     let model: BrowserViewModel
     @Binding var draggedItemID: UUID?
     @Binding var dropState: SidebarDropState?
+    /// The mini sidebar's stand-in for the placeholder's words.
+    var miniSymbol = "plus"
 
     @State private var isTargeted = false
+    @Environment(\.isMiniSidebar) private var isMini
 
     var body: some View {
         ZStack {
             if let placeholder {
-                Text(placeholder)
-                    .font(.caption)
+                Group {
+                    if isMini {
+                        Image(systemName: miniSymbol)
+                            .font(.system(size: 11, weight: .medium))
+                            .help(placeholder)
+                    } else {
+                        Text(placeholder)
+                            .font(.caption)
+                    }
+                }
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
@@ -397,7 +427,11 @@ struct SectionEndDropZone: View {
             let store = zone.model.store
             let count = store.entries(in: store.resolvedParent(zone.destination)).filter { $0.id != dragged }.count
             withAnimation(.easeInOut(duration: 0.15)) {
-                zone.model.moveItem(dragged, to: zone.destination, index: count)
+                if let selection = zone.model.draggedSelection(dragged) {
+                    zone.model.moveDraggedSelection(selection, appendingTo: zone.destination)
+                } else {
+                    zone.model.moveItem(dragged, to: zone.destination, index: count)
+                }
             }
             SidebarDropHaptics.dropped(moved: true)
             return true

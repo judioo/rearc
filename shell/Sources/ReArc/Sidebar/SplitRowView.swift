@@ -10,6 +10,8 @@ struct SplitRowView<Menu: View>: View {
     let split: SplitViewItem
     let isSelected: Bool
     let isDropTarget: Bool
+    /// In a multi-row selection without being the active row.
+    var isMultiSelected = false
     let focusedTabID: Tab.ID
     let favicon: (Tab) -> NSImage?
     let showsAudibleIndicator: (Tab.ID) -> Bool
@@ -46,6 +48,8 @@ struct SplitRowView<Menu: View>: View {
             } else if isSelected {
                 shape.fill(chrome.rowSelected)
                     .shadow(color: .black.opacity(chrome.isDark ? 0.3 : 0.08), radius: 1.5, y: 0.5)
+            } else if isMultiSelected {
+                shape.fill(chrome.rowMultiSelected)
             } else if isHovering {
                 shape.fill(chrome.rowHover)
             }

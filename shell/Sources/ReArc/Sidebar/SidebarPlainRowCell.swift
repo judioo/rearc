@@ -106,7 +106,8 @@ final class SidebarPlainRowCell: NSView {
         let current = generation
         let model = controller.model, spaceID = controller.spaceID, context = controller.context
         let next = withObservationTracking {
-            PlainRowState.read(id: rowID, model: model, spaceID: spaceID, chrome: context.chrome)
+            PlainRowState.read(id: rowID, model: model, spaceID: spaceID, window: context.window, chrome: context.chrome,
+                               isMini: context.isMini)
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 guard let self, self.generation == current else { return }
@@ -124,7 +125,9 @@ final class SidebarPlainRowCell: NSView {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             title.font = .systemFont(ofSize: SidebarMetrics.titleSize, weight: kind == .folder ? .semibold : .regular)
             title.stringValue = state.title
-            title.textColor = NSColor(chrome.title)
+            title.textColor = NSColor(state.isMultiSelected && !state.isSelected ? chrome.multiSelectedTitle : chrome.title)
+            // The mini column (⇧⌘S) draws the icon alone; the title is its tooltip.
+            title.isHidden = state.isMini
             if let customIcon = state.customIcon {
                 applyCustomIcon(customIcon)
             } else {
@@ -132,7 +135,7 @@ final class SidebarPlainRowCell: NSView {
                 case .folder:
                     icon.image = SidebarFolderGlyph.image(isOpen: state.isExpanded, holdsOpenTabs: state.holdsOpenTabs)
                     icon.imageScaling = .scaleNone
-                    icon.contentTintColor = NSColor(chrome.accent)
+                    icon.contentTintColor = NSColor(state.isMultiSelected ? chrome.multiSelectedAccent : chrome.accent)
                     icon.layer?.cornerRadius = 0
                     icon.isHidden = false
                     icon.alphaValue = 1
@@ -166,6 +169,7 @@ final class SidebarPlainRowCell: NSView {
             unread.isHidden = !state.isUnread
             fill.selectedColor = NSColor(chrome.rowSelected).cgColor
             fill.hoverColor = NSColor(chrome.rowHover).cgColor
+            fill.multiSelectedColor = NSColor(chrome.rowMultiSelected).cgColor
             fill.shadowOpacity = chrome.isDark ? 0.3 : 0.08
         }
         updateFill()
@@ -183,7 +187,10 @@ final class SidebarPlainRowCell: NSView {
             icon.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: size, weight: .medium))
             icon.imageScaling = .scaleProportionallyUpOrDown
-            icon.contentTintColor = NSColor(kind == .folder ? state.chrome.accent : state.chrome.title)
+            let multi = state.isMultiSelected && !(state.isSelected && kind != .folder)
+            icon.contentTintColor = NSColor(kind == .folder
+                ? (multi ? state.chrome.multiSelectedAccent : state.chrome.accent)
+                : (multi ? state.chrome.multiSelectedTitle : state.chrome.title))
             icon.isHidden = false
             tokenBadge.isHidden = true
         case .emoji(let text):
@@ -207,11 +214,15 @@ final class SidebarPlainRowCell: NSView {
 
     /// `TabRowView` and `FolderRowView`'s geometry: the 8 pt row inset, 14 pt
     /// per folder level, a 36 pt highlight centred in the 41 pt pitch, the
-    /// icon 10 pt in, the title 11 pt after it.
+    /// icon 10 pt in, the title 11 pt after it. At mini width
+    /// (`MiniSidebarLayout`) levels step 4 pt, there is no title, and the
+    /// unread dot sits on the icon's corner.
     override func layout() {
         super.layout()
         let width = bounds.width
-        let x0 = SidebarMetrics.rowInset + CGFloat(depth) * 14
+        let x0 = state.isMini
+            ? CGFloat(MiniSidebarLayout.highlight(depth: depth).x)
+            : SidebarMetrics.rowInset + CGFloat(depth) * 14
         let inset = (SidebarMetrics.rowPitch - SidebarMetrics.rowHeight) / 2
         let highlight = NSRect(x: x0, y: inset, width: max(0, width - SidebarMetrics.rowInset - x0), height: SidebarMetrics.rowHeight)
         fill.frame = highlight
@@ -239,7 +250,11 @@ final class SidebarPlainRowCell: NSView {
         title.frame = NSRect(x: titleX, y: (midY - titleHeight / 2).rounded(), width: titleWidth, height: titleHeight)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        unread.frame = CGRect(x: titleX + titleWidth + SidebarMetrics.iconToText, y: midY - 3, width: 6, height: 6)
+        if state.isMini {
+            unread.frame = CGRect(x: iconX + size - 1, y: midY - size / 2 - 5, width: 6, height: 6)
+        } else {
+            unread.frame = CGRect(x: titleX + titleWidth + SidebarMetrics.iconToText, y: midY - 3, width: 6, height: 6)
+        }
         CATransaction.commit()
     }
 
@@ -322,6 +337,9 @@ final class SidebarPlainRowCell: NSView {
         let style: SidebarRowFillView.Style
         if !hosted, state.isSelected, kind != .folder {
             style = .selected
+        } else if state.isMultiSelected, !(state.isSelected && kind != .folder) {
+            // A hosted row draws its own grey, as it draws its own pill.
+            style = hosted ? .none : .multiSelected
         } else if pointerInside, !(hosted && hostedHover), !(hosted && state.isSelected && kind != .folder) {
             style = .hover
         } else {
@@ -440,19 +458,29 @@ struct PlainRowState: Equatable {
     var customIcon: SidebarItemIcon?
     var token = ""
     var isSelected = false
+    /// In the window's ⇧/⌘-click selection (the active row included).
+    var isMultiSelected = false
     var isUnloaded = false
     var isUnread = false
     var isExpanded = false
     var holdsOpenTabs = false
+    /// Drawn at mini width (⇧⌘S).
+    var isMini = false
     /// Something only the SwiftUI row draws (a loading ring, a crash glyph,
     /// an audio or Picture in Picture badge, the rename hint), or a rename
     /// field that keeps focus wherever the pointer goes.
     var needsHosting = false
-    var chrome = ThemeChromeColors(theme: .default, dark: false)
+    var chrome = PlainRowState.blankChrome
+    /// Built once: every read starts from a blank state, and the chrome's
+    /// fitting (the multi-selection veil's included) samples the theme finely.
+    private static let blankChrome = ThemeChromeColors(theme: .default, dark: false)
 
-    static func read(id: UUID, model: BrowserViewModel, spaceID: Space.ID, chrome: ThemeChromeColors) -> PlainRowState {
+    static func read(id: UUID, model: BrowserViewModel, spaceID: Space.ID, window: SidebarWindowID? = nil,
+                     chrome: ThemeChromeColors, isMini: Bool = false) -> PlainRowState {
         var state = PlainRowState()
         state.chrome = chrome
+        state.isMultiSelected = model.store.isMultiSelected(id, in: window)
+        state.isMini = isMini
         switch model.store.entry(withID: id) {
         case .tab(let tab):
             state.title = tab.displayTitle
@@ -483,8 +511,9 @@ struct PlainRowState: Equatable {
 
     static func == (a: PlainRowState, b: PlainRowState) -> Bool {
         a.title == b.title && a.customIcon == b.customIcon && a.favicon === b.favicon && a.token == b.token && a.isSelected == b.isSelected
+            && a.isMultiSelected == b.isMultiSelected
             && a.isUnloaded == b.isUnloaded && a.isUnread == b.isUnread && a.isExpanded == b.isExpanded
-            && a.holdsOpenTabs == b.holdsOpenTabs
+            && a.holdsOpenTabs == b.holdsOpenTabs && a.isMini == b.isMini
             && a.needsHosting == b.needsHosting && a.chrome == b.chrome
     }
 }
@@ -492,11 +521,12 @@ struct PlainRowState: Equatable {
 /// The row's highlight: the selected fill with its small shadow, or the
 /// hover wash, on a continuous 8 pt rounded rectangle.
 final class SidebarRowFillView: NSView {
-    enum Style { case none, hover, selected }
+    enum Style { case none, hover, selected, multiSelected }
 
     var style: Style = .none { didSet { if style != oldValue { needsDisplay = true } } }
     var selectedColor: CGColor? { didSet { needsDisplay = true } }
     var hoverColor: CGColor? { didSet { needsDisplay = true } }
+    var multiSelectedColor: CGColor? { didSet { needsDisplay = true } }
     var shadowOpacity: Float = 0.08 { didSet { needsDisplay = true } }
 
     override init(frame frameRect: NSRect) {
@@ -520,6 +550,9 @@ final class SidebarRowFillView: NSView {
             layer.shadowOpacity = 0
         case .hover:
             layer.backgroundColor = hoverColor
+            layer.shadowOpacity = 0
+        case .multiSelected:
+            layer.backgroundColor = multiSelectedColor
             layer.shadowOpacity = 0
         case .selected:
             layer.backgroundColor = selectedColor

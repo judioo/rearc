@@ -118,6 +118,10 @@ public final class SidebarStore {
     private var selectionBySpace: [Space.ID: UUID] {
         didSet { refreshSelectionObservers() }
     }
+    /// Each window's ⇧/⌘-click selection (`SidebarMultiSelection`); not persisted.
+    /// Set while one command closes several tabs (`closingAsOneBatch`).
+    @ObservationIgnored var closedTabBatchID: UUID?
+    @ObservationIgnored var multiSelectionByWindow: [SidebarWindowID?: SidebarMultiSelection] = [:]
     /// Fine-grained observation of the tree (`SidebarObservationKey`).
     @ObservationIgnored let observation = ObservationCells<SidebarObservationKey>()
     /// Sorted content, the id index and the other derived lookups.
@@ -604,17 +608,20 @@ public final class SidebarStore {
 
     // MARK: - Tab mutation
 
+    /// `tabID` is the new tab's identity: a page that already has a shell
+    /// identity (a Peek expanded into a tab) keeps it.
     @discardableResult
     public func addTab(
         kind: Tab.Kind,
         title: String,
         url: URL,
-        in spaceID: Space.ID? = nil
+        in spaceID: Space.ID? = nil,
+        tabID: Tab.ID = UUID()
     ) -> Tab {
         switch kind {
         case .favorite:
             let profileID = spaceID.flatMap { space(withID: $0)?.profileID } ?? activeProfileID
-            var tab = Tab(kind: kind, title: title, url: url, lastActiveAt: now())
+            var tab = Tab(id: tabID, kind: kind, title: title, url: url, lastActiveAt: now())
             let existing = favorites(in: profileID)
             tab.sortRank = rankForNewFavorite(at: existing.count, profileID: profileID)
             favoritesByProfile[profileID, default: []].append(tab)
@@ -629,7 +636,7 @@ public final class SidebarStore {
             let id = spaceID ?? activeSpaceID
             var content = contentBySpace[id] ?? SpaceContent()
             let rank = rankForNewItem(in: content.pinned, atIndex: content.pinned.count)
-            let tab = Tab(kind: kind, title: title, url: url, sortRank: rank, lastActiveAt: now())
+            let tab = Tab(id: tabID, kind: kind, title: title, url: url, sortRank: rank, lastActiveAt: now())
             content.pinned.append(.tab(tab))
             contentBySpace[id] = content
             notifyMutation(.insertItem(id: tab.id, spaceID: id, container: .pinned, sortRank: rank))
@@ -638,7 +645,7 @@ public final class SidebarStore {
             let id = spaceID ?? activeSpaceID
             var content = contentBySpace[id] ?? SpaceContent()
             let rank = rankForNewItem(in: content.today, atIndex: 0)
-            let tab = Tab(kind: kind, title: title, url: url, sortRank: rank, lastActiveAt: now())
+            let tab = Tab(id: tabID, kind: kind, title: title, url: url, sortRank: rank, lastActiveAt: now())
             content.today.insert(.tab(tab), at: 0)
             contentBySpace[id] = content
             notifyMutation(.insertItem(id: tab.id, spaceID: id, container: .unpinned, sortRank: rank))
@@ -1000,7 +1007,7 @@ public final class SidebarStore {
             case .favorites: return
             }
         }
-        closedTabStack.push(ClosedTabRecord(tab: tab, spaceID: spaceID, placement: placement))
+        closedTabStack.push(ClosedTabRecord(tab: tab, spaceID: spaceID, placement: placement, batchID: closedTabBatchID))
         notifyMutation()
     }
 
@@ -1012,7 +1019,8 @@ public final class SidebarStore {
             tab: focus,
             spaceID: location.spaceID,
             placement: .section(location.section, index: index),
-            split: split
+            split: split,
+            batchID: closedTabBatchID
         ))
     }
 

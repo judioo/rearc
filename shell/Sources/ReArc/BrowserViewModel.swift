@@ -14,6 +14,19 @@ final class BrowserViewModel {
         var title: String
         var engineID: UUID
         var profileID: Profile.ID
+        /// The tab whose page opened it (nil from the command bar): Open in Split View joins it.
+        var sourceTabID: Tab.ID? = nil
+        /// The browser window it shows in (nil: whichever is key).
+        var windowID: SidebarWindowID? = nil
+        /// The click it grows from and shrinks back to, in that window (top-left origin).
+        var origin: CGPoint? = nil
+    }
+
+    /// A closed Peek's card shrinking back to its click, for `PeekMotion.closeDuration`.
+    struct PeekClosing: Equatable {
+        let id = UUID()
+        var windowID: SidebarWindowID?
+        var origin: CGPoint?
     }
 
     enum CommandBarURLIntent: Equatable {
@@ -161,6 +174,12 @@ final class BrowserViewModel {
     /// The hidden sidebar shown floating while the pointer is at the window's
     /// leading edge (Arc `SidebarHovering` / floating sidebar).
     var isSidebarPeeking = false
+    /// Each window's sidebar, full or the mini column (⇧⌘S).
+    var sidebarModes = SidebarModes()
+    /// Windows whose sidebar is moving between full and mini width (animated).
+    var sidebarMorphs: [SidebarWindowID?: SidebarWidthMorph] = [:]
+    /// Saves the window session after ⇧⌘S (the Chromium shell's recorder).
+    @ObservationIgnored var onSidebarModeChange: (() -> Void)?
     /// Settings › General › Sidebar position, as laid out now. `setSidebarSide`
     /// changes it behind `sidebarFlipOpacity`.
     var sidebarSide: SidebarSide = .load(from: .standard)
@@ -276,6 +295,8 @@ final class BrowserViewModel {
     var pendingDeletion: SidebarDeletionRequest?
     /// A space waiting for confirmation to move to another profile.
     var pendingSpaceProfileChange: SpaceProfileChange?
+    /// Rows moving to a space of another profile, waiting for confirmation.
+    var pendingProfileMove: SidebarProfileMove?
     @ObservationIgnored var autoArchiveTimer: Timer?
     /// Engine whose favicon is being tracked, per tab.
     @ObservationIgnored var faviconObservedEngines: [Tab.ID: ObjectIdentifier] = [:]
@@ -419,7 +440,8 @@ final class BrowserViewModel {
         commandBarCommandIndexCache.value {
             CommandBarSearch.CommandIndex(catalog: commandBarCatalogCache.value {
                 AppCommandRegistry.all(in: CommandBarContext(
-                    store: store, isSidebarVisible: isSidebarVisible, closedTabStack: store.closedTabStack,
+                    store: store, isSidebarVisible: isSidebarVisible, isMiniSidebar: isMiniSidebar(in: store.keyWindowID),
+                    closedTabStack: store.closedTabStack,
                     peekURL: peekSession?.url, focusedLittleArcID: focusedLittleArcID,
                     mediaByTab: mediaStateByTab, tabMuteModel: tabMuteModel,
                     navigationSchemes: engineHost.navigationSchemes, externalLinkDestination: externalLinkDestination,
@@ -475,6 +497,9 @@ final class BrowserViewModel {
     var pendingProfileRenameName = ""
 
     var peekSession: PeekSession?
+    var peekClosing: PeekClosing?
+    /// The NSWindow the Peek opened in: only its keys (Esc) reach it.
+    @ObservationIgnored weak var peekHostWindow: NSWindow?
     var focusedLittleArcID: LittleArcWindow.ID?
     var littleArcOpenRequests: [LittleArcWindow.ID] = []
     /// Opens Little Arc windows when the app has no SwiftUI scenes (Chromium path).
@@ -960,6 +985,7 @@ final class BrowserViewModel {
     }
 
     func closeSelectedTab() {
+        if let ids = keySelectionIDs { return closeItems(ids) }
         guard let id = store.selectedTabID else { return }
         closeTab(id)
     }
@@ -1392,8 +1418,10 @@ final class BrowserViewModel {
     func configureLinkPeek(on engine: any WebEngine, tab: Tab? = nil) {
         engine.automaticPeekSourceURL = automaticPeekEnabled && tab?.kind != .today ? tab.map { $0.savedURL ?? $0.url } : nil
         let profileID = tab.map { self.profileID(for: $0) } ?? engine.pagePrompts.profileID ?? store.activeProfileID
+        let sourceTabID = tab?.id
         engine.linkPeekHandler = { [weak self] url in
-            self?.showPeek(url: url, profileID: profileID)
+            guard let self else { return }
+            self.showPeek(url: url, profileID: profileID, sourceTabID: sourceTabID, origin: self.peekPointerOrigin())
         }
         (engine as? ShiftClickPeekConfigurable)?.shiftClickPeekEnabled = peekOnShiftClick
         configureLittleArcClicks(on: engine, profileID: profileID)
@@ -1408,19 +1436,24 @@ final class BrowserViewModel {
 
     // MARK: - Peek
 
-    func showPeek(url: URL, profileID: Profile.ID? = nil) {
+    func showPeek(url: URL, profileID: Profile.ID? = nil, sourceTabID: Tab.ID? = nil, origin: CGPoint? = nil) {
         PerfSignposts.interaction(.peekOpen)
-        dismissPeek()
+        dismissPeek(animated: false)
         let originProfile = profileID ?? store.activeProfileID
         let (engineID, engine) = engineHost.ephemeralEngine(profileID: originProfile)
         engine.linkPeekHandler = nil
         engine.load(url)
         scheduleTransientWarmup()
+        peekClosing = nil
+        peekHostWindow = NSApp.keyWindow
         peekSession = PeekSession(
             url: url,
             title: url.host() ?? url.absoluteString,
             engineID: engineID,
-            profileID: originProfile
+            profileID: originProfile,
+            sourceTabID: sourceTabID,
+            windowID: store.keyWindowID,
+            origin: origin
         )
         if let wk = engine as? NavigationCommitReporting {
             wk.onNavigationCommit = { [weak self] navURL, title in
@@ -1433,10 +1466,27 @@ final class BrowserViewModel {
         }
     }
 
-    func dismissPeek() {
+    /// Closes the Peek and drops its page. `animated` shrinks the card back
+    /// to its click (Close, Esc, a click outside); a Peek replaced by another
+    /// or moved into a tab just goes.
+    func dismissPeek(animated: Bool = true) {
         guard let session = peekSession else { return }
         engineHost.removeEphemeral(id: session.engineID, profileID: session.profileID)
         peekSession = nil
+        guard animated else { return }
+        let closing = PeekClosing(windowID: session.windowID, origin: session.origin)
+        peekClosing = closing
+        DispatchQueue.main.asyncAfter(deadline: .now() + PeekMotion.closeDuration + 0.05) { [weak self] in
+            if self?.peekClosing == closing { self?.peekClosing = nil }
+        }
+    }
+
+    /// The pointer in the key window, top-left origin: a Peek a click opened grows from it.
+    private func peekPointerOrigin() -> CGPoint? {
+        guard let window = NSApp.keyWindow, let content = window.contentView else { return nil }
+        let point = content.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        guard content.bounds.contains(point) else { return nil }
+        return CGPoint(x: point.x, y: content.isFlipped ? point.y : content.bounds.height - point.y)
     }
 
     /// Opens `url` in a new Today tab of the active space and selects it.
@@ -1449,25 +1499,62 @@ final class BrowserViewModel {
         return tab
     }
 
+    /// Arc's expand button and ⌘O: the Peek becomes a tab of the current
+    /// space, the page it already shows with its history (nothing reloads).
     func peekOpenInFullTab() {
         guard let session = peekSession else { return }
-        let url = session.url
         let originProfile = session.profileID
-        dismissPeek()
         if store.activeProfileID != originProfile {
             store.selectProfile(originProfile)
         }
-        let tab = store.addTab(kind: .today, title: url.host() ?? "New Tab", url: url)
+        let sourceSpace = session.sourceTabID.flatMap(store.spaceContaining(tabID:))
+            .flatMap { store.space(withID: $0)?.profileID == originProfile ? $0 : nil }
+        let tab = adoptPeekAsTab(session, in: sourceSpace)
         store.selectTab(tab.id)
-        engineHost.engine(for: tab, profileID: originProfile).load(url)
         loadSelectedIfNeeded()
+    }
+
+    /// The tab the Peek's Open in Split View would join, if it can join one.
+    var peekSplitAnchor: Tab.ID? {
+        store.peekSplitAnchor(sourceTabID: peekSession?.sourceTabID)
+    }
+
+    /// Arc's split button: the Peek becomes a pane beside the tab it was
+    /// opened from, with its page as it is, and takes the focus.
+    func peekOpenInSplitView() {
+        guard let session = peekSession, let anchor = peekSplitAnchor,
+              let space = store.spaceContaining(tabID: anchor) else { return }
+        let tab = adoptPeekAsTab(session, in: space)
+        if let split = store.splitTab(tab.id, with: anchor) {
+            store.setSplitFocus(splitID: split.id, tabID: tab.id)
+        } else {
+            store.selectTab(tab.id)
+        }
+        loadSelectedIfNeeded()
+    }
+
+    /// The Peek's page becomes a Today tab with the Peek's id, which is its
+    /// engine's shell identity, so the engine moves over as it is. A space in
+    /// another container cannot take the page: it loads again there.
+    private func adoptPeekAsTab(_ session: PeekSession, in spaceID: Space.ID?) -> Tab {
+        let engine = engineHost.ephemeralEngine(withID: session.engineID, profileID: session.profileID)
+        let url = engine?.currentURL ?? session.url
+        let title = engine?.pageTitle.flatMap { $0.isEmpty ? nil : $0 } ?? session.title
+        peekSession = nil
+        peekClosing = nil
+        let tab = store.addTab(kind: .today, title: title, url: url, in: spaceID, tabID: session.engineID)
+        if profileID(for: tab) != session.profileID
+            || engineHost.promoteEphemeral(id: session.engineID, profileID: session.profileID, to: tab) == nil {
+            engineHost.removeEphemeral(id: session.engineID, profileID: session.profileID)
+        }
+        return tab
     }
 
     func peekOpenInLittleArc() {
         guard let session = peekSession else { return }
         let url = session.url
         let originProfile = session.profileID
-        dismissPeek()
+        dismissPeek(animated: false)
         openLittleArc(url: url, profileID: originProfile)
     }
 
@@ -1475,6 +1562,12 @@ final class BrowserViewModel {
         guard let url = peekSession?.url else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(url.absoluteString, forType: .string)
+    }
+
+    /// The open Peek's page, while there is one.
+    var peekEngine: (any WebEngine)? {
+        guard let session = peekSession else { return nil }
+        return engineHost.ephemeralEngine(withID: session.engineID, profileID: session.profileID)
     }
 
     func peekEngineView() -> AnyView? {
@@ -1946,11 +2039,15 @@ final class BrowserViewModel {
     }
 
     func reopenClosedTab() {
-        guard let tab = store.reopenMostRecentClosedTab() else { return }
-        // A reopened split brings back every pane; panes already open keep their pages.
-        for pane in store.splitContaining(tabID: tab.id)?.split.tabs ?? [tab]
-        where pane.id == tab.id || engineHost.engine(forTabID: pane.id, profileID: profileID(for: pane)) == nil {
-            engineHost.engine(for: pane, profileID: profileID(for: pane)).load(pane.url)
+        // Tabs closed together (a selection's ⌘W) come back together.
+        let reopened = store.reopenMostRecentClosedBatch()
+        guard !reopened.isEmpty else { return }
+        for tab in reopened {
+            // A reopened split brings back every pane; panes already open keep their pages.
+            for pane in store.splitContaining(tabID: tab.id)?.split.tabs ?? [tab]
+            where pane.id == tab.id || engineHost.engine(forTabID: pane.id, profileID: profileID(for: pane)) == nil {
+                engineHost.engine(for: pane, profileID: profileID(for: pane)).load(pane.url)
+            }
         }
         loadSelectedIfNeeded()
     }
@@ -1998,6 +2095,8 @@ final class BrowserViewModel {
             beginSpaceCreation()
         case .toggleSidebar:
             toggleSidebar()
+        case .toggleMiniSidebar:
+            toggleMiniSidebar()
         case .addSplitRight:
             addSplitView(orientation: .horizontal)
         case .addSplitBottom:

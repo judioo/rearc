@@ -28,10 +28,11 @@ public struct SidebarBackdrop: Hashable, Sendable {
 
     public static let span = 0.3
 
-    public init(theme: SpaceTheme, dark: Bool, span: Double = Self.span) {
+    /// `rows` and `columns` set how finely the sidebar is sampled.
+    public init(theme: SpaceTheme, dark: Bool, span: Double = Self.span, rows: Int = 8, columns: Int = 4) {
         let gradient = ThemeGradient(theme: theme, dark: dark)
-        let samples = stride(from: 0.0, through: 1.0, by: 0.125).flatMap { v in
-            stride(from: 0.0, through: span, by: span / 4).map { u in
+        let samples = stride(from: 0.0, through: 1.0, by: 1 / Double(rows)).flatMap { v in
+            stride(from: 0.0, through: span, by: span / Double(columns)).map { u in
                 Self.textured(gradient.color(u: u, v: v).clamped, theme: theme)
             }
         }
@@ -117,6 +118,61 @@ public extension SpaceThemeRoles {
 public enum SidebarRowWash {
     public static func selectedAlpha(lightInk: Bool) -> Double { lightInk ? 0.16 : 0.92 }
     public static func hoverAlpha(lightInk: Bool) -> Double { lightInk ? 0.08 : 0.42 }
+
+    /// The other rows of a multi-row selection (`SidebarMultiSelection`):
+    /// the way Arc greys them, a veil over the sidebar (#D1CBC8 on #E9E4E0,
+    /// about 10 % black, 2026-11-11 recording), unlike the active row's pill
+    /// and the hover wash. The veil is of the ink's own side (black under
+    /// dark ink, white under light ink), so the title is fitted again on it.
+    /// Where even black or white cannot read on it, the row takes a veil of
+    /// the other side instead, which only adds contrast.
+    public struct MultiSelected: Equatable, Sendable {
+        public var veil: SpaceColor
+        public var alpha: Double
+        /// The row's title, moved only as far as its floor needs.
+        public var title: SpaceColor
+    }
+
+    public static let multiSelectedAlpha = 0.10
+    /// The other side's veil, where the ink's own cannot keep the title legible.
+    public static let multiSelectedFallbackAlpha = 0.22
+
+    /// On `theme`'s sidebar, sampled finely: the veil can take a title to
+    /// its floor, so the fit must see the lightest and darkest spots.
+    public static func multiSelected(title: SpaceColor, theme: SpaceTheme, windowDark: Bool, lightInk: Bool) -> MultiSelected {
+        multiSelected(title: title, backdrop: SidebarBackdrop(theme: theme, dark: windowDark, rows: 20, columns: 10), lightInk: lightInk)
+    }
+
+    public static func multiSelected(title: SpaceColor, backdrop: SidebarBackdrop, lightInk: Bool) -> MultiSelected {
+        func veiled(_ veil: SpaceColor, _ alpha: Double) -> SidebarBackdrop {
+            SidebarBackdrop(darkest: backdrop.darkest.mixed(with: veil, fraction: alpha),
+                            lightest: backdrop.lightest.mixed(with: veil, fraction: alpha))
+        }
+        let own: SpaceColor = lightInk ? .white : .black
+        let row = veiled(own, multiSelectedAlpha)
+        let fitted = row.legible(title, floor: SidebarContrast.text, lightInk: lightInk)
+        if row.contrast(of: fitted, lightInk: lightInk) >= SidebarContrast.text {
+            return MultiSelected(veil: own, alpha: multiSelectedAlpha, title: fitted)
+        }
+        return MultiSelected(veil: lightInk ? .black : .white, alpha: multiSelectedFallbackAlpha, title: title)
+    }
+}
+
+public extension SidebarRowWash.MultiSelected {
+    /// A glyph on this veil, fitted to the glyph floor as the title is to
+    /// its own: a folder's glyph in the accent, and in the mini sidebar
+    /// (⇧⌘S), whose 36 pt square has no title, a split's or an easel's
+    /// glyph in the secondary ink. The other side's veil only adds contrast,
+    /// so there the ink stays.
+    func glyph(_ ink: SpaceColor, theme: SpaceTheme, windowDark: Bool, lightInk: Bool) -> SpaceColor {
+        glyph(ink, backdrop: SidebarBackdrop(theme: theme, dark: windowDark, rows: 20, columns: 10), lightInk: lightInk)
+    }
+
+    func glyph(_ ink: SpaceColor, backdrop: SidebarBackdrop, lightInk: Bool) -> SpaceColor {
+        let row = SidebarBackdrop(darkest: backdrop.darkest.mixed(with: veil, fraction: alpha),
+                                  lightest: backdrop.lightest.mixed(with: veil, fraction: alpha))
+        return row.legible(ink, floor: SidebarContrast.glyph, lightInk: lightInk)
+    }
 }
 
 public extension SpaceTexture {
