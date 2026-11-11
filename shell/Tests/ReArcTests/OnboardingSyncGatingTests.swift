@@ -5,8 +5,9 @@ import Testing
 
 @MainActor
 struct OnboardingSyncGatingTests {
+    /// Up to 10 s: the whole suite in parallel can hold the main actor for seconds.
     private func settle(_ until: () -> Bool) async {
-        for _ in 0 ..< 200 where !until() { try? await Task.sleep(nanoseconds: 5_000_000) }
+        for _ in 0 ..< 2000 where !until() { try? await Task.sleep(nanoseconds: 5_000_000) }
     }
 
     /// Finished, deferred or skipped, onboarding never turns sync on; the
