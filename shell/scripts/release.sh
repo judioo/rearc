@@ -59,6 +59,12 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 [[ -z $CHANNEL || -n $APPCAST ]] || die "--channel requires --appcast DIR"
+# A feed is published only from a fully gated run (security RC-0.1.0-544 N-04).
+OVERRIDES=()
+[[ $ALLOW_OUTDATED_ENGINE == 0 ]] || OVERRIDES+=(allow-outdated-engine)
+[[ $ALLOW_NO_SAFE_BROWSING == 0 ]] || OVERRIDES+=(allow-no-safe-browsing)
+[[ $VERIFY == 1 ]] || OVERRIDES+=(no-verify)
+[[ -z $APPCAST || ${#OVERRIDES[@]} == 0 ]] || die "--appcast refuses a build with gate overrides (${OVERRIDES[*]}); make it without them"
 [[ -z $APPCAST || $APPCAST != "$DIST" && $APPCAST != "$DIST/"* ]] || die "appcast archives must live outside the dist directory (which is replaced)"
 [[ $DIST != "$SHELL_DIR/dist/icloud"* && $DIST != "$SHELL_DIR/dist/chromium"* ]] \
   || die "refusing to write $DIST (development bundles live there)"
@@ -131,6 +137,14 @@ plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$PLIST"
 plutil -replace ReArcEngineVersion -string "$ENGINE_VERSION" "$PLIST"
 plutil -replace ReArcSourceRevision -string "$REVISION$SUFFIX" "$PLIST"
 plutil -replace ReArcEngineRevision -string "$OVERLAY" "$PLIST"
+# The gates this build skipped, inside the signed bundle, so a DMG made with an override can
+# be told from a gated one (N-04). Absent when nothing was skipped.
+plutil -remove ReArcReleaseGateOverrides "$PLIST" 2>/dev/null || true
+if [[ ${#OVERRIDES[@]} -gt 0 ]]; then
+  plutil -insert ReArcReleaseGateOverrides -array "$PLIST"
+  for override in "${OVERRIDES[@]}"; do plutil -insert ReArcReleaseGateOverrides -string "$override" -append "$PLIST"; done
+  echo "==> WARNING: gate overrides recorded in Info.plist ReArcReleaseGateOverrides: ${OVERRIDES[*]}" >&2
+fi
 echo "==> version $MARKETING ($BUILD_NUMBER), engine Chromium $ENGINE_VERSION overlay ${OVERLAY:0:10}"
 
 # 4. Sign (inside-out, hardened runtime, timestamps), then keep the symbols.
@@ -221,5 +235,6 @@ if [[ -n $APPCAST ]]; then
   "$SHELL_DIR/scripts/release/generate-appcast.sh" "$APPCAST" "$CHANNEL"
 fi
 
-# Summary: what this run did not check in full (also in Info.plist, ReArcReleaseGates).
+# Summary: what this run did not check in full (overrides are also in Info.plist).
+[[ ${#OVERRIDES[@]} == 0 ]] || echo "==> NOTE: gate overrides: ${OVERRIDES[*]} (Info.plist ReArcReleaseGateOverrides)"
 [[ $LAUNCH_RETRIED == 0 ]] || echo "==> NOTE: the launch check was RETRIED after a teardown-watchdog failure"
