@@ -329,6 +329,22 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         self.model = model
         model.windowPresenter = self
+        if ChromiumLog.traceEnabled {
+            // Who moves the selection, for the self-test log.
+            model.store.onSelectionChange = { [weak model] old, new in
+                guard let store = model?.store else { return }
+                func describe(_ id: UUID?) -> String {
+                    guard let id else { return "nothing" }
+                    if let tab = store.tab(withID: id) { return "'\(tab.title)' \(tab.kind) \(tab.url.absoluteString) \(id.uuidString.prefix(8))" }
+                    if let split = store.split(withID: id) { return "split \(split.tabs.map(\.title)) \(id.uuidString.prefix(8))" }
+                    return "item \(id.uuidString.prefix(8))"
+                }
+                let callers = Thread.callStackSymbols.dropFirst(2).prefix(7).map { line in
+                    line.split(separator: " ", omittingEmptySubsequences: true).dropFirst(3).first.map(String.init) ?? line
+                }
+                ChromiumLog.trace("selection \(describe(old)) -> \(describe(new)) from \(callers.joined(separator: " < "))")
+            }
+        }
         if runtime.capabilities.searchEngines {
             model.searchEngineSettings = ChromiumSearchEngineSettings(runtime: runtime)
         }

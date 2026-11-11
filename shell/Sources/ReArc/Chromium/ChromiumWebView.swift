@@ -253,6 +253,17 @@ final class ChromiumHostView: NSView {
         }
     }
 
+    /// The hidden views from `view` up, innermost first.
+    private static func hiddenAncestry(of view: NSView) -> String {
+        var hidden: [String] = []
+        var current: NSView? = view
+        while let next = current {
+            if next.isHidden { hidden.append(NSStringFromClass(Swift.type(of: next))) }
+            current = next.superview
+        }
+        return hidden.isEmpty ? "none" : hidden.joined(separator: " < ")
+    }
+
     private static func contains(_ view: NSView, firstResponderOf window: NSWindow) -> Bool {
         guard let responder = window.firstResponder as? NSView else { return false }
         return responder === view || responder.isDescendant(of: view)
@@ -289,9 +300,16 @@ final class ChromiumHostView: NSView {
         placeholder = label
     }
 
+    private var tracedVisible: Bool?
+
     private func updateVisibility() {
         guard let lease else { return }
         let visible = window != nil && !isHiddenOrHasHiddenAncestor
+        if tracedVisible != visible {
+            tracedVisible = visible
+            ChromiumLog.trace("tab \(lease.tabID) lease \(lease.attachmentID) visible \(visible)"
+                              + (visible ? "" : window == nil ? " (no window)" : " (hidden: \(Self.hiddenAncestry(of: self)))"))
+        }
         let status = PerfSignposts.engineCall("ViewSetVisible") { ReArcViewSetVisible(lease.tabID, lease.attachmentID, visible) }
         if status != .rearcOK {
             ChromiumLog.info("tab \(lease.tabID) visibility rejected: \(status.rearcName)")

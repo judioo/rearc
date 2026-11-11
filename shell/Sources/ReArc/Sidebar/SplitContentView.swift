@@ -102,9 +102,20 @@ struct SplitContentView: View {
         max(length - dividerThickness * CGFloat(max(count - 1, 0)), 1)
     }
 
+    /// A pane with no engine yet asks the model for one after the update
+    /// (`BrowserViewModel.shownEngine(for:)`): this body can run once more
+    /// for a split being taken away, and must not make a page for a closed pane.
     @ViewBuilder
     private func pane(for tab: Tab, row: SplitPaneToolbarLayout.Row?, ringed: Bool) -> some View {
-        let engine = model.engineHost.engine(for: tab, profileID: model.profileID(for: tab))
+        if let engine = model.shownEngine(for: tab) {
+            paneCard(for: tab, engine: engine, row: row, ringed: ringed)
+        } else {
+            Color.clear.task(id: tab.id) { model.loadShownTab(tab.id) }
+        }
+    }
+
+    @ViewBuilder
+    private func paneCard(for tab: Tab, engine: any WebEngine, row: SplitPaneToolbarLayout.Row?, ringed: Bool) -> some View {
         let radius: CGFloat = showsCards ? CGFloat(cardLayout.radius) : 0
         let card = RoundedRectangle(cornerRadius: radius, style: .continuous)
         let focused = ringed && row?.isActive == true && cardLayout.showsDecoration

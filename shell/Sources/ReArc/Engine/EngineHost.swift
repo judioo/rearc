@@ -62,14 +62,23 @@ final class EngineHost {
 
     /// Favorites are global in the sidebar, but each favorite tab's engine uses
     /// the **active** profile's storage at load time (see `BrowserViewModel.profileID(for:)`).
-    func engine(for tab: Tab, profileID: Profile.ID) -> any WebEngine {
+    func engine(for tab: Tab, profileID: Profile.ID, file: StaticString = #fileID, line: UInt = #line) -> any WebEngine {
         let key = TabEngineKey(tabID: tab.id, profileID: profileID)
         defer { engineCells.access(.tab(key)) }
         if let existing = engines[key] { return existing }
         let context = EngineProfileContext(profileID: profileID)
         let created = makeEngine(context: context, role: .tab, shellID: tab.id)
         setTabEngine(created, for: key)
+        Self.trace("tab engine made for '\(tab.title)' \(tab.kind) \(tab.url.absoluteString) shell \(tab.id.uuidString.prefix(8)) "
+                   + "profile \(profileID.uuidString.prefix(8)) by \(file):\(line)")
         return created
+    }
+
+    /// Engine ownership in the self-test log (`REARC_CHROMIUM_TRACE`).
+    static func trace(_ message: @autoclosure () -> String) {
+        #if REARC_CHROMIUM
+        ChromiumLog.trace(message())
+        #endif
     }
 
     private func setTabEngine(_ engine: (any WebEngine)?, for key: TabEngineKey) {
@@ -79,10 +88,13 @@ final class EngineHost {
     }
 
     /// Drops the tab engines `remove` picks, in place; nothing is notified when none goes.
-    private func removeTabEngines(where remove: (TabEngineKey) -> Bool) {
+    private func removeTabEngines(where remove: (TabEngineKey) -> Bool, file: StaticString = #fileID, line: UInt = #line) {
         let doomed = engines.keys.filter(remove)
         guard !doomed.isEmpty else { return }
-        for key in doomed { setTabEngine(nil, for: key) }
+        for key in doomed {
+            Self.trace("tab engine dropped: shell \(key.tabID.uuidString.prefix(8)) profile \(key.profileID.uuidString.prefix(8)) by \(file):\(line)")
+            setTabEngine(nil, for: key)
+        }
     }
 
     /// The single place that picks the concrete engine type.

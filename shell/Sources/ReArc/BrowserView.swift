@@ -492,7 +492,7 @@ struct BrowserView: View {
             showsToolbar: showsToolbar && shownSplit == nil,
             holdsForAddressEditing: model.addressBarHasKeyboardFocus(for: model.selectedTab(in: windowID)?.id, in: windowID),
             revealOrigin: pageTab.flatMap { PageOrigin.of($0.url) },
-            holdsForPrompt: pageTab.map { model.engineHost.engine(for: $0, profileID: model.profileID(for: $0)).pagePrompts.asksUser } ?? false
+            holdsForPrompt: pageTab.flatMap(model.shownEngine(for:))?.pagePrompts.asksUser ?? false
         ) {
             contentArea
                 .overlay {
@@ -595,7 +595,25 @@ struct BrowserView: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let tab = model.selectedTab(in: windowID) {
-            let engine = model.engineHost.engine(for: tab, profileID: model.profileID(for: tab))
+            // Views only look engines up; the model makes them (`shownEngine(for:)`).
+            if let engine = model.shownEngine(for: tab) {
+                tabPage(tab, engine: engine)
+            } else {
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .task(id: tab.id) { model.loadShownTab(tab.id) }
+            }
+        } else {
+            // Arc's empty card is blank: only the card fill shows.
+            Color.clear
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityLabel("No tab selected. Press ⌘T to open one.")
+        }
+    }
+
+    /// The selected tab's page, with DevTools docked or in the tab when open.
+    @ViewBuilder
+    private func tabPage(_ tab: Tab, engine: any WebEngine) -> some View {
             if let inTab = model.devToolsInTab(for: tab.id) {
                 DevToolsInTabLayout(layout: inTab.layout, view: inTab.view) {
                     engine.makeView()
@@ -619,12 +637,6 @@ struct BrowserView: View {
                     .pageStatus(engine.activity) { engine.reload() }
                     .findBar(model.findBar, for: engine)
             }
-        } else {
-            // Arc's empty card is blank: only the card fill shows.
-            Color.clear
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityLabel("No tab selected. Press ⌘T to open one.")
-        }
     }
 }
 
