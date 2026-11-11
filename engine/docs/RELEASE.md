@@ -16,7 +16,7 @@ distribution.
 |---|---|
 | `build-engine-release.sh` | Optimized non-component engine in `out/ReArc-release-arm64`. Same preflight as `engine/scripts/build.sh`; never touches `out/ReArc-dev-arm64`. `--gen-only` runs just `gn gen`. |
 | `release.sh` | End to end from a built release engine: release shell build from committed HEAD, bundle, version stamp, nested signing, dSYMs, LaunchServices launch check, real-Keychain self-test, optional `--dmg`. Output `shell/dist/release`. |
-| `release.sh` verification mode | The gates run on the bundle signed with `ReArcReleaseVerification` in its Info.plist: only that release bundle takes `REARC_RELEASE_VERIFICATION=1` with `--rearc-selftest` or `--rearc-launch-probe`, a throwaway `REARC_DATA_DIR` or a `--user-data-dir`. After the gates `release.sh` removes the key and signs the bundle again, so the bundle that is notarized and shipped refuses to start with `REARC_DATA_DIR` or `--user-data-dir` and has no self-test or probe (security RC-0.1.0-602 T-04, F-03). For test launches on a throwaway data dir, build with `release.sh --qa`, which keeps the key and refuses `--dmg`, `--appcast` and `--notarize`. `check-launch.sh`, `check-safe-browsing-lists.sh` and `check-upgrade.sh` refuse a shipped bundle as the new build. `check-upgrade.sh` launches a previous release of build 605 or earlier as it is (those honour `REARC_DATA_DIR`); a later, shipped previous release is copied, given the key and signed again with the release identity, and the copy makes the profile. |
+| `release.sh` verification mode | The gates run on the bundle signed with `ReArcReleaseVerification` in its Info.plist: only that release bundle takes `REARC_RELEASE_VERIFICATION=1` with `--rearc-selftest` or `--rearc-launch-probe`, a throwaway `REARC_DATA_DIR` or a `--user-data-dir`. After the gates `release.sh` removes the key and signs the bundle again, so the bundle that is notarized and shipped refuses to start with `REARC_DATA_DIR` or `--user-data-dir` and has no self-test or probe (security RC-0.1.0-602 T-04, F-03). For test launches on a throwaway data dir, build with `release.sh --qa`, which keeps the key and refuses `--dmg`, `--appcast` and `--notarize`. `check-launch.sh`, `check-safe-browsing-lists.sh`, `check-upgrade.sh` and `check-upgrade-data.py` refuse a shipped bundle as the new build. The two upgrade checks launch a previous release of build 608 or earlier as it is (those honour `REARC_DATA_DIR`); a later, shipped previous release is copied, given the key and signed again with the release identity, and the copy runs instead. `release/upgrade-bundles.sh` holds that cut-off (`LAST_DATA_DIR_BUILD`) for both. Neither passes `REARC_RELEASE_VERIFICATION`: they use no self-test or probe. |
 | `bundle-chromium.sh` | Unchanged behavior for dev bundles. New: `--engine-out DIR` (same as `REARC_CHROMIUM_OUT`), and a monolithic engine build is accepted, with no dylib closure outside the bundle. Its build guard blocks only on a `siso ninja` of the out dir being bundled, so a release build no longer blocks dev bundles. |
 | `sign-release.sh` | Inside-out signing of an assembled monolithic bundle with hardened runtime, secure timestamps and Chromium's per-role entitlements; verifies. |
 | `make-dmg.sh` | Signed UDZO DMG: app, Applications link, volume icon, branded Finder background. |
@@ -91,9 +91,10 @@ load with no warning. The release engine therefore needs ReArc's own key:
   loads no test page, so check Google's phishing test page shows the warning by hand once per
   engine update (security RC-0.1.0-602 T-11).
 - The field-trial gate reads the generated build-flag header and then the framework itself:
-  `scripts/release/check-fieldtrial-binary.py` fails when more than half of the macOS study
+  `scripts/release/check-fieldtrial-binary.py` fails when fewer than half of the macOS study
   names in `testing/variations/fieldtrial_testing_config.json` are in the binary as their own
-  strings (build 562 had all 551, the rebuilt engine 58).
+  strings, that is when the testing config is not compiled in (builds 562 and 608 have all 551,
+  the engine of 602 and 605 had 58). See "Engine build".
 - `check-launch.sh` also counts minidumps under `~/Library/Application Support/Chromium/Crashpad`
   (and the probe profile's `Crashpad`) that name `ReArc.app`: helper crashes never reach
   DiagnosticReports.
@@ -115,7 +116,7 @@ committed. Filter `AIza` out of anything copied from a build log.
 
 ```
 target_os="mac" target_cpu="arm64" is_chrome_branded=false is_official_build=false
-use_system_xcode=true use_remoteexec=false use_siso=true chrome_pgo_phase=0 disable_fieldtrial_testing_config=true
+use_system_xcode=true use_remoteexec=false use_siso=true chrome_pgo_phase=0
 symbol_level=1 treat_warnings_as_errors=false
 is_debug=false is_component_build=false dcheck_always_on=false
 enable_dsyms=true enable_stripping=true
@@ -123,11 +124,20 @@ branding_file_path="<repo>/shell/.build-release/BRANDING"   (generated, carries 
 google_api_key="…"   (appended from ~/.config/rearc/google-api-keys.gn, "Safe Browsing key")
 ```
 
-`disable_fieldtrial_testing_config=true` is required. Without it an unbranded build runs
-Chromium's bot configuration, which switches on hundreds of unlaunched features. One of them
-moves Safe Browsing to the v5 list protocol, which Google answers with 404 for our key, so no
-threat list ever arrives (security review of 544, F-02 and N-01). `release.sh --dmg` refuses an
-engine whose `gen/components/variations/service/buildflags.h` has the testing config on.
+The engine is built WITH Chromium's field-trial testing config (the default for an unbranded
+build), because builds 500 to 564 were and profiles carry its storage formats: see "Stored site
+data" below. `release.sh --dmg` refuses an engine whose
+`gen/components/variations/service/buildflags.h` has the testing config off, or whose framework
+lacks the config's study names (`check-fieldtrial-binary.py`). Never add
+`disable_fieldtrial_testing_config=true`: builds 602 and 605 had it.
+
+N-01 from the security review of 544 ("the release engine runs Chromium's field-trial testing
+config") is knowingly open again since 608. Users run the 663 features the config switches on
+for the Mac, unlaunched V8 compiler work among them, as builds 500 to 564 did. Closing it again
+needs more than the GN flag: every feature a profile has been written under must stay on (the
+search-engine migrations in `persistedProfileFeatures`, `DomStorageSqliteNewDatabases` and
+`IdbSqliteOnDiskRollout`, and any other found by a full review of the config), turned on by the
+shell, with `check-upgrade-data.py` passing against the release on the feed.
 
 
 - These are the dev args, which set no other branding arguments, with the release
@@ -249,6 +259,32 @@ treats that as a rollback and hits a fatal `NOTREACHED`. The shell now always pa
 `--enable-features=PrepopulatedEnginesMigration,ApplySearchEngineTypeMigration`
 (`ChromiumLaunchArguments.persistedProfileFeatures`). Any change to the engine's feature set
 can do this again: features leave marks in profiles.
+
+### Stored site data
+
+`check-upgrade.sh` only sees crashes. `scripts/release/check-upgrade-data.py PREVIOUS_APP NEW_APP`
+runs next in `release.sh --dmg`: the previous release stores a value in local storage, IndexedDB,
+a cookie and Cache Storage on a loopback page (port 18765, `REARC_UPGRADE_DATA_PORT`), and the
+new build must read all four back. As in `check-upgrade.sh`, the new build is the bundle being
+verified, and a shipped previous release after 608 runs as a re-signed verification copy. The
+page acts only for the run in progress: a window restored from an earlier run reloads its old
+address and stays inert.
+
+`REARC_UPGRADE_DATA_PROFILES` (colon-separated) adds data directories saved with
+`check-upgrade-data.py --keep DIR APP …`; the new build must read back what that chain stored
+last (`DIR/.rearc-upgrade-data-label`). Keep one made by `check-upgrade-data.py --keep DIR
+rc564/ReArc.app rc605/ReArc.app` for profiles that ran 605 (that chain itself reports 605's loss).
+
+Build 605 is why. Its engine was built with `disable_fieldtrial_testing_config=true`, to get
+Safe Browsing off the v5 list protocol. That also switched off `DomStorageSqliteNewDatabases`
+and `IdbSqliteOnDiskRollout`, so local storage and IndexedDB went back from SQLite to LevelDB:
+profiles from 500 to 564 read both as empty, and each site's IndexedDB data was deleted on its
+first visit. The engine is built with the testing config again, and the shell passes
+`--disable-features=SafeBrowsingLocalListsUseSBv5` (`ChromiumLaunchArguments.disabledEngineFeatures`).
+
+The rule: a build is safe for an existing profile only when every engine feature that was on
+when the profile was written is still on. Never change the engine's feature set, a GN flag that
+changes it, or the Chromium pin without this check passing against the release on the feed.
 
 ## Release notes
 

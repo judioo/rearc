@@ -11,15 +11,27 @@ committed `RELEASES.md` has a heading for the build it is about to make:
 commit before the release, with `echo $(( $(git rev-list --count HEAD) + 1 ))` as the
 number. Details: engine/docs/RELEASE.md, "Release notes".
 
-## ReArc 0.1.0 (605) — 2026-11-11
+## ReArc 0.1.0 (608) — 2026-11-11
 
-This build replaces 602, which was withdrawn an hour after release: it quit at launch on any
-profile made by an earlier build. If 602 will not open, install this build from
-rearc.imara.ae over it; your spaces, tabs and settings are untouched.
+This build replaces 605 and 602, which were both withdrawn within about an hour of release.
 
-**Fixes since 602**
-- ReArc opens again on profiles made by builds 500, 544 and 564. Every release now has to
-  open a profile made by the release before it.
+**If you installed 605**
+- 605 lost website data on profiles made by earlier builds: sites' local storage read as
+  empty, and a site's IndexedDB data was deleted the first time you opened that site in 605.
+  Cookies and sign-ins that rely on them were not affected.
+- This build stops the loss. Sites you did not open in 605 have all their data. For sites you
+  did open, what they stored before 605 in IndexedDB is gone; their older local storage is
+  still on disk but not yet restored.
+
+**Fixes since 605**
+- Website data made by builds 500, 544 and 564 reads back again. The engine runs with the
+  same feature set those builds used, with one change: Safe Browsing uses the list protocol
+  Google serves, so the threat lists arrive.
+- HTTP cache and connection partitioning, which 602 and 605 had switched off, are on again.
+- ReArc opens on profiles made by earlier builds. 602 quit at launch on them; if 602 will not
+  open, install this build over it.
+- Every release now has to read back, in the new build, website data stored by the release
+  before it.
 
 **New**
 - Your Arc card comes with you. Settings › your name › Import Your Card from Arc brings over
@@ -66,6 +78,10 @@ rearc.imara.ae over it; your spaces, tabs and settings are untouched.
 - Syncing Boosts no longer fails with "Cannot create new type SidebarBoostRecord", and one
   rejected kind of record no longer holds up everything else waiting to sync.
 - Settings › Links shows rearc.imara.ae, and Share ReArc links to it.
+
+## ReArc 0.1.0 (605) — 2026-11-11
+
+Withdrawn. It lost website data on profiles made by earlier builds.
 
 ## ReArc 0.1.0 (602) — 2026-11-11
 

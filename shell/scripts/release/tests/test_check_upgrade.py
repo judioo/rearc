@@ -50,14 +50,32 @@ class CheckUpgradeTests(unittest.TestCase):
         self.assertEqual(self.log.read_text(), "")
 
     def test_an_older_previous_release_is_launched_as_it_is(self):
-        old = self.app("old", "605")
-        self.run_check(self.app("new", "700", VERIFY), old)
-        calls = self.log.read_text()
-        self.assertIn(f"open:-n -g {old} --env REARC_DATA_DIR=", calls)
-        self.assertNotIn("sign:", calls)
+        # 608, the hotfix, is the last shipped build that honours REARC_DATA_DIR.
+        for build in ["564", "605", "608"]:
+            self.log.write_text("")
+            old = self.app(f"old-{build}", build)
+            self.run_check(self.app(f"new-{build}", "700", VERIFY), old)
+            calls = self.log.read_text()
+            self.assertIn(f"open:-n -g {old} --env REARC_DATA_DIR=", calls, build)
+            self.assertNotIn("sign:", calls, build)
+            self.assertNotIn("REARC_RELEASE_VERIFICATION", calls, "no self-test or probe here")
+
+    def test_the_cut_off_is_shared_with_the_stored_data_check(self):
+        helper = SCRIPT.parent / "upgrade-bundles.sh"
+        self.assertIn("LAST_DATA_DIR_BUILD=608", helper.read_text())
+        for script in [SCRIPT, SCRIPT.parent / "check-upgrade-data.py"]:
+            text = script.read_text()
+            self.assertIn("upgrade-bundles.sh", text, script.name)
+            self.assertNotRegex(text, r"-gt 6[0-9][0-9]|> 6[0-9][0-9]", f"{script.name} decides no cut-off of its own")
+
+    def test_a_development_bundle_is_launched_as_it_is(self):
+        old = self.app("old", "900")
+        (old / "Contents" / "Info.plist").write_text(PLIST.replace("<key>ReArcRelease</key><true/>", "") % ("900", ""))
+        self.run_check(self.app("new", "901", VERIFY), old)
+        self.assertNotIn("sign:", self.log.read_text())
 
     def test_a_shipped_previous_release_gets_a_signed_verification_copy(self):
-        old = self.app("old", "650")
+        old = self.app("old", "609")
         self.run_check(self.app("new", "700", VERIFY), old)
         calls = self.log.read_text().splitlines()
         sign = next(c for c in calls if c.startswith("sign:"))

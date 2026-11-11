@@ -19,9 +19,15 @@ enum ChromiumLaunchArguments {
     /// Engine features that must stay on in every build. Builds 500 to 564 ran Chromium's
     /// field-trial testing config, which switched these on and recorded that in each profile's
     /// keyword database. With the mark present and the feature off, Chromium treats the profile
-    /// as rolled back and aborts while loading search engines (build 602 did, on every profile
-    /// an earlier build had made). Never remove a feature from this list.
+    /// as rolled back and aborts while loading search engines (build 602 did). The engine runs
+    /// the testing config again, so these are on anyway; they stay listed so that a later
+    /// engine without it cannot repeat 602. Never remove a feature from this list.
     static let persistedProfileFeatures = "--enable-features=PrepopulatedEnginesMigration,ApplySearchEngineTypeMigration"
+    /// The one testing-config feature ReArc turns off: Safe Browsing's v5 list protocol, which
+    /// Google answers with 404 for ReArc's key, so no threat list would ever arrive (544, 564).
+    /// It writes nothing an older build reads; the v4 lists live in the same folder.
+    static let disabledEngineFeatureNames = ["SafeBrowsingLocalListsUseSBv5"]
+    static let disabledEngineFeatures = "--disable-features=" + disabledEngineFeatureNames.joined(separator: ",")
 
     enum KeychainMode: Equatable {
         /// The macOS Keychain ("Chromium Safe Storage"); the only production mode.
@@ -73,7 +79,9 @@ enum ChromiumLaunchArguments {
     }
 
     /// What every launch hands the engine: `browserArguments`, then the features each profile
-    /// needs on (`persistedProfileFeatures`), in release and development builds alike.
+    /// needs on (`persistedProfileFeatures`) and the one ReArc turns off (`disabledEngineFeatures`),
+    /// in release and development builds alike. Chromium keeps only the last `--enable-features`
+    /// and the last `--disable-features`, so these come after anything argv carried.
     static func engineArguments(
         _ arguments: [String],
         defaultUserDataDir: () -> String,
@@ -82,7 +90,7 @@ enum ChromiumLaunchArguments {
         isShipped: Bool = ShippedBuild.current
     ) -> [String] {
         browserArguments(arguments, defaultUserDataDir: defaultUserDataDir, keychain: keychain, isRelease: isRelease, isShipped: isShipped)
-            + [persistedProfileFeatures]
+            + [persistedProfileFeatures, disabledEngineFeatures]
     }
 
     /// LaunchServices arguments are untrusted in shipping bundles. Only profile
@@ -163,8 +171,10 @@ enum ChromiumLaunchArguments {
 
     /// Self-test only: Chromium shows autofill suggestions only while the
     /// tab's view has focus in a key window; a run from a terminal often
-    /// cannot make its window key (as in engine/tests autofill).
-    static let selfTestAutofillFocusSwitch = "--disable-features=RWHVMacHasFocusReturnsFalseForNonKeyWindow"
+    /// cannot make its window key (as in engine/tests autofill). It replaces the launch's own
+    /// `--disable-features` (Chromium keeps the last), so it carries `disabledEngineFeatureNames` too.
+    static let selfTestAutofillFocusSwitch = "--disable-features="
+        + (["RWHVMacHasFocusReturnsFalseForNonKeyWindow"] + disabledEngineFeatureNames).joined(separator: ",")
 
     /// `extensionDirs`: the self-test's local unpacked fixtures (`--load-extension`).
     static func selfTestArguments(_ arguments: [String], extensionDirs: [String] = []) -> [String] {

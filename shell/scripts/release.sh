@@ -97,14 +97,15 @@ if [[ $DMG == 1 ]]; then
   [[ $ALLOW_NO_SAFE_BROWSING == 0 ]] || key_gate+=(--allow-no-safe-browsing)
   python3 "$REPO/engine/scripts/google-api-keys.py" check "$OUT" ${key_gate[@]+"${key_gate[@]}"} \
     || die "the release engine has no real Google API key, so Safe Browsing cannot work; rebuild it with the key (RELEASE.md) or pass --allow-no-safe-browsing"
-  # The engine must not run Chromium's field-trial testing config (RELEASE.md, "Engine build").
-  grep -q 'BUILDFLAG_INTERNAL_FIELDTRIAL_TESTING_ENABLED() (0)' "$OUT/gen/components/variations/service/buildflags.h" 2>/dev/null \
-    || die "the release engine was built with Chromium's field-trial testing config; rebuild it with disable_fieldtrial_testing_config=true (scripts/build-engine-release.sh)"
+  # The engine must run with the feature set existing profiles were written under: Chromium's
+  # field-trial testing config, as builds 500 to 564 and 608 had (RELEASE.md, "Engine build").
+  grep -q 'BUILDFLAG_INTERNAL_FIELDTRIAL_TESTING_ENABLED() (1)' "$OUT/gen/components/variations/service/buildflags.h" 2>/dev/null \
+    || die "the release engine was built without Chromium's field-trial testing config, which changes storage formats under existing profiles; rebuild it (scripts/build-engine-release.sh)"
   # The header is what the build asked for; the framework is what ships (RC-0.1.0-602 T-11).
   python3 -I "$SHELL_DIR/scripts/release/check-fieldtrial-binary.py" \
     "$OUT/Chromium.app/Contents/Frameworks/Chromium Framework.framework/Chromium Framework" \
     "$REPO/engine/chromium/src/testing/variations/fieldtrial_testing_config.json" \
-    || die "the release engine binary carries Chromium's field-trial testing config; rebuild it with disable_fieldtrial_testing_config=true"
+    || die "the release engine binary lacks Chromium's field-trial testing config, which changes storage formats under existing profiles; rebuild it (scripts/build-engine-release.sh)"
   pinned="$(awk '!/^[[:space:]]*(#|$)/ {v=$0} END {print v}' "$REPO/engine/CHROMIUM_PIN")"
   built="$(plutil -extract CFBundleShortVersionString raw "$OUT/Chromium.app/Contents/Info.plist")"
   [[ "$built" == "$pinned" ]] || die "engine output $built does not match CHROMIUM_PIN $pinned; rebuild the release engine"
@@ -262,6 +263,19 @@ if [[ $DMG == 1 ]]; then
     IFS=: read -r -a upgrade_profiles <<<"${REARC_UPGRADE_PROFILES:-}"
     "$SHELL_DIR/scripts/release/check-upgrade.sh" "$APP" "$PREVIOUS_APP" ${upgrade_profiles[@]+"${upgrade_profiles[@]}"} 2>&1 \
       | tee "$DIST/check-upgrade.log" || die "the upgrade check failed (log $DIST/check-upgrade.log)"
+    # Opening is not enough: 605 opened every older profile and read its site data as empty.
+    "$SHELL_DIR/scripts/release/check-upgrade-data.py" "$PREVIOUS_APP" "$APP" 2>&1 \
+      | tee "$DIST/check-upgrade-data.log" || die "stored site data did not survive the upgrade (log $DIST/check-upgrade-data.log)"
+    # REARC_UPGRADE_DATA_PROFILES: data directories saved with check-upgrade-data.py --keep
+    # (for example a chain that ran 605), colon-separated; this build must read back what each
+    # chain stored last.
+    IFS=: read -r -a data_profiles <<<"${REARC_UPGRADE_DATA_PROFILES:-}"
+    n=0
+    for profile in ${data_profiles[@]+"${data_profiles[@]}"}; do
+      n=$((n + 1))
+      "$SHELL_DIR/scripts/release/check-upgrade-data.py" --profile "$profile" "$APP" 2>&1 \
+        | tee "$DIST/check-upgrade-data-$n.log" || die "stored site data in $profile did not survive the upgrade (log $DIST/check-upgrade-data-$n.log)"
+    done
   fi
 fi
 

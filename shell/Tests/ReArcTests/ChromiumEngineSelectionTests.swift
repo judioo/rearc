@@ -239,21 +239,45 @@ final class ReleaseLaunchSecurityTests: XCTestCase {
         XCTAssertNil(ShippedBuild.launchRefusal(arguments: ["ReArc", "--user-data-dir=/tmp/x"], environment: ["REARC_DATA_DIR": "/tmp/x"], shipped: false))
     }
 
-    /// Profiles made by builds 500 to 564 abort without these features (build 602), so every
-    /// launch passes them, whatever argv says.
+    /// Profiles made by builds 500 to 564 abort without these features (build 602), and the
+    /// engine runs the testing config with Safe Browsing's v5 lists turned off (608), so every
+    /// launch passes both, after whatever argv says.
     func testPersistedProfileFeaturesReachTheEngineInEveryLaunch() {
         let feature = ChromiumLaunchArguments.persistedProfileFeatures
+        let disabled = ChromiumLaunchArguments.disabledEngineFeatures
         XCTAssertTrue(feature.contains("PrepopulatedEnginesMigration") && feature.contains("ApplySearchEngineTypeMigration"))
+        XCTAssertEqual(disabled, "--disable-features=SafeBrowsingLocalListsUseSBv5")
+        // Development, the bundle release.sh is verifying, and the shipped bundle.
         for (isRelease, isShipped) in [(false, false), (true, false), (true, true)] {
             for argv in [["ReArc"], ["ReArc", "--enable-features=Other", "--disable-features=PrepopulatedEnginesMigration"]] {
                 let arguments = ChromiumLaunchArguments.engineArguments(argv, defaultUserDataDir: { "/data" }, keychain: .system,
                                                                        isRelease: isRelease, isShipped: isShipped)
-                XCTAssertEqual(arguments.last, feature, "release \(isRelease), shipped \(isShipped), argv \(argv)")
-                XCTAssertEqual(Array(arguments.dropLast()), ChromiumLaunchArguments.browserArguments(
+                let mode = "release \(isRelease), shipped \(isShipped), argv \(argv)"
+                XCTAssertEqual(Array(arguments.suffix(2)), [feature, disabled], mode)
+                XCTAssertEqual(arguments.last { $0.hasPrefix("--disable-features=") }, disabled, "Chromium keeps the last one; \(mode)")
+                XCTAssertEqual(Array(arguments.dropLast(2)), ChromiumLaunchArguments.browserArguments(
                     argv, defaultUserDataDir: { "/data" }, keychain: .system, isRelease: isRelease, isShipped: isShipped))
             }
         }
-        XCTAssertEqual(ChromiumLaunchArguments.engineArguments(["ReArc"], defaultUserDataDir: { "/d" }, keychain: .devMock, isRelease: false).last, feature)
+        XCTAssertEqual(Array(ChromiumLaunchArguments.engineArguments(["ReArc"], defaultUserDataDir: { "/d" }, keychain: .devMock,
+                                                                     isRelease: false).suffix(2)), [feature, disabled])
+    }
+
+    /// The self-test adds its own `--disable-features` after the launch's, which replaces it
+    /// (Chromium keeps the last), so it must carry every feature ReArc turns off.
+    func testTheSelfTestKeepsTheEngineFeaturesOff() throws {
+        for (isRelease, isShipped) in [(false, false), (true, false)] {
+            let launch = ChromiumLaunchArguments.engineArguments(["ReArc"], defaultUserDataDir: { "/data" }, keychain: .system,
+                                                                 isRelease: isRelease, isShipped: isShipped)
+            let selfTest = ChromiumLaunchArguments.selfTestArguments(launch, extensionDirs: ["/tmp/a"])
+            let last = try XCTUnwrap(selfTest.last { $0.hasPrefix("--disable-features=") })
+            let features = Set(last.dropFirst("--disable-features=".count).split(separator: ",").map(String.init))
+            XCTAssertTrue(features.isSuperset(of: ChromiumLaunchArguments.disabledEngineFeatureNames), last)
+            XCTAssertTrue(features.contains("RWHVMacHasFocusReturnsFalseForNonKeyWindow"), last)
+            XCTAssertTrue(selfTest.contains(ChromiumLaunchArguments.persistedProfileFeatures))
+            XCTAssertEqual(ChromiumLaunchArguments.benchArguments(launch).last { $0.hasPrefix("--disable-features=") },
+                           ChromiumLaunchArguments.disabledEngineFeatures, "the bench adds none")
+        }
     }
 
     /// RC-0.1.0-544/602 N-03 (environment): a release engine never sees a TLS key log or an API key override.
