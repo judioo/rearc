@@ -11,6 +11,92 @@ committed `RELEASES.md` has a heading for the build it is about to make:
 commit before the release, with `echo $(( $(git rev-list --count HEAD) + 1 ))` as the
 number. Details: engine/docs/RELEASE.md, "Release notes".
 
+## ReArc 0.1.0 (677) — 2026-11-12
+
+**New**
+- Peek looks and works like Arc's. ⇧-click a link and it opens in a borderless card over the
+  page, with three round buttons floating at its top right: close, expand into a tab, and open
+  in Split View. Click anywhere outside the card, the sidebar included, and it closes. Esc
+  closes it too. Expand (or ⌘O) keeps the page as it is: the same scroll position, what you
+  typed, and its back history.
+- Select several tabs. ⌘-click adds or removes a sidebar row and ⇧-click selects a range; the
+  tab you are on is part of the selection. Right-click the selection for Copy Links, Copy
+  Links as Markdown, Pin, Unpin, Add to Favorites, Duplicate, Open in Split View, Move to
+  Folder, New Folder with Selection, Move to Space and Archive. Move to Profile sends the
+  selection to a space of another profile, after one confirmation that says what stays behind
+  (cookies and sign-ins). ⌘C and ⇧⌘C copy the selection's links one per line and ⌘W closes
+  the whole selection. Drag one selected row and the rest come with it. Esc clears the
+  selection.
+- Mini sidebar. ⇧⌘S shrinks the sidebar to a column of site icons, in the same order as the
+  full sidebar; ⇧⌘S again brings the full sidebar back. ⌘S still hides and shows the sidebar,
+  and a mini sidebar comes back mini. Each window remembers its own mode. View › Show Mini
+  Sidebar does the same.
+
+**Changed: Sync Sidebar is off by default**
+- 608 switched Sync Sidebar on by itself after onboarding. If your iCloud already held a ReArc
+  sidebar from an earlier install, that sidebar was merged into what you had just imported,
+  without a word. ReArc no longer turns sync on by itself, on a new install or an existing
+  one.
+- If Sync Sidebar was on in 602, 605 or 608, it is off after this update, whether ReArc or you
+  switched it on: those builds did not record which. Nothing on your Mac or in iCloud is
+  changed by that. If you sync between Macs, turn it on again in Settings › Account on each.
+- Turning it on looks first. Settings › Account › Sync Sidebar reads what is in iCloud before
+  anything is merged. If iCloud already has a ReArc sidebar, a sheet says so, with how many
+  spaces, pinned tabs and favorites it holds, and warns that it can change what is on this
+  Mac, including what you just imported. You choose: use the iCloud sidebar on this Mac,
+  replace what is in iCloud with this Mac's sidebar, merge both, or cancel. Each of the first
+  three saves this Mac's sidebar to a backup file before it changes anything. Cancel is the
+  default and changes nothing.
+- Manage what is in iCloud. Settings › Account has a new "Sidebar in iCloud" box that shows
+  what iCloud holds and when it was last edited, with Use on This Mac…, Replace iCloud with
+  This Mac… and Delete iCloud Content…. Reading a large sidebar can take half a minute or
+  more; the box shows progress while it reads.
+
+**Fixes**
+- Imported spaces no longer look empty, and Arc spaces are no longer duplicated. Up to 608,
+  every install imported each Arc space as a new space, and merging with iCloud left several
+  copies of one space, only one of which held the tabs. Switching between spaces landed on
+  the empty copies, so it looked as if the tabs were gone. They were not. On first launch this
+  build merges the copies of each Arc space into one and keeps every tab. Your sidebar file
+  is saved first, beside the original, as `sidebar.before-arc-twin-repair-<time>.json`. From
+  now on, importing the same Arc space on two Macs, or twice, gives one space.
+
+**Security**
+- The engine is updated to Chromium 156.0.8078.100, Chromium's latest security update for
+  the 156 line.
+- A shipped ReArc no longer accepts a data folder, a profile folder, the self-test or the
+  launch probe from the command line or the environment, so another program cannot start
+  your ReArc on a folder of its choosing.
+- Sync uploads a pinned tab's saved address, never the page you happen to have open in it,
+  and only web pages become synced tabs. A first join keeps iCloud's copy of rows it already
+  has, and records that cannot be valid are set aside instead of applied.
+- Boost CSS is checked the way the engine reads it, and CSS that arrives in a Boost file waits
+  for your review. A Boost with no approval record approves nothing.
+- Importing from other browsers opens no links, stays inside the browser's own folder, and
+  limits how deep and how large a bookmarks file it reads.
+- A shipped ReArc ignores the engine trace switch, so a program that starts ReArc cannot make
+  it write page addresses and titles to a file of its choosing.
+- A release build clears the TLS key log and Google key overrides from its environment before
+  the engine starts.
+- The Delete Profile dialog says when a container's browsing data stays on disk, and a deleted
+  container that comes back through sync is not deleted again at the next launch.
+
+**Known**
+- ⇧⌘S was Save Page As in Arc. ReArc never had Save Page As, and the keys now toggle the mini
+  sidebar.
+- ⇧⌘T after ⌘W on a selection can take two presses: the tab you were on comes back first,
+  then the rest together.
+- Using or merging the iCloud sidebar on a second Mac can put spaces in a profile that is new
+  on that Mac. Sites then ask you to sign in again there, and the cookies and history of the
+  profile those spaces were in stay on disk, where ReArc no longer shows them. The sheet warns
+  about the sign-ins. Replace keeps no copy of what iCloud held.
+
+
+- A page that adds history entries from script, without a click, gets no Back entry for them
+  in a Peek or after Expand, as in Chrome.
+- For sites opened in 605, their older local storage is still on disk but not yet restored
+  (see 608).
+
 ## ReArc 0.1.0 (608) — 2026-11-11
 
 This build replaces 605 and 602, which were both withdrawn within about an hour of release.
