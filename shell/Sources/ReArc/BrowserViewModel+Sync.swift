@@ -23,7 +23,25 @@ extension BrowserViewModel {
     }
 
     func setSyncEnabled(_ enabled: Bool) {
+        syncDecisionPrompt = nil
         MainActor.assumeIsolated { syncControl?.setUserEnabled(enabled) }
+    }
+
+    /// An existing install nobody chose for: ask once before anything syncs
+    /// (RC-0.1.0-602 T-01). The answer is saved at once; an unanswered
+    /// prompt asks again at the next launch.
+    func offerSyncDecisionIfNeeded() {
+        MainActor.assumeIsolated {
+            guard let control = syncControl, control.needsDecision, syncDecisionPrompt == nil else { return }
+            syncDecisionPrompt = SyncDecisionPrompt(syncedBefore: control.syncedBeforeDecision)
+        }
+    }
+
+    /// A new install's onboarding finished: sync is on by default then,
+    /// unless the prompt is already asking.
+    func enableSyncForNewInstall() {
+        guard syncDecisionPrompt == nil else { return }
+        MainActor.assumeIsolated { syncControl?.enableForNewInstall() }
     }
 
     func syncNow() {

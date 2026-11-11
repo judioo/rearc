@@ -79,7 +79,8 @@ public enum LexoRank: Equatable, Sendable {
         case (let left?, nil):
             return after(left)
         case (let left?, let right?):
-            precondition(left < right, "LexoRank.between requires left < right")
+            // Callers order the bounds; synced ranks can tie, so never trap on them.
+            guard left < right else { return after(left) }
             if left.count >= rebalanceLengthThreshold || right.count >= rebalanceLengthThreshold {
                 return after(left)
             }

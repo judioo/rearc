@@ -1,0 +1,463 @@
+import XCTest
+@testable import SidebarModel
+
+/// RC-0.1.0-602 T-01 (no sync without a choice), T-02 (a first join never
+/// lets a joining Mac's stale rows beat newer iCloud ones or bring back
+/// deleted ones) and T-03 (no crafted record can crash a sync).
+
+@MainActor
+private final class Clock {
+    var date = Date(timeIntervalSince1970: 1_800_000_000)
+    func advance(_ seconds: TimeInterval = 1) { date = date.addingTimeInterval(seconds) }
+}
+
+@MainActor
+private final class Mac {
+    let name: String
+    let store: SidebarStore
+    let coordinator: SidebarSyncCoordinator
+    let clock: Clock
+
+    init(_ name: String, server: InMemorySyncServer, clock: Clock, state: SidebarSyncState? = nil, store: SidebarStore = SidebarStore()) {
+        self.name = name
+        self.clock = clock
+        self.store = store
+        store.now = { [clock] in clock.date }
+        coordinator = SidebarSyncCoordinator(transport: server.transport(account: "alice"), stateStore: InMemorySyncStateStore(state ?? SidebarSyncState()),
+                                             deviceID: name, now: { [clock] in clock.date })
+        coordinator.host = store
+    }
+
+    @discardableResult
+    func sync() async -> SyncCycleOutcome {
+        clock.advance()
+        let outcome = await coordinator.sync()
+        clock.advance()
+        return outcome
+    }
+
+    func edited() { coordinator.captureLocalChanges() }
+
+    func tab(_ title: String) -> Tab? {
+        for space in store.spaces {
+            for case .tab(let tab) in SidebarTree.leaves(store.content(for: space.id).pinned) where tab.displayTitle == title { return tab }
+        }
+        return store.profiles.flatMap { store.favorites(in: $0.id) }.first { $0.displayTitle == title }
+    }
+
+    var records: [String: SyncRecordBody] { SidebarSyncProjection.extract(store.makeSnapshot()) }
+}
+
+private func arcSource() throws -> ArcSidebarImport {
+    let export = try ArcSidebarReader.parse(JSONSerialization.data(withJSONObject: BrowserImportFixture.arcSidebar()))
+    return ArcSidebarImport(export: export, profileNames: ["Default": "Home", "Profile 1": "Studio"])
+}
+
+@MainActor
+final class SyncDecisionTests: XCTestCase {
+    private var folder: URL!
+
+    override func setUp() {
+        folder = FileManager.default.temporaryDirectory.appendingPathComponent("sync-decision-\(UUID())")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    }
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    private func file(_ json: String? = nil, asks: Bool = true) throws -> SidebarSyncStateFile {
+        let url = folder.appendingPathComponent(SidebarSyncStateFile.fileName)
+        if let json { try Data(json.utf8).write(to: url) }
+        return SidebarSyncStateFile(fileURL: url, asksWhenUndecided: asks)
+    }
+
+    func testNoFileIsUndecidedAndOff() throws {
+        let state = try file().load()
+        XCTAssertTrue(state.isUndecided)
+        XCTAssertFalse(state.isActive)
+        let isolated = try file(asks: false).load()
+        XCTAssertEqual(isolated.decision, .isolated, "a REARC_DATA_DIR launch is never asked and stays off")
+        XCTAssertFalse(isolated.isActive)
+    }
+
+    func testBuild602sDefaultOnIsNotAChoice() throws {
+        // What 602 wrote after syncing on by default: on, joined, records, no decision.
+        let state = try file(#"{"version":1,"enabled":true,"zoneReady":true,"joined":true,"records":{"profile_00000000-0000-0000-0000-000000000001":{"payload":{"kind":"SidebarProfileRecord","fields":{}},"pending":false}}}"#).load()
+        XCTAssertTrue(state.isUndecided)
+        XCTAssertFalse(state.isActive)
+        XCTAssertTrue(state.joined, "what it synced is kept, so Turn On carries on where it was")
+        XCTAssertEqual(state.records.count, 1)
+        let coordinator = SidebarSyncCoordinator(transport: InMemorySyncServer().transport(account: "a"), stateStore: InMemorySyncStateStore(state), deviceID: "A")
+        XCTAssertTrue(coordinator.needsDecision)
+        XCTAssertTrue(coordinator.syncedBeforeDecision)
+    }
+
+    func testAnEarlierExplicitOffStaysOffAndIsNotAsked() throws {
+        let state = try file(#"{"version":1,"enabled":false,"zoneReady":false,"joined":false,"records":{}}"#).load()
+        XCTAssertEqual(state.decision, .user)
+        XCTAssertFalse(state.isActive)
+    }
+
+    func testAFileThatDoesNotDecodeNeverTurnsSyncOn() throws {
+        // The saved off is read on its own when the rest is unreadable.
+        var state = try file(#"{"version":1,"enabled":false,"records":"garbage"}"#).load()
+        XCTAssertEqual(state.decision, .user)
+        XCTAssertFalse(state.isActive)
+        // A 602 on with no decision, unreadable: undecided and off.
+        state = try file(#"{"version":1,"enabled":true,"records":7}"#).load()
+        XCTAssertTrue(state.isUndecided)
+        XCTAssertFalse(state.isActive)
+        // Not JSON at all.
+        state = try file("not json").load()
+        XCTAssertTrue(state.isUndecided)
+        XCTAssertFalse(state.isActive)
+        // A chosen on keeps its choice; its records are gone, so the next cycle joins again.
+        state = try file(#"{"version":1,"enabled":true,"decision":"user","records":7}"#).load()
+        XCTAssertTrue(state.isActive)
+        XCTAssertFalse(state.joined)
+    }
+
+    func testUndecidedSyncsNothingAndTheAnswerIsSavedAtOnce() async throws {
+        let server = InMemorySyncServer()
+        let stateFile = try file()
+        let coordinator = SidebarSyncCoordinator(transport: server.transport(account: "a"), stateStore: stateFile, deviceID: "A")
+        let store = SidebarStore()
+        _ = store.addTab(kind: .pinned, title: "Private", url: URL(string: "https://private.test")!)
+        coordinator.host = store
+        XCTAssertTrue(coordinator.needsDecision)
+        let outcome = await coordinator.sync()
+        XCTAssertTrue(outcome.skipped)
+        XCTAssertEqual(server.fetchCount, 0)
+        XCTAssertTrue(server.records(account: "a").isEmpty)
+
+        coordinator.setEnabled(false) // Not Now
+        XCTAssertEqual(stateFile.load().decision, .user)
+        XCTAssertFalse(stateFile.load().isActive)
+        coordinator.enableForNewInstall()
+        XCTAssertFalse(coordinator.isEnabled, "a new install's default never overrides a choice")
+
+        coordinator.setEnabled(true) // Turn On
+        XCTAssertTrue(stateFile.load().isActive)
+        let turnedOn = await coordinator.sync()
+        XCTAssertFalse(turnedOn.skipped)
+        XCTAssertFalse(server.records(account: "a").isEmpty)
+    }
+
+    func testANewInstallIsOnOnceOnboardingFinishes() throws {
+        let stateFile = try file()
+        let coordinator = SidebarSyncCoordinator(transport: InMemorySyncServer().transport(account: "a"), stateStore: stateFile, deviceID: "A")
+        coordinator.enableForNewInstall()
+        XCTAssertTrue(coordinator.isEnabled)
+        XCTAssertEqual(stateFile.load().decision, .newInstall)
+        XCTAssertFalse(coordinator.needsDecision)
+    }
+
+    func testSchedulerStaysIdleUntilAnswered() async {
+        let server = InMemorySyncServer()
+        let coordinator = SidebarSyncCoordinator(transport: server.transport(account: "a"), stateStore: InMemorySyncStateStore(), deviceID: "A")
+        let scheduler = SidebarSyncScheduler(coordinator: coordinator)
+        let host = SidebarStore()
+        scheduler.attach(host: host)
+        scheduler.sleeper = { delay in
+            if delay >= SidebarSyncScheduler.pollInterval { try? await Task.sleep(nanoseconds: 3_600_000_000_000) }
+        }
+        scheduler.start()
+        await scheduler.runCycle()
+        XCTAssertTrue(scheduler.needsDecision)
+        XCTAssertEqual(server.fetchCount, 0)
+        scheduler.setUserEnabled(true)
+        await scheduler.runCycle()
+        XCTAssertGreaterThan(server.fetchCount, 0)
+        scheduler.stop()
+    }
+
+    func testPromptSaysWhatMergesAndWhatStaysLocal() {
+        let fresh = SyncDecisionPrompt(syncedBefore: false)
+        XCTAssertEqual(SyncDecisionPrompt.title, "Sync your sidebar with iCloud?")
+        XCTAssertTrue(fresh.message.contains("merges this Mac's sidebar"))
+        XCTAssertTrue(fresh.message.contains("Today tabs, history, passwords and settings stay on this Mac"))
+        XCTAssertTrue(SyncDecisionPrompt(syncedBefore: true).message.contains("without asking"))
+        XCTAssertFalse(fresh.message.contains("without asking"))
+    }
+}
+
+@MainActor
+final class SyncFirstJoinTests: XCTestCase {
+    private var server: InMemorySyncServer!
+    private var clock: Clock!
+
+    override func setUp() async throws {
+        server = InMemorySyncServer()
+        clock = Clock()
+    }
+
+    private func on() -> SidebarSyncState {
+        var state = SidebarSyncState()
+        state.enabled = true
+        state.decision = .user
+        return state
+    }
+
+    private func arcMac(_ name: String) throws -> Mac {
+        let store = SidebarStore()
+        let source = try arcSource()
+        store.importArcSidebar(source, choices: source.defaultChoices(for: store))
+        return Mac(name, server: server, clock: clock, state: on(), store: store)
+    }
+
+    /// Mac A imported from Arc and was tidied since; Mac B imports the same
+    /// Arc data much later and joins. B's copy is stale: A's edits stay.
+    func testAJoiningMacThatImportedTheSameArcDataNeverRevertsOrResurrects() async throws {
+        let a = try arcMac("A")
+        await a.sync()
+
+        let handbook = try XCTUnwrap(a.tab("Handbook"))
+        _ = a.store.renameTab(handbook.id, to: "Team handbook")
+        // A row of its own (not a split's member), inside a folder.
+        func rows(_ entries: [SidebarEntry]) -> [Tab] {
+            entries.flatMap { entry -> [Tab] in
+                switch entry {
+                case .tab(let tab): return [tab]
+                case .folder(let folder): return rows(folder.children)
+                default: return []
+                }
+            }
+        }
+        let deleted = try XCTUnwrap(a.store.spaces.flatMap { space in
+            a.store.content(for: space.id).pinned.compactMap { entry -> SidebarFolder? in if case .folder(let folder) = entry { return folder } else { return nil } }
+        }.flatMap { rows($0.children) }.first)
+        a.store.closeTab(deleted.id)
+        a.edited()
+        await a.sync()
+        XCTAssertNil(a.store.tab(withID: deleted.id))
+
+        // Within the 30 days a tombstone stays on the server (SYNC-DESIGN §5.4).
+        clock.advance(10 * 24 * 3600)
+        let b = try arcMac("B")
+        XCTAssertNotNil(b.store.tab(withID: deleted.id), "B's own import still has the row A deleted")
+        XCTAssertEqual(b.store.tab(withID: handbook.id)?.displayTitle, "Handbook")
+        let mine = b.store.addTab(kind: .pinned, title: "Only on B", url: URL(string: "https://only-b.test")!, in: b.store.spaces[0].id)
+        await b.sync()
+        await a.sync()
+        await b.sync()
+
+        for mac in [a, b] {
+            XCTAssertEqual(mac.store.tab(withID: handbook.id)?.displayTitle, "Team handbook", "\(mac.name) keeps A's later rename")
+            XCTAssertNil(mac.store.tab(withID: deleted.id), "\(mac.name): the row A deleted stays deleted")
+            XCTAssertNotNil(mac.store.tab(withID: mine.id), "\(mac.name): B's own new row is merged in")
+        }
+        let record = server.records(account: "alice")[SyncRecordKind.item.recordName(for: deleted.id)]
+        XCTAssertEqual(record?.payload.isAlive, false)
+        XCTAssertEqual(Set(a.records.keys), Set(b.records.keys))
+    }
+
+    /// After the join, B is an ordinary member: its own later edits win.
+    func testEditsAfterTheJoinStillWin() async throws {
+        let a = try arcMac("A")
+        await a.sync()
+        let b = try arcMac("B")
+        await b.sync()
+        let handbook = try XCTUnwrap(b.tab("Handbook"))
+        _ = b.store.renameTab(handbook.id, to: "B's handbook")
+        b.edited()
+        await b.sync()
+        await a.sync()
+        XCTAssertEqual(a.store.tab(withID: handbook.id)?.displayTitle, "B's handbook")
+    }
+}
+
+@MainActor
+final class SyncHostileRecordTests: XCTestCase {
+    private var server: InMemorySyncServer!
+    private var clock: Clock!
+
+    override func setUp() async throws {
+        server = InMemorySyncServer()
+        clock = Clock()
+    }
+
+    private func on() -> SidebarSyncState {
+        var state = SidebarSyncState()
+        state.enabled = true
+        state.decision = .user
+        return state
+    }
+
+    /// An attacker with the Apple Account writes records straight to the zone.
+    private func plant(_ name: String, _ payload: SyncRecordPayload) async throws {
+        let attacker = server.transport(account: "alice")
+        try await attacker.prepareZone()
+        _ = try await attacker.modify(saving: [SyncWireRecord(recordName: name, payload: payload)], deleting: [])
+    }
+
+    private func field(_ value: SyncValue, millis: Int64 = 1_800_000_000_000, counter: UInt32 = 0) -> SyncField {
+        SyncField(value: value, stamp: SyncStamp(millis: millis, counter: counter, device: "evil"))
+    }
+
+    func testClockAtItsLimitNeverTraps() {
+        var clock = HybridLogicalClock(device: "A", last: SyncStamp(millis: 5, counter: .max, device: "B"))
+        let next = clock.tick(now: Date(timeIntervalSince1970: 0))
+        XCTAssertEqual(next.millis, 6)
+        XCTAssertEqual(next.counter, 0)
+        var end = HybridLogicalClock(device: "A", last: SyncStamp(millis: .max, counter: .max, device: "B"))
+        _ = end.tick(now: Date())
+        _ = end.tick(now: Date(timeIntervalSince1970: .infinity))
+        _ = end.tick(now: Date(timeIntervalSince1970: .nan))
+    }
+
+    func testASaturatedStampIsQuarantinedAndLaterEditsStillSync() async throws {
+        let a = Mac("A", server: server, clock: clock, state: on())
+        await a.sync()
+        let name = SyncRecordKind.item.recordName(for: UUID())
+        let tab: [String: SyncField] = [
+            "type": field(.string("tab"), millis: .max, counter: .max),
+            "parent": field(.string("pinned:\(a.store.spaces[0].id.uuidString.lowercased())"), millis: .max, counter: .max),
+            "url": field(.string("https://evil.test"), millis: .max, counter: .max),
+        ]
+        try await plant(name, SyncRecordPayload(kind: .item, fields: tab))
+        let outcome = await a.sync()
+        XCTAssertNil(outcome.error)
+        XCTAssertNil(a.coordinator.state.records[name], "never merged")
+        XCTAssertTrue(a.coordinator.quarantinedRecordNames.contains(name))
+        XCTAssertLessThan(a.coordinator.state.clock?.millis ?? 0, Int64.max)
+        _ = a.store.addTab(kind: .pinned, title: "After", url: URL(string: "https://after.test")!, in: a.store.spaces[0].id)
+        a.edited()
+        let synced = await a.sync()
+        XCTAssertNil(synced.error)
+        XCTAssertEqual(a.coordinator.state.pendingCount, 0)
+    }
+
+    func testAFarFutureStampIsQuarantinedButSmallSkewIsNot() async throws {
+        let a = Mac("A", server: server, clock: clock, state: on())
+        await a.sync()
+        let now = Int64(clock.date.timeIntervalSince1970 * 1000)
+        let space = a.store.spaces[0].id.uuidString.lowercased()
+        func tab(_ url: String, millis: Int64) -> SyncRecordPayload {
+            SyncRecordPayload(kind: .item, fields: [
+                "type": field(.string("tab"), millis: millis), "parent": field(.string("pinned:\(space)"), millis: millis),
+                "url": field(.string(url), millis: millis), "title": field(.string(url), millis: millis),
+            ])
+        }
+        let future = SyncRecordKind.item.recordName(for: UUID()), skewed = SyncRecordKind.item.recordName(for: UUID())
+        try await plant(future, tab("https://future.test", millis: now + 400 * 24 * 3600 * 1000))
+        try await plant(skewed, tab("https://skewed.test", millis: now + 60 * 1000))
+        await a.sync()
+        XCTAssertNil(a.coordinator.state.records[future])
+        XCTAssertNotNil(a.coordinator.state.records[skewed], "a peer a minute ahead is normal")
+    }
+
+    func testAStateFileAlreadySaturatedRecoversAtLaunch() {
+        var state = on()
+        let name = SyncRecordKind.profile.recordName(for: UUID())
+        state.records[name] = SyncShadowRecord(payload: SyncRecordPayload(kind: .profile, fields: ["name": field(.string("x"), millis: .max, counter: .max)]))
+        state.clock = SyncStamp(millis: .max, counter: .max, device: "A")
+        let coordinator = SidebarSyncCoordinator(transport: server.transport(account: "alice"), stateStore: InMemorySyncStateStore(state), deviceID: "A", now: { [clock] in clock!.date })
+        XCTAssertNil(coordinator.state.records[name])
+        XCTAssertNil(coordinator.state.clock)
+        var reset = state
+        reset.resetServerState()
+        XCTAssertNil(reset.clock, "Reset iCloud state drops the clock with the records")
+    }
+
+    func testHugeOrderAndNonFiniteNumbersNeverTrap() {
+        for order in [1e300, -1e300, Double(Int.max), .infinity, -.infinity, .nan] {
+            let value = SyncValue.object(["packageID": .string(UUID().uuidString), "order": .number(order)])
+            XCTAssertNotNil(SidebarSyncProjection.installation(from: value))
+        }
+        XCTAssertEqual(SidebarSyncProjection.clampedInt(1e300), Int.max)
+        XCTAssertEqual(SidebarSyncProjection.clampedInt(.nan), 0)
+    }
+
+    func testDuplicateTabsInASplitAndTwoInstallationsForOnePackageNeverTrap() async throws {
+        let a = Mac("A", server: server, clock: clock, state: on())
+        await a.sync()
+        let space = a.store.spaces[0].id.uuidString.lowercased()
+        let tabID = UUID()
+        let member: SyncValue = .object(["id": .string(tabID.uuidString), "kind": .string("pinned"), "title": .string("t"), "url": .string("https://t.test")])
+        try await plant(SyncRecordKind.item.recordName(for: UUID()), SyncRecordPayload(kind: .item, fields: [
+            "type": field(.string("split")), "parent": field(.string("pinned:\(space)")), "orientation": field(.string("horizontal")),
+            "tabs": field(.array([member, member])),
+        ]))
+        // A second split claiming a tab that is also a row of its own.
+        let row = SyncRecordKind.item.recordName(for: tabID)
+        try await plant(row, SyncRecordPayload(kind: .item, fields: [
+            "type": field(.string("tab")), "parent": field(.string("pinned:\(space)")), "url": field(.string("https://t.test")),
+        ]))
+        let other = SyncValue.object(["id": .string(UUID().uuidString), "kind": .string("pinned"), "title": .string("u"), "url": .string("https://u.test")])
+        try await plant(SyncRecordKind.item.recordName(for: UUID()), SyncRecordPayload(kind: .item, fields: [
+            "type": field(.string("split")), "parent": field(.string("pinned:\(space)")), "orientation": field(.string("horizontal")),
+            "tabs": field(.array([member, other])),
+        ]))
+        let package = BoostPackage.newStyle(name: "x", hostScope: [], css: "a{}")
+        let profile = a.store.profiles[0].id.uuidString
+        for _ in 0 ..< 2 {
+            var spoofed = package
+            spoofed.manifest.id = UUID()
+            try await plant(SyncRecordKind.boost.recordName(for: spoofed.manifest.id), SyncRecordPayload(kind: .boost, fields: [
+                "profileID": field(.string(profile)), "package": field(try SyncValue.encoding(spoofed)),
+                "installation": field(.object(["packageID": .string(package.manifest.id.uuidString), "order": .number(1e300)])),
+            ]))
+        }
+        let synced = await a.sync()
+        XCTAssertNil(synced.error)
+        XCTAssertEqual(a.store.makeSnapshot().splitsByID.count, 0)
+        XCTAssertNotNil(a.store.tab(withID: tabID))
+        let library = try XCTUnwrap(a.store.boostLibrariesByProfileID[a.store.profiles[0].id])
+        XCTAssertEqual(BoostLibraryListing.rows(library).count, 2)
+    }
+
+    func testAVeryLongFolderChainBuildsWithoutDeepRecursion() async throws {
+        let a = Mac("A", server: server, clock: clock, state: on())
+        await a.sync()
+        let space = a.store.spaces[0].id.uuidString.lowercased()
+        var parent = "pinned:\(space)"
+        var wires: [SyncWireRecord] = []
+        for index in 0 ..< 3000 {
+            let id = UUID()
+            wires.append(SyncWireRecord(recordName: SyncRecordKind.item.recordName(for: id), payload: SyncRecordPayload(kind: .item, fields: [
+                "type": field(.string("folder")), "parent": field(.string(parent)), "title": field(.string("f\(index)")),
+                "sortRank": field(.string(String(repeating: "0", count: 20_000))),
+            ])))
+            parent = "folder:\(id.uuidString.lowercased())"
+        }
+        let attacker = server.transport(account: "alice")
+        _ = try await attacker.modify(saving: wires, deleting: [])
+        let synced = await a.sync()
+        XCTAssertNil(synced.error)
+        func depth(_ entries: [SidebarEntry]) -> Int {
+            var deepest = 0, level = entries
+            while !level.isEmpty {
+                deepest += 1
+                level = level.flatMap { if case .folder(let folder) = $0 { return folder.children } else { return [] } }
+            }
+            return deepest
+        }
+        XCTAssertLessThanOrEqual(depth(a.store.content(for: a.store.spaces[0].id).pinned), SidebarSyncProjection.maxFolderDepth + 1)
+        XCTAssertEqual(SidebarTree.folders(a.store.content(for: a.store.spaces[0].id).pinned).count, 3000)
+    }
+
+    func testRanksFromSyncNeverTrap() {
+        XCTAssertNotNil(SyncRanks.between(nil, String(repeating: "0", count: 100_000) + "1"))
+        XCTAssertNil(SyncRanks.between("", String(repeating: "0", count: 100_000)))
+        XCTAssertFalse(LexoRank.between("b", "a").isEmpty)
+        XCTAssertFalse(LexoRank.between("a", "a").isEmpty)
+    }
+
+    func testKindThatDisagreesWithTheRecordNameIsQuarantined() async throws {
+        let a = Mac("A", server: server, clock: clock, state: on())
+        await a.sync()
+        let name = SyncRecordKind.space.recordName(for: UUID())
+        try await plant(name, SyncRecordPayload(kind: .item, fields: ["type": field(.string("tab"))]))
+        await a.sync()
+        XCTAssertNil(a.coordinator.state.records[name])
+    }
+
+    func testDeeplyNestedJSONIsRefusedNotACrash() {
+        let deep = String(repeating: "[", count: 100_000) + String(repeating: "]", count: 100_000)
+        XCTAssertThrowsError(try SyncCoding.decoder.decode(SyncValue.self, from: Data(deep.utf8)))
+        let payload = #"{"kind":"SidebarItemRecord","fields":{"x":{"value":"# + String(repeating: "[", count: 50_000) + String(repeating: "]", count: 50_000)
+            + #","stamp":{"millis":1,"counter":0,"device":"e"}}}}"#
+        XCTAssertThrowsError(try SyncRecordPayload.decode(Data(payload.utf8)))
+    }
+}

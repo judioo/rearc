@@ -33,13 +33,13 @@ struct SyncDefaultsAndFailureTests {
         }
     }
 
-    @Test func absentStateDefaultsOnAndSavedOffSurvives() throws {
+    @Test func absentStateIsUndecidedAndSavedOffSurvives() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("sync-defaults-\(UUID())")
         defer { try? FileManager.default.removeItem(at: folder) }
         let file = SidebarSyncStateFile(fileURL: folder.appendingPathComponent("sync-state.json"))
-        #expect(file.load().enabled)
-        let isolated = SidebarSyncStateFile(fileURL: folder.appendingPathComponent("isolated.json"), defaultEnabled: false)
-        #expect(!isolated.load().enabled, "a REARC_DATA_DIR launch stays local until turned on")
+        #expect(!file.load().isActive, "an existing install is asked first (RC-0.1.0-602 T-01)")
+        let isolated = SidebarSyncStateFile(fileURL: folder.appendingPathComponent("isolated.json"), asksWhenUndecided: false)
+        #expect(!isolated.load().isActive, "a REARC_DATA_DIR launch stays local until turned on")
         var state = SidebarSyncState()
         state.enabled = false
         file.save(state)
@@ -47,7 +47,7 @@ struct SyncDefaultsAndFailureTests {
         let coordinator = SidebarSyncCoordinator(transport: InMemorySyncServer().transport(account: "fixture"), stateStore: file, deviceID: "A")
         #expect(!coordinator.isEnabled)
         coordinator.setEnabled(true)
-        #expect(file.load().enabled)
+        #expect(file.load().isActive)
         coordinator.setEnabled(false)
         #expect(!file.load().enabled)
     }
@@ -57,6 +57,8 @@ struct SyncDefaultsAndFailureTests {
         let server = InMemorySyncServer()
         let transport = RejectingTransport(server: server, throwsForBatch: throwsForBatch)
         var state = SidebarSyncState()
+        state.enabled = true
+        state.decision = .user
         state.joined = true
         var fixtureNames = Set<String>()
         for kind in SyncRecordKind.allCases {

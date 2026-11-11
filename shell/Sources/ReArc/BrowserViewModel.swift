@@ -32,6 +32,8 @@ final class BrowserViewModel {
     private(set) var syncStatus: SyncEngineStatus = .local
     /// Settings > iCloud Sync; nil when this build has no iCloud entitlement.
     var syncDetails: SyncStatusDetails?
+    /// The one-time "Sync your sidebar with iCloud?" question, while it is open.
+    var syncDecisionPrompt: SyncDecisionPrompt?
     @ObservationIgnored var syncActivationObserver: NSObjectProtocol?
     private let nowPlaying: MediaKeyRouting
     private var mediaSubscriptions: [Tab.ID: AnyCancellable] = [:]
@@ -667,6 +669,7 @@ final class BrowserViewModel {
         guard didFinishStartup, !syncStarted, !isFirstRun || syncOnboardingResolved else { return }
         syncStarted = true
         syncEngine.start()
+        offerSyncDecisionIfNeeded()
     }
 
     /// “Onboard later” keeps setup available inside the browser, including
@@ -692,6 +695,7 @@ final class BrowserViewModel {
         persistence.finishOnboarding()
         onboardingSetupState = persistence.onboardingSetupState
         syncOnboardingResolved = true
+        enableSyncForNewInstall()
         startSyncIfReady()
     }
 

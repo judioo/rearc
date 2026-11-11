@@ -27,7 +27,7 @@ public enum BoostLibraryListing {
 
     public static func rows(_ library: ProfileBoostLibrary, currentPage: URL? = nil, filter: String = "") -> [BoostLibraryRow] {
         let needle = filter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let order = Dictionary(uniqueKeysWithValues: library.installations.map { ($0.packageID, $0.order) })
+        let order = Dictionary(library.installations.map { ($0.packageID, $0.order) }, uniquingKeysWith: { first, _ in first })
         return library.packages
             .compactMap { package -> BoostLibraryRow? in
                 guard let install = library.installation(for: package.manifest.id) else { return nil }

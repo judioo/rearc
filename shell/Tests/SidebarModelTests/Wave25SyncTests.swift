@@ -218,7 +218,8 @@ final class Wave25SyncConvergenceTests: XCTestCase {
         // Another Mac saves the same record between B's fetch and B's upload.
         server.beforeModify = { server in
             var record = try! XCTUnwrap(server.records(account: "alice")[name])
-            record.payload.fields["savedTitle"] = SyncField(value: .string("From C"), stamp: SyncStamp(millis: Int64.max / 2, device: "C"))
+            // An hour ahead: later than B's write, and still a stamp a real Mac could make (RC-0.1.0-602 T-03).
+            record.payload.fields["savedTitle"] = SyncField(value: .string("From C"), stamp: SyncStamp(millis: 1_800_003_600_000, device: "C"))
             server.overwrite(account: "alice", record: record)
         }
         let outcome = await b.sync()
@@ -481,6 +482,7 @@ final class Wave25SyncResilienceTests: XCTestCase {
         XCTAssertEqual(file.load(), SidebarSyncState(), "a missing file is a fresh state")
         var state = SidebarSyncState()
         state.enabled = true
+        state.decision = .user
         state.accountID = "alice"
         state.transportToken = Data("token".utf8)
         state.records["space_x"] = SyncShadowRecord(

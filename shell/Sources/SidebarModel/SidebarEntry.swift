@@ -41,7 +41,7 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
         self.memberPlacements = memberPlacements
         if widthFactors.isEmpty {
             let equal = 1.0 / Double(tabs.count)
-            self.widthFactors = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, equal) })
+            self.widthFactors = Dictionary(tabs.map { ($0.id, equal) }, uniquingKeysWith: { first, _ in first })
         } else {
             self.widthFactors = SplitViewItem.normalizedFactors(widthFactors, tabIDs: tabs.map(\.id))
         }
@@ -59,6 +59,9 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
         id = try c.decode(UUID.self, forKey: .id)
         orientation = try c.decode(SplitLayoutOrientation.self, forKey: .orientation)
         let decodedTabs = try c.decode([Tab].self, forKey: .tabs)
+        guard (2 ... 4).contains(decodedTabs.count), Set(decodedTabs.map(\.id)).count == decodedTabs.count else {
+            throw DecodingError.dataCorruptedError(forKey: .tabs, in: c, debugDescription: "A split holds two to four different tabs")
+        }
         tabs = decodedTabs
         focusTabID = try c.decodeIfPresent(Tab.ID.self, forKey: .focusTabID) ?? decodedTabs[0].id
         widthFactors = try c.decodeIfPresent([Tab.ID: Double].self, forKey: .widthFactors) ?? [:]
@@ -68,7 +71,7 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
         title = try c.decodeIfPresent(String.self, forKey: .title)
         if widthFactors.isEmpty {
             let equal = 1.0 / Double(tabs.count)
-            widthFactors = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, equal) })
+            widthFactors = Dictionary(tabs.map { ($0.id, equal) }, uniquingKeysWith: { first, _ in first })
         } else {
             widthFactors = SplitViewItem.normalizedFactors(widthFactors, tabIDs: tabs.map(\.id))
         }
@@ -99,9 +102,9 @@ public struct SplitViewItem: Identifiable, Equatable, Codable {
         let sum = raw.reduce(0, +)
         guard sum > 0 else {
             let equal = 1.0 / Double(tabIDs.count)
-            return Dictionary(uniqueKeysWithValues: tabIDs.map { ($0, equal) })
+            return Dictionary(tabIDs.map { ($0, equal) }, uniquingKeysWith: { first, _ in first })
         }
-        return Dictionary(uniqueKeysWithValues: zip(tabIDs, raw.map { $0 / sum }))
+        return Dictionary(zip(tabIDs, raw.map { $0 / sum }), uniquingKeysWith: { first, _ in first })
     }
 }
 

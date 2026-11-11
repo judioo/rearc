@@ -196,6 +196,16 @@ struct BrowserView: View {
         } message: {
             Text(model.captureErrorMessage ?? "")
         }
+        .alert(SyncDecisionPrompt.title, isPresented: Binding(
+            get: { model.syncDecisionPrompt != nil && isKeyWindowSheetOwner },
+            set: { _ in }
+        )) {
+            Button(SyncDecisionPrompt.turnOn) { model.setSyncEnabled(true) }
+                .keyboardShortcut(.defaultAction)
+            Button(SyncDecisionPrompt.notNow, role: .cancel) { model.setSyncEnabled(false) }
+        } message: {
+            Text(model.syncDecisionPrompt?.message ?? "")
+        }
         .alert("Default Browser", isPresented: Binding(
             get: { model.defaultBrowserMessage != nil && isKeyWindowSheetOwner },
             set: { if !$0 { model.defaultBrowserMessage = nil } }

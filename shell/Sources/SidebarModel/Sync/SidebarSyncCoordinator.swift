@@ -115,23 +115,58 @@ public final class SidebarSyncCoordinator {
         self.transport = transport
         self.stateStore = stateStore
         self.now = now
-        let state = initialState ?? stateStore.load()
+        var state = initialState ?? stateStore.load()
+        Self.quarantineImplausible(&state, now: now())
         self.state = state
         self.clock = HybridLogicalClock(device: deviceID, last: state.clock)
         self.details = SyncStatusDetails(
-            phase: state.enabled ? .waiting("Waiting to sync") : .off,
+            phase: state.isActive ? .waiting("Waiting to sync") : .off,
             lastSyncedAt: state.lastSyncedAt,
             pendingCount: state.pendingCount
         )
     }
 
-    public var isEnabled: Bool { state.enabled }
+    /// On, and chosen (or a new install's default): cycles run.
+    public var isEnabled: Bool { state.isActive }
 
+    /// Records whose stamps no device could have written, set aside this
+    /// launch instead of merged (RC-0.1.0-602 T-03).
+    public private(set) var quarantinedRecordNames: Set<String> = []
+
+    /// A state file a crafted record already reached (build 602 adopted any
+    /// stamp): its impossible records go, and a clock pushed past what
+    /// remains restarts from the newest stamp left.
+    static func quarantineImplausible(_ state: inout SidebarSyncState, now: Date) {
+        state.records = state.records.filter { $0.value.payload.isPlausible(now: now) }
+        if let clock = state.clock, !clock.isPlausible(now: now) {
+            state.clock = state.records.values.compactMap(\.payload.latestStamp).max()
+        }
+    }
+
+    /// An existing install nobody chose for: the "Sync your sidebar with
+    /// iCloud?" prompt asks, and nothing syncs until it is answered (T-01).
+    public var needsDecision: Bool { state.isUndecided }
+
+    /// This Mac already synced, before anyone chose (build 602's default).
+    public var syncedBeforeDecision: Bool { state.isUndecided && (state.joined || !state.records.isEmpty) }
+
+    /// The person's choice, from the prompt or Settings.
     public func setEnabled(_ enabled: Bool) {
-        guard state.enabled != enabled else { return }
+        record(enabled, by: .user)
+    }
+
+    /// A new install whose onboarding finished: on unless someone already chose.
+    public func enableForNewInstall() {
+        guard state.isUndecided else { return }
+        record(true, by: .newInstall)
+    }
+
+    private func record(_ enabled: Bool, by decision: SyncDecision) {
+        guard state.enabled != enabled || state.decision != decision else { return }
         state.enabled = enabled
+        state.decision = decision
         persist()
-        update(enabled ? .waiting("Waiting to sync") : .off)
+        update(state.isActive ? .waiting("Waiting to sync") : .off)
     }
 
     /// Sync Now: offer schema-rejected kinds again (after a schema deployment).
@@ -144,7 +179,7 @@ public final class SidebarSyncCoordinator {
     @discardableResult
     public func sync() async -> SyncCycleOutcome {
         var outcome = SyncCycleOutcome()
-        guard state.enabled, host != nil else {
+        guard state.isActive, host != nil else {
             outcome.skipped = true
             return outcome
         }
@@ -200,8 +235,9 @@ public final class SidebarSyncCoordinator {
             remoteChanged = try await pullAll(&outcome)
             let hasRemoteSidebar = state.records.values.contains { $0.payload.kind == .space && $0.payload.isAlive }
             let adopt = hasRemoteSidebar && SidebarSyncProjection.isPristine(host.syncSnapshot())
-            // Rows only the server has are new to this Mac, not deleted here.
-            if !adopt { capture(host.syncSnapshot(), tombstoningMissing: false) }
+            // Rows only the server has are new to this Mac, not deleted here;
+            // rows it already has, alive or deleted, keep the server's copy.
+            if !adopt { capture(host.syncSnapshot(), joining: true) }
             if adopt { remoteChanged = true }
             state.joined = true
         } else {
@@ -218,6 +254,9 @@ public final class SidebarSyncCoordinator {
         state.lastSyncedAt = now()
         state.lastError = nil
         persist()
+        if !quarantinedRecordNames.isEmpty {
+            details.technicalError = "Ignored \(quarantinedRecordNames.count) record(s) with impossible timestamps or kinds: \(quarantinedRecordNames.sorted().prefix(3).joined(separator: ", "))"
+        }
         // The rest synced; still report a type the schema keeps out.
         if let rejected = activeSchemaRejection() { throw rejected }
         update(state.pendingCount == 0 ? .upToDate : .waiting("\(state.pendingCount) changes waiting to upload"))
@@ -239,18 +278,26 @@ public final class SidebarSyncCoordinator {
     /// time it was made even when it uploads hours later (offline). The
     /// scheduler calls this for every coalesced batch of sidebar edits.
     public func captureLocalChanges() {
-        guard state.enabled, state.joined, let host else { return }
+        guard state.isActive, state.joined, let host else { return }
         capture(host.syncSnapshot())
         details.pendingCount = state.pendingCount
     }
 
     /// Stamps every field that differs from the last merged record; rows gone
     /// from the sidebar get a tombstone.
-    func capture(_ snapshot: SidebarSnapshot, tombstoningMissing: Bool = true) {
+    ///
+    /// `joining`: the first sync of a Mac that already has a sidebar. Its
+    /// rows carry no edit times, so a value differing from the server's is
+    /// as likely stale (the same Arc import, months older) as new. Stamping
+    /// it now would beat another Mac's later edit and bring back what it
+    /// deleted (RC-0.1.0-602 T-02), so only rows the server lacks are
+    /// stamped; nothing is tombstoned.
+    func capture(_ snapshot: SidebarSnapshot, joining: Bool = false) {
         let bodies = SidebarSyncProjection.extract(snapshot)
         let at = now()
         for (name, body) in bodies {
             let known = state.records[name]
+            if joining, known != nil { continue }
             var record = known ?? SyncShadowRecord(payload: SyncRecordPayload(kind: body.kind))
             let alive = known != nil && record.payload.isAlive
             var changed = false
@@ -269,7 +316,7 @@ public final class SidebarSyncCoordinator {
                 state.records[name] = record
             }
         }
-        for (name, record) in state.records where tombstoningMissing && record.payload.isAlive && bodies[name] == nil
+        for (name, record) in state.records where !joining && record.payload.isAlive && bodies[name] == nil
             && SidebarSyncProjection.canMaterialize(name, record.payload) {
             var deleted = record
             deleted.payload.tombstone = clock.tick(now: at)
@@ -321,6 +368,12 @@ public final class SidebarSyncCoordinator {
     /// Merges a server copy into the local one. True when the local copy changed.
     @discardableResult
     private func merge(_ wire: SyncWireRecord) -> Bool {
+        guard wire.payload.isPlausible(now: now()),
+              SyncRecordKind.parse(recordName: wire.recordName).map({ $0.kind == wire.payload.kind }) ?? true else {
+            // Never merged, never observed: one crafted record must not stop sync on every Mac.
+            quarantinedRecordNames.insert(wire.recordName)
+            return false
+        }
         if let latest = wire.payload.latestStamp { clock.observe(latest) }
         guard var record = state.records[wire.recordName] else {
             state.records[wire.recordName] = SyncShadowRecord(payload: wire.payload, serverTag: wire.serverTag)

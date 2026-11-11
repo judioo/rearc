@@ -5,9 +5,15 @@ import Foundation
 public protocol SyncControlling: AnyObject {
     var details: SyncStatusDetails { get }
     var isUserEnabled: Bool { get }
+    /// Nobody chose yet (an existing install): ask before anything syncs.
+    var needsDecision: Bool { get }
+    /// Build 602 synced this Mac on by default before anyone chose.
+    var syncedBeforeDecision: Bool { get }
     var onDetailsChange: ((SyncStatusDetails) -> Void)? { get set }
     func attach(host: SidebarSyncHost)
     func setUserEnabled(_ enabled: Bool)
+    /// A new install's onboarding finished: on, unless someone already chose.
+    func enableForNewInstall()
     func syncNow()
 }
 
@@ -46,6 +52,8 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
 
     @MainActor public var details: SyncStatusDetails { coordinator.details }
     @MainActor public var isUserEnabled: Bool { coordinator.isEnabled }
+    @MainActor public var needsDecision: Bool { coordinator.needsDecision }
+    @MainActor public var syncedBeforeDecision: Bool { coordinator.syncedBeforeDecision }
 
     @MainActor
     public func attach(host: SidebarSyncHost) {
@@ -55,7 +63,18 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
     @MainActor
     public func setUserEnabled(_ enabled: Bool) {
         coordinator.setEnabled(enabled)
-        if enabled, started {
+        resumeOrPause()
+    }
+
+    @MainActor
+    public func enableForNewInstall() {
+        coordinator.enableForNewInstall()
+        resumeOrPause()
+    }
+
+    @MainActor
+    private func resumeOrPause() {
+        if coordinator.isEnabled, started {
             startPolling()
             schedule(after: 0)
         } else {
@@ -201,5 +220,29 @@ public struct SyncSettingsPresentation: Equatable, Sendable {
         }
         technicalError = details.technicalError
         canSyncNow = enabled && details.phase != .syncing
+    }
+}
+
+/// The one question an existing install gets before its sidebar syncs
+/// (RC-0.1.0-602 T-01), kept out of the view so tests can read it.
+public struct SyncDecisionPrompt: Equatable, Sendable {
+    public static let title = "Sync your sidebar with iCloud?"
+    public static let turnOn = "Turn On"
+    public static let notNow = "Not Now"
+
+    public var message: String
+
+    /// `syncedBefore`: build 602 already synced this Mac without asking.
+    public init(syncedBefore: Bool) {
+        var text = "ReArc can keep your Spaces, Favorites, pinned tabs, folders, splits and Boosts the same on every Mac signed in to your Apple Account. "
+        if syncedBefore {
+            text += "The last update started syncing this sidebar without asking. Turn On keeps it in step with your other Macs. "
+                + "Not Now stops it on this Mac; what was already uploaded stays in your iCloud account."
+        } else {
+            text += "Turning it on merges this Mac's sidebar with the one in iCloud: what each Mac has appears on both, and where an item "
+                + "is already in iCloud, iCloud's version is kept, including a deletion."
+        }
+        text += " Today tabs, history, passwords and settings stay on this Mac.\n\nYou can change this later in Settings › Account."
+        message = text
     }
 }

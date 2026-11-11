@@ -202,6 +202,7 @@ public enum SidebarSyncProjection {
             if let profile: Profile = decode(base: base, overlay: values, id: id) { profiles.append(profile) }
         }
         if profiles.isEmpty { profiles = snapshot.profiles }
+        if profiles.isEmpty { profiles = [Profile.personalDefault()] }
         var profileIDs = Set(profiles.map(\.id))
 
         var spaces: [Space] = []
@@ -236,6 +237,20 @@ public enum SidebarSyncProjection {
             }
             return .pinned(firstSpaceID)
         }
+        // A split whose tabs repeat, or are rows of their own or of an earlier
+        // split, would put one tab in two places: it is left out (T-03).
+        var splitMembers = Set<UUID>()
+        var unusableSplits = Set<UUID>()
+        for item in items.values.sorted(by: { $0.name < $1.name }) where item.type == "split" {
+            let members = splitTabIDs(item.values)
+            if Set(members).count != members.count || members.contains(where: { items[$0] != nil || splitMembers.contains($0) }) {
+                unusableSplits.insert(item.id)
+            } else {
+                splitMembers.formUnion(members)
+            }
+        }
+        for id in unusableSplits { items[id] = nil }
+
         var parents: [UUID: Parent] = [:]
         for item in items.values {
             switch item.parent {
@@ -249,20 +264,12 @@ public enum SidebarSyncProjection {
             }
         }
         breakCycles(items: items, parents: &parents, root: pinnedRoot)
+        limitDepth(items: items, parents: &parents, root: pinnedRoot)
 
         var children: [Parent: [ItemRecord]] = [:]
-        for item in items.values { children[parents[item.id]!, default: []].append(item) }
-        for key in children.keys {
-            children[key]!.sort { ($0.rank, $0.name) < ($1.rank, $1.name) }
-        }
-        var claimed = Set(items.keys)
-        for item in items.values where item.type == "split" {
-            if case .array(let tabs)? = item.values["tabs"] {
-                for case .object(let fields) in tabs {
-                    if let text = fields["id"]?.stringValue, let id = UUID(uuidString: text) { claimed.insert(id) }
-                }
-            }
-        }
+        for item in items.values { children[parents[item.id] ?? pinnedRoot(for: item), default: []].append(item) }
+        children = children.mapValues { $0.sorted { ($0.rank, $0.name) < ($1.rank, $1.name) } }
+        let claimed = Set(items.keys).union(splitMembers)
 
         // Local easels keep their place among the synced rows by rank.
         var easels: [Parent: [SidebarEntry]] = [:]
@@ -279,7 +286,7 @@ public enum SidebarSyncProjection {
         func entries(under parent: Parent) -> [SidebarEntry] {
             var built: [SidebarEntry] = []
             for item in children[parent] ?? [] {
-                if let entry = makeEntry(item, local: local, children: entries(under:)) { built.append(entry) }
+                if let entry = makeEntry(item, local: local, claimed: claimed, children: entries(under:)) { built.append(entry) }
             }
             for easel in easels[parent] ?? [] {
                 let rank = rank(of: easel)
@@ -357,6 +364,8 @@ public enum SidebarSyncProjection {
                 package.scriptBoost?.userScriptEnabled = hash != nil && library.approvedScriptHashes?[id] == hash
                 var installation = values["installation"].flatMap(installation(from:))
                     ?? BoostInstallation(packageID: id, order: pairs.count)
+                // One installation per package: a record naming another package's id must not make two.
+                installation.packageID = id
                 // Private-window use is this Mac's choice; another Mac cannot turn it on.
                 installation.allowPrivate = library.installation(for: id)?.allowPrivate ?? false
                 pairs.append((package, installation))
@@ -371,7 +380,7 @@ public enum SidebarSyncProjection {
         out.profiles = profiles
         out.spaces = spaces
         out.topAppsContainersByProfileID = topApps
-        out.topAppsContainer = topApps[profiles[0].id]!
+        out.topAppsContainer = topApps[profiles[0].id] ?? snapshot.topAppsContainer
         out.spaceContainers = containers
         out.tabsByID = tabsByID
         out.splitsByID = splitsByID
@@ -470,10 +479,11 @@ public enum SidebarSyncProjection {
 
     static func makeSplit(id: UUID, values: [String: SyncValue], rank: String) -> SplitViewItem? {
         guard let tabs = try? values["tabs"]?.decoded(as: [Tab].self), (2 ... 4).contains(tabs.count),
+              Set(tabs.map(\.id)).count == tabs.count, !tabs.contains(where: { $0.id == id }),
               let orientation = try? values["orientation"]?.decoded(as: SplitLayoutOrientation.self) else { return nil }
         var factors: [Tab.ID: Double] = [:]
         for (key, value) in values["widthFactors"]?.objectValue ?? [:] {
-            if let id = UUID(uuidString: key), case .number(let factor) = value { factors[id] = factor }
+            if let id = UUID(uuidString: key), case .number(let factor) = value, factor.isFinite { factors[id] = factor }
         }
         var placements: [Tab.ID: TabPlacement] = [:]
         for (key, value) in values["memberPlacements"]?.objectValue ?? [:] {
@@ -487,6 +497,17 @@ public enum SidebarSyncProjection {
         // As written, not re-normalized: re-normalizing would drift the values a little on every sync.
         if Set(factors.keys) == Set(tabs.map(\.id)) { split.widthFactors = factors }
         return split
+    }
+
+    /// A synced number as an `Int`, never trapping on NaN, infinity or a huge value.
+    static func clampedInt(_ value: Double) -> Int {
+        guard value.isFinite else { return 0 }
+        return Int(exactly: value.rounded(.towardZero)) ?? (value < 0 ? Int.min : Int.max)
+    }
+
+    static func splitTabIDs(_ values: [String: SyncValue]) -> [UUID] {
+        guard case .array(let tabs)? = values["tabs"] else { return [] }
+        return tabs.compactMap { $0.objectValue?["id"]?.stringValue.flatMap(UUID.init(uuidString:)) }
     }
 
     static func installationValue(_ installation: BoostInstallation) -> SyncValue {
@@ -511,7 +532,7 @@ public enum SidebarSyncProjection {
         return BoostInstallation(
             packageID: packageID,
             enabled: bool("enabled") ?? true,
-            order: Int(number("order") ?? 0),
+            order: clampedInt(number("order") ?? 0),
             allowPrivate: bool("allowPrivate") ?? false,
             spacePolicy: policy
         )
@@ -580,14 +601,21 @@ public enum SidebarSyncProjection {
     private static func makeEntry(
         _ item: ItemRecord,
         local: LocalIndex,
+        claimed: Set<UUID>,
         children: (Parent) -> [SidebarEntry]
     ) -> SidebarEntry? {
+        // This Mac's copy, when the record cannot be read, unless sync placed its id elsewhere.
+        var fallback: SidebarEntry? {
+            guard let entry = local.entries[item.id] else { return nil }
+            if case .split(let split) = entry, split.tabs.contains(where: { claimed.contains($0.id) }) { return nil }
+            return entry
+        }
         switch item.type {
         case "folder":
             let title = item.values["title"]?.stringValue ?? "New Folder"
             return .folder(SidebarFolder(id: item.id, title: title, children: children(.folder(item.id)), sortRank: item.rank, customIcon: icon(in: item.values)))
         case "split":
-            guard var split = makeSplit(id: item.id, values: item.values, rank: item.rank) else { return local.entries[item.id] }
+            guard var split = makeSplit(id: item.id, values: item.values, rank: item.rank) else { return fallback }
             split.tabs = split.tabs.map { tab in
                 var copy = tab
                 if let existing = local.tabs[tab.id] {
@@ -599,7 +627,7 @@ public enum SidebarSyncProjection {
             return .split(split)
         default:
             guard let urlText = item.values["url"]?.stringValue, let url = URL(string: urlText) else {
-                return local.entries[item.id]
+                return fallback
             }
             let isFavorite: Bool
             if case .favorites = item.parent { isFavorite = true } else { isFavorite = false }
@@ -627,12 +655,15 @@ public enum SidebarSyncProjection {
 
     /// Any folder chain that loops is cut where its most recent-but-earliest
     /// move landed: the member whose parent was written first goes to the root.
+    /// Each row is walked once: a chain already known to end is not walked
+    /// again, so a long one costs its length, not its square (T-03).
     private static func breakCycles(items: [UUID: ItemRecord], parents: inout [UUID: Parent], root: (ItemRecord) -> Parent) {
-        for start in items.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
+        var settled = Set<UUID>()
+        for start in items.keys.sorted(by: { $0.uuidString < $1.uuidString }) where !settled.contains(start) {
             var path: [UUID] = []
             var onPath = Set<UUID>()
             var cursor = start
-            while case .folder(let next)? = parents[cursor] {
+            while !settled.contains(cursor), case .folder(let next)? = parents[cursor] {
                 path.append(cursor)
                 onPath.insert(cursor)
                 if onPath.contains(next) {
@@ -641,11 +672,39 @@ public enum SidebarSyncProjection {
                         let a = items[lhs]?.parentStamp, b = items[rhs]?.parentStamp
                         if a != b { return (a ?? SyncStamp(millis: .min, device: "")) < (b ?? SyncStamp(millis: .min, device: "")) }
                         return lhs.uuidString < rhs.uuidString
-                    }!
-                    parents[victim] = root(items[victim]!)
+                    }
+                    if let victim, let item = items[victim] { parents[victim] = root(item) }
                     break
                 }
                 cursor = next
+            }
+            settled.formUnion(path)
+            settled.insert(cursor)
+        }
+    }
+
+    /// Folders nest at most this deep once synced; a deeper one moves to its
+    /// space's pinned root, so building the sidebar never recurses without bound.
+    static let maxFolderDepth = 64
+
+    /// Walks down from the roots (no cycles are left), each row once.
+    private static func limitDepth(items: [UUID: ItemRecord], parents: inout [UUID: Parent], root: (ItemRecord) -> Parent) {
+        var childrenOf: [UUID: [UUID]] = [:]
+        var queue: [(id: UUID, depth: Int)] = []
+        for id in items.keys.sorted(by: { $0.uuidString < $1.uuidString }) {
+            if case .folder(let parent)? = parents[id] { childrenOf[parent, default: []].append(id) } else { queue.append((id, 0)) }
+        }
+        var index = 0
+        while index < queue.count {
+            let (id, depth) = queue[index]
+            index += 1
+            for child in childrenOf[id] ?? [] {
+                if depth + 1 > maxFolderDepth, let item = items[child] {
+                    parents[child] = root(item)
+                    queue.append((child, 0))
+                } else {
+                    queue.append((child, depth + 1))
+                }
             }
         }
     }

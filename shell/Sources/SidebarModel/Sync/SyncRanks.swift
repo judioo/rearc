@@ -17,7 +17,7 @@ public enum SyncRanks {
         guard left < right else { return nil }
         let l = Array(left), r = Array(right)
         var i = 0
-        while i < l.count, l[i] == r[i] { i += 1 }
+        while i < l.count, i < r.count, l[i] == r[i] { i += 1 }
         let prefix = String(r.prefix(i))
         if i == l.count {
             // `left` is a prefix of `right`: extend it below right's next digit.
@@ -32,12 +32,16 @@ public enum SyncRanks {
     }
 
     /// A non-empty string below `rest` (non-empty), or nil when `rest` is all "0".
+    /// A loop, not recursion: a synced rank can be any length (RC-0.1.0-602 T-03).
     private static func below(_ rest: [Character]) -> String? {
-        guard let first = rest.first else { return nil }
-        guard let index = digits.firstIndex(of: first) else { return "0" }
-        if index > 1 { return String(digits[index / 2]) }
-        if index == 1 { return "0U" }
-        return below(Array(rest.dropFirst())).map { "0" + $0 }
+        var zeros = ""
+        for character in rest {
+            guard let index = digits.firstIndex(of: character) else { return zeros + "0" }
+            if index > 1 { return zeros + String(digits[index / 2]) }
+            if index == 1 { return zeros + "0U" }
+            zeros += "0"
+        }
+        return nil
     }
 
     /// Ranks for `ranks` (display order) that strictly increase. Ranks on the

@@ -96,6 +96,24 @@ public struct SyncStamp: Hashable, Codable, Comparable, Sendable {
     public static func < (lhs: SyncStamp, rhs: SyncStamp) -> Bool {
         (lhs.millis, lhs.counter, lhs.device) < (rhs.millis, rhs.counter, rhs.device)
     }
+
+    /// How far ahead of this Mac's clock another Mac's stamp may be.
+    public static let maxSkew: TimeInterval = 24 * 3600
+    /// No real device writes this many times within one millisecond, or
+    /// runs this far behind a peer.
+    public static let maxCounter: UInt32 = 1 << 24
+
+    static func millis(of date: Date) -> Int64 {
+        let value = (date.timeIntervalSince1970 * 1000).rounded(.down)
+        return value.isFinite ? Int64(exactly: value) ?? (value < 0 ? .min : .max) : 0
+    }
+
+    /// A stamp a real device could have written by `now`. Others come from a
+    /// crafted record: adopted, they would push every later stamp to the end
+    /// of time and, before the fix, overflow the clock (RC-0.1.0-602 T-03).
+    public func isPlausible(now: Date) -> Bool {
+        millis >= 0 && millis <= SyncStamp.millis(of: now.addingTimeInterval(Self.maxSkew)) && counter <= Self.maxCounter
+    }
 }
 
 /// Issues strictly increasing stamps that also stay ahead of every stamp seen
@@ -110,12 +128,16 @@ public struct HybridLogicalClock: Codable, Equatable, Sendable {
         self.last = last ?? SyncStamp(millis: 0, device: device)
     }
 
+    /// Total for any saved or observed stamp: a counter at its limit moves
+    /// on to the next millisecond instead of overflowing (RC-0.1.0-602 T-03).
     public mutating func tick(now: Date) -> SyncStamp {
-        let wall = Int64((now.timeIntervalSince1970 * 1000).rounded(.down))
+        let wall = SyncStamp.millis(of: now)
         if wall > last.millis {
             last = SyncStamp(millis: wall, counter: 0, device: device)
-        } else {
+        } else if last.counter < UInt32.max {
             last = SyncStamp(millis: last.millis, counter: last.counter + 1, device: device)
+        } else if last.millis < Int64.max {
+            last = SyncStamp(millis: last.millis + 1, counter: 0, device: device)
         }
         return last
     }
@@ -199,6 +221,11 @@ public struct SyncRecordPayload: Hashable, Codable, Sendable {
 
     public var latestStamp: SyncStamp? {
         ([tombstone].compactMap { $0 } + fields.values.map(\.stamp)).max()
+    }
+
+    /// Every stamp is one a device could have written (see `SyncStamp.isPlausible`).
+    public func isPlausible(now: Date) -> Bool {
+        (tombstone?.isPlausible(now: now) ?? true) && fields.values.allSatisfy { $0.stamp.isPlausible(now: now) }
     }
 
     /// Current field values, without stamps.

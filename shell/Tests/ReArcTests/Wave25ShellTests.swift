@@ -43,10 +43,12 @@ final class Wave25ShellTests: XCTestCase {
         let model = makeModel(syncEngine: scheduler)
         XCTAssertNil(model.syncUnavailableReason)
         XCTAssertNotNil(model.syncControl)
-        XCTAssertEqual(model.syncDetails?.phase, .waiting("Waiting to sync"))
+        XCTAssertEqual(model.syncDetails?.phase, .off, "nothing syncs before onboarding finishes or someone chooses")
+        XCTAssertNil(model.syncDecisionPrompt, "a first run is not asked; its onboarding decides")
         _ = model.store.addTab(kind: .pinned, title: "Synced", url: URL(string: "https://synced.test")!)
 
         model.finishFirstRunOnboarding()
+        XCTAssertNil(model.syncDecisionPrompt, "a new install is on by default once onboarding finishes")
         await scheduler.runCycle()
         XCTAssertTrue(model.isSyncEnabled)
         XCTAssertEqual(model.syncDetails?.phase, .upToDate)
