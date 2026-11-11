@@ -93,4 +93,28 @@ final class ContainerRoutingSecurityTests: XCTestCase {
         let old = try JSONDecoder().decode(VisitHistory.self, from: Data(#"{"records":{"https://a.test":{"url":"https://a.test","title":"A","visitCount":1,"firstVisit":0,"lastVisit":0}}}"#.utf8))
         XCTAssertNil(old.records.values.first?.profileIDs)
     }
+
+    /// S-07: deleting a container takes its Little ReArc windows with it, and a restored
+    /// sidebar never keeps one whose profile is gone.
+    func testDeletingAContainerForgetsItsLittleReArcs() {
+        let store = SidebarStore(spaces: [Space(name: "Personal")])
+        let client = store.addProfile(name: "Client X", createInitialSpace: false)
+        let open = store.createLittleArcWindow(url: url("client.test"), profileID: client.id)
+        let archived = store.createLittleArcWindow(url: url("client.test"), profileID: client.id)
+        store.archiveLittleArcWindow(id: archived.id, reason: .manual)
+        let mine = store.createLittleArcWindow(url: url("mine.test"))
+        XCTAssertNil(store.deleteProfile(client.id))
+        XCTAssertNil(store.littleArcWindow(withID: open.id))
+        XCTAssertFalse(store.littleArcArchivedWindows.contains { $0.window.id == archived.id })
+        XCTAssertNotNil(store.littleArcWindow(withID: mine.id))
+
+        let other = store.addProfile(name: "Other", createInitialSpace: false)
+        let orphan = store.createLittleArcWindow(url: url("x.test"), profileID: other.id)
+        var snapshot = store.makeSnapshot()
+        snapshot.profiles.removeAll { $0.id == other.id }
+        let reloaded = SidebarStore(spaces: [Space(name: "New")])
+        reloaded.applySnapshot(snapshot)
+        XCTAssertNil(reloaded.littleArcWindow(withID: orphan.id))
+        XCTAssertNotNil(reloaded.littleArcWindow(withID: mine.id))
+    }
 }

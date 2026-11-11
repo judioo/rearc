@@ -724,6 +724,10 @@ final class ChromiumRuntime {
         keychainMode = keychain
         userDataDir = ChromiumLaunchArguments.userDataDir(in: arguments).map { URL(fileURLWithPath: $0, isDirectory: true) }
         startupDirectory = ChromiumLaunchArguments.startupProfileDirectory(in: arguments)
+        if let userDataDir {
+            let removed = ChromiumProfileDeletions.run(in: userDataDir)
+            if !removed.isEmpty { ChromiumLog.info("removed the data of \(removed.count) deleted profile(s)") }
+        }
         if let url = storageMapURL { storageMap = ChromiumProfileStorageMap.load(from: url) }
         var callbacks = ReArcCallbacks(
             ready: readyCallback,
@@ -1046,6 +1050,20 @@ final class ChromiumRuntime {
             token.withCString { open($0, callback, context) }
         }
         if status != .rearcOK { finish(status, 0, false) }
+    }
+
+    /// A deleted shell profile: its directory goes at the next launch, and the storage map
+    /// forgets it (security RC-0.1.0-564 S-07).
+    func scheduleDataRemoval(for profileID: Profile.ID) {
+        guard let userDataDir else { return }
+        if let name = ChromiumProfileDeletions.directoryName(for: profileID, map: storageMap) {
+            ChromiumProfileDeletions.schedule(name, in: userDataDir)
+        } else {
+            ChromiumLog.info("deleted profile \(profileID) used the startup directory; its data stays")
+        }
+        if storageMap.directories.removeValue(forKey: ChromiumProfileKey.storageKey(for: profileID)) != nil {
+            saveStorageMap {}
+        }
     }
 
     private var storageMapURL: URL? {

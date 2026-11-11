@@ -77,3 +77,38 @@ final class PermissionCardCoverTests: XCTestCase {
         XCTAssertEqual(BrowserViewModel.displaySite("http://bank.example:8080"), "http://bank.example:8080")
     }
 }
+
+/// Security RC-0.1.0-564 S-07: a deleted container's directory goes at the next launch.
+final class ProfileDataRemovalTests: XCTestCase {
+    func testScheduledDirectoriesAreRemovedButNeverDefaultOrASymlink() throws {
+        let fm = FileManager.default
+        let udd = fm.temporaryDirectory.appendingPathComponent("rearc-s07-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: udd) }
+        let deleted = UUID()
+        let name = try XCTUnwrap(ChromiumProfileDeletions.directoryName(for: deleted, map: ChromiumProfileStorageMap()))
+        XCTAssertEqual(name, ChromiumProfileStoragePlan.namedDirectoryName(forKey: ChromiumProfileKey.storageKey(for: deleted)))
+        try fm.createDirectory(at: udd.appendingPathComponent(name).appendingPathComponent("Network"), withIntermediateDirectories: true)
+        try Data("cookies".utf8).write(to: udd.appendingPathComponent(name).appendingPathComponent("Network/Cookies"))
+        try fm.createDirectory(at: udd.appendingPathComponent("Default"), withIntermediateDirectories: true)
+        let outside = fm.temporaryDirectory.appendingPathComponent("rearc-s07-outside-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: outside) }
+        try fm.createSymbolicLink(at: udd.appendingPathComponent("ReArcProfile-4C494E4B"), withDestinationURL: outside)
+
+        ChromiumProfileDeletions.schedule(name, in: udd)
+        ChromiumProfileDeletions.schedule("Default", in: udd)
+        ChromiumProfileDeletions.schedule("../escape", in: udd)
+        ChromiumProfileDeletions.schedule("ReArcProfile-4C494E4B", in: udd)
+        XCTAssertEqual(ChromiumProfileDeletions.pending(in: udd), [name, "ReArcProfile-4C494E4B"])
+
+        XCTAssertEqual(ChromiumProfileDeletions.run(in: udd), [name])
+        XCTAssertFalse(fm.fileExists(atPath: udd.appendingPathComponent(name).path))
+        XCTAssertTrue(fm.fileExists(atPath: udd.appendingPathComponent("Default").path))
+        XCTAssertTrue(fm.fileExists(atPath: outside.path), "a symlink is never followed")
+        XCTAssertEqual(ChromiumProfileDeletions.pending(in: udd), [])
+
+        var adopted = ChromiumProfileStorageMap()
+        adopted.recordDirectory("Default", for: deleted)
+        XCTAssertNil(ChromiumProfileDeletions.directoryName(for: deleted, map: adopted), "the startup directory stays")
+    }
+}

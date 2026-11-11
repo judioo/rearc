@@ -232,3 +232,56 @@ enum ChromiumProfileStorageIO {
         }
     }
 }
+
+/// Directories of deleted containers, removed at the next launch before the engine starts
+/// (security RC-0.1.0-564 S-07). Closing a persistent profile releases it but leaves its
+/// directory, cookies and history in place, and Chromium can keep it loaded until shutdown,
+/// so deleting the files while the engine runs is not safe. The list lives in the user-data-dir.
+enum ChromiumProfileDeletions {
+    static let fileName = "ReArcPendingProfileDeletions.json"
+    /// Never removed this way: the startup directory and Chromium's own profiles.
+    static let protectedNames: Set<String> = [ChromiumProfileStorageMap.defaultDirectory, "System Profile", "Guest Profile"]
+
+    /// The directory a deleted profile's data is in, or nil when it must stay (it adopted `Default`).
+    static func directoryName(for profileID: Profile.ID, map: ChromiumProfileStorageMap) -> String? {
+        let name: String
+        switch map.storage(for: profileID) {
+        case .named(let key): name = ChromiumProfileStoragePlan.namedDirectoryName(forKey: key)
+        case .directory(let token): name = token
+        }
+        return isRemovable(name) ? name : nil
+    }
+
+    static func isRemovable(_ name: String) -> Bool {
+        ChromiumProfileStoragePlan.isValidDirectoryToken(name) && !protectedNames.contains(name)
+    }
+
+    static func pending(in userDataDir: URL) -> [String] {
+        let url = userDataDir.appendingPathComponent(fileName)
+        guard let data = try? Data(contentsOf: url), let names = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return names
+    }
+
+    static func schedule(_ name: String, in userDataDir: URL) {
+        guard isRemovable(name) else { return }
+        var names = pending(in: userDataDir)
+        guard !names.contains(name) else { return }
+        names.append(name)
+        try? JSONEncoder().encode(names).write(to: userDataDir.appendingPathComponent(fileName), options: .atomic)
+    }
+
+    /// Removes the scheduled directories (plain directories only, never a symlink) and the list.
+    /// Returns what was removed.
+    @discardableResult
+    static func run(in userDataDir: URL, fileManager: FileManager = .default) -> [String] {
+        var removed: [String] = []
+        for name in pending(in: userDataDir) where isRemovable(name) {
+            let path = userDataDir.appendingPathComponent(name).path
+            guard let type = try? fileManager.attributesOfItem(atPath: path)[.type] as? FileAttributeType,
+                  type == .typeDirectory else { continue }
+            if (try? fileManager.removeItem(atPath: path)) != nil { removed.append(name) }
+        }
+        try? fileManager.removeItem(at: userDataDir.appendingPathComponent(fileName))
+        return removed
+    }
+}

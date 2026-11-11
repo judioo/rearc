@@ -471,8 +471,9 @@ final class BrowserViewModel {
     var littleArcOpenRequests: [LittleArcWindow.ID] = []
     /// Opens Little Arc windows when the app has no SwiftUI scenes (Chromium path).
     @ObservationIgnored weak var windowPresenter: BrowserWindowPresenting?
-    /// Runs after a shell profile is deleted, to release its engine storage.
-    @ObservationIgnored var onProfileDeleted: ((Profile.ID) -> Void)?
+    /// Runs after a shell profile is deleted, to release its engine storage; with the
+    /// Little ReArc windows it had open, which the store already forgot.
+    @ObservationIgnored var onProfileDeleted: ((Profile.ID, [LittleArcWindow.ID]) -> Void)?
     /// Open private windows; never persisted.
     var privateWindows: [UUID: PrivateWindowModel] = [:]
     var privateWindowOpenRequests: [UUID] = []
@@ -969,11 +970,12 @@ final class BrowserViewModel {
     /// `deletingSpaces` the profile must own no spaces.
     @discardableResult
     func deleteProfile(_ id: Profile.ID, deletingSpaces: Bool = false) -> ProfileMutationError? {
+        let littleArcs = store.littleArcLiveWindows.filter { $0.profileID == id }.map(\.id)
         if let error = store.deleteProfile(id, deletingSpaces: deletingSpaces) { return error }
         engineHost.evictEngines(forProfileID: id)
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
-        onProfileDeleted?(id)
+        onProfileDeleted?(id, littleArcs)
         return nil
     }
 

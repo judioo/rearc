@@ -335,10 +335,13 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             self.menuKeyEquivalents.apply(model.shortcutOverrides, to: menu)
         }
         if model.appIcon != .standard { model.appIcon.apply() }
-        model.onProfileDeleted = { [weak self, runtime] id in
-            // EngineHost already dropped the profile's engines. Its private windows
-            // close first (their off-the-record children must go before the parent).
+        model.onProfileDeleted = { [weak self, runtime] id, littleArcs in
+            // EngineHost already dropped the profile's engines. Its private windows and
+            // Little ReArc windows close first (their off-the-record children must go
+            // before the parent); the store already forgot the Little ReArcs (S-07).
             self?.closePrivateWindows(parent: id)
+            littleArcs.forEach { self?.dismissLittleArcWindow($0) }
+            runtime.scheduleDataRemoval(for: id)
             runtime.closeProfile(.persistent(id), force: true) { status, cancelled in
                 ChromiumLog.info("deleted profile \(id): engine close \(status.rearcName) cancelled=\(cancelled)")
             }

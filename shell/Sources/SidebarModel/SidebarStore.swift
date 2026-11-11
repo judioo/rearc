@@ -240,6 +240,9 @@ public final class SidebarStore {
             mutationJournal.record(.deleteSpace(id: space.id))
         }
         profiles.removeAll { $0.id == id }
+        // Its Little ReArc windows, archived ones included, go with it (S-07).
+        littleArcWindows.removeAll { $0.profileID == id }
+        archivedLittleArcWindows.removeAll { $0.window.profileID == id }
         lastActiveSpaceByProfile[id] = nil
         favoritesByProfile[id] = nil
         topAppsContainerIDByProfile[id] = nil
@@ -1496,8 +1499,10 @@ public final class SidebarStore {
         }
         closedTabStack = snapshot.closedTabStack
         commandBarUsageBumps = snapshot.commandBarUsageBumps
-        littleArcWindows = snapshot.littleArcWindows
-        archivedLittleArcWindows = snapshot.archivedLittleArcWindows
+        // A Little ReArc of a profile that no longer exists never reopens its storage (S-07).
+        let liveProfiles = Set(profiles.map(\.id))
+        littleArcWindows = snapshot.littleArcWindows.filter { liveProfiles.contains($0.profileID) }
+        archivedLittleArcWindows = snapshot.archivedLittleArcWindows.filter { liveProfiles.contains($0.window.profileID) }
         boostLibrariesByProfileID = snapshot.boostLibrariesByProfileID
         easelRefsByID = snapshot.easelRefsByID
         capturesByID = snapshot.capturesByID
