@@ -1659,8 +1659,10 @@ SYNC-DESIGN are in `docs/SYNC-RECORDS.md`.
   errors back off: 5 s × 2ⁿ, at most 15 min, never sooner than `retryAfter`.
 - **Settings:** the WebKit build has the standard Settings window (⌘,). On
   Chromium, ⌘, opens Chromium's settings, so use **ReArc > iCloud Sync…**.
-  Both show the toggle (on by default; a saved off stays off), status, account, last synced time,
-  queued changes and **Sync Now**. The bottom-bar dot turns green only after
+  Both show the toggle (off by default; only the person turns it on), status, account, last synced time,
+  queued changes and **Sync Now**. Turning it on looks at iCloud first: a sidebar already
+  there gets a sheet (use it, replace it, merge, or cancel); the **Sidebar in iCloud**
+  box shows what iCloud holds and can use, replace or delete it (docs/SYNC-RUNTIME.md). The bottom-bar dot turns green only after
   the server confirmed every pending write.
 - **Signing opt-in:** `REARC_ICLOUD_CONTAINER` and
   `REARC_PROVISIONING_PROFILE` in `signing.local.env` (see
