@@ -232,8 +232,9 @@ public struct ExtensionPromptRequest: Identifiable, Equatable, Sendable {
 
     public var displayCancelLabel: String { cancelLabel.isEmpty ? "Cancel" : cancelLabel }
 
-    /// Permission expansion and re-enable always require an explicit choice.
-    public var cancelIsDefault: Bool { kind == .permissions || kind == .reEnable }
+    /// Every prompt needs an explicit click: Return cancels, as Chrome's install
+    /// dialog does (security RC-0.1.0-544 F-10).
+    public var cancelIsDefault: Bool { true }
 
     public var isDestructive: Bool { kind == .uninstall }
 

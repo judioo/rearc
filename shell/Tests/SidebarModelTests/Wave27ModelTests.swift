@@ -314,10 +314,9 @@ final class Wave27LinkOpenTests: XCTestCase {
 }
 
 final class ExtensionPromptSecurityTests: XCTestCase {
-    func testCancelIsDefaultForPermissionsAndReEnable() {
-        for kind: ExtensionPromptKind in [.permissions, .reEnable] {
+    func testCancelIsDefaultForEveryPrompt() {
+        for kind: ExtensionPromptKind in [.permissions, .reEnable, .install, .uninstall, .external, .remote] {
             XCTAssertTrue(ExtensionPromptRequest(id: 1, kind: kind, extensionID: "x", name: "X").cancelIsDefault)
         }
-        XCTAssertFalse(ExtensionPromptRequest(id: 1, kind: .install, extensionID: "x", name: "X").cancelIsDefault)
     }
 }
