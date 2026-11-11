@@ -3917,15 +3917,19 @@ extension ChromiumSelfTest {
         model.selectTab(tabA.id)
         var (_, peek) = try await openPeek(from: tabA)
         guard let content = window.contentView else { throw Failure(description: "browser window has no content view") }
-        let sidebarPoint = NSPoint(x: model.sidebarWidth(in: store.keyWindowID) / 2, y: content.bounds.midY)
-        let selectedBefore = store.selectedItemID
-        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            if let event = NSEvent.mouseEvent(with: type, location: content.convert(sidebarPoint, to: nil), modifierFlags: [],
-                                              timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                                              context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
-                window.sendEvent(event)
+        /// A click in the middle of the sidebar as it is now (full or the mini column).
+        func clickSidebar(_ modifiers: NSEvent.ModifierFlags = []) {
+            let point = NSPoint(x: model.sidebarWidth(in: store.keyWindowID) / 2, y: content.bounds.midY)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                if let event = NSEvent.mouseEvent(with: type, location: content.convert(point, to: nil), modifierFlags: modifiers,
+                                                  timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                  context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                    window.sendEvent(event)
+                }
             }
         }
+        let selectedBefore = store.selectedItemID
+        clickSidebar()
         try await wait("a click on the sidebar closes the Peek") {
             model.peekSession == nil && runtime.liveLeaseCount(forTab: peek.tabID) == 0
         }
@@ -3934,6 +3938,41 @@ extension ChromiumSelfTest {
         (_, peek) = try await openPeek(from: tabA)
         press("\u{1b}", keyCode: 53, [], in: window, model: model, delivery: .direct)
         try await wait("Esc closes the Peek") { model.peekSession == nil && runtime.liveLeaseCount(forTab: peek.tabID) == 0 }
+
+        // With a ⌘-click selection, in the full and the mini sidebar: a ⇧- or
+        // ⌘-click on the sidebar only closes the Peek (the selection stays as
+        // it was), and Esc closes the Peek before it clears the selection.
+        guard let key = store.keyWindowID else { throw Failure(description: "no key browser window") }
+        let spare = store.addTab(kind: .today, title: "Peek selection", url: URL(string: "\(base)/b")!,
+                                 in: store.spaceContaining(tabID: tabA.id))
+        try check(model.handleSelectionClick(on: spare.id, in: key, modifiers: .command), "⌘-click did not select a second row")
+        let selection = store.multiSelectedIDs(in: key)
+        try check(selection?.count == 2, "the selection is \(selection?.count ?? 0) rows")
+        for mini in [false, true] {
+            if mini {
+                model.sidebarModes.set(.mini, in: key)
+                try await Task.sleep(nanoseconds: 400_000_000)
+                try check(model.sidebarWidth(in: key) == CGFloat(MiniSidebarLayout.width), "the mini sidebar is \(model.sidebarWidth(in: key)) pt")
+            }
+            for modifiers in [NSEvent.ModifierFlags.shift, .command] {
+                (_, peek) = try await openPeek(from: tabA)
+                clickSidebar(modifiers)
+                try await wait("a \(modifiers == .shift ? "⇧" : "⌘")-click on the \(mini ? "mini " : "")sidebar closes the Peek") {
+                    model.peekSession == nil && runtime.liveLeaseCount(forTab: peek.tabID) == 0
+                }
+                try check(store.multiSelectedIDs(in: key) == selection && store.selectedItemID == selectedBefore,
+                          "the click that closed the Peek changed the \(mini ? "mini " : "")sidebar's selection")
+            }
+            (_, peek) = try await openPeek(from: tabA)
+            press("\u{1b}", keyCode: 53, [], in: window, model: model, delivery: .direct)
+            try await wait("Esc closes the Peek over a selection") { model.peekSession == nil }
+            try check(store.multiSelectedIDs(in: key) == selection, "Esc cleared the selection along with the Peek")
+        }
+        model.sidebarModes.set(.full, in: key)
+        model.clearSelection(in: key)
+        model.closeTab(spare.id)
+        model.selectTab(tabA.id)
+        try await wait("the full sidebar is back") { model.sidebarWidth(in: key) == model.sidebarWidth }
 
         let mark = "(function(){ window.__rearcPeekMark = 'kept'; history.pushState({}, '', '?peeked'); return 1; })()"
         let readMark = "typeof window.__rearcPeekMark === 'string' ? window.__rearcPeekMark : 'reloaded'"
@@ -3973,7 +4012,8 @@ extension ChromiumSelfTest {
         try await wait("tab A alone after the Peek's pane closed") {
             store.splitContaining(tabID: tabA.id) == nil && engineA.attachmentID != nil
         }
-        log("PASS Peek chrome: sidebar click and Esc close it (the click stays out of the sidebar); Expand and Split View "
+        log("PASS Peek chrome: sidebar click and Esc close it (the click stays out of the sidebar and its ⇧/⌘ selection, "
+            + "full and mini; Esc leaves the selection); Expand and Split View "
             + "keep Chromium tab \(chromiumTab)'s page, script state and history")
     }
 
@@ -4351,10 +4391,10 @@ extension ChromiumSelfTest {
         try await Task.sleep(nanoseconds: 700_000_000)
         try check(pageFocused(), "⌘S moved keyboard focus to \(String(describing: window.firstResponder))")
         let hiddenWidth = engine.leaseHolder?.bounds.width ?? 0
-        try check(hiddenWidth > shownWidth + model.sidebarWidth * 0.8, "the page did not take the sidebar's width (\(shownWidth) -> \(hiddenWidth))")
+        try check(hiddenWidth > shownWidth + model.sidebarWidth(in: model.store.keyWindowID) * 0.8, "the page did not take the sidebar's width (\(shownWidth) -> \(hiddenWidth))")
         moveMouse(to: NSPoint(x: 2, y: window.frame.height / 2), in: window)
         try await wait("the window edge floats the hidden sidebar") { model.isSidebarPeeking }
-        moveMouse(to: NSPoint(x: model.sidebarWidth + 120, y: window.frame.height / 2), in: window)
+        moveMouse(to: NSPoint(x: model.sidebarWidth(in: model.store.keyWindowID) + 120, y: window.frame.height / 2), in: window)
         try await wait("leaving the floating sidebar hides it") { !model.isSidebarPeeking }
         try check(abs((engine.leaseHolder?.bounds.width ?? 0) - hiddenWidth) < 1, "the floating sidebar resized the page")
         try await focusPage()
@@ -4719,7 +4759,7 @@ extension ChromiumSelfTest {
         try check(window.attachedSheet == nil, "Create a Space must open in the sidebar, not as a sheet")
         let row = accessibilityElement(in: window, labelled: "Choose a Theme")!
         let rowFrame = row.accessibilityFrame()
-        try check(rowFrame.maxX <= window.frame.minX + model.sidebarWidth + 2,
+        try check(rowFrame.maxX <= window.frame.minX + model.sidebarWidth(in: store.keyWindowID) + 2,
                   "the Choose a Theme row \(rowFrame) must be in the sidebar")
         // A real click: the row is a SwiftUI button inside the sidebar's space pager.
         var themePlace = "its theme popover was not clicked (no window-server input)"
