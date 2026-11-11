@@ -1583,7 +1583,7 @@ final class BrowserViewModel {
             return
         }
         guard let tab = store.selectedTab else { return }
-        openLittleArc(url: tab.url, title: tab.title)
+        openLittleArc(url: tab.url, title: tab.title, profileID: profileID(for: tab))
     }
 
     func prepareForQuit() {

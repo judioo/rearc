@@ -1356,8 +1356,11 @@ private extension NSMenu {
 
 extension BrowserViewModel {
     /// Chromium-created contents (popup, target=_blank) from a persistent
-    /// profile become a today tab in the active space; popups open as tabs,
-    /// never as native windows.
+    /// profile become a today tab in a space of that profile: the opener's
+    /// space, else the active one, else the profile's first (a Little ReArc
+    /// in another container opens into that container). Popups open as tabs,
+    /// never as native windows. Declined when the profile has no space, so the
+    /// tab's badge and storage never disagree (security RC-0.1.0-564 S-01).
     func adoptChromiumTab(_ event: ChromiumTabEvent, profileKey: ChromiumProfileKey?) -> Bool {
         let blank = URL(string: "about:blank")!
         let url = event.url.flatMap(URL.init(string:)).flatMap { $0.absoluteString.isEmpty ? nil : $0 } ?? blank
@@ -1366,8 +1369,24 @@ extension BrowserViewModel {
         if event.disposition == 1 || event.disposition == 2, takeLittleArcClick() {
             return adoptChromiumLittleArc(event, profileKey: profileKey, url: url)
         }
-        let tab = store.addTab(kind: .today, title: event.title.flatMap { $0.isEmpty ? nil : $0 } ?? "New Tab", url: url)
+        var space: Space.ID?
+        if case .persistent(let owner) = profileKey {
+            let opener = ChromiumRuntime.shared.engine(forTab: event.openerTabID).flatMap { engine in
+                engineHost.allTabEngines().first { ($0.2 as AnyObject) === engine }?.0
+            }
+            guard let target = store.space(forNewTabIn: owner, preferring: opener.flatMap(store.spaceContaining(tabID:))) else {
+                ChromiumLog.info("not adopting tab \(event.tabID): its profile has no space")
+                return false
+            }
+            space = target
+        }
+        let tab = store.addTab(kind: .today, title: event.title.flatMap { $0.isEmpty ? nil : $0 } ?? "New Tab", url: url, in: space)
         let profileID = profileID(for: tab)
+        if case .persistent(let owner) = profileKey, owner != profileID {
+            assertionFailure("adopted tab labelled \(profileID), engine profile \(owner)")
+            store.closeTab(tab.id)
+            return false
+        }
         // The contents already live in the opener's BrowserContext; keep it.
         let engine = ChromiumEngine(
             runtime: ChromiumRuntime.shared,
@@ -1382,8 +1401,10 @@ extension BrowserViewModel {
         }
         engineHost.adopt(engine, for: tab, profileID: profileID)
         observeFavicon(of: engine, tabID: tab.id)
-        // Background-tab disposition stays unselected; the rest take focus in the sidebar.
+        // Background-tab disposition stays unselected; the rest take focus in the sidebar,
+        // in their own space (as link opens do).
         if event.disposition != 2 {
+            if let space, space != store.activeSpaceID { store.selectSpace(space) }
             selectTab(tab.id)
         }
         return true

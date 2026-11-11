@@ -70,13 +70,17 @@ extension BrowserViewModel: PageLinkRouting {
             window.engine.loadPageLink(url)
             return
         }
-        let space = prompts.ownerTabID.flatMap { store.spaceContaining(tabID: $0) }
+        // The new tab inherits the source page's profile: its own space for a sidebar tab, a
+        // space of that profile for a Little ReArc, Peek or favourite (RC-0.1.0-564 S-03).
+        let owner = prompts.ownerTabID.flatMap { store.spaceContaining(tabID: $0) }
+        guard let space = store.space(forNewTabIn: prompts.profileID ?? store.activeProfileID, preferring: owner) else { return }
         let tab = store.addTab(kind: .today, title: url.host() ?? "New Tab", url: url, in: space)
         let engine = engineHost.engine(for: tab, profileID: profileID(for: tab))
         configureLinkPeek(on: engine)
         engine.loadPageLink(url)
         syncBoosts(for: tab)
         if select {
+            if space != store.activeSpaceID { store.selectSpace(space) }
             store.selectTab(tab.id)
             loadSelectedIfNeeded()
         }

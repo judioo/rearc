@@ -71,7 +71,7 @@ struct TabContextMenu: View {
         if model.canSplitWithSelectedTab(tab.id) {
             Button("Split with Current Tab") { model.splitWithSelectedTab(tab.id) }
         }
-        Button("Open in Little ReArc") { model.openLittleArc(url: tab.url, title: tab.displayTitle) }
+        Button("Open in Little ReArc") { model.openLittleArc(url: tab.url, title: tab.displayTitle, profileID: model.profileID(for: tab)) }
         if BoostScopeMatcher.urlIsEligibleForBoosts(tab.url) {
             Button("Edit Boost for This Site") {
                 model.selectTab(tab.id)

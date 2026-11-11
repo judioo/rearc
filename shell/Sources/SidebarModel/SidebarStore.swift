@@ -1326,7 +1326,9 @@ public final class SidebarStore {
     }
 
     public func activeBoostEntries(for tab: Tab, isPrivate: Bool = false) -> [BoostRuntimeEntry] {
-        let profileID = spaceContaining(tabID: tab.id).flatMap { spaceID in
+        // A favourite belongs to its profile's strip, not the active space: a background
+        // favourite of another container keeps its own Boosts (RC-0.1.0-564 S-04).
+        let profileID = favoriteOwner(of: tab.id) ?? spaceContaining(tabID: tab.id).flatMap { spaceID in
             spaces.first(where: { $0.id == spaceID })?.profileID
         } ?? activeProfileID
         let spaceID = spaceContaining(tabID: tab.id)
