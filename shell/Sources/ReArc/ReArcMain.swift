@@ -18,6 +18,10 @@ enum ReArcMain {
             infoDictionary: info
         )
         let options = parsed.resolvingApplicationClass(requiresChromium: chromiumOwnsApplication)
+        if let refusal = options.verificationRefusal {
+            FileHandle.standardError.write(Data("ReArc: \(refusal)\nSELFTEST FAIL: verification refused\n".utf8))
+            exit(64)
+        }
         if options.source == .applicationClass {
             FileHandle.standardError.write(Data(("ReArc: this bundle's application class is Chromium's \(EngineLaunchOptions.chromiumApplicationClass); "
                 + "using the Chromium engine (the WebKit path cannot start here).\n").utf8))

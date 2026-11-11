@@ -3233,9 +3233,12 @@ enum SelfTestExtensionFixture {
     static let popupSize = CGSize(width: 320, height: 180)
 
     /// Writes the fixtures into a fresh temp directory; their paths for `--load-extension`.
+    /// The name is random and the directory owner-only, so it cannot be prepared or found
+    /// by its name in advance (security RC-0.1.0-544 F-03); the profile they load into is
+    /// always a new one in a release build (`ReleaseVerificationDataDir`).
     static func write() -> [URL] {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-selftest-extensions-\(ProcessInfo.processInfo.processIdentifier)")
-        try? FileManager.default.removeItem(at: root)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-selftest-extensions-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         let popup = root.appendingPathComponent("popup"), click = root.appendingPathComponent("click")
         func file(_ dir: URL, _ name: String, _ text: String) {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

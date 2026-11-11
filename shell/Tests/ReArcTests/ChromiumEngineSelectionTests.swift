@@ -220,11 +220,66 @@ final class ReleaseLaunchSecurityTests: XCTestCase {
         XCTAssertFalse(shipping.selfTest)
         XCTAssertNil(shipping.launchProbePath)
         XCTAssertNil(shipping.bench)
-        let verification = EngineLaunchOptions.parse(arguments: flags,
-            environment: [EngineLaunchOptions.releaseVerificationEnvironmentKey: "1"], infoDictionary: info)
+        let verification = EngineLaunchOptions.parse(arguments: flags + ["--user-data-dir=/tmp/fresh"],
+            environment: [EngineLaunchOptions.releaseVerificationEnvironmentKey: "1"], infoDictionary: info,
+            dataDirRefusal: { _ in nil })
+        XCTAssertNil(verification.verificationRefusal)
         XCTAssertTrue(verification.selfTest)
         XCTAssertEqual(verification.launchProbePath, "/tmp/probe")
         XCTAssertNil(EngineLaunchOptions.parse(arguments: ["ReArc", "--rearc-bench"],
             environment: [EngineLaunchOptions.releaseVerificationEnvironmentKey: "1"], infoDictionary: info).bench)
+    }
+
+    /// RC-0.1.0-544 F-03: a release self-test or probe never runs on the user's profile.
+    func testReleaseVerificationRefusesAnyDataDirThatIsNotThrowaway() {
+        let info: [String: Any] = ["ReArcRelease": true, "ReArcDefaultEngine": "chromium"]
+        let environment = [EngineLaunchOptions.releaseVerificationEnvironmentKey: "1"]
+        for flag in ["--rearc-selftest", "--rearc-launch-probe=/tmp/probe"] {
+            let missing = EngineLaunchOptions.parse(arguments: ["ReArc", flag], environment: environment, infoDictionary: info,
+                                                    dataDirRefusal: { _ in XCTFail("no dir to check"); return nil })
+            XCTAssertNotNil(missing.verificationRefusal)
+            XCTAssertFalse(missing.selfTest)
+            XCTAssertNil(missing.launchProbePath)
+            var checked: [String] = []
+            let used = EngineLaunchOptions.parse(arguments: ["ReArc", flag, "--user-data-dir", "/real"], environment: environment,
+                                                 infoDictionary: info, dataDirRefusal: { checked.append($0); return "in use" })
+            XCTAssertEqual(checked, ["/real"])
+            XCTAssertEqual(used.verificationRefusal?.contains("in use"), true)
+            XCTAssertFalse(used.selfTest)
+            XCTAssertNil(used.launchProbePath)
+        }
+        // Development bundles keep their own temp default.
+        let dev = EngineLaunchOptions.parse(arguments: ["ReArc", "--rearc-selftest"], environment: [:],
+                                            dataDirRefusal: { _ in XCTFail("dev builds are not checked"); return "x" })
+        XCTAssertTrue(dev.selfTest)
+        XCTAssertNil(dev.verificationRefusal)
+    }
+
+    func testThrowawayDataDirIsNewOrEmptyAndOutsideTheShellData() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("rearc-f03-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: base) }
+        let root = base.appendingPathComponent("ReArc", isDirectory: true)
+        try fm.createDirectory(at: root.appendingPathComponent("Chromium/Default"), withIntermediateDirectories: true)
+        let refusal = { ReleaseVerificationDataDir.refusal($0, protectedRoots: [root]) }
+        XCTAssertNil(refusal(base.appendingPathComponent("absent").path))
+        let empty = base.appendingPathComponent("empty", isDirectory: true)
+        try fm.createDirectory(at: empty, withIntermediateDirectories: true)
+        XCTAssertNil(refusal(empty.path))
+        XCTAssertNotNil(refusal(root.path))
+        XCTAssertNotNil(refusal(root.appendingPathComponent("Chromium").path))
+        XCTAssertNotNil(refusal(root.appendingPathComponent("Chromium/../Chromium/New").path))
+        XCTAssertNotNil(refusal(base.path), "an ancestor of the data dir")
+        let link = base.appendingPathComponent("link")
+        try fm.createSymbolicLink(at: link, withDestinationURL: root.appendingPathComponent("Chromium"))
+        XCTAssertNotNil(refusal(link.path), "a symlink to the real profile")
+        let used = base.appendingPathComponent("used", isDirectory: true)
+        try fm.createDirectory(at: used, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: used.appendingPathComponent("Local State"))
+        XCTAssertNotNil(refusal(used.path), "an existing profile elsewhere")
+        let file = base.appendingPathComponent("file")
+        try Data().write(to: file)
+        XCTAssertNotNil(refusal(file.path))
+        XCTAssertNotNil(refusal(""))
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import SidebarModel
 
 /// Which web engine the process should host. WebKit is the default; Chromium
 /// is honored only by a binary built with `REARC_CHROMIUM` running from a
@@ -51,6 +52,9 @@ struct EngineLaunchOptions: Equatable {
     var source: Source = .builtInDefault
     var launchProbePath: String?
     var bench: BenchOptions?
+    /// Set when a release build was asked for self-test or probe mode on a data dir that
+    /// is not throwaway (security RC-0.1.0-544 F-03); the process must exit, never launch.
+    var verificationRefusal: String?
 
     /// `--rearc-bench` and its `--rearc-bench-*` options (docs/PERFORMANCE-PLAN.md §2.2).
     struct BenchOptions: Equatable {
@@ -126,7 +130,8 @@ struct EngineLaunchOptions: Equatable {
     static func parse(
         arguments: [String],
         environment: [String: String],
-        infoDictionary: [String: Any]? = nil
+        infoDictionary: [String: Any]? = nil,
+        dataDirRefusal: (String) -> String? = ReleaseVerificationDataDir.refusal
     ) -> EngineLaunchOptions {
         var engine = Engine.webkit
         var source = Source.builtInDefault
@@ -153,6 +158,21 @@ struct EngineLaunchOptions: Equatable {
                 probe = String(argument.dropFirst(launchProbeFlagPrefix.count))
             }
         }
+        // A release build uses the real Keychain item, and the self-test loads extension code:
+        // both modes run only on a fresh data dir, never on the user's profile.
+        var refusal: String?
+        if isRelease, selfTest || probe != nil {
+            let mode = selfTest ? selfTestFlag : String(launchProbeFlagPrefix.dropLast())
+            if let dir = ChromiumLaunchArguments.userDataDir(in: ChromiumLaunchArguments.releaseArguments(arguments)) {
+                refusal = dataDirRefusal(dir).map { "\(mode) refused for --user-data-dir=\(dir): \($0)" }
+            } else {
+                refusal = "\(mode) in a release build needs --user-data-dir=<new empty directory>"
+            }
+            if refusal != nil {
+                selfTest = false
+                probe = nil
+            }
+        }
         let bench = selfTest || isRelease ? nil : BenchOptions.parse(Array(arguments.dropFirst()))
         if selfTest {
             engine = .chromium
@@ -162,7 +182,8 @@ struct EngineLaunchOptions: Equatable {
             source = .bench
         }
         return EngineLaunchOptions(engine: engine, selfTest: selfTest, source: source,
-                                   launchProbePath: probe.flatMap { $0.isEmpty ? nil : $0 }, bench: bench)
+                                   launchProbePath: probe.flatMap { $0.isEmpty ? nil : $0 }, bench: bench,
+                                   verificationRefusal: refusal)
     }
 
     /// True when NSApplicationMain would instantiate Chromium's application
@@ -182,6 +203,35 @@ struct EngineLaunchOptions: Equatable {
         options.engine = .chromium
         options.source = .applicationClass
         return options
+    }
+}
+
+/// The data dir a release self-test or launch probe may use: absent or empty, and outside
+/// the user's ReArc data (the default root and any `REARC_DATA_DIR` root). Symlinks are
+/// resolved first, so a link to the real profile is refused like the profile itself.
+enum ReleaseVerificationDataDir {
+    static func refusal(_ path: String) -> String? {
+        refusal(path, protectedRoots: [ShellDataLocation.root(environment: [:]), ShellDataLocation.root])
+    }
+
+    static func refusal(_ path: String, protectedRoots: [URL], fileManager: FileManager = .default) -> String? {
+        guard !path.isEmpty else { return "empty path" }
+        let dir = resolved(URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true))
+        for root in protectedRoots.map(resolved) {
+            let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+            if dir.path == root.path || (dir.path + "/").hasPrefix(rootPath) || rootPath.hasPrefix(dir.path + "/") {
+                return "it overlaps the ReArc data directory \(root.path)"
+            }
+        }
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: dir.path, isDirectory: &isDirectory) else { return nil }
+        guard isDirectory.boolValue else { return "it is not a directory" }
+        guard let entries = try? fileManager.contentsOfDirectory(atPath: dir.path) else { return "it cannot be read" }
+        return entries.isEmpty ? nil : "it is not empty (verification runs only on a new profile)"
+    }
+
+    private static func resolved(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
     }
 }
 
