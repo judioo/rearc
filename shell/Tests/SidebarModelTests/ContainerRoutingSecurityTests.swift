@@ -44,4 +44,32 @@ final class ContainerRoutingSecurityTests: XCTestCase {
         let entries = store.activeBoostEntries(for: favourite)
         XCTAssertEqual(entries.map(\.css), ["a{color:red}"], "the favourite's own profile, not the active one")
     }
+
+    /// S-05: a space whose container was deleted elsewhere keeps its own container.
+    func testASpaceWhoseProfileIsMissingKeepsItsOwnContainer() {
+        let store = SidebarStore(spaces: [Space(name: "Personal")])
+        let personal = store.activeProfileID
+        let banking = store.addProfile(name: "Banking")
+        let bankSpace = store.spaces.first { $0.profileID == banking.id }!
+
+        // Another Mac deleted the Banking container: its profile record is gone from sync.
+        var records = SidebarSyncProjection.extract(store.makeSnapshot())
+        records[SyncRecordKind.profile.recordName(for: banking.id)] = nil
+        let payloads = records.mapValues { body in
+            SyncRecordPayload(kind: body.kind, fields: body.values.mapValues { SyncField(value: $0, stamp: SyncStamp(millis: 1, device: "B")) })
+        }
+        let applied = SidebarSyncProjection.apply(payloads, onto: store.makeSnapshot())
+        let space = applied.spaces.first { $0.id == bankSpace.id }
+        XCTAssertEqual(space?.profileID, banking.id, "never moved into another container")
+        XCTAssertNotEqual(space?.profileID, personal)
+        XCTAssertEqual(applied.profiles.first { $0.id == banking.id }?.name, "Banking", "the local profile comes back")
+
+        // The local loader does the same for a sidebar.json naming an unknown profile.
+        var snapshot = store.makeSnapshot()
+        snapshot.profiles.removeAll { $0.id == banking.id }
+        let reloaded = SidebarStore(spaces: [Space(name: "Other")])
+        reloaded.applySnapshot(snapshot)
+        XCTAssertEqual(reloaded.spaces.first { $0.id == bankSpace.id }?.profileID, banking.id)
+        XCTAssertEqual(reloaded.profile(withID: banking.id)?.name, "Recovered Container")
+    }
 }

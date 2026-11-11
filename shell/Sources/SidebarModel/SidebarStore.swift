@@ -1440,12 +1440,11 @@ public final class SidebarStore {
         if snapshot.spaces.isEmpty {
             spaces = [Space(name: "Personal", profileID: defaultProfileID)]
         } else {
-            spaces = snapshot.spaces.map { space in
-                var copy = space
-                if !profiles.contains(where: { $0.id == copy.profileID }) {
-                    copy.profileID = defaultProfileID
-                }
-                return copy
+            // A space never moves to another profile's storage: one whose profile is missing
+            // gets that profile back under the same UUID (RC-0.1.0-564 S-05).
+            spaces = snapshot.spaces
+            for space in spaces where !profiles.contains(where: { $0.id == space.profileID }) {
+                profiles.append(Profile.recovered(space.profileID, from: snapshot.profiles))
             }
         }
         // Schema 10 keys favorites by profile; older snapshots carry one global

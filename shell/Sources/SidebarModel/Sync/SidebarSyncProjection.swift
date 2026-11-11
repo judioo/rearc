@@ -202,13 +202,20 @@ public enum SidebarSyncProjection {
             if let profile: Profile = decode(base: base, overlay: values, id: id) { profiles.append(profile) }
         }
         if profiles.isEmpty { profiles = snapshot.profiles }
-        let profileIDs = Set(profiles.map(\.id))
+        var profileIDs = Set(profiles.map(\.id))
 
         var spaces: [Space] = []
         for (id, values) in spaceValues {
             let base = snapshot.spaces.first { $0.id == id }.map { objectFields($0, dropping: []) } ?? [:]
-            if var space: Space = decode(base: base, overlay: values, id: id) {
-                if !profileIDs.contains(space.profileID) { space.profileID = profiles[0].id }
+            if let space: Space = decode(base: base, overlay: values, id: id) {
+                var space = space
+                // A space whose container is gone (deleted on another Mac, or never synced)
+                // keeps that container: its profile comes back under the same UUID, so its
+                // tabs never move into another container's cookies (RC-0.1.0-564 S-05).
+                if !profileIDs.contains(space.profileID) {
+                    profiles.append(Profile.recovered(space.profileID, from: snapshot.profiles))
+                    profileIDs.insert(space.profileID)
+                }
                 space.theme.style = styles[id] ?? SpaceThemeStyle()
                 spaces.append(space)
             }

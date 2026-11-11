@@ -36,6 +36,13 @@ public struct Profile: Identifiable, Hashable, Codable, Sendable {
         self.themeColor = themeColor
     }
 
+    /// The profile a space still names after it went missing: the known one when `known`
+    /// has it, otherwise a new "Recovered Container" under the same UUID, so the engine
+    /// reopens that container's own storage (security RC-0.1.0-564 S-05).
+    public static func recovered(_ id: UUID, from known: [Profile]) -> Profile {
+        known.first { $0.id == id } ?? Profile(id: id, name: "Recovered Container")
+    }
+
     enum CodingKeys: String, CodingKey { case id, name, avatar, themeColor }
 
     public init(from decoder: Decoder) throws {
