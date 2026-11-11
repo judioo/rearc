@@ -121,6 +121,7 @@ public final class SidebarSyncCoordinator {
         self.stateStore = stateStore
         self.now = now
         var state = initialState ?? stateStore.load()
+        state.normalize()
         Self.quarantineImplausible(&state, now: now())
         self.state = state
         self.clock = HybridLogicalClock(device: deviceID, last: state.clock)
@@ -148,30 +149,154 @@ public final class SidebarSyncCoordinator {
         }
     }
 
-    /// An existing install nobody chose for: the "Sync your sidebar with
-    /// iCloud?" prompt asks, and nothing syncs until it is answered (T-01).
-    public var needsDecision: Bool { state.isUndecided }
-
-    /// This Mac already synced, before anyone chose (build 602's default).
-    public var syncedBeforeDecision: Bool { state.isUndecided && (state.joined || !state.records.isEmpty) }
-
-    /// The person's choice, from the prompt or Settings.
+    /// The switch in Settings. On starts syncing: when iCloud already holds
+    /// a sidebar the app asks first (`detectCloudSidebar`, then
+    /// `apply(_:from:)`), and calls this only when it is empty.
     public func setEnabled(_ enabled: Bool) {
-        record(enabled, by: .user)
-    }
-
-    /// A new install whose onboarding finished: on unless someone already chose.
-    public func enableForNewInstall() {
-        guard state.isUndecided else { return }
-        record(true, by: .newInstall)
-    }
-
-    private func record(_ enabled: Bool, by decision: SyncDecision) {
-        guard state.enabled != enabled || state.decision != decision else { return }
+        guard state.enabled != enabled || state.decision != .user else { return }
         state.enabled = enabled
-        state.decision = decision
+        state.decision = .user
         persist()
         update(state.isActive ? .waiting("Waiting to sync") : .off)
+    }
+
+    // MARK: - iCloud's sidebar
+
+    /// What the last `detectCloudSidebar` found, held aside: none of it is
+    /// in the sidebar until `apply(_:from:)`.
+    public private(set) var stagedCloudSidebar: CloudSidebarFound?
+    /// How long a look at iCloud may take before it counts as unreachable.
+    public var detectionTimeout: TimeInterval = 20
+
+    /// Looks at iCloud without changing anything there or here.
+    public func detectCloudSidebar() async -> CloudSidebarDetection {
+        guard let reader = transport as? SidebarCloudReading else {
+            return .unavailable("This build can't look at iCloud.")
+        }
+        let timeout = detectionTimeout
+        let look = await Self.withTimeout(timeout) { () -> Result<(SyncAccountStatus, [SyncWireRecord]?), SyncTransportError> in
+            let account = await reader.accountStatus()
+            guard case .available = account else { return .success((account, nil)) }
+            do {
+                return .success((account, try await reader.readAllRecords()))
+            } catch let error as SyncTransportError {
+                return .failure(error)
+            } catch {
+                return .failure(.other(error.localizedDescription))
+            }
+        }
+        let detection: CloudSidebarDetection
+        switch look {
+        case nil:
+            detection = .unreachable("iCloud didn't answer. Check your connection and try again.")
+        case .failure(let error)?:
+            detection = error == .notAuthenticated ? .signedOut(error.userMessage) : .unreachable(Self.unreachableMessage(error))
+        case .success((let account, let wires))?:
+            switch account {
+            case .available(let userID):
+                let records = sanitized(wires ?? [])
+                let summary = CloudSidebarSummary.of(records.mapValues(\.payload))
+                detection = summary.spaces > 0
+                    ? .found(CloudSidebarFound(accountID: userID, records: records.values.sorted { $0.recordName < $1.recordName }, summary: summary))
+                    : .empty(accountID: userID)
+            case .noAccount:
+                detection = .signedOut("Sign in to iCloud in System Settings to sync your sidebar.")
+            case .restricted:
+                detection = .signedOut("iCloud is restricted on this Mac.")
+            case .temporarilyUnavailable, .couldNotDetermine:
+                detection = .unreachable("iCloud is unavailable right now. Try again in a moment.")
+            }
+        }
+        stagedCloudSidebar = detection.found
+        return detection
+    }
+
+    private static func unreachableMessage(_ error: SyncTransportError) -> String {
+        switch error {
+        case .networkUnavailable: return "ReArc can't reach iCloud. Check your connection and try again."
+        case .permissionFailure: return error.userMessage
+        default: return "iCloud is unavailable right now. Try again in a moment."
+        }
+    }
+
+    /// The records a merge would accept (RC-0.1.0-602 T-03), one per name,
+    /// at most `recordLimit`.
+    private func sanitized(_ wires: [SyncWireRecord]) -> [String: SyncWireRecord] {
+        var kept: [String: SyncWireRecord] = [:]
+        for wire in wires {
+            guard wire.payload.isPlausible(now: now()),
+                  SyncRecordKind.parse(recordName: wire.recordName).map({ $0.kind == wire.payload.kind }) ?? false else { continue }
+            guard kept[wire.recordName] != nil || kept.count < recordLimit else { continue }
+            kept[wire.recordName] = wire
+        }
+        return kept
+    }
+
+    /// The person's answer to "iCloud already has a ReArc sidebar", for
+    /// the sidebar `detectCloudSidebar` found; sync is on afterwards.
+    /// Nothing is fetched or sent here: the next cycle does that.
+    ///
+    /// - `useCloud`: the sidebar becomes iCloud's (synced parts; Today
+    ///   tabs of spaces that go are archived). The caller backs it up first.
+    /// - `replaceCloud`: this Mac's sidebar wins every field, and what
+    ///   only iCloud has is deleted there, so other Macs get this one's.
+    /// - `merge`: a first join (iCloud's copy of rows it already has is
+    ///   kept), matching spaces imported from the same Arc space.
+    public func apply(_ choice: CloudSidebarChoice, from found: CloudSidebarFound) {
+        guard let host else { return }
+        state.resetServerState()
+        transport.reset()
+        state.enabled = true
+        state.decision = .user
+        switch choice {
+        case .merge:
+            break
+        case .useCloud, .replaceCloud:
+            state.accountID = found.accountID
+            for wire in found.records { merge(wire) }
+            for name in state.records.keys { state.records[name]?.pending = false }
+            state.clock = clock.last
+            // The zone is there (it was just read), and every record is known.
+            state.zoneReady = true
+            state.joined = true
+            if choice == .useCloud {
+                var outcome = SyncCycleOutcome()
+                applyToHost(&outcome)
+            } else {
+                capture(host.syncSnapshot())
+            }
+        }
+        stagedCloudSidebar = nil
+        persist()
+        update(.waiting("Waiting to sync"))
+    }
+
+    /// Deletes ReArc's sidebar from iCloud and turns sync off on this Mac;
+    /// this Mac's sidebar stays. Another Mac still syncing uploads its own again.
+    public func deleteCloudSidebar() async throws {
+        guard let reader = transport as? SidebarCloudReading else { throw SyncTransportError.permissionFailure }
+        try await reader.deleteZone()
+        state.resetServerState()
+        transport.reset()
+        state.enabled = false
+        state.decision = .user
+        stagedCloudSidebar = nil
+        persist()
+        update(.off)
+    }
+
+    /// `operation`'s result, or nil when it takes longer than `seconds` (it
+    /// is left to finish on its own; a CloudKit call may not notice cancelling).
+    static func withTimeout<T: Sendable>(_ seconds: TimeInterval, _ operation: @escaping @Sendable () async -> T) async -> T? {
+        let once = ResumeOnce<T?>()
+        return await withCheckedContinuation { continuation in
+            once.continuation = continuation
+            Task { once.resume(await operation()) }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                once.resume(nil)
+            }
+        }
     }
 
     /// Sync Now: offer schema-rejected kinds again (after a schema deployment).
@@ -557,5 +682,19 @@ public final class SidebarSyncCoordinator {
 
     private func persist() {
         stateStore.save(state)
+    }
+}
+
+/// Resumes a continuation with the first value only.
+private final class ResumeOnce<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    var continuation: CheckedContinuation<T, Never>?
+
+    func resume(_ value: T) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
     }
 }

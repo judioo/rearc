@@ -10,6 +10,8 @@ public enum CloudKitSyncAvailability {
     /// Info.plist key the bundle scripts write when REARC_ICLOUD_CONTAINER is set.
     public static let infoPlistKey = "ReArcICloudContainer"
     public static let unavailableMessage = "iCloud sync unavailable in this build"
+    /// Beside sync-state.json in a `REARC_DATA_DIR` launch: one line per iCloud call.
+    public static let cloudKitCallLogName = "cloudkit-calls.log"
 
     public enum Availability: Equatable, Sendable {
         case available(containerIdentifier: String)
@@ -64,8 +66,14 @@ public enum CloudKitSyncAvailability {
             #if canImport(CloudKit)
             let fileURL = stateFileURL ?? SidebarFilePersistence.defaultFileURL
                 .deletingLastPathComponent().appendingPathComponent(SidebarSyncStateFile.fileName)
+            let transport = CloudKitSyncTransport(containerIdentifier: container)
+            if ShellDataLocation.isOverridden {
+                // A test run lists every iCloud call it made (docs/SYNC-RUNTIME.md).
+                let log = fileURL.deletingLastPathComponent().appendingPathComponent(cloudKitCallLogName)
+                transport.accessLog = { line in CloudKitCallLog.append(line, to: log) }
+            }
             let coordinator = SidebarSyncCoordinator(
-                transport: CloudKitSyncTransport(containerIdentifier: container),
+                transport: transport,
                 stateStore: SidebarSyncStateFile(fileURL: fileURL),
                 deviceID: deviceID.uuidString.lowercased(),
                 initialState: initialState
@@ -74,6 +82,24 @@ public enum CloudKitSyncAvailability {
             #else
             return UnavailableSyncEngine(reason: "\(unavailableMessage) (CloudKit missing).")
             #endif
+        }
+    }
+}
+
+/// Appends "<ISO time> <line>" to a file, from any thread.
+enum CloudKitCallLog {
+    private static let lock = NSLock()
+
+    static func append(_ line: String, to url: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        let text = ISO8601DateFormatter().string(from: Date()) + " " + line + "\n"
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(Data(text.utf8))
+            try? handle.close()
+        } else {
+            try? Data(text.utf8).write(to: url, options: [.atomic])
         }
     }
 }

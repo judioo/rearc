@@ -15,8 +15,14 @@ import Foundation
 ///
 /// Only construct after `CloudKitSyncAvailability` said `.available`:
 /// `CKContainer` traps without the entitlement.
-public final class CloudKitSyncTransport: SidebarSyncTransport, CKSyncEngineDelegate, @unchecked Sendable {
+public final class CloudKitSyncTransport: SidebarSyncTransport, SidebarCloudReading, CKSyncEngineDelegate, @unchecked Sendable {
     public static let zoneName = CloudKitSyncZone.zoneName
+
+    /// Every call that reaches iCloud, one line each ("read …" or "write …").
+    /// Set for a `REARC_DATA_DIR` launch, so a test run can show what it touched.
+    public var accessLog: ((String) -> Void)?
+    /// `SidebarSyncCoordinator.maxRecords`: a look reads no further.
+    static let readLimit = 50_000
 
     private let container: CKContainer
     private let database: CKDatabase
@@ -40,6 +46,7 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, CKSyncEngineDele
     // MARK: SidebarSyncTransport
 
     public func accountStatus() async -> SyncAccountStatus {
+        accessLog?("read account status")
         do {
             switch try await container.accountStatus() {
             case .available:
@@ -57,6 +64,7 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, CKSyncEngineDele
     }
 
     public func prepareZone() async throws {
+        accessLog?("write: create the sidebar zone")
         do {
             _ = try await database.modifyRecordZones(saving: [CKRecordZone(zoneID: zoneID)], deleting: [])
         } catch {
@@ -65,6 +73,7 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, CKSyncEngineDele
     }
 
     public func fetchChanges(since token: Data?) async throws -> SyncFetchResult {
+        accessLog?("read changes (sync engine)")
         let engine = syncEngine(token: token)
         withLock {
             fetched = []
@@ -83,6 +92,7 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, CKSyncEngineDele
     }
 
     public func modify(saving records: [SyncWireRecord], deleting names: [String]) async throws -> SyncModifyResult {
+        accessLog?("write: save \(records.count) records, delete \(names.count)")
         let engine = syncEngine(token: nil)
         let ckRecords = records.map(makeRecord)
         let deleteIDs = names.map { CKRecord.ID(recordName: $0, zoneID: zoneID) }
@@ -117,6 +127,49 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, CKSyncEngineDele
             engine = nil
             serialization = nil
         }
+    }
+
+    // MARK: SidebarCloudReading
+
+    /// A plain zone read, outside CKSyncEngine (which would set up a
+    /// subscription): nothing in iCloud changes.
+    public func readAllRecords() async throws -> [SyncWireRecord]? {
+        var records: [SyncWireRecord] = []
+        var token: CKServerChangeToken?
+        var pages = 0
+        do {
+            while true {
+                let page = try await database.recordZoneChanges(inZoneWith: zoneID, since: token)
+                for case .success(let modification) in page.modificationResultsByID.values {
+                    if let wire = Self.wire(from: modification.record) { records.append(wire) }
+                }
+                token = page.changeToken
+                pages += 1
+                // Bounded like a merge (RC-0.1.0-602 T-10): past the limit, the rest is ignored.
+                guard page.moreComing, records.count <= Self.readLimit, pages < 1000 else { break }
+            }
+        } catch {
+            let mapped = Self.map(error, zoneID: zoneID)
+            if mapped == .zoneNotFound || mapped == .userDeletedZone {
+                accessLog?("read the sidebar zone: none")
+                return nil
+            }
+            accessLog?("read the sidebar zone: failed")
+            throw mapped
+        }
+        accessLog?("read the sidebar zone: \(records.count) records")
+        return records
+    }
+
+    public func deleteZone() async throws {
+        accessLog?("write: delete the sidebar zone")
+        do {
+            _ = try await database.modifyRecordZones(saving: [], deleting: [zoneID])
+        } catch {
+            let mapped = Self.map(error, zoneID: zoneID)
+            guard mapped == .zoneNotFound || mapped == .userDeletedZone else { throw mapped }
+        }
+        reset()
     }
 
     // MARK: CKSyncEngineDelegate

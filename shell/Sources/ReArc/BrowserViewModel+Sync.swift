@@ -22,26 +22,81 @@ extension BrowserViewModel {
         MainActor.assumeIsolated { syncControl?.isUserEnabled ?? false }
     }
 
+    /// The switch in Settings › Account. Off is immediate. On looks at
+    /// iCloud first (read-only): empty, it starts syncing; holding a
+    /// sidebar, it asks what to do with it (`syncCloudChoice`); out of
+    /// reach, it says so and the switch stays off.
     func setSyncEnabled(_ enabled: Bool) {
-        syncDecisionPrompt = nil
-        MainActor.assumeIsolated { syncControl?.setUserEnabled(enabled) }
-    }
-
-    /// An existing install nobody chose for: ask once before anything syncs
-    /// (RC-0.1.0-602 T-01). The answer is saved at once; an unanswered
-    /// prompt asks again at the next launch.
-    func offerSyncDecisionIfNeeded() {
-        MainActor.assumeIsolated {
-            guard let control = syncControl, control.needsDecision, syncDecisionPrompt == nil else { return }
-            syncDecisionPrompt = SyncDecisionPrompt(syncedBefore: control.syncedBeforeDecision)
+        syncCloudMessage = nil
+        guard enabled else {
+            MainActor.assumeIsolated { syncControl?.setUserEnabled(false) }
+            return
+        }
+        checkCloudSidebar { [weak self] detection in
+            guard let self else { return }
+            switch detection {
+            case .empty:
+                MainActor.assumeIsolated { self.syncControl?.setUserEnabled(true) }
+            case .found(let found):
+                self.syncCloudChoice = found
+            case .signedOut(let message), .unreachable(let message), .unavailable(let message):
+                self.syncCloudMessage = message
+            }
         }
     }
 
-    /// A new install's onboarding finished: sync is on by default then,
-    /// unless the prompt is already asking.
-    func enableSyncForNewInstall() {
-        guard syncDecisionPrompt == nil else { return }
-        MainActor.assumeIsolated { syncControl?.enableForNewInstall() }
+    /// A read-only look at iCloud for Settings › Account; `done` gets it too.
+    func checkCloudSidebar(_ done: ((CloudSidebarDetection) -> Void)? = nil) {
+        guard let control = syncControl, !isCheckingCloud else { return }
+        isCheckingCloud = true
+        Task { @MainActor [weak self] in
+            let detection = await control.detectCloudSidebar()
+            guard let self else { return }
+            self.isCheckingCloud = false
+            self.cloudDetection = detection
+            done?(detection)
+        }
+    }
+
+    /// Where "Use the iCloud sidebar" keeps the copy of this Mac's sidebar it replaces.
+    var sidebarBackupFolder: URL { SidebarBackup.folder(besides: persistence.fileURL) }
+
+    /// The folder as the sheet names it: "ReArc › Backups".
+    var sidebarBackupFolderName: String {
+        ShellDataLocation.isOverridden ? sidebarBackupFolder.path : "ReArc › Backups in your Application Support folder"
+    }
+
+    /// The person's answer for the sidebar in iCloud; sync is on afterwards.
+    /// Using iCloud's backs this Mac's sidebar up first, and does nothing if that fails.
+    func chooseCloudSidebar(_ choice: CloudSidebarChoice, from found: CloudSidebarFound) {
+        syncCloudChoice = nil
+        syncCloudMessage = nil
+        if choice == .useCloud {
+            do {
+                _ = try SidebarBackup.write(store.makeSnapshot(), besides: persistence.fileURL, reason: "before-icloud")
+            } catch {
+                syncCloudMessage = "ReArc couldn't save a copy of this Mac's sidebar, so nothing was changed."
+                return
+            }
+        }
+        MainActor.assumeIsolated { syncControl?.apply(choice, from: found) }
+        reconcileEngineOwnership()
+        loadSelectedIfNeeded()
+        checkCloudSidebar()
+    }
+
+    /// Settings › Account › Delete iCloud Content…: this Mac's sidebar stays; sync turns off.
+    func deleteCloudSidebar() {
+        guard let control = syncControl else { return }
+        syncCloudMessage = nil
+        Task { @MainActor [weak self] in
+            do {
+                try await control.deleteCloudSidebar()
+            } catch {
+                self?.syncCloudMessage = (error as? SyncTransportError)?.userMessage ?? "iCloud couldn't delete ReArc's sidebar. Try again in a moment."
+            }
+            self?.checkCloudSidebar()
+        }
     }
 
     func syncNow() {

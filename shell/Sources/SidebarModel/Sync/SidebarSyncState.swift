@@ -14,14 +14,16 @@ public struct SyncShadowRecord: Equatable, Codable, Sendable {
     }
 }
 
-/// Who set the sync toggle (RC-0.1.0-602 T-01).
+/// Who set the sync toggle. Sync Sidebar is off until the person turns it
+/// on in Settings: only `.user` with `enabled` syncs.
 public enum SyncDecision: String, Codable, Sendable {
-    /// The person: the "Sync your sidebar with iCloud?" prompt, Settings, or
-    /// an explicit off saved by an earlier build.
+    /// The person: the switch in Settings, the sheet it shows when iCloud
+    /// already holds a sidebar, or 605's and 608's "Turn On" prompt.
     case user
-    /// On by default once a new install's onboarding finished.
+    /// Written by 605 and 608: on by default once a new install's onboarding
+    /// finished. Never written now; such a file loads as off.
     case newInstall
-    /// Off without asking: a `REARC_DATA_DIR` launch's throwaway sidebar.
+    /// Written by 605 and 608 for a `REARC_DATA_DIR` launch. Loads as off.
     case isolated
 }
 
@@ -32,10 +34,9 @@ public struct SidebarSyncState: Equatable, Codable, Sendable {
     public static let version = 1
 
     public var version = SidebarSyncState.version
-    /// The saved toggle. Sync runs only when it is on and `decision` is set.
+    /// The saved toggle. Sync runs only when it is on and `decision` is `.user`.
     public var enabled = false
-    /// Nil until someone chose. Files from 602 and earlier have none: 602
-    /// wrote `enabled` on by default, so an on there is not a choice.
+    /// Who set `enabled`. Files from 602 have none.
     public var decision: SyncDecision?
     public var accountID: String?
     public var zoneReady = false
@@ -53,11 +54,8 @@ public struct SidebarSyncState: Equatable, Codable, Sendable {
 
     public var pendingCount: Int { records.values.filter(\.pending).count }
 
-    /// Nobody chose yet: ask before the first cycle, and sync nothing until then.
-    public var isUndecided: Bool { decision == nil }
-
-    /// Whether cycles run: on, and on by someone's choice or a new install's default.
-    public var isActive: Bool { enabled && decision != nil }
+    /// Whether cycles run: switched on, by the person.
+    public var isActive: Bool { enabled && decision == .user }
 
     /// Drops everything tied to the server account, keeping the toggle.
     /// The clock goes too: a stamp a crafted record pushed it to must not
@@ -71,6 +69,18 @@ public struct SidebarSyncState: Equatable, Codable, Sendable {
         clock = nil
         lastSyncedAt = nil
     }
+
+    /// Off unless the person switched it on. 602 (on with no decision) and
+    /// 605/608 (on as a new install's default) switched sync on by
+    /// themselves: those files load off, and what they merged is forgotten
+    /// here (the sidebar and iCloud stay as they are), so turning it on
+    /// again is a first join that asks first.
+    mutating func normalize() {
+        guard !isActive else { return }
+        if enabled || decision == .newInstall || decision == .isolated { resetServerState() }
+        enabled = false
+        if decision != .user { decision = nil }
+    }
 }
 
 public protocol SidebarSyncStateStoring: AnyObject {
@@ -81,56 +91,20 @@ public protocol SidebarSyncStateStoring: AnyObject {
 public final class SidebarSyncStateFile: SidebarSyncStateStoring {
     public static let fileName = "sync-state.json"
     public let fileURL: URL
-    /// False in a `REARC_DATA_DIR` launch (benchmarks, manual tests): a
-    /// throwaway folder with no state file stays off and is never asked
-    /// about, so it cannot merge into the user's iCloud sidebar unless sync
-    /// is turned on there.
-    public let asksWhenUndecided: Bool
 
-    public init(fileURL: URL, asksWhenUndecided: Bool = !ShellDataLocation.isOverridden) {
+    public init(fileURL: URL) {
         self.fileURL = fileURL
-        self.asksWhenUndecided = asksWhenUndecided
     }
 
-    /// Never on without a choice (RC-0.1.0-602 T-01). No file, or a file
-    /// whose toggle was on without a recorded decision (602's default),
-    /// is undecided and off. A file that does not fully decode keeps only
-    /// a readable explicit choice, and otherwise reads as undecided.
+    /// Never on without the person's choice. No file, a file a build
+    /// switched on by itself (`normalize`), or a file that does not fully
+    /// decode load off; a later switch-on looks at iCloud first.
     public func load() -> SidebarSyncState {
-        guard let data = try? Data(contentsOf: fileURL) else { return Self.fresh(asks: asksWhenUndecided) }
-        guard var state = try? SyncCoding.decoder.decode(SidebarSyncState.self, from: data),
-              state.version == SidebarSyncState.version else {
-            var state = Self.fresh(asks: asksWhenUndecided)
-            if let toggle = try? SyncCoding.decoder.decode(Toggle.self, from: data), let saved = toggle.enabled {
-                if !saved {
-                    state.decision = .user
-                } else if let decision = toggle.decision {
-                    // A chosen on, with its records unreadable: the next cycle joins again.
-                    state.enabled = true
-                    state.decision = decision
-                }
-            }
-            return state
-        }
-        if state.decision == nil {
-            // Earlier builds saved an off only when the person chose it. An on
-            // without a decision asks, in a REARC_DATA_DIR launch too: there
-            // someone put the file in place (how the prompt is checked).
-            if !state.enabled { state.decision = .user } else { state.enabled = false }
-        }
+        guard let data = try? Data(contentsOf: fileURL),
+              var state = try? SyncCoding.decoder.decode(SidebarSyncState.self, from: data),
+              state.version == SidebarSyncState.version else { return SidebarSyncState() }
+        state.normalize()
         return state
-    }
-
-    private static func fresh(asks: Bool) -> SidebarSyncState {
-        var state = SidebarSyncState()
-        if !asks { state.decision = .isolated }
-        return state
-    }
-
-    /// The two fields read on their own from a file the full state cannot decode.
-    private struct Toggle: Decodable {
-        var enabled: Bool?
-        var decision: SyncDecision?
     }
 
     public func save(_ state: SidebarSyncState) {

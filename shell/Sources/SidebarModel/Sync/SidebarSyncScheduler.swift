@@ -5,16 +5,17 @@ import Foundation
 public protocol SyncControlling: AnyObject {
     var details: SyncStatusDetails { get }
     var isUserEnabled: Bool { get }
-    /// Nobody chose yet (an existing install): ask before anything syncs.
-    var needsDecision: Bool { get }
-    /// Build 602 synced this Mac on by default before anyone chose.
-    var syncedBeforeDecision: Bool { get }
     var onDetailsChange: ((SyncStatusDetails) -> Void)? { get set }
     func attach(host: SidebarSyncHost)
+    /// Off, or on when iCloud holds no sidebar (`detectCloudSidebar` said so).
     func setUserEnabled(_ enabled: Bool)
-    /// A new install's onboarding finished: on, unless someone already chose.
-    func enableForNewInstall()
     func syncNow()
+    /// A read-only look at iCloud (Settings, and before turning sync on).
+    func detectCloudSidebar() async -> CloudSidebarDetection
+    /// Uses, replaces or merges with what `detectCloudSidebar` found; sync is on afterwards.
+    func apply(_ choice: CloudSidebarChoice, from found: CloudSidebarFound)
+    /// Deletes ReArc's sidebar from iCloud; sync is off afterwards.
+    func deleteCloudSidebar() async throws
 }
 
 /// Runs `SidebarSyncCoordinator` cycles: soon after local edits (debounced),
@@ -52,8 +53,6 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
 
     @MainActor public var details: SyncStatusDetails { coordinator.details }
     @MainActor public var isUserEnabled: Bool { coordinator.isEnabled }
-    @MainActor public var needsDecision: Bool { coordinator.needsDecision }
-    @MainActor public var syncedBeforeDecision: Bool { coordinator.syncedBeforeDecision }
 
     @MainActor
     public func attach(host: SidebarSyncHost) {
@@ -67,8 +66,19 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
     }
 
     @MainActor
-    public func enableForNewInstall() {
-        coordinator.enableForNewInstall()
+    public func detectCloudSidebar() async -> CloudSidebarDetection {
+        await coordinator.detectCloudSidebar()
+    }
+
+    @MainActor
+    public func apply(_ choice: CloudSidebarChoice, from found: CloudSidebarFound) {
+        coordinator.apply(choice, from: found)
+        resumeOrPause()
+    }
+
+    @MainActor
+    public func deleteCloudSidebar() async throws {
+        try await coordinator.deleteCloudSidebar()
         resumeOrPause()
     }
 
@@ -223,26 +233,49 @@ public struct SyncSettingsPresentation: Equatable, Sendable {
     }
 }
 
-/// The one question an existing install gets before its sidebar syncs
-/// (RC-0.1.0-602 T-01), kept out of the view so tests can read it.
-public struct SyncDecisionPrompt: Equatable, Sendable {
-    public static let title = "Sync your sidebar with iCloud?"
-    public static let turnOn = "Turn On"
-    public static let notNow = "Not Now"
+/// What Settings says when Sync Sidebar is switched on and iCloud already
+/// holds a sidebar, and in its iCloud box; kept out of the views so tests
+/// can read them.
+public enum SyncCloudText {
+    public static let sheetTitle = "iCloud already has a ReArc sidebar"
 
-    public var message: String
+    /// "It has 14 spaces, 210 pinned tabs and 12 favorites, last updated 3 days ago."
+    public static func holds(_ summary: CloudSidebarSummary, now: Date = Date()) -> String {
+        "It has " + summary.counts + (summary.updatedText(now: now).map { ", " + $0 } ?? "") + "."
+    }
 
-    /// `syncedBefore`: build 602 already synced this Mac without asking.
-    public init(syncedBefore: Bool) {
-        var text = "ReArc can keep your Spaces, Favorites, pinned tabs, folders, splits and Boosts the same on every Mac signed in to your Apple Account. "
-        if syncedBefore {
-            text += "The last update started syncing this sidebar without asking. Turn On keeps it in step with your other Macs. "
-                + "Not Now stops it on this Mac; what was already uploaded stays in your iCloud account."
-        } else {
-            text += "Turning it on merges this Mac's sidebar with the one in iCloud: what each Mac has appears on both, and where an item "
-                + "is already in iCloud, iCloud's version is kept, including a deletion."
+    public static let sheetWarning = "Using it can replace or change what is on this Mac, including what you just imported."
+
+    public static func title(_ choice: CloudSidebarChoice) -> String {
+        switch choice {
+        case .useCloud: return "Use the iCloud Sidebar on This Mac"
+        case .replaceCloud: return "Replace What's in iCloud with This Mac's Sidebar"
+        case .merge: return "Merge Both"
         }
-        text += " Today tabs, history, passwords and settings stay on this Mac.\n\nYou can change this later in Settings › Account."
-        message = text
+    }
+
+    /// One line: what the choice does.
+    public static func consequence(_ choice: CloudSidebarChoice, backupFolder: String) -> String {
+        switch choice {
+        case .useCloud:
+            return "This Mac's sidebar is replaced. A copy of it is saved first in \(backupFolder)."
+        case .replaceCloud:
+            return "iCloud's sidebar is replaced with this one, and your other Macs get this Mac's sidebar."
+        case .merge:
+            return "Both come together. Spaces imported from the same Arc space appear once; where both have an item, iCloud's version is kept."
+        }
+    }
+
+    public static let cancel = "Cancel"
+    public static let cancelConsequence = "Nothing changes here or in iCloud, and Sync Sidebar stays off."
+
+    /// The iCloud box in Settings › Account.
+    public static func status(_ detection: CloudSidebarDetection?, now: Date = Date()) -> String {
+        switch detection {
+        case nil: return "Checking iCloud…"
+        case .found(let found)?: return "iCloud has " + found.summary.counts + (found.summary.updatedText(now: now).map { ", " + $0 } ?? "") + "."
+        case .empty?: return "iCloud has no ReArc sidebar."
+        case .signedOut(let message)?, .unreachable(let message)?, .unavailable(let message)?: return message
+        }
     }
 }

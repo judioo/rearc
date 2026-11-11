@@ -41,6 +41,16 @@ public final class InMemorySyncServer: @unchecked Sendable {
     public var beforeModify: ((InMemorySyncServer) -> Void)?
     public private(set) var modifyCount = 0
     public private(set) var fetchCount = 0
+    /// Read-only looks (`SidebarCloudReading.readAllRecords`).
+    public private(set) var readCount = 0
+    /// Zones created, and zones deleted, by any device.
+    public private(set) var zoneCreations = 0
+    public private(set) var zoneDeletions = 0
+    /// Whether `account` has a sidebar zone.
+    public func hasZone(account: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return zones[account] != nil
+    }
 
     public init() {}
 
@@ -108,6 +118,7 @@ public final class InMemorySyncServer: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         deletedByUser.remove(account)
         if zones[account] == nil {
+            zoneCreations += 1
             generationCounter += 1
             zones[account] = Zone(generation: generationCounter)
         }
@@ -136,6 +147,20 @@ public final class InMemorySyncServer: @unchecked Sendable {
         let deleted = zone.deletions.filter { $0.value > since && $0.value <= through }.map(\.key).sorted()
         let token = try JSONEncoder().encode(Token(generation: zone.generation, sequence: through, epoch: tokenEpoch[account, default: 0]))
         return SyncFetchResult(changed: page.map(\.wire), deleted: deleted, token: token, moreComing: more)
+    }
+
+    func read(account: String) throws -> [SyncWireRecord]? {
+        try checkFault()
+        lock.lock(); defer { lock.unlock() }
+        readCount += 1
+        guard let zone = zones[account] else { return nil }
+        return zone.records.values.sorted { $0.changeSequence < $1.changeSequence }.map(\.wire)
+    }
+
+    func deleteZone(account: String) throws {
+        try checkFault()
+        lock.lock(); defer { lock.unlock() }
+        if zones.removeValue(forKey: account) != nil { zoneDeletions += 1 }
     }
 
     func modify(account: String, saving records: [SyncWireRecord], deleting names: [String]) throws -> SyncModifyResult {
@@ -185,7 +210,7 @@ public final class InMemorySyncServer: @unchecked Sendable {
     }
 }
 
-public final class InMemorySyncTransport: SidebarSyncTransport, @unchecked Sendable {
+public final class InMemorySyncTransport: SidebarSyncTransport, SidebarCloudReading, @unchecked Sendable {
     public let server: InMemorySyncServer
     /// The signed-in account; set to simulate sign-out or switching accounts.
     public var account: String?
@@ -209,6 +234,14 @@ public final class InMemorySyncTransport: SidebarSyncTransport, @unchecked Senda
 
     public func modify(saving records: [SyncWireRecord], deleting names: [String]) async throws -> SyncModifyResult {
         try server.modify(account: try signedIn(), saving: records, deleting: names)
+    }
+
+    public func readAllRecords() async throws -> [SyncWireRecord]? {
+        try server.read(account: try signedIn())
+    }
+
+    public func deleteZone() async throws {
+        try server.deleteZone(account: try signedIn())
     }
 
     private func signedIn() throws -> String {

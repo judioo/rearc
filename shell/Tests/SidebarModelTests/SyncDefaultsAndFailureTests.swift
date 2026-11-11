@@ -33,13 +33,11 @@ struct SyncDefaultsAndFailureTests {
         }
     }
 
-    @Test func absentStateIsUndecidedAndSavedOffSurvives() throws {
+    @Test func absentStateIsOffAndSavedOffSurvives() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("sync-defaults-\(UUID())")
         defer { try? FileManager.default.removeItem(at: folder) }
         let file = SidebarSyncStateFile(fileURL: folder.appendingPathComponent("sync-state.json"))
-        #expect(!file.load().isActive, "an existing install is asked first (RC-0.1.0-602 T-01)")
-        let isolated = SidebarSyncStateFile(fileURL: folder.appendingPathComponent("isolated.json"), asksWhenUndecided: false)
-        #expect(!isolated.load().isActive, "a REARC_DATA_DIR launch stays local until turned on")
+        #expect(!file.load().isActive, "Sync Sidebar is off until the person turns it on")
         var state = SidebarSyncState()
         state.enabled = false
         file.save(state)

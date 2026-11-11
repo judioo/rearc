@@ -53,8 +53,10 @@ private func arcSource() throws -> ArcSidebarImport {
     return ArcSidebarImport(export: export, profileNames: ["Default": "Home", "Profile 1": "Studio"])
 }
 
+/// Sync Sidebar is off unless the person turned it on (replaces T-01's
+/// one-time prompt): no build's own default keeps it on.
 @MainActor
-final class SyncDecisionTests: XCTestCase {
+final class SyncOffByDefaultTests: XCTestCase {
     private var folder: URL!
 
     override func setUp() {
@@ -66,94 +68,88 @@ final class SyncDecisionTests: XCTestCase {
         try? FileManager.default.removeItem(at: folder)
     }
 
-    private func file(_ json: String? = nil, asks: Bool = true) throws -> SidebarSyncStateFile {
+    private func file(_ json: String? = nil) throws -> SidebarSyncStateFile {
         let url = folder.appendingPathComponent(SidebarSyncStateFile.fileName)
         if let json { try Data(json.utf8).write(to: url) }
-        return SidebarSyncStateFile(fileURL: url, asksWhenUndecided: asks)
+        return SidebarSyncStateFile(fileURL: url)
     }
 
-    func testNoFileIsUndecidedAndOff() throws {
+    private let record = #""records":{"profile_00000000-0000-0000-0000-000000000001":{"payload":{"kind":"SidebarProfileRecord","fields":{}},"pending":false}}"#
+
+    func testNoFileIsOff() throws {
         let state = try file().load()
-        XCTAssertTrue(state.isUndecided)
         XCTAssertFalse(state.isActive)
-        let isolated = try file(asks: false).load()
-        XCTAssertEqual(isolated.decision, .isolated, "a REARC_DATA_DIR launch is never asked and stays off")
-        XCTAssertFalse(isolated.isActive)
+        XCTAssertNil(state.decision)
     }
 
-    func testBuild602sDefaultOnIsNotAChoice() throws {
-        // What 602 wrote after syncing on by default: on, joined, records, no decision.
-        let state = try file(#"{"version":1,"enabled":true,"zoneReady":true,"joined":true,"records":{"profile_00000000-0000-0000-0000-000000000001":{"payload":{"kind":"SidebarProfileRecord","fields":{}},"pending":false}}}"#).load()
-        XCTAssertTrue(state.isUndecided)
+    func testOnByABuildsOwnDefaultGoesOffAndForgetsWhatItMerged() throws {
+        // 602: on, joined, records, no decision.
+        var state = try file(#"{"version":1,"enabled":true,"zoneReady":true,"joined":true,"accountID":"a",\#(record)}"#).load()
         XCTAssertFalse(state.isActive)
-        XCTAssertTrue(state.joined, "what it synced is kept, so Turn On carries on where it was")
-        XCTAssertEqual(state.records.count, 1)
-        let coordinator = SidebarSyncCoordinator(transport: InMemorySyncServer().transport(account: "a"), stateStore: InMemorySyncStateStore(state), deviceID: "A")
-        XCTAssertTrue(coordinator.needsDecision)
-        XCTAssertTrue(coordinator.syncedBeforeDecision)
+        XCTAssertFalse(state.enabled)
+        XCTAssertNil(state.decision)
+        XCTAssertFalse(state.joined, "turning it on again is a first join, which looks at iCloud first")
+        XCTAssertTrue(state.records.isEmpty)
+        XCTAssertNil(state.accountID)
+        // 605 and 608: on as a new install's default.
+        state = try file(#"{"version":1,"enabled":true,"decision":"newInstall","zoneReady":true,"joined":true,"accountID":"a",\#(record)}"#).load()
+        XCTAssertFalse(state.isActive)
+        XCTAssertTrue(state.records.isEmpty)
+        // 605 and 608 in a REARC_DATA_DIR launch.
+        state = try file(#"{"version":1,"enabled":false,"decision":"isolated","zoneReady":false,"joined":false,\#(record)}"#).load()
+        XCTAssertFalse(state.isActive)
+        XCTAssertNil(state.decision)
     }
 
-    func testAnEarlierExplicitOffStaysOffAndIsNotAsked() throws {
-        let state = try file(#"{"version":1,"enabled":false,"zoneReady":false,"joined":false,"records":{}}"#).load()
-        XCTAssertEqual(state.decision, .user)
-        XCTAssertFalse(state.isActive)
-    }
-
-    func testAFileThatDoesNotDecodeNeverTurnsSyncOn() throws {
-        // The saved off is read on its own when the rest is unreadable.
-        var state = try file(#"{"version":1,"enabled":false,"records":"garbage"}"#).load()
-        XCTAssertEqual(state.decision, .user)
-        XCTAssertFalse(state.isActive)
-        // A 602 on with no decision, unreadable: undecided and off.
-        state = try file(#"{"version":1,"enabled":true,"records":7}"#).load()
-        XCTAssertTrue(state.isUndecided)
-        XCTAssertFalse(state.isActive)
-        // Not JSON at all.
-        state = try file("not json").load()
-        XCTAssertTrue(state.isUndecided)
-        XCTAssertFalse(state.isActive)
-        // A chosen on keeps its choice; its records are gone, so the next cycle joins again.
-        state = try file(#"{"version":1,"enabled":true,"decision":"user","records":7}"#).load()
+    func testTheirOwnOnStaysOn() throws {
+        // Settings' switch, or 605/608's "Turn On": the person chose it.
+        let state = try file(#"{"version":1,"enabled":true,"decision":"user","zoneReady":true,"joined":true,\#(record)}"#).load()
         XCTAssertTrue(state.isActive)
-        XCTAssertFalse(state.joined)
+        XCTAssertTrue(state.joined)
+        XCTAssertEqual(state.records.count, 1)
+        let off = try file(#"{"version":1,"enabled":false,"decision":"user","zoneReady":true,"joined":true,\#(record)}"#).load()
+        XCTAssertFalse(off.isActive)
+        XCTAssertEqual(off.records.count, 1, "their own off keeps what it synced")
     }
 
-    func testUndecidedSyncsNothingAndTheAnswerIsSavedAtOnce() async throws {
+    func testAFileThatDoesNotDecodeIsOff() throws {
+        for json in [#"{"version":1,"enabled":true,"decision":"user","records":7}"#, #"{"version":1,"enabled":true,"records":"garbage"}"#,
+                     "not json", #"{"version":1,"enabled":true,"decision":"someday"}"#] {
+            let state = try file(json).load()
+            XCTAssertFalse(state.isActive, json)
+            XCTAssertTrue(state.records.isEmpty, json)
+        }
+    }
+
+    func testOffSyncsNothingUntilSwitchedOn() async throws {
         let server = InMemorySyncServer()
         let stateFile = try file()
         let coordinator = SidebarSyncCoordinator(transport: server.transport(account: "a"), stateStore: stateFile, deviceID: "A")
         let store = SidebarStore()
         _ = store.addTab(kind: .pinned, title: "Private", url: URL(string: "https://private.test")!)
         coordinator.host = store
-        XCTAssertTrue(coordinator.needsDecision)
         let outcome = await coordinator.sync()
         XCTAssertTrue(outcome.skipped)
         XCTAssertEqual(server.fetchCount, 0)
-        XCTAssertTrue(server.records(account: "a").isEmpty)
+        XCTAssertFalse(server.hasZone(account: "a"))
 
-        coordinator.setEnabled(false) // Not Now
-        XCTAssertEqual(stateFile.load().decision, .user)
-        XCTAssertFalse(stateFile.load().isActive)
-        coordinator.enableForNewInstall()
-        XCTAssertFalse(coordinator.isEnabled, "a new install's default never overrides a choice")
-
-        coordinator.setEnabled(true) // Turn On
+        coordinator.setEnabled(true)
         XCTAssertTrue(stateFile.load().isActive)
         let turnedOn = await coordinator.sync()
         XCTAssertFalse(turnedOn.skipped)
         XCTAssertFalse(server.records(account: "a").isEmpty)
     }
 
-    func testANewInstallIsOnOnceOnboardingFinishes() throws {
-        let stateFile = try file()
-        let coordinator = SidebarSyncCoordinator(transport: InMemorySyncServer().transport(account: "a"), stateStore: stateFile, deviceID: "A")
-        coordinator.enableForNewInstall()
-        XCTAssertTrue(coordinator.isEnabled)
-        XCTAssertEqual(stateFile.load().decision, .newInstall)
-        XCTAssertFalse(coordinator.needsDecision)
+    func testAStateHandedInIsNormalizedToo() {
+        var state = SidebarSyncState()
+        state.enabled = true
+        state.decision = .newInstall
+        let coordinator = SidebarSyncCoordinator(transport: InMemorySyncServer().transport(account: "a"), stateStore: InMemorySyncStateStore(), deviceID: "A",
+                                                 initialState: state)
+        XCTAssertFalse(coordinator.isEnabled)
     }
 
-    func testSchedulerStaysIdleUntilAnswered() async {
+    func testSchedulerStaysIdleUntilSwitchedOn() async {
         let server = InMemorySyncServer()
         let coordinator = SidebarSyncCoordinator(transport: server.transport(account: "a"), stateStore: InMemorySyncStateStore(), deviceID: "A")
         let scheduler = SidebarSyncScheduler(coordinator: coordinator)
@@ -164,21 +160,11 @@ final class SyncDecisionTests: XCTestCase {
         }
         scheduler.start()
         await scheduler.runCycle()
-        XCTAssertTrue(scheduler.needsDecision)
         XCTAssertEqual(server.fetchCount, 0)
         scheduler.setUserEnabled(true)
         await scheduler.runCycle()
         XCTAssertGreaterThan(server.fetchCount, 0)
         scheduler.stop()
-    }
-
-    func testPromptSaysWhatMergesAndWhatStaysLocal() {
-        let fresh = SyncDecisionPrompt(syncedBefore: false)
-        XCTAssertEqual(SyncDecisionPrompt.title, "Sync your sidebar with iCloud?")
-        XCTAssertTrue(fresh.message.contains("merges this Mac's sidebar"))
-        XCTAssertTrue(fresh.message.contains("Today tabs, history, passwords and settings stay on this Mac"))
-        XCTAssertTrue(SyncDecisionPrompt(syncedBefore: true).message.contains("without asking"))
-        XCTAssertFalse(fresh.message.contains("without asking"))
     }
 }
 

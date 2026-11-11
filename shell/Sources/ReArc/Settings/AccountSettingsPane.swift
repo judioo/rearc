@@ -16,6 +16,8 @@ struct AccountSettingsPane: View {
     @State private var canImportArc = false
     @State private var cardShareAnchor: NSView?
     @State private var shareReArcAnchor: NSView?
+    /// A destructive iCloud action waiting for its confirmation.
+    @State private var confirming: CloudAction?
 
     private static let columnWidth: CGFloat = 339
 
@@ -27,6 +29,7 @@ struct AccountSettingsPane: View {
                 VStack(spacing: 17) {
                     accountBox
                     syncBox
+                    if model.syncControl != nil { cloudBox }
                     shareBox
                 }
                 .frame(width: Self.columnWidth)
@@ -37,6 +40,7 @@ struct AccountSettingsPane: View {
             .padding(.bottom, 24)
         }
         .onAppear {
+            if model.syncControl != nil, model.cloudDetection == nil { model.checkCloudSidebar() }
             model.membershipCard.ensureLoaded()
             canImportArc = model.canImportArcMembershipCard()
             model.membershipCard.accountTabAppeared(reduceMotion: reduceMotion)
@@ -50,6 +54,30 @@ struct AccountSettingsPane: View {
             Button("Save") { model.changeAccountName(nameDraft) }
         } message: {
             Text("The name on your card and your profile.")
+        }
+        .sheet(isPresented: Binding(get: { model.syncCloudChoice != nil }, set: { if !$0 { model.syncCloudChoice = nil } })) {
+            if let found = model.syncCloudChoice {
+                CloudSidebarChoiceSheet(found: found, backupFolder: model.sidebarBackupFolderName,
+                                        choose: { model.chooseCloudSidebar($0, from: found) },
+                                        cancel: { model.syncCloudChoice = nil })
+            }
+        }
+        .alert(confirming?.title ?? "", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
+               presenting: confirming) { action in
+            Button(action.button, role: .destructive) { perform(action) }
+            Button("Cancel", role: .cancel) {}
+                .keyboardShortcut(.defaultAction)
+        } message: { action in
+            Text(action.message(found: model.cloudDetection?.found, backupFolder: model.sidebarBackupFolderName))
+        }
+    }
+
+    private func perform(_ action: CloudAction) {
+        guard let found = model.cloudDetection?.found else { return }
+        switch action {
+        case .use: model.chooseCloudSidebar(.useCloud, from: found)
+        case .replace: model.chooseCloudSidebar(.replaceCloud, from: found)
+        case .delete: model.deleteCloudSidebar()
         }
     }
 
@@ -192,11 +220,20 @@ struct AccountSettingsPane: View {
                             .frame(width: 7, height: 7)
                         Text("Last synced: \(text.lastSyncedText)").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
-                    if let error = text.errorText {
+                    if model.isCheckingCloud {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini)
+                            Text("Looking at iCloud…").font(.system(size: 12)).foregroundStyle(.secondary)
+                        }
+                    }
+                    if let message = model.syncCloudMessage {
+                        Text(message).font(.system(size: 11)).foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if let error = text.errorText {
                         Text(error).font(.system(size: 11)).foregroundStyle(.red)
                     }
                     SettingsHairline()
-                    Text("ReArc syncs Spaces and their themes, Favorites, pinned tabs, folders, splits and Boosts through your iCloud account; only you can see them. Today tabs and easels stay on this Mac.")
+                    Text("Off unless you turn it on. ReArc syncs Spaces and their themes, Favorites, pinned tabs, folders, splits and Boosts through your iCloud account; only you can see them. Today tabs and easels stay on this Mac.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     DisclosureGroup("Details", isExpanded: $showsSyncDetails) {
@@ -223,6 +260,37 @@ struct AccountSettingsPane: View {
                     }
                     .font(.system(size: 12))
                 }
+            }
+        }
+    }
+
+    /// What iCloud holds, and what can be done with it, sync on or off.
+    private var cloudBox: some View {
+        let found = model.cloudDetection?.found
+        return AccountBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Sidebar in iCloud").font(.system(size: 13))
+                    Spacer()
+                    Button { model.checkCloudSidebar() } label: {
+                        Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(model.isCheckingCloud)
+                    .help("Look at iCloud again")
+                    .accessibilityLabel("Look at iCloud again")
+                }
+                Text(model.isCheckingCloud && model.cloudDetection == nil ? "Looking at iCloud…" : SyncCloudText.status(model.cloudDetection))
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                SettingsHairline()
+                VStack(alignment: .leading, spacing: 6) {
+                    Button("Use on This Mac…") { confirming = .use }
+                    Button("Replace iCloud with This Mac…") { confirming = .replace }
+                    Button("Delete iCloud Content…", role: .destructive) { confirming = .delete }
+                }
+                .controlSize(.small)
+                .disabled(found == nil || model.isCheckingCloud)
             }
         }
     }
@@ -260,5 +328,85 @@ private struct AccountBox<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(SettingsColors.box, in: RoundedRectangle(cornerRadius: SettingsMetrics.boxRadius, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: SettingsMetrics.boxRadius, style: .continuous).strokeBorder(SettingsColors.border))
+    }
+}
+
+/// The iCloud box's destructive actions, each confirmed with what it affects.
+enum CloudAction: Identifiable {
+    case use, replace, delete
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .use: return "Use the iCloud sidebar on this Mac?"
+        case .replace: return "Replace iCloud's sidebar with this Mac's?"
+        case .delete: return "Delete ReArc's sidebar from iCloud?"
+        }
+    }
+
+    var button: String {
+        switch self {
+        case .use: return "Use iCloud's Sidebar"
+        case .replace: return "Replace iCloud's Sidebar"
+        case .delete: return "Delete from iCloud"
+        }
+    }
+
+    func message(found: CloudSidebarFound?, backupFolder: String) -> String {
+        let holds = found.map { SyncCloudText.holds($0.summary) + " " } ?? ""
+        switch self {
+        case .use:
+            return holds + SyncCloudText.consequence(.useCloud, backupFolder: backupFolder) + " Sync Sidebar is on afterwards."
+        case .replace:
+            return holds + SyncCloudText.consequence(.replaceCloud, backupFolder: backupFolder) + " Sync Sidebar is on afterwards."
+        case .delete:
+            return holds + "It is deleted from iCloud. This Mac's sidebar stays as it is, and Sync Sidebar turns off here. "
+                + "Another Mac that still syncs uploads its own sidebar again."
+        }
+    }
+}
+
+/// Switching Sync Sidebar on found a sidebar in iCloud: say so, and what
+/// each way forward does, before anything moves. Cancel is the default.
+struct CloudSidebarChoiceSheet: View {
+    let found: CloudSidebarFound
+    let backupFolder: String
+    let choose: (CloudSidebarChoice) -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "icloud").font(.system(size: 26)).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(SyncCloudText.sheetTitle).font(.headline)
+                    Text(SyncCloudText.holds(found.summary)).font(.callout)
+                    Text(SyncCloudText.sheetWarning).font(.callout).foregroundStyle(.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(CloudSidebarChoice.allCases, id: \.self) { choice in
+                    row(SyncCloudText.title(choice), SyncCloudText.consequence(choice, backupFolder: backupFolder)) { choose(choice) }
+                }
+                row(SyncCloudText.cancel, SyncCloudText.cancelConsequence, isDefault: true, action: cancel)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+        .onExitCommand(perform: cancel)
+    }
+
+    private func row(_ title: String, _ consequence: String, isDefault: Bool = false, action: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if isDefault {
+                Button(title, action: action).keyboardShortcut(.defaultAction)
+            } else {
+                Button(title, action: action)
+            }
+            Text(consequence).font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
