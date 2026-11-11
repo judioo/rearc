@@ -16,6 +16,65 @@ extension BrowserViewModel {
         sidebarMorph(in: window)?.shown ?? Double(sidebarWidth(in: window))
     }
 
+    /// The Peek's card and buttons in `window` (window content coordinates,
+    /// top-left): centred beside a laid-out sidebar, else in the whole window;
+    /// a fullscreen Peek page fills it. The overlay and the click monitor both use it.
+    func peekLayout(in window: SidebarWindowID?, windowSize: CGSize) -> PeekLayout {
+        let bounds = CGRect(origin: .zero, size: windowSize)
+        if isPeekPageFullscreen { return PeekLayout(region: bounds, isFullscreen: true) }
+        let besideSidebar = isSidebarVisible && isSidebarLaidOut && !isHTMLFullscreen(in: window)
+        return PeekLayout(region: PeekLayout.region(
+            windowSize: windowSize,
+            sidebarWidth: besideSidebar ? peekSidebarWidth(in: window) : 0,
+            sidebarOnLeft: sidebarPlacement(in: window).side == .left
+        ))
+    }
+
+    /// The app's event monitor, before anything else sees a mouse-down: one
+    /// outside the Peek's card in the Peek's window closes it
+    /// (`PeekOutsideClick`), and that click and its mouse-up go no further.
+    /// True when the event is taken.
+    func handlePeekMouse(_ event: NSEvent) -> Bool {
+        handlePeekMouse(type: event.type, locationInWindow: event.locationInWindow, window: event.window)
+    }
+
+    func handlePeekMouse(type: NSEvent.EventType, locationInWindow: CGPoint, window: NSWindow?) -> Bool {
+        switch type {
+        case .leftMouseUp, .rightMouseUp:
+            guard peekSwallowsMouseUp == type else { return false }
+            peekSwallowsMouseUp = nil
+            return true
+        case .leftMouseDown, .rightMouseDown:
+            break
+        default:
+            return false
+        }
+        peekSwallowsMouseUp = nil
+        // The command bar and the tab switcher sit above the Peek in its window.
+        guard let session = peekSession, !isCommandBarPresented, tabSwitcher == nil,
+              let window, window === peekHostWindow, let content = window.contentView else { return false }
+        let local = content.convert(locationInWindow, from: nil)
+        let size = content.bounds.size
+        let point = CGPoint(x: local.x, y: content.isFlipped ? local.y : size.height - local.y)
+        let controls = TrafficLightPositioner.titlebarFrame(windowSize: size)
+        let outcome = PeekOutsideClick.outcome(
+            at: point, windowSize: size, layout: peekLayout(in: session.windowID, windowSize: size),
+            sheetAttached: window.attachedSheet != nil,
+            windowControls: CGRect(x: controls.minX, y: 0, width: controls.width, height: controls.height)
+        )
+        switch outcome {
+        case .pass:
+            return false
+        case .closeAndPass:
+            performPeekAction(.close)
+            return false
+        case .closeAndSwallow:
+            performPeekAction(.close)
+            peekSwallowsMouseUp = type == .leftMouseDown ? .leftMouseUp : .rightMouseUp
+            return true
+        }
+    }
+
     /// The Peek's page is fullscreen: the card fills the window, with no chrome.
     var isPeekPageFullscreen: Bool {
         (peekEngine as? PageFullscreenControlling)?.isPageFullscreen ?? false

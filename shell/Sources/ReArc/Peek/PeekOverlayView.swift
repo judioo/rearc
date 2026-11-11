@@ -26,7 +26,9 @@ struct PeekOverlayView: View {
             : PeekMotion.originRect(pointer: session.origin, card: layout.card, bounds: bounds)
         let surface = PeekSurface(chrome: chrome)
         ZStack(alignment: .topLeading) {
-            // Everything outside the card: a click there closes the Peek and goes no further.
+            // Everything outside the card. The app's mouse-down monitor closes
+            // the Peek first and takes the click (`handlePeekMouse`); this tap
+            // is the fallback, and a close on a closed Peek does nothing.
             Color.clear
                 .contentShape(Rectangle())
                 .onTapGesture(count: 1, coordinateSpace: .local) { point in
@@ -65,6 +67,11 @@ struct PeekOverlayView: View {
         }
         .frame(width: bounds.width, height: bounds.height, alignment: .topLeading)
         .opacity(reduceMotion && !grown ? 0 : 1)
+        // The window the click monitor closes this Peek from (the key window
+        // at open can be none when the app is not active).
+        .background(AnchorReader { [session] view in
+            if let window = view.window, model.peekSession?.engineID == session.engineID { model.peekHostWindow = window }
+        })
         .onAppear(perform: appear)
     }
 

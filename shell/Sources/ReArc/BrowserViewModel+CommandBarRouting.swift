@@ -134,6 +134,9 @@ extension BrowserViewModel {
         guard tabSwitcherMonitor == nil else { return }
         tabSwitcherMonitor = ShellKeyMonitor(handle: { [weak self] event in
             guard let self else { return event }
+            // A click outside an open Peek's card closes it and goes no further.
+            if self.handlePeekMouse(event) { return nil }
+            if event.type != .leftMouseDown, event.type.isMouse { return event }
             if event.type == .leftMouseDown {
                 // ⌥⌘-click routing on Chromium reads this (BrowserViewModel+LittleArcChrome).
                 self.noteMouseDown(modifiers: event.modifierFlags)
@@ -200,7 +203,8 @@ final class ShellKeyMonitor {
     private let observers: [NSObjectProtocol]
 
     init(handle: @escaping (NSEvent) -> NSEvent?, onInterrupt: @escaping () -> Void) {
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged, .leftMouseDown], handler: handle)
+        monitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .flagsChanged, .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp], handler: handle)
         observers = [NSApplication.didResignActiveNotification, NSWindow.didResignKeyNotification,
                      NSWindow.didBecomeKeyNotification, NSWindow.willCloseNotification].map { name in
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in onInterrupt() }
@@ -212,3 +216,8 @@ final class ShellKeyMonitor {
         observers.forEach(NotificationCenter.default.removeObserver)
     }
 }
+
+private extension NSEvent.EventType {
+    var isMouse: Bool { [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp].contains(self) }
+}
+

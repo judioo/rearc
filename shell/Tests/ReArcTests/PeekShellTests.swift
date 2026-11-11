@@ -154,4 +154,68 @@ final class PeekShellTests: XCTestCase {
         let long = URL(string: "https://login.accounts.example.com.\(String(repeating: "a", count: 80)).evil.test/x")!
         XCTAssertTrue(PeekAddress.parts(of: long).host.hasSuffix("evil.test"), "a long host keeps its registrable end")
     }
+
+    // MARK: The outside click, from the mouse-down
+
+    private func browserWindow() -> NSWindow {
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1200, height: 800),
+                              styleMask: [.titled, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        return window
+    }
+
+    /// Window base coordinates (bottom-left) for a top-left content point.
+    private func location(_ point: CGPoint, in window: NSWindow) -> CGPoint {
+        let content = window.contentView!
+        let local = CGPoint(x: point.x, y: content.isFlipped ? point.y : content.bounds.height - point.y)
+        return content.convert(local, to: nil)
+    }
+
+    func testAMouseDownOnTheWashClosesThePeekAndTakesItsMouseUp() throws {
+        let model = makeModel()
+        _ = try peekFromTab(model)
+        let window = browserWindow()
+        model.peekHostWindow = window
+        let size = window.contentView!.bounds.size
+        let layout = model.peekLayout(in: model.peekSession?.windowID, windowSize: size)
+        let wash = location(CGPoint(x: layout.card.minX - 30, y: layout.card.midY), in: window)
+
+        XCTAssertTrue(model.handlePeekMouse(type: .leftMouseDown, locationInWindow: wash, window: window))
+        XCTAssertNil(model.peekSession)
+        XCTAssertTrue(model.handlePeekMouse(type: .leftMouseUp, locationInWindow: wash, window: window), "its mouse-up goes too")
+        XCTAssertFalse(model.handlePeekMouse(type: .leftMouseUp, locationInWindow: wash, window: window), "only that one")
+        XCTAssertFalse(model.handlePeekMouse(type: .leftMouseDown, locationInWindow: wash, window: window), "no Peek, the click is the page's")
+        XCTAssertFalse(model.performPeekAction(.close), "a second close does nothing")
+    }
+
+    func testARightClickOnTheWashAlsoCloses() throws {
+        let model = makeModel()
+        _ = try peekFromTab(model)
+        let window = browserWindow()
+        model.peekHostWindow = window
+        let layout = model.peekLayout(in: model.peekSession?.windowID, windowSize: window.contentView!.bounds.size)
+        let wash = location(CGPoint(x: layout.card.maxX + 80, y: layout.card.midY + 200), in: window)
+        XCTAssertTrue(model.handlePeekMouse(type: .rightMouseDown, locationInWindow: wash, window: window))
+        XCTAssertNil(model.peekSession)
+        XCTAssertTrue(model.handlePeekMouse(type: .rightMouseUp, locationInWindow: wash, window: window))
+    }
+
+    func testClicksOnTheCardInAnotherWindowOrUnderTheCommandBarAreNotTheMonitors() throws {
+        let model = makeModel()
+        _ = try peekFromTab(model)
+        let window = browserWindow()
+        model.peekHostWindow = window
+        let layout = model.peekLayout(in: model.peekSession?.windowID, windowSize: window.contentView!.bounds.size)
+        let card = location(CGPoint(x: layout.card.midX, y: layout.card.midY), in: window)
+        let wash = location(CGPoint(x: layout.card.minX - 30, y: layout.card.midY), in: window)
+        XCTAssertFalse(model.handlePeekMouse(type: .leftMouseDown, locationInWindow: card, window: window), "inside the card")
+        XCTAssertFalse(model.handlePeekMouse(type: .leftMouseDown, locationInWindow: wash, window: browserWindow()), "another window")
+        XCTAssertFalse(model.handlePeekMouse(type: .leftMouseDown, locationInWindow: wash, window: nil))
+        model.isCommandBarPresented = true
+        XCTAssertFalse(model.handlePeekMouse(type: .leftMouseDown, locationInWindow: wash, window: window), "the command bar's click")
+        model.isCommandBarPresented = false
+        XCTAssertNotNil(model.peekSession, "still open")
+        XCTAssertFalse(model.handlePeekMouse(type: .leftMouseUp, locationInWindow: card, window: window), "a mouse-up it did not take")
+    }
 }
+
