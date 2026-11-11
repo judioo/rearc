@@ -136,7 +136,11 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, SidebarCloudRead
     public struct ReadTuning: Sendable {
         /// The person is waiting: CloudKit treats lower qualities as discretionary.
         public var qualityOfService: QualityOfService = .userInitiated
-        public var resultsLimit: Int?
+        /// The server sends 200 records a batch unless asked for more, and
+        /// each batch costs it 1.3 to 2 s whatever its size: against 3,048
+        /// records, 1,000 took 18 to 25 s where the default took 27 to 30 s.
+        /// It caps a batch itself (often about 375).
+        public var resultsLimit: Int? = 1000
         public var desiredKeys: [String]?
         public init() {}
     }

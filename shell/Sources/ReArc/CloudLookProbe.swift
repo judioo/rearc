@@ -9,7 +9,7 @@ import SidebarModel
 /// title or an address.
 ///
 /// `--rearc-icloud-look-qos=utility|default|userInitiated`,
-/// `--rearc-icloud-look-limit=N` and `--rearc-icloud-look-keys=payload`
+/// `--rearc-icloud-look-limit=N` (0: the server's default) and `--rearc-icloud-look-keys=payload`
 /// try other read settings.
 enum CloudLookProbe {
     static let flag = "--rearc-icloud-look"
@@ -36,7 +36,7 @@ enum CloudLookProbe {
         case "default": transport.readTuning.qualityOfService = .default
         default: break
         }
-        transport.readTuning.resultsLimit = value("limit").flatMap(Int.init)
+        if let limit = value("limit").flatMap(Int.init) { transport.readTuning.resultsLimit = limit > 0 ? limit : nil }
         transport.readTuning.desiredKeys = value("keys").map { $0.split(separator: ",").map(String.init) }
         let started = Date()
         func stamp() -> String { String(format: "%6.2f s", Date().timeIntervalSince(started)) }
