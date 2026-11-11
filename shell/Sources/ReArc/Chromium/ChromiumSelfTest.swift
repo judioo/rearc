@@ -2240,10 +2240,15 @@ extension ChromiumSelfTest {
                 hosts.append("tab \(found.engine.tabID) lease \(found.leaseAttachmentID ?? 0) frame \(found.convert(found.bounds, to: nil))"
                              + (found.isHiddenOrHasHiddenAncestor ? " hidden" : ""))
             }
+            if NSStringFromClass(Swift.type(of: view)).contains("RenderWidgetHostViewCocoa") {
+                hosts.append("renderer view frame \(view.convert(view.bounds, to: nil))" + (view.isHidden ? " hidden" : ""))
+            }
             view.subviews.forEach(collect)
         }
-        collect(content)
-        return (hitHost === host, "hit \(chain.prefix(6).joined(separator: " < ")) (tab \(hitHost?.engine.tabID ?? 0)); page views: "
+        collect(host)
+        // The click reaches the page only through its renderer view, the hit chain's first link.
+        let reachesRenderer = hitHost === host && chain.first?.contains("RenderWidgetHostViewCocoa") == true
+        return (reachesRenderer, "hit \(chain.prefix(6).joined(separator: " < ")) (tab \(hitHost?.engine.tabID ?? 0)); page view: "
                 + hosts.joined(separator: "; "))
     }
 
@@ -4120,6 +4125,7 @@ extension ChromiumSelfTest {
             model.automaticPeekEnabled = false
             try await wait("auto Peek disabled in the current document") { !engine.automaticPeekUpdating }
             // Nothing of the closed Peek may still take the page's clicks.
+            let closedAt = Date()
             do {
                 try await wait("the closed Peek leaves the source page clickable", timeout: 5) {
                     hitReport(window, engine: engine, at: center).hitsPage
@@ -4128,7 +4134,8 @@ extension ChromiumSelfTest {
                 throw Failure(description: "after the \(kind) Peek closed its source page takes no clicks: "
                               + hitReport(window, engine: engine, at: center).text)
             }
-            log("auto Peek \(kind) closed: " + hitReport(window, engine: engine, at: center).text)
+            log("auto Peek \(kind) closed: the page takes clicks after \(Int(Date().timeIntervalSince(closedAt) * 1000)) ms; "
+                + hitReport(window, engine: engine, at: center).text)
             click(window, engine: engine, at: center, host: engine.leaseHolder)
             try await wait("disabled auto Peek follows link", timeout: 15) { engine.currentURL == offSite && !engine.isLoading }
             try check(model.peekSession == nil, "disabled auto Peek still opened a preview")
