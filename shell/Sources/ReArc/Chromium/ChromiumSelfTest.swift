@@ -1179,6 +1179,7 @@ final class ChromiumSelfTest {
         model.dismissPeek()
         try await wait("peek dismissed") { model.peekSession == nil && runtime.liveLeaseCount(forTab: peek.tabID) == 0 }
 
+        try await peekChromeChecks(model: model, store: store, base: base, window: first, tabA: tabA, engineA: engineA)
         try await automaticPeekChecks(model: model, store: store, base: base, window: first)
         model.selectTab(tabA.id)
 
@@ -3892,6 +3893,88 @@ extension ChromiumSelfTest {
         try check(late == ReArcStatus(REARC_NOT_FOUND), "a second reply to the offer returned \(late.rearcName)")
         log("PASS address save offer (ABI 1.37): '\(offer.title)' \(offer.summaryLines) -> No Thanks (declined; nothing stored), "
             + "second reply -> \(late.rearcName)")
+    }
+
+    /// Arc's Peek chrome: a click outside the card (here on the sidebar)
+    /// closes it without reaching the sidebar, Esc closes it, and Expand and
+    /// Split View move the live page into a tab: the same Chromium tab, its
+    /// script state and history intact, so nothing reloads.
+    @MainActor
+    private func peekChromeChecks(model: BrowserViewModel, store: SidebarStore, base: String, window: NSWindow,
+                                  tabA: Tab, engineA: ChromiumEngine) async throws {
+        func openPeek(from source: Tab?) async throws -> (BrowserViewModel.PeekSession, ChromiumEngine) {
+            model.showPeek(url: URL(string: "\(base)/a")!, sourceTabID: source?.id)
+            guard let session = model.peekSession,
+                  let peek = model.engineHost.ephemeralEngine(withID: session.engineID, profileID: session.profileID) as? ChromiumEngine else {
+                throw Failure(description: "Peek created no Chromium engine")
+            }
+            try await wait("peek page shown in its card", timeout: 20) {
+                peek.attachmentID != nil && peek.pageTitle == Self.titleA && !peek.isLoading && peek.leaseHolder?.window === window
+            }
+            return (session, peek)
+        }
+
+        model.selectTab(tabA.id)
+        var (_, peek) = try await openPeek(from: tabA)
+        guard let content = window.contentView else { throw Failure(description: "browser window has no content view") }
+        let sidebarPoint = NSPoint(x: model.sidebarWidth(in: store.keyWindowID) / 2, y: content.bounds.midY)
+        let selectedBefore = store.selectedItemID
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            if let event = NSEvent.mouseEvent(with: type, location: content.convert(sidebarPoint, to: nil), modifierFlags: [],
+                                              timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                              context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                window.sendEvent(event)
+            }
+        }
+        try await wait("a click on the sidebar closes the Peek") {
+            model.peekSession == nil && runtime.liveLeaseCount(forTab: peek.tabID) == 0
+        }
+        try check(store.selectedItemID == selectedBefore, "the click that closed the Peek also reached the sidebar")
+
+        (_, peek) = try await openPeek(from: tabA)
+        press("\u{1b}", keyCode: 53, [], in: window, model: model, delivery: .direct)
+        try await wait("Esc closes the Peek") { model.peekSession == nil && runtime.liveLeaseCount(forTab: peek.tabID) == 0 }
+
+        let mark = "(function(){ window.__rearcPeekMark = 'kept'; history.pushState({}, '', '?peeked'); return 1; })()"
+        let readMark = "typeof window.__rearcPeekMark === 'string' ? window.__rearcPeekMark : 'reloaded'"
+        var (session, expanding) = try await openPeek(from: tabA)
+        _ = try await expanding.evaluate(mark, in: .page)
+        try await wait("Peek page has a history entry") { expanding.canGoBack }
+        let chromiumTab = expanding.tabID
+        try check(model.performPeekAction(.expandToTab), "Expand did nothing")
+        guard let expanded = store.selectedTab, expanded.id == session.engineID,
+              model.engineHost.engine(forTabID: expanded.id, profileID: session.profileID) === expanding else {
+            throw Failure(description: "Expand did not move the Peek's engine into the selected tab")
+        }
+        try await wait("expanded tab attached in the window", timeout: 20) {
+            expanding.attachmentID != nil && expanding.leaseHolder?.window === window
+        }
+        let kept = try await expanding.evaluate(readMark, in: .page) as? String
+        try check(expanding.role == .tab && expanding.tabID == chromiumTab && kept == "kept" && expanding.canGoBack
+                      && expanding.currentURL?.query == "peeked",
+                  "expanded Peek: role \(expanding.role) tab \(expanding.tabID) vs \(chromiumTab), mark \(kept ?? "-"), "
+                      + "back \(expanding.canGoBack), url \(expanding.currentURL?.absoluteString ?? "-")")
+        model.closeTab(expanded.id)
+        model.selectTab(tabA.id)
+
+        (session, expanding) = try await openPeek(from: tabA)
+        _ = try await expanding.evaluate(mark, in: .page)
+        try check(model.peekSplitAnchor == tabA.id, "tab A cannot take the Peek as a split pane")
+        try check(model.performPeekAction(.openInSplitView), "Open in Split View did nothing")
+        guard let split = store.splitContaining(tabID: tabA.id)?.split, split.tabs.map(\.id) == [tabA.id, session.engineID],
+              model.engineHost.engine(forTabID: session.engineID, profileID: session.profileID) === expanding else {
+            throw Failure(description: "Open in Split View made no split of tab A and the Peek's page")
+        }
+        try await wait("split panes attached", timeout: 20) { engineA.attachmentID != nil && expanding.attachmentID != nil }
+        let splitKept = try await expanding.evaluate(readMark, in: .page) as? String
+        try check(splitKept == "kept", "the split pane reloaded the Peek's page")
+        model.closeTab(session.engineID)
+        model.selectTab(tabA.id)
+        try await wait("tab A alone after the Peek's pane closed") {
+            store.splitContaining(tabID: tabA.id) == nil && engineA.attachmentID != nil
+        }
+        log("PASS Peek chrome: sidebar click and Esc close it (the click stays out of the sidebar); Expand and Split View "
+            + "keep Chromium tab \(chromiumTab)'s page, script state and history")
     }
 
     @MainActor
