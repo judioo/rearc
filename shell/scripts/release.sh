@@ -227,11 +227,10 @@ if [[ $DMG == 1 ]]; then
 fi
 
 if [[ $NOTARIZE == 1 && $DMG == 1 ]]; then
-  "$SHELL_DIR/scripts/notarize.sh" "$DIST/ReArc-$MARKETING.dmg"
+  "$SHELL_DIR/scripts/notarize.sh" "$DIST/ReArc-$MARKETING-$BUILD_NUMBER.dmg"
 fi
 if [[ -n $APPCAST ]]; then
-  # The versioned archive name prevents marketing-version repeats overwriting old builds.
-  cp "$DIST/ReArc-$MARKETING.dmg" "$APPCAST/ReArc-$MARKETING-$BUILD_NUMBER.dmg"
+  cp "$DIST/ReArc-$MARKETING-$BUILD_NUMBER.dmg" "$APPCAST/ReArc-$MARKETING-$BUILD_NUMBER.dmg"
   "$SHELL_DIR/scripts/release/generate-appcast.sh" "$APPCAST" "$CHANNEL"
 fi
 

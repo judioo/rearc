@@ -41,7 +41,7 @@ shell/scripts/release.sh --dmg
 # 3. With Developer ID only (never before):
 shell/scripts/notarize.sh shell/dist/release/ReArc.app      # notarize + staple the app
 shell/scripts/make-dmg.sh shell/dist/release/ReArc.app      # DMG from the stapled app
-shell/scripts/notarize.sh shell/dist/release/ReArc-<version>.dmg
+shell/scripts/notarize.sh shell/dist/release/ReArc-<version>-<build>.dmg
 ```
 
 `release.sh --worktree` builds the uncommitted working tree for local testing; its
@@ -220,7 +220,8 @@ engine whose `gen/components/variations/service/buildflags.h` has the testing co
   the outer `CFBundleShortVersionString` with the running Chromium version and reports an
   update only when the outer one is **higher**. Keep the ReArc version below the Chromium
   major (156) and this stays inert. Crash reports (crashpad `ver`) carry the ReArc version.
-- DMG name: `ReArc-<CFBundleShortVersionString>.dmg`.
+- DMG name: `ReArc-<CFBundleShortVersionString>-<CFBundleVersion>.dmg`, for example
+  `ReArc-0.1.0-602.dmg` for 0.1.0 (602). The same name is used in `dist/` and in the update feed.
 
 ## Release notes
 
