@@ -3986,15 +3986,21 @@ extension ChromiumSelfTest {
         var (_, peek) = try await openPeek(from: tabA)
         guard let content = window.contentView else { throw Failure(description: "browser window has no content view") }
         /// A click in the middle of the sidebar as it is now (full or the mini column).
-        func clickSidebar(_ modifiers: NSEvent.ModifierFlags = []) {
-            let point = NSPoint(x: model.sidebarWidth(in: store.keyWindowID) / 2, y: content.bounds.midY)
-            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                if let event = NSEvent.mouseEvent(with: type, location: content.convert(point, to: nil), modifierFlags: modifiers,
+        /// A click at a window point (top-left), posted to the app's event
+        /// queue like real input, so the app's mouse-down monitor sees it.
+        func post(_ point: CGPoint, _ modifiers: NSEvent.ModifierFlags = [], right: Bool = false) {
+            let local = NSPoint(x: point.x, y: content.isFlipped ? point.y : content.bounds.height - point.y)
+            let types: [NSEvent.EventType] = right ? [.rightMouseDown, .rightMouseUp] : [.leftMouseDown, .leftMouseUp]
+            for type in types {
+                if let event = NSEvent.mouseEvent(with: type, location: content.convert(local, to: nil), modifierFlags: modifiers,
                                                   timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                                                   context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
-                    window.sendEvent(event)
+                    NSApp.postEvent(event, atStart: false)
                 }
             }
+        }
+        func clickSidebar(_ modifiers: NSEvent.ModifierFlags = []) {
+            post(CGPoint(x: model.sidebarWidth(in: store.keyWindowID) / 2, y: content.bounds.height / 2), modifiers)
         }
         let selectedBefore = store.selectedItemID
         clickSidebar()
@@ -4006,6 +4012,28 @@ extension ChromiumSelfTest {
         (_, peek) = try await openPeek(from: tabA)
         press("\u{1b}", keyCode: 53, [], in: window, model: model, delivery: .direct)
         try await wait("Esc closes the Peek") { model.peekSession == nil && runtime.liveLeaseCount(forTab: peek.tabID) == 0 }
+
+        // The washed page beside the card, left- and right-clicked: the Peek
+        // closes from the mouse-down and the page under it gets nothing.
+        for right in [false, true] {
+            (_, peek) = try await openPeek(from: tabA)
+            let layout = model.peekLayout(in: store.keyWindowID, windowSize: content.bounds.size)
+            let pageBefore = engineA.currentURL
+            post(CGPoint(x: (layout.region.minX + layout.card.minX) / 2, y: layout.card.midY), right: right)
+            try await wait("a \(right ? "right-" : "")click on the washed page closes the Peek") {
+                model.peekSession == nil && runtime.liveLeaseCount(forTab: peek.tabID) == 0
+            }
+            try check(engineA.currentURL == pageBefore && model.peekSwallowsMouseUp == nil,
+                      "the \(right ? "right-" : "")click that closed the Peek reached the page or kept its mouse-up")
+        }
+        // A click on the card itself (its address line) leaves it open.
+        (_, peek) = try await openPeek(from: tabA)
+        let cardLayout = model.peekLayout(in: store.keyWindowID, windowSize: content.bounds.size)
+        post(CGPoint(x: cardLayout.card.midX, y: cardLayout.card.minY + PeekLayout.addressLineHeight / 2))
+        try await Task.sleep(nanoseconds: 400_000_000)
+        try check(model.peekSession != nil, "a click on the Peek's address line closed it")
+        press("\u{1b}", keyCode: 53, [], in: window, model: model, delivery: .direct)
+        try await wait("Esc closes the Peek after the card click") { model.peekSession == nil }
 
         // With a ⌘-click selection, in the full and the mini sidebar: a ⇧- or
         // ⌘-click on the sidebar only closes the Peek (the selection stays as
@@ -4085,7 +4113,8 @@ extension ChromiumSelfTest {
         try await wait("tab A alone after the Peek's pane closed") {
             store.splitContaining(tabID: tabA.id) == nil && engineA.attachmentID != nil
         }
-        log("PASS Peek chrome: sidebar click and Esc close it (the click stays out of the sidebar and its ⇧/⌘ selection, "
+        log("PASS Peek chrome: sidebar, washed-page left and right clicks (from the mouse-down) and Esc close it, a card click "
+            + "does not (the click stays out of the sidebar and its ⇧/⌘ selection, "
             + "full and mini; Esc leaves the selection); Expand and Split View "
             + "keep Chromium tab \(chromiumTab)'s page, script state and history")
     }

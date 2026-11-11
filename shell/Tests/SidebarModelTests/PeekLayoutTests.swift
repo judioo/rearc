@@ -191,4 +191,49 @@ final class PeekLayoutTests: XCTestCase {
         _ = try XCTUnwrap(store.createFolder(containing: [a.id, b.id]))
         XCTAssertNil(store.peekSplitAnchor(sourceTabID: a.id))
     }
+
+    // MARK: Outside click, decided from the mouse-down
+
+    private let controls = CGRect(x: 0, y: 0, width: 84, height: 47)
+
+    private func outcome(_ point: CGPoint, layout: PeekLayout? = nil, sheet: Bool = false) -> PeekOutsideClick.Outcome {
+        PeekOutsideClick.outcome(at: point, windowSize: arcWindow, layout: layout ?? arcLayout,
+                                 sheetAttached: sheet, windowControls: controls)
+    }
+
+    func testAMouseDownOutsideTheCardClosesThePeekAndIsTaken() {
+        XCTAssertEqual(outcome(CGPoint(x: 370, y: 700)), .closeAndSwallow, "the washed page left of the card")
+        XCTAssertEqual(outcome(CGPoint(x: 1680, y: 900)), .closeAndSwallow, "the washed page right of the card")
+        XCTAssertEqual(outcome(CGPoint(x: 150, y: 400)), .closeAndSwallow, "a sidebar row")
+        XCTAssertEqual(outcome(CGPoint(x: 150, y: 1380)), .closeAndSwallow, "the sidebar's bottom bar")
+        XCTAssertEqual(outcome(CGPoint(x: 900, y: 1402)), .closeAndSwallow, "below the card")
+    }
+
+    func testTheCardAndItsButtonsKeepTheirClicks() throws {
+        let layout = arcLayout
+        XCTAssertEqual(outcome(CGPoint(x: 900, y: 600)), .pass, "the page")
+        XCTAssertEqual(outcome(CGPoint(x: 900, y: 20)), .pass, "the address line")
+        for control in PeekLayout.Control.allCases {
+            let frame = try XCTUnwrap(layout.frame(of: control))
+            XCTAssertEqual(outcome(CGPoint(x: frame.midX, y: frame.midY)), .pass, "\(control)")
+        }
+    }
+
+    func testTheWindowsOwnControlsAndEdgesStayTheWindows() {
+        XCTAssertEqual(outcome(CGPoint(x: 20, y: 23)), .pass, "the traffic lights")
+        XCTAssertEqual(outcome(CGPoint(x: 1704, y: 700)), .pass, "the right resize edge")
+        XCTAssertEqual(outcome(CGPoint(x: 900, y: 1407)), .pass, "the bottom resize edge")
+        XCTAssertEqual(outcome(CGPoint(x: 900, y: 2)), .pass, "the top resize edge")
+        XCTAssertEqual(outcome(CGPoint(x: 900, y: 8)), .closeAndPass, "the strip above the card closes and still drags the window")
+    }
+
+    func testOtherWindowsSheetsAndAFullscreenPageAreLeftAlone() {
+        let region = CGRect(origin: .zero, size: arcWindow)
+        XCTAssertEqual(PeekOutsideClick.outcome(at: CGPoint(x: 370, y: 700), windowSize: arcWindow, layout: nil,
+                                                sheetAttached: false, windowControls: controls), .pass,
+                       "another window (a menu, a panel, Settings, a Little ReArc), or no Peek")
+        XCTAssertEqual(outcome(CGPoint(x: 370, y: 700), sheet: true), .pass, "a sheet is up")
+        XCTAssertEqual(outcome(CGPoint(x: 370, y: 700), layout: PeekLayout(region: region, isFullscreen: true)), .pass,
+                       "the Peek's page is fullscreen")
+    }
 }

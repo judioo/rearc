@@ -507,6 +507,8 @@ final class BrowserViewModel {
     var peekClosing: PeekClosing?
     /// The NSWindow the Peek opened in: only its keys (Esc) reach it.
     @ObservationIgnored weak var peekHostWindow: NSWindow?
+    /// The mouse-up of a click the Peek took (`handlePeekMouse`).
+    @ObservationIgnored var peekSwallowsMouseUp: NSEvent.EventType?
     var focusedLittleArcID: LittleArcWindow.ID?
     var littleArcOpenRequests: [LittleArcWindow.ID] = []
     /// Opens Little Arc windows when the app has no SwiftUI scenes (Chromium path).

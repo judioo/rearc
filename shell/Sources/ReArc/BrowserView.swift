@@ -339,14 +339,7 @@ struct BrowserView: View {
     /// The Peek centred beside a laid-out sidebar, else in the whole window;
     /// a fullscreen Peek page fills the window.
     private func peekLayout(windowSize: CGSize) -> PeekLayout {
-        let bounds = CGRect(origin: .zero, size: windowSize)
-        if model.isPeekPageFullscreen { return PeekLayout(region: bounds, isFullscreen: true) }
-        let besideSidebar = model.isSidebarVisible && model.isSidebarLaidOut && !isPageFullscreen
-        return PeekLayout(region: PeekLayout.region(
-            windowSize: windowSize,
-            sidebarWidth: besideSidebar ? model.peekSidebarWidth(in: windowID) : 0,
-            sidebarOnLeft: placement.side == .left
-        ))
+        model.peekLayout(in: windowID, windowSize: windowSize)
     }
 
     private var pageCardLayout: PageCardLayout {

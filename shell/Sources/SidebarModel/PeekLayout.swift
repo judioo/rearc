@@ -209,3 +209,38 @@ public enum PeekMotion {
         return CGRect(x: Double(centre.x) - width / 2, y: Double(centre.y) - height / 2, width: width, height: height)
     }
 }
+
+/// A mouse-down while a Peek is open, decided from the event itself in the
+/// app's event monitor rather than from a SwiftUI gesture over the embedded
+/// pages (which sometimes missed it). Anywhere outside the card and its
+/// buttons closes the Peek; the click goes no further.
+public enum PeekOutsideClick {
+    public enum Outcome: Equatable, Sendable {
+        /// Not the Peek's: the window handles it as usual.
+        case pass
+        /// Close the Peek and take the click.
+        case closeAndSwallow
+        /// Close the Peek and let the click through: the strip above the
+        /// card, where a drag moves the window.
+        case closeAndPass
+    }
+
+    /// The window edge band that resizes it.
+    public static let resizeMargin = 4.0
+
+    /// `point` is in the window's content, top-left origin. `layout` is the
+    /// Peek's in that window, nil when the click is in another window (a menu,
+    /// a panel, Settings, a Little ReArc) or no Peek shows there.
+    /// `windowControls` covers the traffic lights.
+    public static func outcome(at point: CGPoint, windowSize: CGSize, layout: PeekLayout?,
+                               sheetAttached: Bool, windowControls: CGRect) -> Outcome {
+        guard let layout, !layout.isFullscreen, !sheetAttached else { return .pass }
+        if layout.card.contains(point) || layout.control(at: point) != nil { return .pass }
+        if windowControls.contains(point) { return .pass }
+        let margin = CGFloat(resizeMargin)
+        if point.x < margin || point.y < margin || point.x > windowSize.width - margin || point.y > windowSize.height - margin {
+            return .pass
+        }
+        return point.y < layout.card.minY ? .closeAndPass : .closeAndSwallow
+    }
+}
