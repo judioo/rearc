@@ -347,6 +347,22 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
         let space = sourceTab.flatMap(store.spaceContaining(tabID:)).flatMap { inProfile($0) ? $0 : nil }
             ?? ([active] + store.spaces.map(\.id)).first(where: inProfile)
         ChromiumLog.info("link open \(event.requestID): disposition \(event.disposition) -> \(placement)")
+        // A private window's link opens as another private window of the same session, as its
+        // popups do; the engine then navigates it with the page as initiator (F-06).
+        if case .offTheRecord(let session, let parent)? = runtime.profileKey(forEngineProfile: event.profileID) {
+            if case .decline(let reason) = placement { return declineLink(event, reason) }
+            guard let tabID = runtime.createBlankTab(profile: event.profileID, role: .privateWindow) else {
+                return declineLink(event, "tab creation failed")
+            }
+            let blank = URL(string: "about:blank")!
+            let engine = ChromiumEngine(runtime: runtime, adopting: ChromiumTabEvent.created(profileID: event.profileID, tabID: tabID, url: "about:blank"),
+                                        initialURL: blank, context: EngineProfileContext(profileID: parent, isEphemeral: true),
+                                        profileKey: .offTheRecord(session: session, parent: parent), shellID: UUID())
+            model.openPrivateWindow(session: session, parentProfileID: parent, engine: engine)
+            reconcileWindows()
+            runtime.respondLinkOpen(event.requestID, tab: tabID)
+            return
+        }
         switch placement {
         case .decline(let reason):
             declineLink(event, reason)

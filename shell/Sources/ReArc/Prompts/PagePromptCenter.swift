@@ -549,7 +549,9 @@ final class PagePromptCenter {
     @discardableResult
     func performShellItem(_ item: PageContextMenuItem, params: PageContextMenuParams, engineDeclined: Bool = false) -> Bool {
         let opensPage = ([.openLinkInNewTab, .openLinkInLittleArc, .openLinkInNewSplit, .openImageInNewTab] as [PageContextMenuItem]).contains(item)
-        if opensPage, engineOpensLinks, privateSession == nil, !engineDeclined { return false }
+        // The engine opens links with the page as initiator (Sec-Fetch-Site, SameSite cookies);
+        // a private window's link becomes another window of its session (F-06).
+        if opensPage, engineOpensLinks, !engineDeclined { return false }
         switch item {
         case .openLinkInNewTab:
             if let url = params.openableLink { router?.openLinkInNewTab(url, from: self) }

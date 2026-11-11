@@ -344,6 +344,10 @@ final class Wave22ShellTests: XCTestCase {
         XCTAssertEqual(router.opened.count, count)
         XCTAssertTrue(prompts.performShellItem(.openLinkInNewSplit, params: params, engineDeclined: true))
         XCTAssertEqual(router.opened.last?.0, "split")
+        // RC-0.1.0-544 F-06: a private window's link goes through the engine too.
+        prompts.privateSession = UUID()
+        XCTAssertFalse(prompts.performShellItem(.openLinkInNewTab, params: params), "the engine opens it, with an initiator")
+        XCTAssertTrue(prompts.performShellItem(.openLinkInNewTab, params: params, engineDeclined: true))
     }
 
     func testNativeMenuShowsThePlan() {
