@@ -62,6 +62,19 @@ enum ChromiumLaunchArguments {
         return result
     }
 
+    /// What every launch hands the engine: `browserArguments`, then the features each profile
+    /// needs on (`persistedProfileFeatures`), in release and development builds alike.
+    static func engineArguments(
+        _ arguments: [String],
+        defaultUserDataDir: () -> String,
+        keychain: KeychainMode,
+        isRelease: Bool = ShippedBuild.isRelease(infoDictionary: Bundle.main.infoDictionary),
+        isShipped: Bool = ShippedBuild.current
+    ) -> [String] {
+        browserArguments(arguments, defaultUserDataDir: defaultUserDataDir, keychain: keychain, isRelease: isRelease, isShipped: isShipped)
+            + [persistedProfileFeatures]
+    }
+
     /// LaunchServices arguments are untrusted in shipping bundles. Only profile
     /// selection crosses this boundary; feature switches and test fixtures are
     /// appended by shell code after filtering, never accepted from argv.

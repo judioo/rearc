@@ -31,13 +31,13 @@ enum ChromiumHost {
                     "\(ChromiumLaunchArguments.devMockKeychainInfoKey) ignored: release builds always use the macOS Keychain"
                 )
             }
-            let arguments = ChromiumLaunchArguments.browserArguments(
+            let arguments = ChromiumLaunchArguments.engineArguments(
                 CommandLine.arguments,
                 defaultUserDataDir: {
                     defaultUserDataDir(selfTest: options.selfTest || options.launchProbePath != nil || options.bench != nil).path
                 },
                 keychain: keychain
-            ) + [ChromiumLaunchArguments.persistedProfileFeatures]
+            )
             let runtime = ChromiumRuntime.shared
             // A release bundle being verified checked its throwaway profile when it parsed
             // the options; the profile is checked again just before the engine opens it, so

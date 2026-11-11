@@ -12,6 +12,12 @@
 #   REARC_UPGRADE_SECONDS (default 45) without a new ReArc crash report.
 #   Pass "-" as PREVIOUS_APP to test only the PROFILE_DIRs.
 # Nothing takes the keyboard focus (`open -g`). The user's own data is never opened.
+#
+# NEW_APP must be the bundle release.sh is verifying (ReArcReleaseVerification in its signed
+# Info.plist): a shipped bundle refuses REARC_DATA_DIR (security RC-0.1.0-602 T-04). Builds up
+# to 605 honour REARC_DATA_DIR as shipped; a later shipped PREVIOUS_APP is copied, given the
+# verification key and signed again with the release identity (sign-release.sh, or
+# REARC_UPGRADE_SIGN), and the copy makes the profile.
 set -euo pipefail
 
 die() { echo "check-upgrade: $*" >&2; exit 1; }
@@ -21,6 +27,13 @@ NEW="$(cd "$1" && pwd)"; PREVIOUS="$2"; shift 2
 SETTLE="${REARC_UPGRADE_SETTLE_SECONDS:-40}"
 STAY="${REARC_UPGRADE_SECONDS:-45}"
 REPORTS="$HOME/Library/Logs/DiagnosticReports"
+SIGN="${REARC_UPGRADE_SIGN:-$(cd "$(dirname "$0")/.." && pwd)/sign-release.sh}"
+# A release bundle without the verification key: it starts only on the person's own data.
+shipped() {
+  [[ "$(plutil -extract ReArcRelease raw "$1/Contents/Info.plist" 2>/dev/null || true)" == true \
+    && "$(plutil -extract ReArcReleaseVerification raw "$1/Contents/Info.plist" 2>/dev/null || true)" != true ]]
+}
+shipped "$NEW" && die "$NEW is a shipped release bundle, which refuses REARC_DATA_DIR; run this on the bundle release.sh is verifying"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rearc-upgrade.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 crashes() { ls "$REPORTS" 2>/dev/null | grep -c '^ReArc-' || true; }
@@ -56,6 +69,14 @@ PROFILES=()
 if [[ $PREVIOUS != - ]]; then
   PREVIOUS="$(cd "$PREVIOUS" && pwd)"
   [[ -x "$PREVIOUS/Contents/MacOS/ReArc" ]] || die "no ReArc.app at $PREVIOUS"
+  if shipped "$PREVIOUS" && [[ "$(plutil -extract CFBundleVersion raw "$PREVIOUS/Contents/Info.plist" 2>/dev/null || echo 0)" -gt 605 ]]; then
+    echo "check-upgrade: $PREVIOUS refuses REARC_DATA_DIR; making a verification copy of it"
+    mkdir -p "$WORK/previous-app"
+    cp -Rc "$PREVIOUS" "$WORK/previous-app/ReArc.app" 2>/dev/null || cp -R "$PREVIOUS" "$WORK/previous-app/ReArc.app"
+    PREVIOUS="$WORK/previous-app/ReArc.app"
+    plutil -insert ReArcReleaseVerification -bool true "$PREVIOUS/Contents/Info.plist"
+    "$SIGN" "$PREVIOUS" >"$WORK/sign-previous.log" 2>&1 || die "signing the verification copy failed (log $WORK/sign-previous.log)"
+  fi
   made="$WORK/previous"
   seed "$made"
   echo "check-upgrade: making a profile with $(plutil -extract CFBundleVersion raw "$PREVIOUS/Contents/Info.plist") ($PREVIOUS), ${SETTLE}s"

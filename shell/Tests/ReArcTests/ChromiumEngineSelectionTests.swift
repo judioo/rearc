@@ -239,6 +239,23 @@ final class ReleaseLaunchSecurityTests: XCTestCase {
         XCTAssertNil(ShippedBuild.launchRefusal(arguments: ["ReArc", "--user-data-dir=/tmp/x"], environment: ["REARC_DATA_DIR": "/tmp/x"], shipped: false))
     }
 
+    /// Profiles made by builds 500 to 564 abort without these features (build 602), so every
+    /// launch passes them, whatever argv says.
+    func testPersistedProfileFeaturesReachTheEngineInEveryLaunch() {
+        let feature = ChromiumLaunchArguments.persistedProfileFeatures
+        XCTAssertTrue(feature.contains("PrepopulatedEnginesMigration") && feature.contains("ApplySearchEngineTypeMigration"))
+        for (isRelease, isShipped) in [(false, false), (true, false), (true, true)] {
+            for argv in [["ReArc"], ["ReArc", "--enable-features=Other", "--disable-features=PrepopulatedEnginesMigration"]] {
+                let arguments = ChromiumLaunchArguments.engineArguments(argv, defaultUserDataDir: { "/data" }, keychain: .system,
+                                                                       isRelease: isRelease, isShipped: isShipped)
+                XCTAssertEqual(arguments.last, feature, "release \(isRelease), shipped \(isShipped), argv \(argv)")
+                XCTAssertEqual(Array(arguments.dropLast()), ChromiumLaunchArguments.browserArguments(
+                    argv, defaultUserDataDir: { "/data" }, keychain: .system, isRelease: isRelease, isShipped: isShipped))
+            }
+        }
+        XCTAssertEqual(ChromiumLaunchArguments.engineArguments(["ReArc"], defaultUserDataDir: { "/d" }, keychain: .devMock, isRelease: false).last, feature)
+    }
+
     func testShippedIsReleaseWithoutTheVerificationKey() {
         XCTAssertTrue(ShippedBuild.isShipped(infoDictionary: ["ReArcRelease": true]))
         XCTAssertFalse(ShippedBuild.isShipped(infoDictionary: ["ReArcRelease": true, "ReArcReleaseVerification": true]))
