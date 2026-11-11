@@ -15,6 +15,12 @@ enum ChromiumLaunchArguments {
     static let profileDirectoryFlag = "--profile-directory="
     static let mockKeychainSwitch = "--use-mock-keychain"
     static let devMockKeychainInfoKey = "ReArcDevUseMockKeychain"
+    /// Engine features that must stay on in every build. Builds 500 to 564 ran Chromium's
+    /// field-trial testing config, which switched these on and recorded that in each profile's
+    /// keyword database. With the mark present and the feature off, Chromium treats the profile
+    /// as rolled back and aborts while loading search engines (build 602 did, on every profile
+    /// an earlier build had made). Never remove a feature from this list.
+    static let persistedProfileFeatures = "--enable-features=PrepopulatedEnginesMigration,ApplySearchEngineTypeMigration"
 
     enum KeychainMode: Equatable {
         /// The macOS Keychain ("Chromium Safe Storage"); the only production mode.

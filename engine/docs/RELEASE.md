@@ -223,6 +223,22 @@ engine whose `gen/components/variations/service/buildflags.h` has the testing co
 - DMG name: `ReArc-<CFBundleShortVersionString>-<CFBundleVersion>.dmg`, for example
   `ReArc-0.1.0-602.dmg` for 0.1.0 (602). The same name is used in `dist/` and in the update feed.
 
+## Upgrade check
+
+`release.sh --dmg` needs `--previous-app PATH`: the `ReArc.app` of the release that is on the
+update feed now. `scripts/release/check-upgrade.sh` launches that app in the background to make
+a profile, then opens the profile with the new build, which must stay up for 45 seconds with no
+crash report. `REARC_UPGRADE_PROFILES` adds saved data directories of older builds.
+
+Build 602 is why. It passed the launch check, the self-test and the Safe Browsing check, all on
+fresh profiles, and aborted at launch on every profile made by 500, 544 or 564. Those engines
+ran Chromium's field-trial testing config, which switched on `PrepopulatedEnginesMigration` and
+recorded it in the profile's keyword database; 602's engine had the feature off, and Chromium
+treats that as a rollback and hits a fatal `NOTREACHED`. The shell now always passes
+`--enable-features=PrepopulatedEnginesMigration,ApplySearchEngineTypeMigration`
+(`ChromiumLaunchArguments.persistedProfileFeatures`). Any change to the engine's feature set
+can do this again: features leave marks in profiles.
+
 ## Release notes
 
 `RELEASES.md` at the repo root records every distributed build, newest first. Each entry is
