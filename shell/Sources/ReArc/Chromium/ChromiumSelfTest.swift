@@ -2199,6 +2199,34 @@ extension ChromiumSelfTest {
         }
     }
 
+    /// What a click at `css` on `engine`'s page would land on, and every page view in the window.
+    @MainActor
+    private func hitReport(_ window: NSWindow, engine: ChromiumEngine, at css: CGPoint) -> (hitsPage: Bool, text: String) {
+        guard let content = window.contentView, let host = engine.leaseHolder else { return (false, "the page has no view") }
+        let viewPoint = PageZoom.viewPoint(fromCSSPoint: css, zoom: engine.zoomFactor)
+        let local = NSPoint(x: viewPoint.x, y: host.isFlipped ? viewPoint.y : host.bounds.height - viewPoint.y)
+        let point = content.convert(host.convert(local, to: nil), from: nil)
+        var chain: [String] = []
+        var view = content.hitTest(point)
+        var hitHost: ChromiumHostView?
+        while let current = view {
+            chain.append(String(describing: type(of: current)))
+            if let found = current as? ChromiumHostView { hitHost = found; break }
+            view = current.superview
+        }
+        var hosts: [String] = []
+        func collect(_ view: NSView) {
+            if let found = view as? ChromiumHostView {
+                hosts.append("tab \(found.engine.tabID) lease \(found.leaseAttachmentID ?? 0) frame \(found.convert(found.bounds, to: nil))"
+                             + (found.isHiddenOrHasHiddenAncestor ? " hidden" : ""))
+            }
+            view.subviews.forEach(collect)
+        }
+        collect(content)
+        return (hitHost === host, "hit \(chain.prefix(6).joined(separator: " < ")) (tab \(hitHost?.engine.tabID ?? 0)); page views: "
+                + hosts.joined(separator: "; "))
+    }
+
     @MainActor
     private func rightClickUntil(_ window: NSWindow, engine: ChromiumEngine, at css: CGPoint, _ label: String, _ condition: () -> Bool) async throws {
         for attempt in 0..<3 {
@@ -4067,7 +4095,17 @@ extension ChromiumSelfTest {
             model.dismissPeek()
             model.automaticPeekEnabled = false
             try await wait("auto Peek disabled in the current document") { !engine.automaticPeekUpdating }
-            click(window, engine: engine, at: center)
+            // Nothing of the closed Peek may still take the page's clicks.
+            do {
+                try await wait("the closed Peek leaves the source page clickable", timeout: 5) {
+                    hitReport(window, engine: engine, at: center).hitsPage
+                }
+            } catch {
+                throw Failure(description: "after the \(kind) Peek closed its source page takes no clicks: "
+                              + hitReport(window, engine: engine, at: center).text)
+            }
+            log("auto Peek \(kind) closed: " + hitReport(window, engine: engine, at: center).text)
+            click(window, engine: engine, at: center, host: engine.leaseHolder)
             try await wait("disabled auto Peek follows link", timeout: 15) { engine.currentURL == offSite && !engine.isLoading }
             try check(model.peekSession == nil, "disabled auto Peek still opened a preview")
             model.deleteTab(tab.id)
