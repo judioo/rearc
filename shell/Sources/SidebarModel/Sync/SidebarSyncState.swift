@@ -81,9 +81,10 @@ public protocol SidebarSyncStateStoring: AnyObject {
 public final class SidebarSyncStateFile: SidebarSyncStateStoring {
     public static let fileName = "sync-state.json"
     public let fileURL: URL
-    /// False in a `REARC_DATA_DIR` launch (benchmarks, manual tests): its
-    /// throwaway sidebar stays off and is never asked about, so it cannot
-    /// merge into the user's iCloud one unless sync is turned on there.
+    /// False in a `REARC_DATA_DIR` launch (benchmarks, manual tests): a
+    /// throwaway folder with no state file stays off and is never asked
+    /// about, so it cannot merge into the user's iCloud sidebar unless sync
+    /// is turned on there.
     public let asksWhenUndecided: Bool
 
     public init(fileURL: URL, asksWhenUndecided: Bool = !ShellDataLocation.isOverridden) {
@@ -112,14 +113,10 @@ public final class SidebarSyncStateFile: SidebarSyncStateStoring {
             return state
         }
         if state.decision == nil {
-            if !state.enabled {
-                state.decision = .user // Earlier builds saved an off only when the person chose it.
-            } else if asksWhenUndecided {
-                state.enabled = false
-            } else {
-                state.decision = .isolated
-                state.enabled = false
-            }
+            // Earlier builds saved an off only when the person chose it. An on
+            // without a decision asks, in a REARC_DATA_DIR launch too: there
+            // someone put the file in place (how the prompt is checked).
+            if !state.enabled { state.decision = .user } else { state.enabled = false }
         }
         return state
     }

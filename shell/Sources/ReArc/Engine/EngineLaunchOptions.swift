@@ -30,6 +30,10 @@ struct EngineLaunchOptions: Equatable {
     /// Opt-in for release verification, supplied by release/check-launch scripts
     /// through the process environment (never via open --args). This enables
     /// self-test and probe modes only; release argv filtering still applies.
+    /// Honoured only by a bundle whose signed Info.plist carries
+    /// `ShippedBuild.verificationKey`, which `scripts/release.sh` removes
+    /// before notarizing: a shipped bundle has no self-test or probe mode
+    /// (RC-0.1.0-602 F-03, T-04).
     static let releaseVerificationEnvironmentKey = "REARC_RELEASE_VERIFICATION"
 
     static let engineFlagPrefix = "--rearc-engine="
@@ -143,8 +147,9 @@ struct EngineLaunchOptions: Equatable {
             engine = Engine(rawValue: value.lowercased()) ?? .webkit
             source = .environment
         }
-        let isRelease = infoDictionary?["ReArcRelease"] as? Bool == true
-        let verificationAllowed = !isRelease || environment[releaseVerificationEnvironmentKey] == "1"
+        let isRelease = ShippedBuild.isRelease(infoDictionary: infoDictionary)
+        let verificationAllowed = !isRelease
+            || (ShippedBuild.isVerificationBundle(infoDictionary: infoDictionary) && environment[releaseVerificationEnvironmentKey] == "1")
         var selfTest = false
         var probe: String?
         for argument in arguments.dropFirst() {

@@ -20,6 +20,15 @@ BASELINE=""
 if [[ ${1:-} == --crash-baseline ]]; then BASELINE="${2:?--crash-baseline needs a file}"; shift 2; fi
 APP="$(cd "$(dirname "${1:-$SHELL_DIR/dist/chromium/ReArc.app}")" && pwd)/$(basename "${1:-ReArc.app}")"
 [[ -d $APP ]] || { echo "check-launch: no bundle at $APP" >&2; exit 1; }
+# A shipped release bundle ignores REARC_DATA_DIR, --user-data-dir and the verification modes
+# (RC-0.1.0-602 T-04): launched here it would open the person's own profile. Only the bundle
+# scripts/release.sh is verifying (ReArcReleaseVerification in its signed Info.plist) takes them.
+plist="$APP/Contents/Info.plist"
+if [[ "$(plutil -extract ReArcRelease raw "$plist" 2>/dev/null || true)" == true \
+  && "$(plutil -extract ReArcReleaseVerification raw "$plist" 2>/dev/null || true)" != true ]]; then
+  echo "check-launch: $APP is a shipped release bundle, which has no verification mode; run this on the bundle release.sh is verifying" >&2
+  exit 1
+fi
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rearc-launch-check.XXXXXX")"
 LINK="http://127.0.0.1:9/rearc-launch-check"
 REPORTS="${REARC_CRASH_REPORTS:-$HOME/Library/Logs/DiagnosticReports}"

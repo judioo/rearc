@@ -8,6 +8,14 @@ import Foundation
 ///
 /// It lives in the user's Caches, not the data folder: a reopen from System
 /// Settings carries no `REARC_DATA_DIR`, so the ticket also remembers it.
+///
+/// Any process running as the person can write that file, so a ticket
+/// steers nothing else (RC-0.1.0-602 T-06): it is read only when it is a
+/// plain file of theirs that only they can read, and only by the bundle that
+/// wrote it (never another app). A shipped bundle accepts no data folder
+/// from it; elsewhere the folder must hold the ticket's nonce, which
+/// `bindDataDirectory` wrote there. It expires after `lifetime` and is
+/// removed on the launch it resumes, or on any launch that runs no onboarding.
 public struct OnboardingResumeTicket: Codable, Equatable, Sendable {
     /// The launch's `REARC_DATA_DIR`, if it had one.
     public var dataDirectory: String?
@@ -49,30 +57,66 @@ public struct OnboardingResumeTicket: Codable, Equatable, Sendable {
         return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("com.rearc.browser")
     }()
 
-    /// Appends a timestamped line to `relaunch.log` (kept under 64 KB).
+    /// Appends a timestamped line to `relaunch.log` (kept under 64 KB). The
+    /// log is never followed through a symlink, and the line loses its control
+    /// characters: parts of it come from the environment (RC-0.1.0-602 T-09).
     public static func log(_ line: String, to url: URL = logURL) {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let text = "\(ISO8601DateFormatter().string(from: Date())) pid \(ProcessInfo.processInfo.processIdentifier) \(line)\n"
-        if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int, size > 64_000 {
-            try? FileManager.default.removeItem(at: url)
+        let clean = String(String.UnicodeScalarView(line.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : $0 }).prefix(1000))
+        let text = "\(ISO8601DateFormatter().string(from: Date())) pid \(ProcessInfo.processInfo.processIdentifier) \(clean)\n"
+        var info = stat()
+        if lstat(url.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size > 64_000 {
+            unlink(url.path)
         }
-        if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
-            handle.write(Data(text.utf8))
-            try? handle.close()
-        } else {
-            try? Data(text.utf8).write(to: url)
-        }
+        let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == getuid() else { return }
+        _ = Array(text.utf8).withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
     }
 
+    /// Owner-only, so only the person (and what runs as them) can read or replace it.
     public func write(to url: URL = defaultURL) {
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? JSONEncoder().encode(self).write(to: url, options: [.atomic])
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        try? data.write(to: url, options: [.atomic])
+        chmod(url.path, 0o600)
     }
 
-    /// A fresh ticket from any copy of ReArc; a stale one is removed.
+    /// The marker beside a non-default data folder's files: the ticket's
+    /// nonce, which a launch must find there before it adopts the folder.
+    public static let markerName = ".rearc-onboarding-resume"
+
+    /// Records that ReArc itself is onboarding in `directory` under this ticket.
+    public func bindDataDirectory(_ directory: URL) {
+        let marker = directory.appendingPathComponent(Self.markerName)
+        try? Data(nonce.utf8).write(to: marker, options: [.atomic])
+        chmod(marker.path, 0o600)
+    }
+
+    /// The nonce a data folder was bound to, from a plain owner-only file of this user's.
+    public static func boundNonce(in directory: String) -> String? {
+        let path = (directory as NSString).appendingPathComponent(markerName)
+        guard isPrivateFile(path), let data = FileManager.default.contents(atPath: path), data.count < 256 else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// A regular file (not a link) owned by this user, with no group or other access.
+    static func isPrivateFile(_ path: String) -> Bool {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return false }
+        return (info.st_mode & S_IFMT) == S_IFREG && info.st_uid == getuid() && (info.st_mode & 0o077) == 0
+    }
+
+    /// A fresh ticket from any copy of ReArc; a stale or unsafe one is removed.
     public static func current(at url: URL = defaultURL, now: Date = Date()) -> OnboardingResumeTicket? {
-        guard let data = try? Data(contentsOf: url),
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return nil }
+        guard isPrivateFile(url.path) else {
+            remove(at: url)
+            return nil
+        }
+        guard let data = try? Data(contentsOf: url), data.count < 64_000,
               let ticket = try? JSONDecoder().decode(OnboardingResumeTicket.self, from: data) else { return nil }
         let age = now.timeIntervalSince(ticket.written)
         guard age >= 0, age < lifetime else {
@@ -108,26 +152,29 @@ public struct OnboardingResumeTicket: Codable, Equatable, Sendable {
     /// What a launch does about a fresh ticket, decided before anything
     /// reads or writes the data folder.
     public enum LaunchAction: Equatable, Sendable {
-        /// No ticket, or this launch already names its data folder.
+        /// No ticket, another copy's ticket (left for that copy), or this
+        /// launch already names its data folder.
         case none
         /// This copy's ticket: use its data folder (nil: the default one) and
         /// resume at the browser step.
         case adopt(dataDirectory: String?)
-        /// Another copy's ticket (System Settings reopens by bundle id, and
-        /// may pick this one): open that copy and quit, touching nothing.
-        case handOff(bundlePath: String, dataDirectory: String?)
-        /// The ticket's data folder is gone: forget it, launch as usual.
+        /// The ticket cannot be honoured (its folder is gone, or not one this
+        /// ReArc bound to it): forget it, launch as usual.
         case discard
     }
 
+    /// Never another bundle: System Settings may reopen a different copy of
+    /// ReArc by bundle id, and that copy simply launches as usual.
     public static func launchAction(environment: [String: String], bundlePath: String, ticket: OnboardingResumeTicket?,
-                                    exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> LaunchAction {
+                                    shipped: Bool = ShippedBuild.current,
+                                    exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+                                    boundNonce: (String) -> String? = OnboardingResumeTicket.boundNonce(in:)) -> LaunchAction {
         guard let ticket else { return .none }
-        if !(environment[ShellDataLocation.environmentKey]?.isEmpty ?? true) { return .none }
-        if let dir = ticket.dataDirectory, !exists(dir) { return .discard }
-        if ticket.bundlePath != bundlePath, exists(ticket.bundlePath) {
-            return .handOff(bundlePath: ticket.bundlePath, dataDirectory: ticket.dataDirectory)
-        }
-        return .adopt(dataDirectory: ticket.dataDirectory)
+        if !shipped, !(environment[ShellDataLocation.environmentKey]?.isEmpty ?? true) { return .none }
+        guard ticket.bundlePath == bundlePath else { return .none }
+        guard let dir = ticket.dataDirectory else { return .adopt(dataDirectory: nil) }
+        // A shipped bundle always runs on the person's own folder (T-04).
+        if shipped || !exists(dir) || boundNonce(dir) != ticket.nonce { return .discard }
+        return .adopt(dataDirectory: dir)
     }
 }

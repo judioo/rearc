@@ -47,10 +47,10 @@ final class FirstRunOnboarding: OnboardingHost {
 
     /// At process start, before anything reads or writes `ShellDataLocation`:
     /// what a fresh resume ticket asks of this launch. A reopen from System
-    /// Settings carries no `REARC_DATA_DIR` or arguments and may even be
-    /// another copy of ReArc (it goes by bundle id), so the ticket, outside
-    /// any data folder, says where the onboarding was. Logs which path
-    /// relaunched to `relaunch.log` beside it.
+    /// Settings carries no `REARC_DATA_DIR` or arguments, so the ticket,
+    /// outside any data folder, says where the onboarding was; only this very
+    /// bundle honours it, and a shipped one only on its own data folder
+    /// (RC-0.1.0-602 T-06). Logs which path relaunched to `relaunch.log` beside it.
     static func applyResumeTicketAtLaunch(arguments: [String] = CommandLine.arguments,
                                           environment: [String: String] = ProcessInfo.processInfo.environment) {
         guard !isAutomated(arguments) else { return }
@@ -68,15 +68,6 @@ final class FirstRunOnboarding: OnboardingHost {
             OnboardingResumeTicket.remove()
         case .adopt(let dir):
             if let dir { setenv(ShellDataLocation.environmentKey, dir, 1) }
-            if var ticket, ticket.bundlePath != here {
-                // Its own copy is gone: this one resumes in its place.
-                ticket.bundlePath = here
-                ticket.write()
-            }
-        case .handOff(let path, let dir):
-            ReArcRelaunch.open(URL(fileURLWithPath: path, isDirectory: true), arguments: ticket?.isRehearsal == true ? [forceFlag] : [],
-                               dataDirectory: dir, by: "a hand-off from \(here)")
-            exit(0)
         }
     }
 
@@ -104,6 +95,8 @@ final class FirstRunOnboarding: OnboardingHost {
         } else if model.isFirstRun, !automated {
             model.finishFirstRunOnboarding()
         }
+        // A ticket resumes only an onboarding this launch runs (T-06).
+        if kind == nil, !automated { OnboardingResumeTicket.remove() }
         return kind
     }
 
@@ -196,6 +189,7 @@ final class FirstRunOnboarding: OnboardingHost {
         let dir = ShellDataLocation.isOverridden ? ShellDataLocation.root.path : nil
         let ticket = OnboardingResumeTicket(dataDirectory: dir, bundlePath: Bundle.main.bundlePath, name: name, colourIndex: colourIndex,
                                             isRehearsal: kind == .rehearsal)
+        if dir != nil { ticket.bindDataDirectory(ShellDataLocation.root) }
         ticket.write()
         OnboardingResumeTicket.log("resume point saved (ticket \(ticket.nonce), data \(dir ?? "default"))")
     }

@@ -1,4 +1,5 @@
 import Foundation
+import SidebarModel
 
 /// Process entry. The Chromium path must branch before any NSApplication or
 /// SwiftUI `App.main` exists (engine/docs/C-ABI.md "Linking and startup");
@@ -7,6 +8,11 @@ import Foundation
 enum ReArcMain {
     @MainActor
     static func main() {
+        // Before anything else (RC-0.1.0-602 T-04): a shipped bundle runs only on its own data.
+        if let refusal = ShippedBuild.launchRefusal(arguments: CommandLine.arguments, environment: ProcessInfo.processInfo.environment) {
+            FileHandle.standardError.write(Data("ReArc: \(refusal)\n".utf8))
+            exit(64)
+        }
         // A relaunch helper only waits for the old ReArc to quit and opens this bundle again.
         ReArcRelaunch.runHelperIfAsked()
         PerfSignposts.launchEvent("Main")

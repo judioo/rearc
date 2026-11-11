@@ -35,6 +35,11 @@ if [[ -n ${STUB_WATCHDOG:-} ]]; then echo "Teardown watchdog expired"; exit 1; f
 echo "launch probe: ReArcEngineRun returned 0, shutdown ok"
 """
 
+SHIPPED_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>ReArcRelease</key><true/>%s</dict></plist>
+"""
+
 
 class CheckLaunchTests(unittest.TestCase):
     def setUp(self):
@@ -77,6 +82,16 @@ class CheckLaunchTests(unittest.TestCase):
         retry = self.run_check()
         self.assertEqual(retry.returncode, 1, "the baseline was taken before the first attempt")
         self.assertIn("new crash report", retry.stderr)
+
+    def test_a_shipped_bundle_is_refused_before_anything_launches(self):
+        # RC-0.1.0-602 T-04: it ignores the probe and the profile, so it would open the real data.
+        (self.app / "Contents" / "Info.plist").write_text(SHIPPED_PLIST % "")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("shipped release bundle", result.stderr)
+        self.assertFalse(self.baseline.exists(), "refused before the crash baseline or any launch")
+        (self.app / "Contents" / "Info.plist").write_text(SHIPPED_PLIST % "<key>ReArcReleaseVerification</key><true/>")
+        self.assertEqual(self.run_check().returncode, 0, "the bundle release.sh is verifying runs")
 
     def test_other_browsers_helper_reports_are_ignored(self):
         self.run_check()  # writes the baseline

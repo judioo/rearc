@@ -129,17 +129,31 @@ enum ReArcRelaunch {
     /// Set in the reopened app's environment: who opened it, for `relaunch.log`.
     static let relaunchedByKey = "REARC_RELAUNCHED_BY"
 
+    /// Whether this helper may act (RC-0.1.0-602 T-09): it reopens only the
+    /// bundle it runs from, and only for the ReArc that started it (its
+    /// parent, or launchd once that parent has already gone).
+    static func accepts(_ request: Request, ownBundle: URL = Bundle.main.bundleURL, parent: pid_t = getppid()) -> Bool {
+        let own = ownBundle.standardizedFileURL.resolvingSymlinksInPath()
+        let asked = request.bundle.standardizedFileURL.resolvingSymlinksInPath()
+        guard own.path == asked.path, own.pathExtension == "app" else { return false }
+        return parent == request.pid || (parent == 1 && kill(request.pid, 0) != 0)
+    }
+
     /// In the helper: wait (up to a minute) until the old ReArc has quit and
     /// Launch Services has let go of it, then open the bundle by its URL.
     static func runHelperIfAsked(_ argv: [String] = CommandLine.arguments) {
         guard let request = request(from: argv) else { return }
+        guard accepts(request) else {
+            OnboardingResumeTicket.log("relaunch helper refused: not this bundle's own relaunch (asked for \(request.bundle.path), pid \(request.pid))")
+            exit(64)
+        }
         let deadline = Date().addingTimeInterval(60)
         while Date() < deadline, kill(request.pid, 0) == 0 || NSRunningApplication(processIdentifier: request.pid) != nil {
             usleep(100_000)
         }
         usleep(300_000)
         let dir = ProcessInfo.processInfo.environment[ShellDataLocation.environmentKey]
-        open(request.bundle, arguments: request.arguments, dataDirectory: dir, by: "ReArc's Relaunch helper (old pid \(request.pid))")
+        open(Bundle.main.bundleURL, arguments: request.arguments, dataDirectory: dir, by: "ReArc's Relaunch helper (old pid \(request.pid))")
         exit(0)
     }
 

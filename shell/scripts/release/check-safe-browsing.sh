@@ -23,6 +23,15 @@ die() { echo "check-safe-browsing: $*" >&2; exit 1; }
 APP="$(cd "$1" && pwd)"
 EXE="$APP/Contents/MacOS/ReArc"
 [[ -x $EXE ]] || die "no executable at $EXE"
+# A shipped release bundle ignores REARC_DATA_DIR, --user-data-dir and the verification modes
+# (RC-0.1.0-602 T-04): launched here it would open the person's own profile. Only the bundle
+# scripts/release.sh is verifying (ReArcReleaseVerification in its signed Info.plist) takes them.
+plist="$APP/Contents/Info.plist"
+if [[ "$(plutil -extract ReArcRelease raw "$plist" 2>/dev/null || true)" == true \
+  && "$(plutil -extract ReArcReleaseVerification raw "$plist" 2>/dev/null || true)" != true ]]; then
+  echo "check-safe-browsing: $APP is a shipped release bundle, which has no verification mode; run this on the bundle release.sh is verifying" >&2
+  exit 1
+fi
 TIMEOUT="${REARC_SB_TIMEOUT:-360}"
 POLL="${REARC_SB_POLL:-5}"
 LAUNCH_WAIT="${REARC_SB_LAUNCH_WAIT:-60}"

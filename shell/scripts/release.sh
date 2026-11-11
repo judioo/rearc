@@ -4,6 +4,9 @@
 # hardened-runtime signing (scripts/sign-release.sh), dSYMs, then verification: a
 # LaunchServices launch to ready (scripts/check-launch.sh) and the self-test against the real
 # Keychain. Optionally a signed DMG (scripts/make-dmg.sh). Notarization is opt-in (--notarize).
+# The gates run on the bundle signed with ReArcReleaseVerification in its Info.plist, the only
+# release bundle that takes a throwaway data dir, self-test or launch probe; the key is then
+# removed and the bundle signed again, so what ships has none of those (RC-0.1.0-602 T-04, F-03).
 # Docs: engine/docs/RELEASE.md.
 #
 # Usage: scripts/release.sh [--engine-out DIR] [--dist DIR] [--worktree] [--no-verify] [--dmg]
@@ -21,6 +24,9 @@
 #                     skip the live list-download check (Safe Browsing may not work; warns
 #                     loudly). See RELEASE.md.
 #   --selftest-timeout SECONDS  watchdog for the self-test (default 300)
+#   --qa              keep the verification mode in the bundle, for test launches on a throwaway
+#                     REARC_DATA_DIR (a shipped bundle refuses them); never distributed, so no
+#                     --dmg, --appcast or --notarize
 # Signing settings: see sign-release.sh (REARC_RELEASE_IDENTITY, REARC_TEAM_ID, iCloud).
 set -euo pipefail
 
@@ -39,6 +45,7 @@ CHANNEL=""
 NOTARIZE=0
 SELFTEST_TIMEOUT=300
 LAUNCH_RETRIED=0
+QA=0
 die() { echo "release: $*" >&2; exit 1; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,12 +60,14 @@ while [[ $# -gt 0 ]]; do
     --channel) CHANNEL="$2"; [[ $CHANNEL == beta ]] || die "only --channel beta is supported"; shift ;;
     --notarize) NOTARIZE=1 ;;
     --selftest-timeout) SELFTEST_TIMEOUT="$2"; shift ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    --qa) QA=1 ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
 done
 [[ -z $CHANNEL || -n $APPCAST ]] || die "--channel requires --appcast DIR"
+[[ $QA == 0 || ( $DMG == 0 && $NOTARIZE == 0 ) ]] || die "--qa makes a test bundle that is never distributed: no --dmg, --appcast or --notarize"
 # A feed is published only from a fully gated run (security RC-0.1.0-544 N-04).
 OVERRIDES=()
 [[ $ALLOW_OUTDATED_ENGINE == 0 ]] || OVERRIDES+=(allow-outdated-engine)
@@ -137,6 +146,13 @@ plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$PLIST"
 plutil -replace ReArcEngineVersion -string "$ENGINE_VERSION" "$PLIST"
 plutil -replace ReArcSourceRevision -string "$REVISION$SUFFIX" "$PLIST"
 plutil -replace ReArcEngineRevision -string "$OVERLAY" "$PLIST"
+# Verification mode for the gates below only; step 5c removes it before anything ships.
+plutil -remove ReArcReleaseVerification "$PLIST" 2>/dev/null || true
+VERIFICATION_BUNDLE=0
+if [[ $VERIFY == 1 || $DMG == 1 || $QA == 1 ]]; then
+  plutil -insert ReArcReleaseVerification -bool true "$PLIST"
+  VERIFICATION_BUNDLE=1
+fi
 # The gates this build skipped, inside the signed bundle, so a DMG made with an override can
 # be told from a gated one (N-04). Absent when nothing was skipped.
 plutil -remove ReArcReleaseGateOverrides "$PLIST" 2>/dev/null || true
@@ -218,6 +234,20 @@ if [[ $DMG == 1 ]]; then
     "$SHELL_DIR/scripts/release/check-safe-browsing.sh" "$APP" 2>&1 | tee "$DIST/check-safe-browsing.log" \
       || die "Safe Browsing stored no lists (log $DIST/check-safe-browsing.log); pass --allow-no-safe-browsing only for a build that is not distributed"
   fi
+fi
+
+# 5c. The shipped bundle: without the verification key, signed again (Info.plist is sealed by
+#     the signature). Its code is the code the gates ran; it takes no REARC_DATA_DIR,
+#     --user-data-dir, self-test or launch probe (RC-0.1.0-602 T-04, F-03).
+if [[ $QA == 1 ]]; then
+  echo "==> --qa: the bundle keeps its verification mode; it takes REARC_DATA_DIR and must never be distributed" >&2
+elif [[ $VERIFICATION_BUNDLE == 1 ]]; then
+  plutil -remove ReArcReleaseVerification "$PLIST"
+  echo "==> removing verification mode and signing the shipped bundle again"
+  "$SHELL_DIR/scripts/sign-release.sh" "$APP" 2>&1 | tee "$DIST/sign-release-shipped.log"
+fi
+if [[ $QA == 0 ]] && plutil -extract ReArcReleaseVerification raw "$PLIST" >/dev/null 2>&1; then
+  die "the bundle still has ReArcReleaseVerification; it must never ship"
 fi
 
 # 6. Optional notarization, DMG and local appcast. Never uploads.

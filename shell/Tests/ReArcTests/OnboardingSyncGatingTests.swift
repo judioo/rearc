@@ -21,7 +21,18 @@ struct OnboardingSyncGatingTests {
         await scheduler.runCycle()
         #expect(server.fetchCount == 0)
         #expect(server.modifyCount == 0)
-        if deferOnboarding { model.deferFirstRunOnboarding() } else { model.finishFirstRunOnboarding() }
+        if deferOnboarding {
+            // "Onboard later" finishes nothing: the person is asked before anything syncs (RC-0.1.0-602 T-01).
+            model.deferFirstRunOnboarding()
+            await scheduler.runCycle()
+            #expect(model.syncDecisionPrompt != nil)
+            #expect(server.modifyCount == 0)
+            model.setSyncEnabled(true)
+            #expect(model.syncDecisionPrompt == nil)
+        } else {
+            model.finishFirstRunOnboarding()
+            #expect(model.syncDecisionPrompt == nil, "a finished onboarding turns sync on by default")
+        }
         await scheduler.runCycle()
         #expect(server.modifyCount > 0)
         #expect(server.records(account: "fixture").values.contains { $0.payload.values["title"] == .string("Imported fixture") })

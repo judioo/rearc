@@ -22,4 +22,21 @@ final class ReArcRelaunchTests: XCTestCase {
         XCTAssertEqual(ReArcRelaunch.environment(["REARC_DATA_DIR": "/tmp/demo", "HOME": "/Users/x"]), ["REARC_DATA_DIR": "/tmp/demo"])
         XCTAssertEqual(ReArcRelaunch.environment(["HOME": "/Users/x"]), [:])
     }
+
+    /// RC-0.1.0-602 T-09: the helper reopens only its own bundle, for the ReArc that started it.
+    func testTheHelperOpensOnlyItsOwnBundleForItsParent() {
+        let own = URL(fileURLWithPath: "/Applications/ReArc.app", isDirectory: true)
+        let request = { (path: String, pid: pid_t) in ReArcRelaunch.Request(pid: pid, bundle: URL(fileURLWithPath: path, isDirectory: true), arguments: []) }
+        XCTAssertTrue(ReArcRelaunch.accepts(request("/Applications/ReArc.app", 4242), ownBundle: own, parent: 4242))
+        XCTAssertTrue(ReArcRelaunch.accepts(request("/Applications/./ReArc.app", 4242), ownBundle: own, parent: 4242))
+        XCTAssertFalse(ReArcRelaunch.accepts(request("/System/Applications/Calculator.app", 4242), ownBundle: own, parent: 4242),
+                       "any other app")
+        XCTAssertFalse(ReArcRelaunch.accepts(request("/Applications/ReArc.app", 4242), ownBundle: own, parent: 999),
+                       "started by some other process")
+        let live = ProcessInfo.processInfo.processIdentifier
+        XCTAssertFalse(ReArcRelaunch.accepts(request("/Applications/ReArc.app", live), ownBundle: own, parent: 1),
+                       "orphaned, but the named ReArc is still running: not its relaunch")
+        XCTAssertFalse(ReArcRelaunch.accepts(request("/usr/bin", 4242), ownBundle: URL(fileURLWithPath: "/usr/bin"), parent: 4242),
+                       "only from an app bundle")
+    }
 }

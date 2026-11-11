@@ -41,15 +41,22 @@ fi
 while true; do sleep 1; done
 """
 
+SHIPPED_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>ReArcRelease</key><true/>%s</dict></plist>
+"""
+
 
 class CheckSafeBrowsingTests(unittest.TestCase):
-    def run_check(self, root, timeout="4", **stub):
+    def run_check(self, root, timeout="4", plist=None, **stub):
         tools = root / "bin"
         tools.mkdir()
         (tools / "open").write_text(FAKE_OPEN)
         app = root / "Rel ease" / "ReArc.app"
         (app / "Contents" / "MacOS").mkdir(parents=True)
         (app / "Contents" / "MacOS" / "ReArc").write_text(STUB_APP)
+        if plist is not None:
+            (app / "Contents" / "Info.plist").write_text(plist)
         for path in [tools / "open", app / "Contents" / "MacOS" / "ReArc"]:
             path.chmod(0o755)
         log = root / "calls"
@@ -93,6 +100,15 @@ class CheckSafeBrowsingTests(unittest.TestCase):
             result, _, _ = self.run_check(Path(temp), timeout="10", STUB_EXIT="3")
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue("did not appear" in result.stderr or "exited before" in result.stderr, result.stderr)
+
+
+    def test_a_shipped_bundle_is_refused_before_anything_launches(self):
+        # RC-0.1.0-602 T-04: it ignores REARC_DATA_DIR, so it would open the person's own profile.
+        with tempfile.TemporaryDirectory(prefix="rearc-sb-test-") as temp:
+            result, calls, _ = self.run_check(Path(temp), plist=SHIPPED_PLIST % "", STUB_DELAY="1")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("shipped release bundle", result.stderr)
+            self.assertFalse(any(c.startswith("open:") for c in calls))
 
 
 if __name__ == "__main__":

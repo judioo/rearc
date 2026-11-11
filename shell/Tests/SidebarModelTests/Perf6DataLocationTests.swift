@@ -20,6 +20,11 @@ struct Perf6DataLocationTests {
         #expect(home.path == NSHomeDirectory() + "/rearc-test")
     }
 
+    /// RC-0.1.0-602 T-04: a shipped bundle never moves its data folder.
+    @Test func aShippedBundleIgnoresTheOverride() {
+        #expect(ShellDataLocation.root(environment: [ShellDataLocation.environmentKey: "/tmp/prepared"], honoursOverride: false) == userRoot)
+    }
+
     /// The test process sets no override: the shell's files stay under one root.
     @Test func filesShareTheRoot() {
         let root = ShellDataLocation.root

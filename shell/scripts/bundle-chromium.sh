@@ -173,8 +173,13 @@ if [[ $CONFIG == release ]]; then
     plutil -replace "$key" -bool YES "$PLIST"
   done
   plutil -replace SUScheduledCheckInterval -integer 86400 "$PLIST"
+  # --selftest and --launch-check need the verification mode a shipped bundle lacks
+  # (RC-0.1.0-602 T-04): such a bundle is for checking here, never for distribution.
+  plutil -remove ReArcReleaseVerification "$PLIST" 2>/dev/null || true
+  if [[ $SELFTEST == 1 || $LAUNCH_CHECK == 1 ]]; then plutil -insert ReArcReleaseVerification -bool true "$PLIST"; fi
 else
   plutil -remove ReArcRelease "$PLIST" 2>/dev/null || true
+  plutil -remove ReArcReleaseVerification "$PLIST" 2>/dev/null || true
 fi
 
 plutil -replace CFBundleExecutable -string ReArc "$PLIST"
@@ -283,7 +288,8 @@ ReArc.app (Chromium ${VERSION}) assembled:
   $APP
 Run the Chromium engine:
   "$APP/Contents/MacOS/ReArc" --rearc-engine=chromium      (or REARC_ENGINE=chromium)
-Run the self-test (a release bundle needs REARC_RELEASE_VERIFICATION=1 and a new, empty data dir):
+Run the self-test (a release bundle needs --selftest or --launch-check here, which marks it for
+verification only, plus REARC_RELEASE_VERIFICATION=1 and a new, empty data dir):
   "$APP/Contents/MacOS/ReArc" --rearc-selftest --user-data-dir="\$(mktemp -d)"
 EOF
 

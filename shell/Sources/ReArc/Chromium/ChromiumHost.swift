@@ -39,6 +39,17 @@ enum ChromiumHost {
                 keychain: keychain
             )
             let runtime = ChromiumRuntime.shared
+            // A release bundle being verified checked its throwaway profile when it parsed
+            // the options; the profile is checked again just before the engine opens it, so
+            // a folder filled in between is refused too (RC-0.1.0-602 F-03).
+            if options.selfTest || options.launchProbePath != nil, ShippedBuild.isRelease(infoDictionary: Bundle.main.infoDictionary) {
+                let refusal = ChromiumLaunchArguments.userDataDir(in: arguments).map { dir in ReleaseVerificationDataDir.refusal(dir).map { "\(dir): \($0)" } }
+                    ?? "no --user-data-dir"
+                if let refusal {
+                    FileHandle.standardError.write(Data("ReArc: verification refused for \(refusal)\nSELFTEST FAIL: verification refused\n".utf8))
+                    exit(64)
+                }
+            }
             if options.selfTest {
                 let test = ChromiumSelfTest(runtime: runtime)
                 runtime.onReady = { test.start() }

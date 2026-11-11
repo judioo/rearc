@@ -213,13 +213,56 @@ final class ReleaseLaunchSecurityTests: XCTestCase {
                        ["ReArc", "--user-data-dir=/isolated"])
     }
 
+    /// RC-0.1.0-602 T-04: a shipped bundle's engine profile is always ReArc's own.
+    func testShippedBundleNeverTakesAUserDataDirAndProfileNamesStayInside() {
+        let argv = ["ReArc", "--user-data-dir=/tmp/prepared", "--user-data-dir", "/tmp/other", "--profile-directory=Profile 2"]
+        XCTAssertEqual(ChromiumLaunchArguments.browserArguments(argv, defaultUserDataDir: { "/Users/x/Library/Application Support/ReArc/Chromium" },
+                                                                keychain: .system, isRelease: true, isShipped: true),
+                       ["ReArc", "--profile-directory=Profile 2", "--user-data-dir=/Users/x/Library/Application Support/ReArc/Chromium"])
+        XCTAssertEqual(ChromiumLaunchArguments.browserArguments(argv, defaultUserDataDir: { XCTFail("explicit"); return "" },
+                                                                keychain: .system, isRelease: true, isShipped: false),
+                       ["ReArc", "--user-data-dir=/tmp/prepared", "--user-data-dir=/tmp/other", "--profile-directory=Profile 2"],
+                       "the bundle release.sh is verifying keeps its throwaway profiles")
+        for escape in ["../../../tmp/evil", "..", ".", "a/b", "/tmp/x", ""] {
+            XCTAssertEqual(ChromiumLaunchArguments.releaseArguments(["ReArc", "--profile-directory=" + escape]), ["ReArc"], escape)
+        }
+        XCTAssertTrue(ChromiumLaunchArguments.isPlainProfileDirectory("Default"))
+        XCTAssertTrue(ChromiumLaunchArguments.isPlainProfileDirectory("Profile 3"))
+    }
+
+    /// A shipped bundle given a data folder refuses to start rather than open the person's own data.
+    func testAShippedBundleRefusesADataFolderOrProfileFolder() {
+        XCTAssertNotNil(ShippedBuild.launchRefusal(arguments: ["ReArc"], environment: ["REARC_DATA_DIR": "/tmp/x"], shipped: true))
+        XCTAssertNotNil(ShippedBuild.launchRefusal(arguments: ["ReArc", "--user-data-dir=/tmp/x"], environment: [:], shipped: true))
+        XCTAssertNotNil(ShippedBuild.launchRefusal(arguments: ["ReArc", "--user-data-dir", "/tmp/x"], environment: [:], shipped: true))
+        XCTAssertNil(ShippedBuild.launchRefusal(arguments: ["ReArc", "-psn_0_1", "https://x.test"], environment: ["REARC_DATA_DIR": ""], shipped: true))
+        XCTAssertNil(ShippedBuild.launchRefusal(arguments: ["ReArc", "--user-data-dir=/tmp/x"], environment: ["REARC_DATA_DIR": "/tmp/x"], shipped: false))
+    }
+
+    func testShippedIsReleaseWithoutTheVerificationKey() {
+        XCTAssertTrue(ShippedBuild.isShipped(infoDictionary: ["ReArcRelease": true]))
+        XCTAssertFalse(ShippedBuild.isShipped(infoDictionary: ["ReArcRelease": true, "ReArcReleaseVerification": true]))
+        XCTAssertTrue(ShippedBuild.isVerificationBundle(infoDictionary: ["ReArcRelease": true, "ReArcReleaseVerification": true]))
+        XCTAssertFalse(ShippedBuild.isVerificationBundle(infoDictionary: ["ReArcReleaseVerification": true]), "only a release bundle")
+        XCTAssertFalse(ShippedBuild.isShipped(infoDictionary: [:]))
+        XCTAssertFalse(ShippedBuild.current, "the test runner is no shipped bundle")
+    }
+
     func testReleaseIgnoresDiagnosticFlagsUnlessVerificationEnvironmentIsSet() {
         let flags = ["ReArc", "--rearc-selftest", "--rearc-launch-probe=/tmp/probe", "--rearc-bench"]
-        let info: [String: Any] = ["ReArcRelease": true, "ReArcDefaultEngine": "chromium"]
-        let shipping = EngineLaunchOptions.parse(arguments: flags, environment: [:], infoDictionary: info)
-        XCTAssertFalse(shipping.selfTest)
-        XCTAssertNil(shipping.launchProbePath)
-        XCTAssertNil(shipping.bench)
+        let shipped: [String: Any] = ["ReArcRelease": true, "ReArcDefaultEngine": "chromium"]
+        let info = shipped.merging(["ReArcReleaseVerification": true]) { $1 }
+        for environment in [[:], [EngineLaunchOptions.releaseVerificationEnvironmentKey: "1"]] {
+            // RC-0.1.0-602 F-03, T-04: a shipped bundle has no self-test or probe, whatever the environment says.
+            let shipping = EngineLaunchOptions.parse(arguments: flags + ["--user-data-dir=/tmp/fresh"], environment: environment,
+                                                     infoDictionary: shipped, dataDirRefusal: { _ in nil })
+            XCTAssertFalse(shipping.selfTest)
+            XCTAssertNil(shipping.launchProbePath)
+            XCTAssertNil(shipping.bench)
+            XCTAssertNil(shipping.verificationRefusal)
+        }
+        XCTAssertFalse(EngineLaunchOptions.parse(arguments: flags + ["--user-data-dir=/tmp/fresh"], environment: [:], infoDictionary: info,
+                                                 dataDirRefusal: { _ in nil }).selfTest, "the verification bundle still needs the environment")
         let verification = EngineLaunchOptions.parse(arguments: flags + ["--user-data-dir=/tmp/fresh"],
             environment: [EngineLaunchOptions.releaseVerificationEnvironmentKey: "1"], infoDictionary: info,
             dataDirRefusal: { _ in nil })
@@ -232,7 +275,7 @@ final class ReleaseLaunchSecurityTests: XCTestCase {
 
     /// RC-0.1.0-544 F-03: a release self-test or probe never runs on the user's profile.
     func testReleaseVerificationRefusesAnyDataDirThatIsNotThrowaway() {
-        let info: [String: Any] = ["ReArcRelease": true, "ReArcDefaultEngine": "chromium"]
+        let info: [String: Any] = ["ReArcRelease": true, "ReArcReleaseVerification": true, "ReArcDefaultEngine": "chromium"]
         let environment = [EngineLaunchOptions.releaseVerificationEnvironmentKey: "1"]
         for flag in ["--rearc-selftest", "--rearc-launch-probe=/tmp/probe"] {
             let missing = EngineLaunchOptions.parse(arguments: ["ReArc", flag], environment: environment, infoDictionary: info,

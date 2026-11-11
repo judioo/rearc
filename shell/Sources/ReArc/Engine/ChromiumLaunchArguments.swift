@@ -1,4 +1,5 @@
 import Foundation
+import SidebarModel
 
 /// Browser-process argv for `ReArcEngineRun`.
 ///
@@ -42,9 +43,10 @@ enum ChromiumLaunchArguments {
         _ arguments: [String],
         defaultUserDataDir: () -> String,
         keychain: KeychainMode,
-        isRelease: Bool = Bundle.main.object(forInfoDictionaryKey: "ReArcRelease") as? Bool == true
+        isRelease: Bool = ShippedBuild.isRelease(infoDictionary: Bundle.main.infoDictionary),
+        isShipped: Bool = ShippedBuild.current
     ) -> [String] {
-        var result = isRelease ? releaseArguments(arguments) : arguments
+        var result = isRelease ? releaseArguments(arguments, allowsUserDataDir: !isShipped) : arguments
         if !result.contains(where: { $0.hasPrefix(userDataDirFlag) }) {
             result.append(userDataDirFlag + defaultUserDataDir())
         }
@@ -57,24 +59,40 @@ enum ChromiumLaunchArguments {
     /// LaunchServices arguments are untrusted in shipping bundles. Only profile
     /// selection crosses this boundary; feature switches and test fixtures are
     /// appended by shell code after filtering, never accepted from argv.
-    static func releaseArguments(_ arguments: [String]) -> [String] {
+    ///
+    /// `allowsUserDataDir`: false in a shipped bundle (RC-0.1.0-602 T-04): the
+    /// engine profile folder is always ReArc's own, so no process can start
+    /// ReArc, and its Full Disk Access, on a profile it prepared. Only a bundle
+    /// `scripts/release.sh` is still verifying takes one, for its throwaway
+    /// profiles. A profile directory is one plain folder name inside it.
+    static func releaseArguments(_ arguments: [String], allowsUserDataDir: Bool = true) -> [String] {
         var result = Array(arguments.prefix(1))
+        let prefixes = allowsUserDataDir ? [userDataDirFlag, profileDirectoryFlag] : [profileDirectoryFlag]
+        func accepts(_ prefix: String, _ value: String) -> Bool {
+            prefix != profileDirectoryFlag || isPlainProfileDirectory(value)
+        }
         var index = 1
         while index < arguments.count {
             let argument = arguments[index]
-            for prefix in [userDataDirFlag, profileDirectoryFlag] {
+            for prefix in prefixes {
                 if argument.hasPrefix(prefix), argument.count > prefix.count {
-                    result.append(argument)
+                    if accepts(prefix, String(argument.dropFirst(prefix.count))) { result.append(argument) }
                 } else if argument == String(prefix.dropLast()), index + 1 < arguments.count,
                           !arguments[index + 1].isEmpty, !arguments[index + 1].hasPrefix("-") {
                     index += 1
-                    result.append(prefix + arguments[index])
+                    if accepts(prefix, arguments[index]) { result.append(prefix + arguments[index]) }
                     break
                 }
             }
             index += 1
         }
         return result
+    }
+
+    /// `Default`, `Profile 3` or a container's folder: never a path out of the user data dir.
+    static func isPlainProfileDirectory(_ name: String) -> Bool {
+        !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\\") && !name.contains("\0")
+            && !name.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
 
     /// Self-test only, never the product: Chromium hides the pages of occluded
