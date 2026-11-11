@@ -182,6 +182,33 @@ extension BrowserViewModel {
         beginRename(.folder(folder.id))
     }
 
+    // MARK: - Drag
+
+    /// The rows a drag of `id` in the key window carries: the whole
+    /// selection when `id` is in it, else nil (the row alone, as before).
+    /// Drops on another window, the page edge or a row's middle (stacking)
+    /// still take the dragged row alone.
+    func draggedSelection(_ id: UUID) -> [UUID]? {
+        guard let ids = keySelectionIDs, ids.contains(id) else { return nil }
+        return ids
+    }
+
+    /// Reorder: the dragged selection lands before or after `targetID`.
+    @discardableResult
+    func moveDraggedSelection(_ ids: [UUID], relativeTo targetID: UUID, after: Bool) -> Bool {
+        guard let moved = store.moveEntries(ids, relativeTo: targetID, after: after), !moved.isEmpty else { return false }
+        reconcileEngineOwnership()
+        loadSelectedIfNeeded()
+        return true
+    }
+
+    /// After a section's last row (pins into Pinned, unpins into Today).
+    func moveDraggedSelection(_ ids: [UUID], appendingTo destination: SidebarStore.ItemDestination) {
+        guard !store.moveEntries(ids, appendingTo: destination).isEmpty else { return }
+        reconcileEngineOwnership()
+        loadSelectedIfNeeded()
+    }
+
     // MARK: - Split View
 
     func canOpenInSplitView(_ ids: [UUID]) -> Bool { store.canSplit(selection: ids) }

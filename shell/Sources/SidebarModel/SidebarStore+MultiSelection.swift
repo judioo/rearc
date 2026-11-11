@@ -195,6 +195,30 @@ extension SidebarStore {
         return pinned.filter { moveEntry($0, toSpace: spaceID) } + today.reversed().filter { moveEntry($0, toSpace: spaceID) }.reversed()
     }
 
+    /// A drag of several rows dropped before or after `targetID`: they land
+    /// there together, in order. Refused (nil) when the target is one of them.
+    @discardableResult
+    public func moveEntries(_ ids: [UUID], relativeTo targetID: UUID, after: Bool) -> [UUID]? {
+        let entries = topmostEntries(ids)
+        guard !entries.contains(targetID) else { return nil }
+        var anchor = targetID, placeAfter = after
+        return entries.filter { id in
+            guard moveItem(id, relativeTo: anchor, after: placeAfter) else { return false }
+            anchor = id
+            placeAfter = true
+            return true
+        }
+    }
+
+    /// A drag of several rows dropped after a container's last row.
+    @discardableResult
+    public func moveEntries(_ ids: [UUID], appendingTo destination: ItemDestination) -> [UUID] {
+        topmostEntries(ids).filter { id in
+            let count = entries(in: resolvedParent(destination)).filter { $0.id != id }.count
+            return moveItem(id, to: destination, index: count)
+        }
+    }
+
     /// Move to Folder for each row not already there, appended in order.
     @discardableResult
     public func moveEntries(_ ids: [UUID], intoFolder folderID: UUID) -> [UUID] {

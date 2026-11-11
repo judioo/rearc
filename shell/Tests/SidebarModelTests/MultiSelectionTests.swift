@@ -274,4 +274,18 @@ final class MultiSelectionTests: XCTestCase {
         XCTAssertEqual(split?.tabs.map(\.id), [f.mail.id, f.google[0].id, f.google[1].id])
         XCTAssertFalse(f.store.canSplit(selection: [f.mail.id, f.google[2].id]), "a tab already in a split")
     }
+
+    func testDraggedRowsLandTogetherInOrder() {
+        let f = makeFixture()
+        // Mail and Google 3 dropped after Google 1: Mail unpins, both follow in order.
+        XCTAssertEqual(f.store.moveEntries([f.mail.id, f.google[2].id], relativeTo: f.google[0].id, after: true),
+                       [f.mail.id, f.google[2].id])
+        XCTAssertEqual(f.store.outline(for: f.space).today.map(\.id), [f.google[0].id, f.mail.id, f.google[2].id, f.google[1].id])
+        XCTAssertNil(f.store.moveEntries([f.mail.id, f.google[0].id], relativeTo: f.google[0].id, after: false),
+                     "the target is one of the rows")
+        // Appended to Pinned, folder and its contents as one.
+        XCTAssertEqual(f.store.moveEntries([f.google[0].id, f.google[1].id], appendingTo: .section(spaceID: f.space, section: .pinned)),
+                       [f.google[0].id, f.google[1].id])
+        XCTAssertEqual(f.store.outline(for: f.space).pinned.map(\.id), [f.folder.id, f.google[0].id, f.google[1].id])
+    }
 }

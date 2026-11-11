@@ -316,15 +316,18 @@ struct SidebarRowDropDelegate: DropDelegate {
         }
         guard let draggedItemID, let position = position(for: info) else { return false }
         withAnimation(.easeInOut(duration: 0.15)) {
+            // A selected row carries the window's whole selection.
+            let selection = model.draggedSelection(draggedItemID)
             switch (position, target) {
             case (.into, .folder(let folder)):
-                model.moveItem(draggedItemID, intoFolder: folder.id)
+                if let selection { model.moveItems(selection, intoFolder: folder.id) }
+                else { model.moveItem(draggedItemID, intoFolder: folder.id) }
             case (.into, _):
                 model.combineIntoSplit(draggedItemID, onto: target.id)
-            case (.before, _):
-                model.moveItem(draggedItemID, relativeTo: target.id, after: false)
-            case (.after, _):
-                model.moveItem(draggedItemID, relativeTo: target.id, after: true)
+            case (.before, _), (.after, _):
+                let after = position == .after
+                if let selection, model.moveDraggedSelection(selection, relativeTo: target.id, after: after) { break }
+                model.moveItem(draggedItemID, relativeTo: target.id, after: after)
             }
         }
         SidebarDropHaptics.dropped(moved: true)
@@ -410,7 +413,11 @@ struct SectionEndDropZone: View {
             let store = zone.model.store
             let count = store.entries(in: store.resolvedParent(zone.destination)).filter { $0.id != dragged }.count
             withAnimation(.easeInOut(duration: 0.15)) {
-                zone.model.moveItem(dragged, to: zone.destination, index: count)
+                if let selection = zone.model.draggedSelection(dragged) {
+                    zone.model.moveDraggedSelection(selection, appendingTo: zone.destination)
+                } else {
+                    zone.model.moveItem(dragged, to: zone.destination, index: count)
+                }
             }
             SidebarDropHaptics.dropped(moved: true)
             return true
