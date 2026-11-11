@@ -7,10 +7,10 @@ struct SettingsCapabilities {
     var pictureInPicture = true
     /// Chrome's "Warn you if passwords are exposed in a data breach" (Chromium only).
     var passwordLeakCheck: Binding<Bool>?
-    /// Whether the engine can run Safe Browsing (a real Google API key; engine
-    /// ABI 1.57). nil: no such engine (WebKit). Settings never claims
-    /// protection a build cannot give (audit F-02).
-    var safeBrowsingAvailable: Bool?
+    /// What Safe Browsing is doing now: the engine's key (ABI 1.57) and whether
+    /// lists have actually been downloaded. nil: no such engine (WebKit).
+    /// Settings never claims protection the build is not giving (audit F-02).
+    var safeBrowsingStatus: (() -> SafeBrowsingStatus)?
 }
 
 /// Arc's Settings window (FEATURE-SPECS/SETTINGS.md §11). One pane at a
@@ -378,13 +378,12 @@ struct ProfilesSettingsPane: View {
         ].filter { model.canOpenBrowserPage($0.0) }
         if !dataRows.isEmpty {
             SettingsHeader(title: "Your Data and Settings")
-            if let available = capabilities.safeBrowsingAvailable {
+            if let status = capabilities.safeBrowsingStatus?() {
+                let row = SafeBrowsingRow(status)
                 SettingsGroup {
-                    SettingsLabeledRow(label: "Safe Browsing", info: available
-                        ? "Warnings before known phishing and malware sites and downloads. Choose the level in Privacy and security › Security."
-                        : "This build of ReArc has no Safe Browsing key, so it can’t check sites or downloads against Google’s lists of phishing and malware. The protection level in Privacy and security has no effect.") {
-                        Text(available ? "Available" : "Unavailable")
-                            .foregroundStyle(available ? Color.secondary : Color.red)
+                    SettingsLabeledRow(label: "Safe Browsing", info: row.info) {
+                        Text(row.value)
+                            .foregroundStyle(row.isWarning ? Color.red : Color.secondary)
                     }
                 }
             }
@@ -918,6 +917,42 @@ struct AdvancedSettingsPane: View {
                 }
                 .padding(.top, 12)
             }
+        }
+    }
+}
+
+/// The Settings row for `SafeBrowsingStatus`: what is happening, never what is configured.
+struct SafeBrowsingRow: Equatable {
+    var value: String
+    var info: String
+    var isWarning: Bool
+
+    init(_ status: SafeBrowsingStatus, now: Date = Date()) {
+        let level = " Choose the level in Privacy and security › Security."
+        switch status {
+        case .unavailable:
+            value = "Unavailable"
+            info = "This build of ReArc has no Safe Browsing key, so it can’t check sites or downloads against Google’s lists of phishing and malware. The protection level in Privacy and security has no effect."
+            isWarning = true
+        case .waitingForLists:
+            value = "Starting"
+            info = "ReArc is downloading Google’s lists of phishing and malware sites. Until they arrive, sites and downloads are not checked." + level
+            isWarning = false
+        case .active(let date):
+            value = "On"
+            info = "Warnings before known phishing and malware sites and downloads. Lists updated "
+                + RelativeDateTimeFormatter().localizedString(for: date, relativeTo: now) + "." + level
+            isWarning = false
+        case .notUpdating:
+            value = "Not working"
+            info = "ReArc could not download Google’s lists of phishing and malware sites, so sites and downloads are not being checked. Check your network or firewall."
+            isWarning = true
+        case .stale(let date):
+            value = "Out of date"
+            info = "Google’s lists of phishing and malware sites were last updated "
+                + RelativeDateTimeFormatter().localizedString(for: date, relativeTo: now)
+                + ", so new threats are not recognised. Check your network or firewall."
+            isWarning = true
         }
     }
 }

@@ -17,8 +17,9 @@
 #   --notarize        notarize app before DMG and DMG before appcast (opt-in)
 #   --dmg             also make the signed DMG
 #   --allow-outdated-engine  override the Mac Stable/Extended security release gate
-#   --allow-no-safe-browsing  make a DMG from an engine without a real Google API key
-#                     (Safe Browsing cannot work; warns loudly). See RELEASE.md.
+#   --allow-no-safe-browsing  make a DMG from an engine without a real Google API key, and
+#                     skip the live list-download check (Safe Browsing may not work; warns
+#                     loudly). See RELEASE.md.
 #   --selftest-timeout SECONDS  watchdog for the self-test (default 300)
 # Signing settings: see sign-release.sh (REARC_RELEASE_IDENTITY, REARC_TEAM_ID, iCloud).
 set -euo pipefail
@@ -51,7 +52,7 @@ while [[ $# -gt 0 ]]; do
     --channel) CHANNEL="$2"; [[ $CHANNEL == beta ]] || die "only --channel beta is supported"; shift ;;
     --notarize) NOTARIZE=1 ;;
     --selftest-timeout) SELFTEST_TIMEOUT="$2"; shift ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
@@ -172,6 +173,18 @@ if [[ $VERIFY == 1 ]]; then
   grep -E "^\[selftest|SELFTEST|ABI-GAP" "$LOG" | tail -n 20 || true
   [[ $status == 0 ]] || die "self-test failed with status $status (log $LOG)"
   echo "==> self-test passed in $((SECONDS - t0))s"
+fi
+
+# 5b. Safe Browsing must actually download its lists (security RC-0.1.0-544 F-02): a key that
+#     is present but refused, or a list protocol Google does not serve, ships silent otherwise.
+#     Runs for every DMG, --no-verify included; only --allow-no-safe-browsing skips it.
+if [[ $DMG == 1 ]]; then
+  if [[ $ALLOW_NO_SAFE_BROWSING == 1 ]]; then
+    echo "==> WARNING: --allow-no-safe-browsing: Safe Browsing list downloads were NOT checked" >&2
+  else
+    "$SHELL_DIR/scripts/release/check-safe-browsing.sh" "$APP" 2>&1 | tee "$DIST/check-safe-browsing.log" \
+      || die "Safe Browsing stored no lists (log $DIST/check-safe-browsing.log); pass --allow-no-safe-browsing only for a build that is not distributed"
+  fi
 fi
 
 # 6. Optional notarization, DMG and local appcast. Never uploads.

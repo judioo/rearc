@@ -687,7 +687,11 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
                 get: { runtime.leakDetectionEnabled },
                 set: { runtime.setLeakDetectionForAllProfiles($0) }
             ) : nil,
-            safeBrowsingAvailable: runtime.safeBrowsingAvailable
+            safeBrowsingStatus: {
+                SafeBrowsingStatus.evaluate(
+                    configured: runtime.safeBrowsingAvailable, userDataDir: runtime.userDataDir,
+                    engineRunning: runtime.readyAt.map { ProcessInfo.processInfo.systemUptime - $0 } ?? 0)
+            }
         )
     }
 

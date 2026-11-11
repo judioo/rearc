@@ -81,9 +81,18 @@ load with no warning. The release engine therefore needs ReArc's own key:
 - `release.sh --dmg` runs `google-api-keys.py check`: the engine's `google_api_key` GN arg
   must be a real key, and the release framework must contain it. Otherwise it stops
   unless `--allow-no-safe-browsing` is given.
-- At run time the shell asks the engine (`ReArcEngineSafeBrowsingAvailable`, ABI 1.57).
-  Dev engines (`engine/scripts/build.sh`) are built without a key, so they show Safe
-  Browsing as unavailable, like any keyless build.
+- A key in the build does not prove the lists download. After the self-test, `release.sh
+  --dmg` runs `scripts/release/check-safe-browsing.sh`: it launches the signed app in the
+  background (`open -n -g`, `--no-onboarding`, a throwaway `REARC_DATA_DIR`), waits up to
+  6 minutes for a non-empty `*.store` in `<data>/Chromium/Safe Browsing`, then quits that
+  instance. No list fails the release. `--allow-no-safe-browsing` skips this check too.
+  The check needs the network, and a firewall prompt for the new copy's helpers stalls it.
+- At run time the shell asks the engine (`ReArcEngineSafeBrowsingAvailable`, ABI 1.57) and
+  then looks at the same folder: Settings › Profiles shows Safe Browsing as Unavailable (no
+  key), Starting (no lists yet, first 10 minutes), On (lists stored and updated within a
+  day), Not working (no lists after 10 minutes) or Out of date. Dev engines
+  (`engine/scripts/build.sh`) are built without a key, so they show Safe Browsing as
+  unavailable, like any keyless build.
 
 The key passes to the compiler as a define on `google_apis` compiles only, so it appears in
 the local `out/ReArc-release-arm64` build files and compiler command lines, which are never

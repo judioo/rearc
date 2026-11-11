@@ -11,3 +11,18 @@ final class SecurityAuditShellTests: XCTestCase {
         XCTAssertEqual(BrowserViewModel.displaySite("null"), "This page", "an opaque origin names no site")
     }
 }
+
+/// Security RC-0.1.0-544 F-02: the Settings row says what is happening.
+final class SafeBrowsingRowTests: XCTestCase {
+    func testOnlyDownloadedListsReadAsOn() {
+        XCTAssertEqual(SafeBrowsingRow(.unavailable).value, "Unavailable")
+        XCTAssertTrue(SafeBrowsingRow(.unavailable).isWarning)
+        XCTAssertEqual(SafeBrowsingRow(.notUpdating).value, "Not working")
+        XCTAssertTrue(SafeBrowsingRow(.notUpdating).isWarning)
+        XCTAssertTrue(SafeBrowsingRow(.stale(lastUpdate: Date(timeIntervalSinceNow: -5 * 86400))).isWarning)
+        XCTAssertFalse(SafeBrowsingRow(.waitingForLists).value == "On")
+        let on = SafeBrowsingRow(.active(lastUpdate: Date()))
+        XCTAssertEqual(on.value, "On")
+        XCTAssertFalse(on.isWarning)
+    }
+}
