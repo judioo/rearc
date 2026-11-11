@@ -6,6 +6,8 @@ extension EnvironmentValues {
     @Entry var sidebarWindow: SidebarWindowID?
     /// The window's Library is drawn over its sidebar (`SidebarView`).
     @Entry var sidebarCoveredByLibrary = false
+    /// The sidebar is the mini column (⇧⌘S): rows draw their icons only.
+    @Entry var isMiniSidebar = false
 }
 
 /// Per-window focused space (wave 19): each browser window shows its own

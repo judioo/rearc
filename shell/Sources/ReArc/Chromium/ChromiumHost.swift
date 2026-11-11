@@ -531,6 +531,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let spaceID = saved.flatMap { model.store.restoredSpaceID(saved: $0.spaceID, profileID: $0.profileID) }
         // Registered before the view exists, so its first frame shows its own space.
         if let spaceID { model.store.registerWindow(windowID, spaceID: spaceID) }
+        // A restored window keeps its sidebar mode; a new one takes the key window's.
+        model.openSidebarMode(for: windowID, restoring: saved.map { $0.sidebarMode ?? .full })
         let hosting = NSHostingView(rootView: BrowserView(model: model, windowID: windowID, initialSpaceID: spaceID))
         // The window's limits are fixed: with the default sizing options every
         // SwiftUI update measured the whole tree for its minimum size, the
@@ -806,7 +808,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
               let entry = windows[ObjectIdentifier(window)] else { return }
         if case .browser(let windowID) = entry.role, !terminating {
             MainActor.assumeIsolated {
-                lastClosedBrowserWindow = sessionRecorder?.record(window, isKey: false, space: model?.store.focusedSpace(in: windowID))
+                lastClosedBrowserWindow = sessionRecorder?.record(window, isKey: false, space: model?.store.focusedSpace(in: windowID),
+                                                                  sidebarMode: model?.sidebarMode(in: windowID))
             }
         }
         windows[ObjectIdentifier(window)] = nil
@@ -844,6 +847,8 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             }
         }
         sessionRecorder = recorder
+        // ⇧⌘S is part of a window's record.
+        model?.onSidebarModeChange = { [weak recorder] in recorder?.changed() }
         return recorder
     }
 
@@ -911,7 +916,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         let hasKey = entries.contains { $0.1 == keyID }
         let saved = entries.enumerated().compactMap { index, entry in
             sessionRecorder?.record(entry.0, isKey: hasKey ? entry.1 == keyID : index == 0,
-                                    space: model?.store.focusedSpace(in: entry.1))
+                                    space: model?.store.focusedSpace(in: entry.1), sidebarMode: model?.sidebarMode(in: entry.1))
         }
         return WindowSessionSnapshot(windows: saved, lastClosed: lastClosedBrowserWindow)
     }
@@ -1189,10 +1194,10 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         main.addSubmenu(edit, title: "Edit")
 
         let view = NSMenu(title: "View")
-        // Arc's title flips with the sidebar.
+        // Arc's title flips with the sidebar; ReArc's mini sidebar sits beside it.
         target.add([[ShellMenuItem("Hide Sidebar", "s", liveTitle: { model.isSidebarVisible ? "Hide Sidebar" : "Show Sidebar" }) {
             model.toggleSidebar()
-        }]], to: view)
+        }] + ShellMenus.miniSidebar(model)], to: view)
         view.addItem(.separator())
         target.add(ShellMenus.navigation(model), to: view)
         if runtime.capabilities.downloads {

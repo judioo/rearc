@@ -155,6 +155,12 @@ final class BrowserViewModel {
     /// The hidden sidebar shown floating while the pointer is at the window's
     /// leading edge (Arc `SidebarHovering` / floating sidebar).
     var isSidebarPeeking = false
+    /// Each window's sidebar, full or the mini column (⇧⌘S).
+    var sidebarModes = SidebarModes()
+    /// Windows whose sidebar is moving between full and mini width (animated).
+    var sidebarMorphs: [SidebarWindowID?: SidebarWidthMorph] = [:]
+    /// Saves the window session after ⇧⌘S (the Chromium shell's recorder).
+    @ObservationIgnored var onSidebarModeChange: (() -> Void)?
     /// Settings › General › Sidebar position, as laid out now. `setSidebarSide`
     /// changes it behind `sidebarFlipOpacity`.
     var sidebarSide: SidebarSide = .load(from: .standard)
@@ -413,7 +419,8 @@ final class BrowserViewModel {
         commandBarCommandIndexCache.value {
             CommandBarSearch.CommandIndex(catalog: commandBarCatalogCache.value {
                 AppCommandRegistry.all(in: CommandBarContext(
-                    store: store, isSidebarVisible: isSidebarVisible, closedTabStack: store.closedTabStack,
+                    store: store, isSidebarVisible: isSidebarVisible, isMiniSidebar: isMiniSidebar(in: store.keyWindowID),
+                    closedTabStack: store.closedTabStack,
                     peekURL: peekSession?.url, focusedLittleArcID: focusedLittleArcID,
                     mediaByTab: mediaStateByTab, tabMuteModel: tabMuteModel,
                     navigationSchemes: engineHost.navigationSchemes, externalLinkDestination: externalLinkDestination,
@@ -1994,6 +2001,8 @@ final class BrowserViewModel {
             beginSpaceCreation()
         case .toggleSidebar:
             toggleSidebar()
+        case .toggleMiniSidebar:
+            toggleMiniSidebar()
         case .addSplitRight:
             addSplitView(orientation: .horizontal)
         case .addSplitBottom:
