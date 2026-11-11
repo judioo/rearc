@@ -85,6 +85,15 @@ public enum SidebarSyncProjection {
         for (space, rank) in zip(snapshot.spaces, spaceRanks) {
             var values = objectFields(space, dropping: ["id"])
             values["sortRank"] = .string(rank)
+            // A Set and a UUID-keyed map encode in hash order, which changes every
+            // launch: sorted, an unchanged space no longer uploads again (T-10).
+            if let ids = space.arcImportedItemIDs {
+                values["arcImportedItemIDs"] = .array(ids.map(\.uuidString).sorted().map(SyncValue.string))
+            }
+            if let mapping = space.arcItemMapping {
+                values["arcItemMapping"] = .array(mapping.sorted { $0.key.uuidString < $1.key.uuidString }
+                    .flatMap { [SyncValue.string($0.key.uuidString), .string($0.value.uuidString)] })
+            }
             // The space record keeps the wave 25 theme shape; the rest of the
             // style has its own record, written only while it is set.
             values["theme"] = (try? SyncValue.encoding(space.theme.baseColor)) ?? .null
@@ -189,7 +198,8 @@ public enum SidebarSyncProjection {
     // MARK: - Apply
 
     /// The local snapshot with its synced parts replaced by `records` (alive ones).
-    public static func apply(_ records: [String: SyncRecordPayload], onto snapshot: SidebarSnapshot) -> SidebarSnapshot {
+    /// `now`: when a deleted space's Today tabs are archived.
+    public static func apply(_ records: [String: SyncRecordPayload], onto snapshot: SidebarSnapshot, now: Date = Date()) -> SidebarSnapshot {
         var profileValues: [UUID: [String: SyncValue]] = [:]
         var spaceValues: [UUID: [String: SyncValue]] = [:]
         var items: [UUID: ItemRecord] = [:]
@@ -322,12 +332,34 @@ public enum SidebarSyncProjection {
             return built
         }
 
-        // Today stays local; a deleted space's Today rows move to the first space.
+        // Today stays local. A deleted space's Today rows move to a space of the
+        // same container, never into another's cookies (RC-0.1.0-602 T-10); with
+        // none left there, its tabs go to the archive, as they would on a close.
+        // A fresh install adopting the iCloud sidebar keeps its starter's rows.
         var today: [UUID: [SidebarEntry]] = [:]
+        var archived: [ArchivedTabRecord] = []
+        lazy var adoptsStarter = isPristine(snapshot)
         for space in snapshot.spaces {
-            let target = spaceIDs.contains(space.id) ? space.id : firstSpaceID
             let rows = local.today[space.id, default: []].filter { !overlaps($0, claimed) }
-            today[target, default: []].append(contentsOf: rows)
+            if spaceIDs.contains(space.id) {
+                today[space.id, default: []].append(contentsOf: rows)
+            } else if let target = spaces.first(where: { $0.profileID == space.profileID })?.id {
+                today[target, default: []].append(contentsOf: rows)
+            } else if rows.isEmpty {
+                continue
+            } else if adoptsStarter {
+                today[firstSpaceID, default: []].append(contentsOf: rows)
+            } else {
+                for row in rows {
+                    switch row {
+                    case .tab(let tab): archived.append(ArchivedTabRecord(tab: tab, spaceID: space.id, archivedAt: now, reason: .manual))
+                    case .split(let split):
+                        archived += split.tabs.map { ArchivedTabRecord(tab: $0, spaceID: space.id, archivedAt: now, reason: .manual) }
+                    case .folder, .easel:
+                        today[firstSpaceID, default: []].append(row)
+                    }
+                }
+            }
         }
 
         var tabsByID: [UUID: Tab] = [:]
@@ -413,6 +445,8 @@ public enum SidebarSyncProjection {
         out.foldersByID = foldersByID
         out.easelRefsByID = easelRefsByID
         out.boostLibrariesByProfileID = libraries
+        let archivedIDs = Set(snapshot.archivedTabs.map(\.id))
+        out.archivedTabs = snapshot.archivedTabs + archived.filter { !archivedIDs.contains($0.id) }
         out.lastActiveSpaceByProfile = snapshot.lastActiveSpaceByProfile.filter { profileIDs.contains($0.key) && spaceIDs.contains($0.value) }
         out.selectionBySpace = snapshot.selectionBySpace.filter { spaceIDs.contains($0.key) }
         out.expandedFolderIDs = snapshot.expandedFolderIDs.filter { foldersByID[$0] != nil }

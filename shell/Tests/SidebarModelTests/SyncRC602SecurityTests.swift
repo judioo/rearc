@@ -528,3 +528,86 @@ final class SyncAddressTests: XCTestCase {
         }
     }
 }
+
+/// RC-0.1.0-602 T-10.
+@MainActor
+final class SyncSmallGapTests: XCTestCase {
+    private var server: InMemorySyncServer!
+    private var clock: Clock!
+
+    override func setUp() async throws {
+        server = InMemorySyncServer()
+        clock = Clock()
+    }
+
+    private func on() -> SidebarSyncState {
+        var state = SidebarSyncState()
+        state.enabled = true
+        state.decision = .user
+        return state
+    }
+
+    func testARemoteSpaceDeleteKeepsTodayTabsInTheirOwnContainer() async throws {
+        let a = Mac("A", server: server, clock: clock, state: on())
+        let home = a.store.spaces[0]
+        let sibling = a.store.addSpace(name: "Sibling", iconName: "star.fill", profileID: home.profileID)
+        let work = a.store.addProfile(name: "Work")
+        let workSpace = try XCTUnwrap(a.store.spaces(in: work.id).first)
+        let lone = a.store.addSpace(name: "Lone", iconName: "moon.fill", profileID: work.id)
+        await a.sync()
+        let b = Mac("B", server: server, clock: clock, state: on())
+        await b.sync()
+        let homeToday = b.store.addTab(kind: .today, title: "Home scratch", url: URL(string: "https://home.test")!, in: home.id)
+        let loneToday = b.store.addTab(kind: .today, title: "Work scratch", url: URL(string: "https://work.test")!, in: lone.id)
+        b.edited()
+        await b.sync()
+
+        // A deletes Home (its container keeps Sibling) and the whole Work container.
+        XCTAssertTrue(a.store.removeSpace(home.id))
+        XCTAssertNil(a.store.deleteProfile(work.id, deletingSpaces: true))
+        XCTAssertTrue(a.store.spaces.allSatisfy { $0.id != lone.id && $0.id != workSpace.id })
+        a.edited()
+        await a.sync()
+        await b.sync()
+        XCTAssertTrue(b.store.content(for: sibling.id).today.contains { $0.id == homeToday.id }, "same container's space")
+        for space in b.store.spaces where space.profileID != work.id {
+            XCTAssertFalse(b.store.content(for: space.id).today.contains { $0.id == loneToday.id }, "never into another container")
+        }
+        XCTAssertTrue(b.store.makeSnapshot().archivedTabs.contains { $0.id == loneToday.id }, "archived when its container has no space")
+    }
+
+    func testImportBookkeepingEncodesInAStableOrder() throws {
+        let store = SidebarStore()
+        let ids = (0 ..< 20).map { _ in UUID() }
+        let index = try XCTUnwrap(store.spaces.indices.first)
+        store.spaces[index].arcImportedItemIDs = Set(ids)
+        store.spaces[index].arcItemMapping = Dictionary(uniqueKeysWithValues: ids.map { ($0, UUID()) })
+        let body = try XCTUnwrap(SidebarSyncProjection.extract(store.makeSnapshot())[SyncRecordKind.space.recordName(for: store.spaces[index].id)])
+        guard case .array(let imported)? = body.values["arcImportedItemIDs"], case .array(let mapping)? = body.values["arcItemMapping"] else {
+            return XCTFail("missing")
+        }
+        let importedText = imported.compactMap(\.stringValue)
+        XCTAssertEqual(importedText, importedText.sorted())
+        let keys = stride(from: 0, to: mapping.count, by: 2).compactMap { mapping[$0].stringValue }
+        XCTAssertEqual(keys, keys.sorted())
+        // And it still reads back.
+        let applied = SidebarSyncProjection.apply([SyncRecordKind.space.recordName(for: store.spaces[index].id):
+            SyncRecordPayload(kind: .space, fields: body.values.mapValues { SyncField(value: $0, stamp: SyncStamp(millis: 1, device: "A")) })], onto: SidebarStore().makeSnapshot())
+        XCTAssertEqual(applied.spaces.first?.arcItemMapping, store.spaces[index].arcItemMapping)
+    }
+
+    func testAPullKeepsNoMoreThanTheRecordLimit() async throws {
+        let a = Mac("A", server: server, clock: clock, state: on())
+        a.coordinator.recordLimit = 40
+        await a.sync()
+        let stamp = SyncStamp(millis: Int64(clock.date.timeIntervalSince1970 * 1000), device: "evil")
+        let flood = (0 ..< 200).map { _ in
+            SyncWireRecord(recordName: SyncRecordKind.item.recordName(for: UUID()), payload: SyncRecordPayload(kind: .item, fields: ["type": SyncField(value: .string("folder"), stamp: stamp)]))
+        }
+        _ = try await server.transport(account: "alice").modify(saving: flood, deleting: [])
+        let outcome = await a.sync()
+        XCTAssertNil(outcome.error)
+        XCTAssertLessThanOrEqual(a.coordinator.state.records.count, 40)
+        XCTAssertFalse(a.coordinator.quarantinedRecordNames.isEmpty)
+    }
+}

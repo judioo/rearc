@@ -92,6 +92,11 @@ public final class SidebarSyncCoordinator {
     /// A record type the server's schema rejected is offered again after
     /// this long (or on Sync Now); every other type keeps syncing meanwhile.
     public static let schemaRetryInterval: TimeInterval = 900
+    /// At most this many records are kept; a pull past it sets the rest
+    /// aside (RC-0.1.0-602 T-10). CloudKit caps each record at 1 MB.
+    public static let maxRecords = 50_000
+    /// `maxRecords`, lower in tests.
+    var recordLimit = SidebarSyncCoordinator.maxRecords
 
     public let transport: SidebarSyncTransport
     public weak var host: SidebarSyncHost?
@@ -255,7 +260,7 @@ public final class SidebarSyncCoordinator {
         state.lastError = nil
         persist()
         if !quarantinedRecordNames.isEmpty {
-            details.technicalError = "Ignored \(quarantinedRecordNames.count) record(s) with impossible timestamps or kinds: \(quarantinedRecordNames.sorted().prefix(3).joined(separator: ", "))"
+            details.technicalError = "Ignored \(quarantinedRecordNames.count) record(s) with impossible timestamps or kinds, or past \(recordLimit) records: \(quarantinedRecordNames.sorted().prefix(3).joined(separator: ", "))"
         }
         // The rest synced; still report a type the schema keeps out.
         if let rejected = activeSchemaRejection() { throw rejected }
@@ -266,7 +271,7 @@ public final class SidebarSyncCoordinator {
     /// rebuild repaired (rescued orphans, re-ranked ties) as local writes.
     private func applyToHost(_ outcome: inout SyncCycleOutcome) {
         guard let host else { return }
-        let merged = SidebarSyncProjection.apply(state.records.mapValues(\.payload), onto: host.syncSnapshot())
+        let merged = SidebarSyncProjection.apply(state.records.mapValues(\.payload), onto: host.syncSnapshot(), now: now())
         host.applySyncedSnapshot(merged)
         outcome.appliedRemote = true
         capture(host.syncSnapshot())
@@ -371,6 +376,10 @@ public final class SidebarSyncCoordinator {
         guard wire.payload.isPlausible(now: now()),
               SyncRecordKind.parse(recordName: wire.recordName).map({ $0.kind == wire.payload.kind }) ?? true else {
             // Never merged, never observed: one crafted record must not stop sync on every Mac.
+            quarantinedRecordNames.insert(wire.recordName)
+            return false
+        }
+        if state.records[wire.recordName] == nil, state.records.count >= recordLimit {
             quarantinedRecordNames.insert(wire.recordName)
             return false
         }

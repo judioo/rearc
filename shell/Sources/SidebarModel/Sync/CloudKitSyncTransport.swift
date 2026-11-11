@@ -200,7 +200,7 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, CKSyncEngineDele
     }
 
     static func wire(from record: CKRecord) -> SyncWireRecord? {
-        guard let data = record.encryptedValues["payload"] as? Data,
+        guard let data = record.encryptedValues["payload"] as? Data, data.count <= 1 << 20,
               let payload = try? SyncRecordPayload.decode(data) else { return nil }
         return SyncWireRecord(recordName: record.recordID.recordName, payload: payload, serverTag: systemFields(of: record))
     }
