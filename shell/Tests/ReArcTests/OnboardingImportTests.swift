@@ -219,8 +219,8 @@ final class OnboardingImportTests: XCTestCase {
         let card = model.membershipCard.ensureLoaded()
         XCTAssertEqual(card.title, "STATUESQUE HUNTER")
         XCTAssertEqual(card.shape, 4)
-        XCTAssertFalse(card.hasArcHistory, "Arc dates are not read from its token file")
-        XCTAssertEqual(model.membershipCardName, model.accountName, "profile name until Act 1 gives one")
+        XCTAssertTrue(card.hasArcHistory)
+        XCTAssertEqual(model.membershipCardName, "Akilu", "Arc's name until Act 1 gives one")
         model.recordOnboardingName("  Ada ")
         XCTAssertEqual(model.membershipCardName, "Ada")
     }

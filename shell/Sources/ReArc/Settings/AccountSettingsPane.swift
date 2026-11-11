@@ -41,6 +41,9 @@ struct AccountSettingsPane: View {
             canImportArc = model.canImportArcMembershipCard()
             model.membershipCard.accountTabAppeared(reduceMotion: reduceMotion)
         }
+        .onChange(of: model.membershipCard.card) {
+            canImportArc = model.canImportArcMembershipCard()
+        }
         .alert("Change Name", isPresented: $renaming) {
             TextField("Name", text: $nameDraft)
             Button("Cancel", role: .cancel) {}
@@ -106,7 +109,7 @@ struct AccountSettingsPane: View {
 
     private func importFromArc() {
         guard model.importArcMembershipCardFromArc() else { return NSSound.beep() }
-        canImportArc = false
+        canImportArc = model.canImportArcMembershipCard()
         model.membershipCard.playTransition(reduceMotion: reduceMotion)
     }
 

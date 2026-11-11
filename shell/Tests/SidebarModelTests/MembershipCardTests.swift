@@ -178,18 +178,18 @@ final class MembershipCardTests: XCTestCase {
         """.utf8)
     }
 
-    func testArcsCardImportsWithoutAuthFields() throws {
-        let imported = try XCTUnwrap(ArcMembershipCardImport.read(card: arcCard))
+    func testArcsCardImportsOnlyNameAndMemberSinceFromAuth() throws {
+        let imported = try XCTUnwrap(ArcMembershipCardImport.read(card: arcCard, auth: arcAuth))
         XCTAssertEqual(imported.title, "STATUESQUE HUNTER")
         XCTAssertEqual(imported.palette, 6)
         XCTAssertEqual(imported.shape, 2)
         XCTAssertEqual(imported.seed, [10, 7, 9, 14, 7, 3, 9, 7, 4, 1, 4, 12, 14, 9, 7])
-        XCTAssertNil(imported.name)
-        XCTAssertNil(imported.memberSince)
+        XCTAssertEqual(imported.name, "Akilu")
+        XCTAssertEqual(imported.memberSince, Date(timeIntervalSinceReferenceDate: 738929101.8))
     }
 
     func testNothingElseFromTheAuthFileIsKeptOrStored() throws {
-        let imported = try XCTUnwrap(ArcMembershipCardImport.read(card: arcCard))
+        let imported = try XCTUnwrap(ArcMembershipCardImport.read(card: arcCard, auth: arcAuth))
         // The import holds nothing but its six fields...
         let fields = Set(Mirror(reflecting: imported).children.compactMap(\.label))
         XCTAssertEqual(fields, ["title", "palette", "shape", "seed", "memberSince", "name"])
@@ -219,8 +219,8 @@ final class MembershipCardTests: XCTestCase {
         XCTAssertNil(ArcMembershipCardImport.load(from: support))
         try arcCard.write(to: arc.appendingPathComponent(ArcMembershipCardImport.cardFileName))
         let imported = try XCTUnwrap(ArcMembershipCardImport.load(from: support))
-        XCTAssertNil(imported.memberSince)
-        XCTAssertNil(imported.name)
+        XCTAssertEqual(imported.memberSince, Date(timeIntervalSinceReferenceDate: 738929101.8))
+        XCTAssertEqual(imported.name, "Akilu")
         XCTAssertEqual(imported.title, "STATUESQUE HUNTER")
     }
 
@@ -249,20 +249,63 @@ final class MembershipCardTests: XCTestCase {
 
     func testApplyingTheImportSetsUpTheTransition() throws {
         let fresh = MembershipCard.fresh(now: date(2026, 11, 8))
-        let imported = try XCTUnwrap(ArcMembershipCardImport.read(card: arcCard))
+        let imported = try XCTUnwrap(ArcMembershipCardImport.read(card: arcCard, auth: arcAuth))
         let card = imported.applied(to: fresh)
         XCTAssertEqual(card.title, "STATUESQUE HUNTER")
         XCTAssertEqual(card.titleSource, .arc)
         XCTAssertEqual(card.shape, 2)
         XCTAssertEqual(card.arcPalette, 6, "the Arc-era card's colours")
         XCTAssertEqual(card.palette, 0, "after the transition, the theme's")
-        XCTAssertNil(card.arcName)
+        XCTAssertEqual(card.arcName, "Akilu")
         XCTAssertEqual(card.rearcMemberSince, fresh.rearcMemberSince, "ReArc's date is set once")
-        XCTAssertFalse(card.hasArcHistory)
-        XCTAssertTrue(card.transitionShown)
+        XCTAssertTrue(card.hasArcHistory)
+        XCTAssertFalse(card.transitionShown)
         // A card file without a member-since date has no story to tell.
         let titleOnly = ArcMembershipCardImport(title: "A B").applied(to: fresh)
         XCTAssertTrue(titleOnly.transitionShown)
+    }
+
+    func testReimportRestoresRandomizedDesignAndUpgradesHistoryWithoutDuplicates() throws {
+        let imported = try XCTUnwrap(ArcMembershipCardImport.read(card: arcCard, auth: arcAuth))
+        let designOnly = try XCTUnwrap(ArcMembershipCardImport.read(card: arcCard))
+        let fresh = MembershipCard.fresh(now: date(2026, 11, 8))
+        var card = designOnly.applied(to: fresh)
+        XCTAssertFalse(imported.isApplied(to: card), "builds 544/564 can recover history")
+        card = imported.applied(to: card)
+        XCTAssertTrue(imported.isApplied(to: card))
+        XCTAssertTrue(card.hasArcHistory)
+        XCTAssertEqual(imported.applied(to: card), card, "import is idempotent")
+        card.randomize()
+        XCTAssertFalse(imported.isApplied(to: card))
+        card = imported.applied(to: card)
+        XCTAssertEqual(card, imported.applied(to: fresh))
+        XCTAssertEqual(card.seed.count, MembershipCard.blobCount)
+    }
+
+    func testMissingOrMalformedAuthStillImportsDesign() throws {
+        for auth in [Data? .none, Data("not JSON".utf8), Data(#"{"session":{"user":{"createdAt":"bad"}}}"#.utf8)] {
+            let imported = try XCTUnwrap(ArcMembershipCardImport.read(card: arcCard, auth: auth))
+            XCTAssertNil(imported.memberSince)
+            XCTAssertNil(imported.name)
+            XCTAssertEqual(imported.title, "STATUESQUE HUNTER")
+        }
+        XCTAssertNil(ArcMembershipCardImport.read(card: nil, auth: arcAuth))
+        // One bad field leaves the other; a non-positive date is no date.
+        let badDate = Data(#"{"session":{"user":{"createdAt":"bad","name":"  Akilu  "}}}"#.utf8)
+        XCTAssertEqual(ArcMembershipCardImport.read(card: arcCard, auth: badDate)?.name, "Akilu")
+        let zero = Data(#"{"session":{"user":{"createdAt":0,"name":7}}}"#.utf8)
+        XCTAssertNil(ArcMembershipCardImport.read(card: arcCard, auth: zero)?.memberSince)
+        XCTAssertNil(ArcMembershipCardImport.read(card: arcCard, auth: zero)?.name)
+    }
+
+    func testAnUntitledArcCardStillImportsItsDesignAndHistory() throws {
+        let untitled = Data(#"{"paletteNumber": 3, "shapeName": "Shape1"}"#.utf8)
+        let imported = try XCTUnwrap(ArcMembershipCardImport.read(card: untitled, auth: arcAuth))
+        XCTAssertNil(imported.title)
+        XCTAssertEqual(imported.palette, 3)
+        XCTAssertEqual(imported.name, "Akilu")
+        XCTAssertNotNil(imported.memberSince)
+        XCTAssertNil(ArcMembershipCardImport.read(card: Data("{}".utf8), auth: arcAuth), "an empty card is no card")
     }
 
     // MARK: Palettes and blobs

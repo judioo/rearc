@@ -506,11 +506,12 @@ public struct MembershipCardPalette: Equatable, Sendable {
 
 // MARK: Import from Arc
 
-/// Imports title, palette, shape and blob numbers from Arc's membership card.
-/// Never opens StorableAuthState.json: that file holds session tokens. Arc's
-/// name and member-since date are no longer imported; the card uses the
-/// onboarding/profile name and ReArc's own start date. Existing saved Arc
-/// history still works. Arc's files are never written.
+/// Imports Arc's card design and only `session.user.createdAt` (Apple reference
+/// date seconds) and `session.user.name` from StorableAuthState.json, to retain
+/// the member's history and card name. Current Arc stores no tokens there;
+/// the decoder stays field-limited in case that changes (F-21). Both files
+/// are capped at 1 MB; no other auth fields are retained, logged or written.
+/// Arc's files are never written.
 public struct ArcMembershipCardImport: Equatable, Sendable {
     public static let cardFileName = "StorableMembershipCard.json"
     public static let authFileName = "StorableAuthState.json"
@@ -537,7 +538,10 @@ public struct ArcMembershipCardImport: Equatable, Sendable {
         self.name = name
     }
 
-    public var isEmpty: Bool { title == nil && memberSince == nil && name == nil }
+    public var isEmpty: Bool { !hasDesign && memberSince == nil && name == nil }
+
+    /// Whether Arc's card file gave anything: an auth file alone is no card.
+    var hasDesign: Bool { title != nil || palette != nil || shape != nil || !seed.isEmpty }
 
     /// Arc's folder in Application Support.
     public static func folder(in applicationSupport: URL) -> URL {
@@ -552,7 +556,8 @@ public struct ArcMembershipCardImport: Equatable, Sendable {
 
     public static func load(from applicationSupport: URL) -> ArcMembershipCardImport? {
         let folder = folder(in: applicationSupport)
-        return read(card: smallFile(folder.appendingPathComponent(cardFileName)))
+        guard let card = smallFile(folder.appendingPathComponent(cardFileName)), read(card: card) != nil else { return nil }
+        return read(card: card, auth: smallFile(folder.appendingPathComponent(authFileName)))
     }
 
     static func smallFile(_ url: URL) -> Data? {
@@ -561,7 +566,7 @@ public struct ArcMembershipCardImport: Equatable, Sendable {
     }
 
     /// Nil when the card gives nothing.
-    public static func read(card: Data?) -> ArcMembershipCardImport? {
+    public static func read(card: Data?, auth: Data? = nil) -> ArcMembershipCardImport? {
         var result = ArcMembershipCardImport()
         if let card, let state = try? JSONDecoder().decode(CardState.self, from: card) {
             result.title = state.title.flatMap(MembershipCardTitle.sanitized)
@@ -569,7 +574,16 @@ public struct ArcMembershipCardImport: Equatable, Sendable {
             result.shape = state.shapeName.flatMap(shapeNumber)
             result.seed = Array((state.backgroundBlobInfo ?? []).prefix(MembershipCard.blobCount)).map { max(0, min($0, 99)) }
         }
-        return result.isEmpty ? nil : result
+        guard result.hasDesign else { return nil }
+        if let auth, auth.count <= maximumFileSize,
+           let user = (try? JSONDecoder().decode(AuthState.self, from: auth))?.session?.user {
+            result.memberSince = user.createdAt.flatMap { $0.isFinite && $0 > 0 ? Date(timeIntervalSinceReferenceDate: $0) : nil }
+            result.name = user.name.flatMap { name in
+                let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : String(trimmed.prefix(40))
+            }
+        }
+        return result
     }
 
     /// "Shape2" → 2.
@@ -599,6 +613,50 @@ public struct ArcMembershipCardImport: Equatable, Sendable {
         card.palette = 0
         card.transitionShown = !card.hasArcHistory
         return card
+    }
+
+    /// Compare only imported design/history, ignoring local name and transition progress.
+    public func isApplied(to card: MembershipCard) -> Bool {
+        let restored = applied(to: card)
+        return card.title == restored.title && card.titleSource == restored.titleSource
+            && card.shape == restored.shape && card.arcPalette == restored.arcPalette
+            && card.seed == restored.seed && card.palette == restored.palette
+            && card.arcMemberSince == restored.arcMemberSince && card.arcName == restored.arcName
+    }
+
+    /// Only the path to the two fields; every other key is skipped unread,
+    /// and a field of the wrong type is dropped on its own.
+    private struct AuthState: Decodable {
+        var session: Session?
+
+        init(from decoder: Decoder) throws {
+            session = try? decoder.container(keyedBy: CodingKeys.self).decode(Session.self, forKey: .session)
+        }
+
+        enum CodingKeys: String, CodingKey { case session }
+
+        struct Session: Decodable {
+            var user: User?
+
+            init(from decoder: Decoder) throws {
+                user = try? decoder.container(keyedBy: CodingKeys.self).decode(User.self, forKey: .user)
+            }
+
+            enum CodingKeys: String, CodingKey { case user }
+        }
+
+        struct User: Decodable {
+            var createdAt: Double?
+            var name: String?
+
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                createdAt = try? c.decode(Double.self, forKey: .createdAt)
+                name = try? c.decode(String.self, forKey: .name)
+            }
+
+            enum CodingKeys: String, CodingKey { case createdAt, name }
+        }
     }
 
     private struct CardState: Decodable {

@@ -129,9 +129,10 @@ extension BrowserViewModel {
         membershipCard.update { $0 = imported.applied(to: $0) }
     }
 
-    /// The card offers Import from Arc while it has no Arc story and Arc's files are there.
+    /// Offer import whenever Arc's available design or history differs from this card.
     func canImportArcMembershipCard(applicationSupport: URL = BrowserImportDiscovery.applicationSupport) -> Bool {
-        !membershipCard.ensureLoaded().hasArcHistory && membershipCard.ensureLoaded().titleSource != .arc && ArcMembershipCardImport.exists(in: applicationSupport)
+        guard let imported = ArcMembershipCardImport.load(from: applicationSupport) else { return false }
+        return !imported.isApplied(to: membershipCard.ensureLoaded())
     }
 
     /// The card's Import from Arc; false when Arc's files gave nothing.

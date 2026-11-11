@@ -129,6 +129,12 @@ final class SettingsCardShellTests: XCTestCase {
         XCTAssertTrue(model.canImportArcMembershipCard(applicationSupport: support))
         XCTAssertTrue(model.importArcMembershipCardFromArc(applicationSupport: support))
         XCTAssertFalse(model.canImportArcMembershipCard(applicationSupport: support), "imported: no second offer")
+        model.randomizeMembershipCard()
+        XCTAssertTrue(model.canImportArcMembershipCard(applicationSupport: support))
+        XCTAssertTrue(model.importArcMembershipCardFromArc(applicationSupport: support))
+        XCTAssertFalse(model.canImportArcMembershipCard(applicationSupport: support))
+        model.membershipCard.update { $0.arcMemberSince = nil }
+        XCTAssertTrue(model.canImportArcMembershipCard(applicationSupport: support), "recover history from older imports")
     }
 
     func testTheDownloadIsTheCardAtFourTimesOnItsBackdrop() throws {
