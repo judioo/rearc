@@ -80,9 +80,12 @@ GN_ARGS=(
   'generate_about_credits=true'
   'is_debug=false' 'is_component_build=false' 'dcheck_always_on=false'
   'enable_dsyms=true' 'enable_stripping=true'
-  # Chromium's field-trial testing config is for its bots: it switches on unlaunched features
-  # (among them the Safe Browsing v5 lists, which Google does not serve to our key).
-  'disable_fieldtrial_testing_config=true'
+  # The engine keeps Chromium's field-trial testing config (no disable_fieldtrial_testing_config).
+  # Builds 500 to 564 ran it, and features leave marks in profiles: with it off, 602 aborted on
+  # the keyword database and 605 switched local storage and IndexedDB back to an older format,
+  # which emptied both for existing profiles. The shell turns off the one feature that breaks
+  # ReArc (Safe Browsing v5 lists). Do not change the engine's feature set without the
+  # upgrade check reading stored site data back (RELEASE.md, "Upgrade check").
   "branding_file_path=\"$GENERATED_BRANDING\""
 )
 printf '=== gn gen %s (overlay %s) ===\nargs: %s\n' "$OUT_DIR" "$(git rev-parse --short=10 HEAD)" "${GN_ARGS[*]}"

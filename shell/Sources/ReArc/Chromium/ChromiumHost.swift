@@ -37,7 +37,7 @@ enum ChromiumHost {
                     defaultUserDataDir(selfTest: options.selfTest || options.launchProbePath != nil || options.bench != nil).path
                 },
                 keychain: keychain
-            ) + [ChromiumLaunchArguments.persistedProfileFeatures]
+            ) + [ChromiumLaunchArguments.persistedProfileFeatures, ChromiumLaunchArguments.disabledEngineFeatures]
             let runtime = ChromiumRuntime.shared
             if options.selfTest {
                 let test = ChromiumSelfTest(runtime: runtime)
