@@ -31,6 +31,10 @@ if [[ -n ${STUB_CRASH:-} ]]; then
   printf '{"procPath" : "\\/Users\\/USER\\/x\\/ReArc.app\\/Contents\\/Frameworks\\/Chromium Helper"}' \
     > "$REARC_TEST_REPORTS/Chromium Helper (Renderer)-$RANDOM.ips"
 fi
+if [[ -n ${STUB_DUMP:-} ]]; then
+  mkdir -p "$REARC_CRASHPAD_DIRS/completed"
+  printf 'MDMP /Applications/%s/Contents/Frameworks/x' "$STUB_DUMP" > "$REARC_CRASHPAD_DIRS/completed/$RANDOM.dmp"
+fi
 if [[ -n ${STUB_WATCHDOG:-} ]]; then echo "Teardown watchdog expired"; exit 1; fi
 echo "launch probe: ReArcEngineRun returned 0, shutdown ok"
 """
@@ -59,8 +63,10 @@ class CheckLaunchTests(unittest.TestCase):
         self.baseline = root / "baseline.txt"
         tmp = root / "tmp"
         tmp.mkdir()
+        self.crashpad = root / "Crashpad"
         self.env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", TMPDIR=str(tmp),
-                        REARC_CRASH_REPORTS=str(self.reports), REARC_TEST_REPORTS=str(self.reports))
+                        REARC_CRASH_REPORTS=str(self.reports), REARC_TEST_REPORTS=str(self.reports),
+                        REARC_CRASHPAD_DIRS=str(self.crashpad))
 
     def tearDown(self):
         self.temp.cleanup()
@@ -92,6 +98,15 @@ class CheckLaunchTests(unittest.TestCase):
         self.assertFalse(self.baseline.exists(), "refused before the crash baseline or any launch")
         (self.app / "Contents" / "Info.plist").write_text(SHIPPED_PLIST % "<key>ReArcReleaseVerification</key><true/>")
         self.assertEqual(self.run_check().returncode, 0, "the bundle release.sh is verifying runs")
+
+    def test_a_helper_minidump_in_crashpad_fails(self):
+        # RC-0.1.0-602 T-11: renderer and GPU crashes go to Crashpad, not DiagnosticReports.
+        result = self.run_check(STUB_DUMP="ReArc.app")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("new Chromium crash dump", result.stderr)
+
+    def test_another_chromiums_minidump_is_ignored(self):
+        self.assertEqual(self.run_check(STUB_DUMP="Chromium.app").returncode, 0)
 
     def test_other_browsers_helper_reports_are_ignored(self):
         self.run_check()  # writes the baseline

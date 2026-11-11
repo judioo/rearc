@@ -1,11 +1,11 @@
-"""check-safe-browsing.sh against a stub app and a stub `open`: no LaunchServices, no ReArc."""
+"""check-safe-browsing-lists.sh against a stub app and a stub `open`: no LaunchServices, no ReArc."""
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "check-safe-browsing.sh"
+SCRIPT = Path(__file__).resolve().parents[1] / "check-safe-browsing-lists.sh"
 
 # Stands in for `open -n -g --env K=V --stdout F --stderr F -a APP --args ...`: runs the
 # app's executable in the background with that environment, as LaunchServices would.
@@ -36,7 +36,9 @@ printf 'data:%s\n' "$REARC_DATA_DIR" >> "$TEST_LOG"
 if [[ -n ${STUB_DELAY:-} ]]; then
   sleep "$STUB_DELAY" & wait $!
   mkdir -p "$REARC_DATA_DIR/Chromium/Safe Browsing"
-  head -c "${STUB_BYTES:-64}" /dev/zero > "$REARC_DATA_DIR/Chromium/Safe Browsing/UrlSoceng.store"
+  for list in ${STUB_LISTS:-UrlSoceng UrlMalware}; do
+    head -c "${STUB_BYTES:-64}" /dev/zero > "$REARC_DATA_DIR/Chromium/Safe Browsing/$list.store"
+  done
 fi
 while true; do sleep 1; done
 """
@@ -72,7 +74,7 @@ class CheckSafeBrowsingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="rearc-sb-test-") as temp:
             result, calls, tmp = self.run_check(Path(temp), STUB_DELAY="2")
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("PASS: 1 list store(s)", result.stdout)
+            self.assertIn("PASS: phishing and malware lists stored (2 list store(s))", result.stdout)
             self.assertIn("terminated", calls)
             args = next(c for c in calls if c.startswith("args:"))
             self.assertIn("--no-onboarding", args)
@@ -85,7 +87,7 @@ class CheckSafeBrowsingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="rearc-sb-test-") as temp:
             result, calls, _ = self.run_check(Path(temp), timeout="3", STUB_DELAY="60")
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("FAIL: no Safe Browsing list stored", result.stderr)
+            self.assertIn("FAIL: the phishing and malware lists were not both stored", result.stderr)
             self.assertIn("terminated", calls)
             data = next(c for c in calls if c.startswith("data:"))[5:]
             self.assertTrue(Path(data).exists(), "kept for inspection")
@@ -94,6 +96,13 @@ class CheckSafeBrowsingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="rearc-sb-test-") as temp:
             result, _, _ = self.run_check(Path(temp), timeout="4", STUB_DELAY="1", STUB_BYTES="0")
             self.assertNotEqual(result.returncode, 0)
+
+    def test_other_lists_alone_are_not_enough(self):
+        # RC-0.1.0-602 T-11: the gate's name says phishing and malware lists; others are not that.
+        with tempfile.TemporaryDirectory(prefix="rearc-sb-test-") as temp:
+            result, _, _ = self.run_check(Path(temp), timeout="4", STUB_DELAY="1", STUB_LISTS="UrlBilling UrlSoceng")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("(2 list store(s))", result.stderr)
 
     def test_fails_when_the_instance_exits_early(self):
         with tempfile.TemporaryDirectory(prefix="rearc-sb-test-") as temp:

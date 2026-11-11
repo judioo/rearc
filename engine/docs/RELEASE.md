@@ -16,7 +16,7 @@ distribution.
 |---|---|
 | `build-engine-release.sh` | Optimized non-component engine in `out/ReArc-release-arm64`. Same preflight as `engine/scripts/build.sh`; never touches `out/ReArc-dev-arm64`. `--gen-only` runs just `gn gen`. |
 | `release.sh` | End to end from a built release engine: release shell build from committed HEAD, bundle, version stamp, nested signing, dSYMs, LaunchServices launch check, real-Keychain self-test, optional `--dmg`. Output `shell/dist/release`. |
-| `release.sh` verification mode | The gates run on the bundle signed with `ReArcReleaseVerification` in its Info.plist: only that release bundle takes `REARC_RELEASE_VERIFICATION=1` with `--rearc-selftest` or `--rearc-launch-probe`, a throwaway `REARC_DATA_DIR` or a `--user-data-dir`. After the gates `release.sh` removes the key and signs the bundle again, so the bundle that is notarized and shipped refuses to start with `REARC_DATA_DIR` or `--user-data-dir` and has no self-test or probe (security RC-0.1.0-602 T-04, F-03). For test launches on a throwaway data dir, build with `release.sh --qa`, which keeps the key and refuses `--dmg`, `--appcast` and `--notarize`. `check-launch.sh` and `check-safe-browsing.sh` refuse a shipped bundle. |
+| `release.sh` verification mode | The gates run on the bundle signed with `ReArcReleaseVerification` in its Info.plist: only that release bundle takes `REARC_RELEASE_VERIFICATION=1` with `--rearc-selftest` or `--rearc-launch-probe`, a throwaway `REARC_DATA_DIR` or a `--user-data-dir`. After the gates `release.sh` removes the key and signs the bundle again, so the bundle that is notarized and shipped refuses to start with `REARC_DATA_DIR` or `--user-data-dir` and has no self-test or probe (security RC-0.1.0-602 T-04, F-03). For test launches on a throwaway data dir, build with `release.sh --qa`, which keeps the key and refuses `--dmg`, `--appcast` and `--notarize`. `check-launch.sh` and `check-safe-browsing-lists.sh` refuse a shipped bundle. |
 | `bundle-chromium.sh` | Unchanged behavior for dev bundles. New: `--engine-out DIR` (same as `REARC_CHROMIUM_OUT`), and a monolithic engine build is accepted, with no dylib closure outside the bundle. Its build guard blocks only on a `siso ninja` of the out dir being bundled, so a release build no longer blocks dev bundles. |
 | `sign-release.sh` | Inside-out signing of an assembled monolithic bundle with hardened runtime, secure timestamps and Chromium's per-role entitlements; verifies. |
 | `make-dmg.sh` | Signed UDZO DMG: app, Applications link, volume icon, branded Finder background. |
@@ -83,10 +83,20 @@ load with no warning. The release engine therefore needs ReArc's own key:
   must be a real key, and the release framework must contain it. Otherwise it stops
   unless `--allow-no-safe-browsing` is given.
 - A key in the build does not prove the lists download. After the self-test, `release.sh
-  --dmg` runs `scripts/release/check-safe-browsing.sh`: it launches the signed app in the
+  --dmg` runs `scripts/release/check-safe-browsing-lists.sh`: it launches the signed app in the
   background (`open -n -g`, `--no-onboarding`, a throwaway `REARC_DATA_DIR`), waits up to
-  6 minutes for a non-empty `*.store` in `<data>/Chromium/Safe Browsing`, then quits that
-  instance. No list fails the release. `--allow-no-safe-browsing` skips this check too.
+  6 minutes for non-empty `UrlSoceng.store` and `UrlMalware.store` (the phishing and malware
+  lists) in `<data>/Chromium/Safe Browsing`, then quits that instance. Without both the release
+  fails. `--allow-no-safe-browsing` skips this check too. The gate checks the lists only: it
+  loads no test page, so check Google's phishing test page shows the warning by hand once per
+  engine update (security RC-0.1.0-602 T-11).
+- The field-trial gate reads the generated build-flag header and then the framework itself:
+  `scripts/release/check-fieldtrial-binary.py` fails when more than half of the macOS study
+  names in `testing/variations/fieldtrial_testing_config.json` are in the binary as their own
+  strings (build 562 had all 551, the rebuilt engine 58).
+- `check-launch.sh` also counts minidumps under `~/Library/Application Support/Chromium/Crashpad`
+  (and the probe profile's `Crashpad`) that name `ReArc.app`: helper crashes never reach
+  DiagnosticReports.
   The check needs the network, and a firewall prompt for the new copy's helpers stalls it.
 - At run time the shell asks the engine (`ReArcEngineSafeBrowsingAvailable`, ABI 1.57) and
   then looks at the same folder: Settings › Profiles shows Safe Browsing as Unavailable (no

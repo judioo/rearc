@@ -92,6 +92,11 @@ if [[ $DMG == 1 ]]; then
   # The engine must not run Chromium's field-trial testing config (RELEASE.md, "Engine build").
   grep -q 'BUILDFLAG_INTERNAL_FIELDTRIAL_TESTING_ENABLED() (0)' "$OUT/gen/components/variations/service/buildflags.h" 2>/dev/null \
     || die "the release engine was built with Chromium's field-trial testing config; rebuild it with disable_fieldtrial_testing_config=true (scripts/build-engine-release.sh)"
+  # The header is what the build asked for; the framework is what ships (RC-0.1.0-602 T-11).
+  python3 -I "$SHELL_DIR/scripts/release/check-fieldtrial-binary.py" \
+    "$OUT/Chromium.app/Contents/Frameworks/Chromium Framework.framework/Chromium Framework" \
+    "$REPO/engine/chromium/src/testing/variations/fieldtrial_testing_config.json" \
+    || die "the release engine binary carries Chromium's field-trial testing config; rebuild it with disable_fieldtrial_testing_config=true"
   pinned="$(awk '!/^[[:space:]]*(#|$)/ {v=$0} END {print v}' "$REPO/engine/CHROMIUM_PIN")"
   built="$(plutil -extract CFBundleShortVersionString raw "$OUT/Chromium.app/Contents/Info.plist")"
   [[ "$built" == "$pinned" ]] || die "engine output $built does not match CHROMIUM_PIN $pinned; rebuild the release engine"
@@ -226,13 +231,14 @@ fi
 
 # 5b. Safe Browsing must actually download its lists (security RC-0.1.0-544 F-02): a key that
 #     is present but refused, or a list protocol Google does not serve, ships silent otherwise.
-#     Runs for every DMG, --no-verify included; only --allow-no-safe-browsing skips it.
+#     Runs for every DMG, --no-verify included; only --allow-no-safe-browsing skips it. It checks
+#     that the phishing and malware lists are stored, not that a warning page shows (T-11).
 if [[ $DMG == 1 ]]; then
   if [[ $ALLOW_NO_SAFE_BROWSING == 1 ]]; then
     echo "==> WARNING: --allow-no-safe-browsing: Safe Browsing list downloads were NOT checked" >&2
   else
-    "$SHELL_DIR/scripts/release/check-safe-browsing.sh" "$APP" 2>&1 | tee "$DIST/check-safe-browsing.log" \
-      || die "Safe Browsing stored no lists (log $DIST/check-safe-browsing.log); pass --allow-no-safe-browsing only for a build that is not distributed"
+    "$SHELL_DIR/scripts/release/check-safe-browsing-lists.sh" "$APP" 2>&1 | tee "$DIST/check-safe-browsing-lists.log" \
+      || die "Safe Browsing stored no phishing and malware lists (log $DIST/check-safe-browsing-lists.log); pass --allow-no-safe-browsing only for a build that is not distributed"
   fi
 fi
 

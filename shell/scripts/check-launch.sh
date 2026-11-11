@@ -32,8 +32,25 @@ fi
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rearc-launch-check.XXXXXX")"
 LINK="http://127.0.0.1:9/rearc-launch-check"
 REPORTS="${REARC_CRASH_REPORTS:-$HOME/Library/Logs/DiagnosticReports}"
-# The app and its helpers (which keep Chromium's names) and crashpad.
-reports() { ls "$REPORTS" 2>/dev/null | grep -E '^(ReArc|Chromium Helper|chrome_crashpad_handler)' || true; }
+# Renderer, GPU and utility crashes never reach DiagnosticReports: Chromium's handler writes them
+# as minidumps under the default user data dir's Crashpad folder, whatever --user-data-dir says
+# (chrome_paths.cc DIR_CRASH_DUMPS), for this unbranded engine ~/Library/Application
+# Support/Chromium/Crashpad (security RC-0.1.0-602 T-11). Colon-separated; tests override it.
+CRASHPAD="${REARC_CRASHPAD_DIRS:-$HOME/Library/Application Support/Chromium/Crashpad}"
+# The app and its helpers (which keep Chromium's names) and crashpad; then minidumps.
+reports() {
+  ls "$REPORTS" 2>/dev/null | grep -E '^(ReArc|Chromium Helper|chrome_crashpad_handler)' || true
+  local dirs dir
+  IFS=: read -ra dirs <<<"$CRASHPAD"
+  for dir in "${dirs[@]}" "$WORK"/profile-*/Crashpad; do
+    [[ -d $dir ]] && find "$dir" -type f -name '*.dmp' 2>/dev/null | sed 's|^|crashpad:|'
+  done
+  return 0
+}
+# A minidump names its modules' paths (UTF-16): one of this ReArc.app's, not another Chromium's.
+rearc_dump() {
+  python3 -I -c 'import sys; d = open(sys.argv[1], "rb").read(); sys.exit(0 if b"ReArc.app" in d or "ReArc.app".encode("utf-16-le") in d else 1)' "$1"
+}
 [[ -n $BASELINE ]] || BASELINE="$WORK/crash-baseline"
 [[ -f $BASELINE ]] || reports >"$BASELINE"
 failed=0
@@ -80,7 +97,12 @@ probe link "$LINK"
 # reports are anonymised, but the bundle name stays).
 while IFS= read -r report; do
   [[ -n $report ]] || continue
-  if [[ $report == ReArc* ]] || grep -q 'ReArc\.app' "$REPORTS/$report" 2>/dev/null; then
+  if [[ $report == crashpad:* ]]; then
+    if rearc_dump "${report#crashpad:}"; then
+      echo "check-launch: new Chromium crash dump ${report#crashpad:}" >&2
+      failed=1
+    fi
+  elif [[ $report == ReArc* ]] || grep -q 'ReArc\.app' "$REPORTS/$report" 2>/dev/null; then
     echo "check-launch: new crash report $REPORTS/$report" >&2
     failed=1
   fi
