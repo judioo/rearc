@@ -446,6 +446,8 @@ struct MiniSpaceHeaderView: View {
         .fixedSize()
         .frame(maxWidth: .infinity, alignment: .leading)
         .onHover { isHovering = $0 }
+        // A right-click opens the same menu, as on the full header.
+        .contextMenu { menu }
         .help(space.name)
         .accessibilityLabel("Space: \(space.name)")
         .accessibilityHint("Opens the space menu")
