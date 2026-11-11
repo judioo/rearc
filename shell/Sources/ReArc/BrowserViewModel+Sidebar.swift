@@ -501,9 +501,12 @@ extension BrowserViewModel {
         case .profile(let id):
             let profile = store.profile(withID: id)
             let count = store.spaces(in: id).count
-            return ("Delete “\(profile?.name ?? "Profile")”?",
-                    "Its \(count) space\(count == 1 ? "" : "s"), favorites and browsing data are deleted. This cannot be undone.",
-                    "Delete Profile")
+            let spaces = "\(count) space\(count == 1 ? "" : "s")"
+            // The dialog says what happens: a container on the startup folder keeps its data (S-07).
+            let message = profileKeepsDataOnDelete?(id) == true
+                ? "Its \(spaces) and favorites are deleted. Its browsing data stays on this Mac: it is in the first profile's folder, which ReArc never removes. This cannot be undone."
+                : "Its \(spaces), favorites and browsing data are deleted. This cannot be undone."
+            return ("Delete “\(profile?.name ?? "Profile")”?", message, "Delete Profile")
         case nil:
             return ("", "", "")
         }

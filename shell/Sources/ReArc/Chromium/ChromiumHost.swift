@@ -346,6 +346,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             self.menuKeyEquivalents.apply(model.shortcutOverrides, to: menu)
         }
         if model.appIcon != .standard { model.appIcon.apply() }
+        model.profileKeepsDataOnDelete = { [runtime] id in runtime.keepsDataOnDelete(id) }
         model.onProfileDeleted = { [weak self, runtime] id, littleArcs in
             // EngineHost already dropped the profile's engines. Its private windows and
             // Little ReArc windows close first (their off-the-record children must go

@@ -111,4 +111,36 @@ final class ProfileDataRemovalTests: XCTestCase {
         adopted.recordDirectory("Default", for: deleted)
         XCTAssertNil(ChromiumProfileDeletions.directoryName(for: deleted, map: adopted), "the startup directory stays")
     }
+
+    /// RC-0.1.0-602 S-07: a deleted container recreated before a restart keeps its folder.
+    func testAProfileOpenedAgainIsNoLongerScheduled() throws {
+        let fm = FileManager.default
+        let udd = fm.temporaryDirectory.appendingPathComponent("rearc-s07b-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: udd, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: udd) }
+        let back = UUID(), gone = UUID()
+        let backName = try XCTUnwrap(ChromiumProfileDeletions.directoryName(for: back, map: ChromiumProfileStorageMap()))
+        let goneName = try XCTUnwrap(ChromiumProfileDeletions.directoryName(for: gone, map: ChromiumProfileStorageMap()))
+        for name in [backName, goneName] {
+            try fm.createDirectory(at: udd.appendingPathComponent(name), withIntermediateDirectories: true)
+            ChromiumProfileDeletions.schedule(name, in: udd)
+        }
+        ChromiumProfileDeletions.unschedule(backName, in: udd)
+        XCTAssertEqual(ChromiumProfileDeletions.run(in: udd), [goneName])
+        XCTAssertTrue(fm.fileExists(atPath: udd.appendingPathComponent(backName).path))
+    }
+
+    @MainActor
+    func testTheDeleteDialogSaysWhenTheDataStays() {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-s07-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let model = BrowserViewModel(store: SidebarStore(), persistence: SidebarFilePersistence(fileURL: file), faviconStore: FaviconStore(directory: nil))
+        defer { model.persistence.stop() }
+        let other = model.store.addProfile(name: "Work")
+        model.pendingDeletion = .profile(other.id)
+        XCTAssertTrue(model.pendingDeletionMessage.message.contains("browsing data are deleted"))
+        model.profileKeepsDataOnDelete = { $0 == other.id }
+        XCTAssertTrue(model.pendingDeletionMessage.message.contains("browsing data stays"))
+        model.pendingDeletion = nil
+    }
 }

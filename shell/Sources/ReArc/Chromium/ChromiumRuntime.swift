@@ -994,6 +994,18 @@ final class ChromiumRuntime {
     private func applyPersistentOpenPlan(_ plan: ChromiumProfileStoragePlan, profileID: Profile.ID,
                                          finish: @escaping (ReArcStatus, UInt64, Bool) -> Void) {
         let key = ChromiumProfileKey.persistent(profileID)
+        // A profile opened again (a deleted container's UUID back through sync before a
+        // restart) keeps its folder: the next launch must not delete the one in use (RC-0.1.0-602 S-07).
+        if let userDataDir {
+            switch plan {
+            case .named(let name), .keepNamed(let name):
+                ChromiumProfileDeletions.unschedule(ChromiumProfileStoragePlan.namedDirectoryName(forKey: name), in: userDataDir)
+            case .directory(let token):
+                ChromiumProfileDeletions.unschedule(token, in: userDataDir)
+            default:
+                break
+            }
+        }
         switch plan {
         case .named(let name):
             openNamed(name, finish: finish)
@@ -1050,6 +1062,11 @@ final class ChromiumRuntime {
             token.withCString { open($0, callback, context) }
         }
         if status != .rearcOK { finish(status, 0, false) }
+    }
+
+    /// A container deleted now would keep its engine data (it uses the startup directory).
+    func keepsDataOnDelete(_ profileID: Profile.ID) -> Bool {
+        userDataDir != nil && ChromiumProfileDeletions.directoryName(for: profileID, map: storageMap) == nil
     }
 
     /// A deleted shell profile: its directory goes at the next launch, and the storage map

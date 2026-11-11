@@ -476,6 +476,9 @@ final class BrowserViewModel {
     /// Runs after a shell profile is deleted, to release its engine storage; with the
     /// Little ReArc windows it had open, which the store already forgot.
     @ObservationIgnored var onProfileDeleted: ((Profile.ID, [LittleArcWindow.ID]) -> Void)?
+    /// True for a container whose engine data stays when it is deleted: it took over the
+    /// startup `Default` folder (RC-0.1.0-602 S-07). Set by the Chromium host.
+    @ObservationIgnored var profileKeepsDataOnDelete: ((Profile.ID) -> Bool)?
     /// Open private windows; never persisted.
     var privateWindows: [UUID: PrivateWindowModel] = [:]
     var privateWindowOpenRequests: [UUID] = []

@@ -270,6 +270,14 @@ enum ChromiumProfileDeletions {
         try? JSONEncoder().encode(names).write(to: userDataDir.appendingPathComponent(fileName), options: .atomic)
     }
 
+    /// The directory is in use again: it is not removed at the next launch.
+    static func unschedule(_ name: String, in userDataDir: URL) {
+        var names = pending(in: userDataDir)
+        guard names.contains(name) else { return }
+        names.removeAll { $0 == name }
+        try? JSONEncoder().encode(names).write(to: userDataDir.appendingPathComponent(fileName), options: .atomic)
+    }
+
     /// Removes the scheduled directories (plain directories only, never a symlink) and the list.
     /// Returns what was removed.
     @discardableResult
