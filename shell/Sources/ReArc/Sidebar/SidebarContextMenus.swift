@@ -7,8 +7,19 @@ import SidebarModel
 struct TabContextMenu: View {
     let model: BrowserViewModel
     let tab: Tab
+    @Environment(\.sidebarWindow) private var window
 
     var body: some View {
+        let targets = model.store.menuTargets(for: tab.id, in: window)
+        if targets.count > 1 {
+            SelectionContextMenu(model: model, ids: targets)
+        } else {
+            singleTabMenu
+        }
+    }
+
+    @ViewBuilder
+    private var singleTabMenu: some View {
         let store = model.store
         let kind = store.kind(of: tab.id)
         let inSplit = store.splitContaining(tabID: tab.id) != nil
@@ -94,8 +105,19 @@ struct TabContextMenu: View {
 struct FolderContextMenu: View {
     let model: BrowserViewModel
     let folder: SidebarFolder
+    @Environment(\.sidebarWindow) private var window
 
     var body: some View {
+        let targets = model.store.menuTargets(for: folder.id, in: window)
+        if targets.count > 1 {
+            SelectionContextMenu(model: model, ids: targets)
+        } else {
+            singleFolderMenu
+        }
+    }
+
+    @ViewBuilder
+    private var singleFolderMenu: some View {
         let store = model.store
         let expanded = store.isFolderExpanded(folder.id)
         Button("Rename Folder…") { model.beginRename(.folder(folder.id)) }
@@ -119,8 +141,19 @@ struct SectionItemContextMenu: View {
     let entry: SidebarEntry
     /// The split pane right-clicked, for its own items.
     var paneID: Tab.ID? = nil
+    @Environment(\.sidebarWindow) private var window
 
     var body: some View {
+        let targets = model.store.menuTargets(for: entry.id, in: window)
+        if targets.count > 1 {
+            SelectionContextMenu(model: model, ids: targets)
+        } else {
+            singleItemMenu
+        }
+    }
+
+    @ViewBuilder
+    private var singleItemMenu: some View {
         let store = model.store
         if let spaceID = store.spaceContaining(entryID: entry.id),
            case .section(_, let section) = store.parent(of: entry.id) {
@@ -167,6 +200,70 @@ struct SectionItemContextMenu: View {
         case .tab, .folder:
             EmptyView()
         }
+    }
+}
+
+/// The menu of a row inside a multi-row selection: the single row's
+/// commands that make sense for several, acting on all of them in sidebar
+/// order. A right-click outside the selection gets that row's own menu
+/// (and the selection goes, `SidebarListController`).
+struct SelectionContextMenu: View {
+    let model: BrowserViewModel
+    let ids: [UUID]
+
+    var body: some View {
+        let store = model.store
+        let tabs = store.plainTabIDs(ids).filter { store.splitContaining(tabID: $0) == nil }
+        let today = tabs.filter { store.kind(of: $0) == .today }
+        let pinned = tabs.filter { store.kind(of: $0) == .pinned }
+        let spaceID = ids.first.flatMap { store.spaceContaining(entryID: $0) }
+
+        Button("Copy Links") { model.copyLinks(of: ids) }
+            .disabled(store.linkTabIDs(for: ids).isEmpty)
+        Button("Copy Links as Markdown") { model.copyLinks(of: ids, format: .markdown) }
+            .disabled(store.linkTabIDs(for: ids).isEmpty)
+        Divider()
+        if !today.isEmpty {
+            Button(today.count == 1 ? "Pin Tab" : "Pin \(today.count) Tabs") { model.pinTabs(today) }
+        }
+        if !pinned.isEmpty {
+            Button(pinned.count == 1 ? "Unpin Tab" : "Unpin \(pinned.count) Tabs") { model.unpinTabs(pinned) }
+        }
+        if !tabs.isEmpty {
+            Button("Add to Favorites") { model.addTabsToFavorites(tabs) }
+            Button(tabs.count == 1 ? "Duplicate" : "Duplicate \(tabs.count) Tabs") { model.duplicateTabs(tabs) }
+        }
+        if model.canOpenInSplitView(ids) {
+            Button("Open in Split View") { model.openInSplitView(ids) }
+        }
+        Divider()
+        if let spaceID {
+            Menu("Move to Folder") {
+                let outline = store.folderOutline(in: spaceID).filter { !ids.contains($0.folder.id) }
+                ForEach(outline, id: \.folder.id) { item in
+                    Button(String(repeating: "    ", count: item.depth) + item.folder.title) {
+                        model.moveItems(ids, intoFolder: item.folder.id)
+                    }
+                }
+                if !outline.isEmpty { Divider() }
+                Button("New Folder with Selection") { model.newFolder(withSelection: ids) }
+            }
+            let owner = store.space(withID: spaceID)?.profileID ?? store.activeProfileID
+            let otherSpaces = store.spaces(in: owner).filter { $0.id != spaceID }
+            if !otherSpaces.isEmpty {
+                Menu("Move to Space") {
+                    ForEach(otherSpaces) { space in
+                        Button(space.name) { model.moveItems(ids, toSpace: space.id) }
+                    }
+                }
+            }
+        }
+        Divider()
+        if !tabs.isEmpty {
+            Button(tabs.count == 1 ? "Archive Tab" : "Archive \(tabs.count) Tabs") { model.archiveTabs(tabs) }
+        }
+        Button(model.closeMenuTitle(for: ids)) { model.closeItems(ids) }
+            .disabled(tabs.isEmpty && !ids.contains { store.split(withID: $0) != nil })
     }
 }
 

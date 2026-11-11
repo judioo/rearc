@@ -74,6 +74,16 @@ struct SidebarEntryRow: View, Equatable {
 
     private func isSelected(_ id: UUID) -> Bool { model.store.isSelected(id, inSpace: spaceID) }
 
+    /// In this window's ⇧/⌘-click selection, drawn grey unless it is the active row.
+    private func isMultiSelected(_ id: UUID) -> Bool { model.store.isMultiSelected(id, in: window) }
+
+    /// A ⇧- or ⌘-click changes the selection instead of `action`.
+    private func click(_ id: UUID, _ action: @escaping () -> Void) -> () -> Void {
+        { [model, window] in
+            if !model.handleSelectionClick(on: id, in: window) { action() }
+        }
+    }
+
     @ViewBuilder
     private func entryRow(_ entry: SidebarEntry) -> some View {
         switch entry {
@@ -88,7 +98,7 @@ struct SidebarEntryRow: View, Equatable {
                 isUnloaded: model.isTabUnloaded(tab.id),
                 isInPictureInPicture: model.isPictureInPicture(tab.id),
                 activity: model.tabActivity(tab.id),
-                onSelect: { model.selectTab(tab.id) },
+                onSelect: click(tab.id) { model.selectTab(tab.id) },
                 onClose: { model.closeTab(tab.id) },
                 onMute: { model.toggleMute(tab.id) },
                 onPictureInPicture: { model.setPictureInPicture(false, tabID: tab.id) },
@@ -97,7 +107,8 @@ struct SidebarEntryRow: View, Equatable {
                 subtitle: model.renameHintSubtitle(for: tab.id),
                 closeKind: model.closeKind(of: tab.id),
                 onRename: { model.beginRename(.tab(tab.id)) },
-                rename: SidebarRowRename(row: tab.id, model: model)
+                rename: SidebarRowRename(row: tab.id, model: model),
+                isMultiSelected: isMultiSelected(tab.id)
             ) {
                 TabContextMenu(model: model, tab: tab)
             }
@@ -109,7 +120,8 @@ struct SidebarEntryRow: View, Equatable {
                 holdsOpenTabs: model.folderHoldsOpenTab(folder.id),
                 onCloseFolder: { model.closeFolderTabs(folder.id) },
                 rename: SidebarRowRename(row: folder.id, model: model),
-                onToggle: { model.store.toggleFolderExpanded(folder.id) }
+                isMultiSelected: isMultiSelected(folder.id),
+                onToggle: click(folder.id) { model.store.toggleFolderExpanded(folder.id) }
             ) {
                 FolderContextMenu(model: model, folder: folder)
             }
@@ -119,7 +131,7 @@ struct SidebarEntryRow: View, Equatable {
                 title: model.easelTitle(for: ref),
                 isNote: model.easelDocumentStore.document(id: ref.easelDocumentID)?.kind == .note,
                 isSelected: isSelected(ref.id),
-                onSelect: { model.selectEasel(ref.id) },
+                onSelect: click(ref.id) { model.selectEasel(ref.id) },
                 onClose: { model.deleteEaselSidebarItem(ref.id) },
                 onRename: { model.renameEasel(documentID: ref.easelDocumentID, title: $0) }
             )
@@ -129,12 +141,13 @@ struct SidebarEntryRow: View, Equatable {
                 split: split,
                 isSelected: isSelected(split.id),
                 isDropTarget: isDropInto,
+                isMultiSelected: isMultiSelected(split.id) && !isSelected(split.id),
                 focusedTabID: split.focusTabID,
                 favicon: { model.favicon(for: $0) },
                 showsAudibleIndicator: { model.showsAudibleIndicator(for: $0) },
                 onMutePane: { model.toggleMute($0) },
-                onSelectSplit: { model.selectSplit(split.id) },
-                onSelectPane: { model.selectSplit(split.id, focusTabID: $0) },
+                onSelectSplit: click(split.id) { model.selectSplit(split.id) },
+                onSelectPane: { pane in click(split.id) { model.selectSplit(split.id, focusTabID: pane) }() },
                 onCloseSplit: { model.closeSplit(split.id) },
                 onClosePane: { option, tabID in
                     if option {

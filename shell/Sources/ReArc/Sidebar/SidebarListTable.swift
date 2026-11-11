@@ -143,6 +143,10 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
     var hostsAllRows: Bool { isDragging || externalDrag }
     /// Tab cards and folder lists for rows under the pointer.
     private(set) lazy var hoverPreview = SidebarHoverPreview(controller: self)
+    /// Holds the keyboard while this list has a multi-row selection, so ⌘C
+    /// copies its links and Esc drops it; the page gets it back after.
+    private let selectionKeys = SidebarSelectionKeyView()
+    private weak var focusBeforeSelection: NSResponder?
 
     static let cellID = NSUserInterfaceItemIdentifier("SidebarListCell")
     static let plainCellID = NSUserInterfaceItemIdentifier("SidebarPlainRow")
@@ -203,6 +207,22 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
         rebuild(animated: false, reloadAll: true)
         trackSelection()
         observeInteraction(scroll)
+        selectionKeys.onCopy = { [weak self] in
+            guard let self, let ids = model.store.multiSelectedIDs(in: context.window) else { return false }
+            model.copyLinks(of: ids)
+            return true
+        }
+        selectionKeys.onCancel = { [weak self] in
+            guard let self else { return false }
+            guard model.store.multiSelection(in: context.window) != nil else { return false }
+            model.clearSelection(in: context.window)
+            return true
+        }
+        selectionKeys.hasSelection = { [weak self] in
+            self.map { $0.model.store.multiSelectedIDs(in: $0.context.window) != nil } ?? false
+        }
+        scroll.addSubview(selectionKeys)
+        trackMultiSelection()
         return scroll
     }
 
@@ -251,6 +271,7 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
                 MainActor.assumeIsolated {
                     self?.isMenuTracking = true
                     self?.hoverPreview.cancel()
+                    self?.dropSelectionForMenuOutsideIt()
                 }
             },
             center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -263,6 +284,41 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
                 }
             },
         ]
+    }
+
+    /// A row's context menu opened on a row outside the selection: the menu
+    /// acts on that row alone (`SidebarStore.menuTargets`) and the selection goes.
+    private func dropSelectionForMenuOutsideIt() {
+        guard let table = tableView, let event = NSApp.currentEvent, event.window === table.window,
+              event.type == .rightMouseDown || (event.type == .leftMouseDown && event.modifierFlags.contains(.control)) else { return }
+        let index = table.row(at: table.convert(event.locationInWindow, from: nil))
+        guard rows.indices.contains(index), case .item(let item, _) = rows[index],
+              model.store.multiSelection(in: context.window)?.spaceID == spaceID,
+              !model.store.isMultiSelected(item.id, in: context.window) else { return }
+        model.clearSelection(in: context.window)
+    }
+
+    // MARK: Keyboard for a selection
+
+    /// Takes the keyboard when this list's window gets a selection in its
+    /// space, and hands it back to what had it when the selection ends.
+    private func trackMultiSelection() {
+        guard isActive else { return }
+        let selected = withObservationTracking {
+            model.store.multiSelection(in: context.window)?.spaceID == spaceID
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { self?.trackMultiSelection() }
+        }
+        guard let window = selectionKeys.window else { return }
+        if selected {
+            guard window.firstResponder !== selectionKeys else { return }
+            focusBeforeSelection = window.firstResponder
+            window.makeFirstResponder(selectionKeys)
+        } else if window.firstResponder === selectionKeys {
+            let previous = (focusBeforeSelection as? NSView).flatMap { $0.window === window ? $0 : nil }
+            window.makeFirstResponder(previous)
+            focusBeforeSelection = nil
+        }
     }
 
     /// Each visible plain row re-reads the pointer and whether it should be live.
@@ -495,6 +551,36 @@ extension SidebarListHeights {
         heights.header = Double(SidebarMetrics.headerHeight + SidebarMetrics.headerToFirstRow)
         return heights
     }()
+}
+
+/// The responder a list's multi-row selection holds the keyboard with:
+/// Edit › Copy (⌘C) copies the selected rows' links, Esc drops the selection.
+/// Other keys go on up the responder chain.
+final class SidebarSelectionKeyView: NSView, NSMenuItemValidation {
+    var onCopy: () -> Bool = { false }
+    var onCancel: () -> Bool = { false }
+    var hasSelection: () -> Bool = { false }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    @objc func copy(_ sender: Any?) {
+        if !onCopy() { NSSound.beep() }
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        if !onCancel() { super.cancelOperation(sender) }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53, onCancel() { return }
+        super.keyDown(with: event)
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        item.action == #selector(copy(_:)) ? hasSelection() : true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// A table that never takes keyboard focus or draws a selection, and lets

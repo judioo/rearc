@@ -130,6 +130,10 @@ struct ThemeChromeColors: Equatable {
     var accent: Color
     var rowHover: Color
     var rowSelected: Color
+    /// The other rows of a multi-row selection: Arc's grey veil, and the
+    /// title fitted to read on it (`SidebarRowWash.multiSelected`).
+    var rowMultiSelected: Color
+    var multiSelectedTitle: Color
     var focus: Color
     /// Floating panels over the window (command bar, Peek): the theme's
     /// `backgroundExtra` / dark `background` washed over the material.
@@ -164,6 +168,9 @@ struct ThemeChromeColors: Equatable {
         // wash of it (row geometry and fills are still to observe, §8).
         rowSelected = Color(semantic.backgroundExtra).opacity(SidebarRowWash.selectedAlpha(lightInk: dark))
         rowHover = Color(semantic.backgroundExtra).opacity(SidebarRowWash.hoverAlpha(lightInk: dark))
+        let multi = SidebarRowWash.multiSelected(title: chrome.title, theme: theme, windowDark: windowDark ?? dark, lightInk: dark)
+        rowMultiSelected = Color(multi.veil).opacity(multi.alpha)
+        multiSelectedTitle = Color(multi.title)
         focus = Color(semantic.focus).opacity(semantic.focusAlpha)
         panel = Color(dark ? semantic.background : semantic.backgroundExtra).opacity(dark ? 0.6 : 0.55)
         toast = Color(semantic.background)
