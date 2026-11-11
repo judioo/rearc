@@ -156,6 +156,17 @@ final class SidebarBadgeInkTests: XCTestCase {
         }
     }
 
+    /// The mini sidebar's corner marks (mute, Picture in Picture, a split)
+    /// sit over favicons of any colour, on the badge's disc made opaque.
+    func testMiniCornerMarksReadOnTheirOwnDisc() {
+        for (name, theme, windowDark) in Self.legibleCases {
+            let (lightInk, chrome) = SpaceThemeRoles.sidebarChrome(theme: theme, windowDark: windowDark)
+            let ink = SidebarBadgeInk(chrome: chrome, dark: lightInk)
+            // Opaque, so nothing under it enters the ratio.
+            XCTAssertGreaterThanOrEqual(contrast(ink.glyph, ink.cornerDisc), SidebarContrast.text, "corner mark, \(Self.label(name, windowDark))")
+        }
+    }
+
     func testBadgeIgnoresProfileColour() {
         let chrome = SpaceThemeRoles(theme: SpaceTheme.presets[1]).chrome(dark: false)
         XCTAssertEqual(SidebarBadgeInk(chrome: chrome, dark: false).glyph, chrome.glyph)
