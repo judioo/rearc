@@ -27,7 +27,7 @@ in the background, one copy of each. ReArc never reads your passwords or cookies
   themes, media and picture in picture, boosts, easels and capture, onboarding and
   import, developer tools docking, Sparkle updates and the iCloud sync foundation.
   `cd shell && swift build && swift test`.
-- **`engine/`**: the Chromium pin (`156.0.8078.96`, in `engine/CHROMIUM_PIN`) and
+- **`engine/`**: the Chromium pin (`156.0.8078.100`, in `engine/CHROMIUM_PIN`) and
   ReArc's patch overlay (`engine/patches/series`). Also the fetch and build scripts,
   the C ABI the shell talks to (`engine/docs/C-ABI.md`) and its native test hosts.
   The Chromium checkout itself is not in this repo: `engine/scripts/fetch.sh` gets it.

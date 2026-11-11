@@ -234,9 +234,9 @@ shell, with `check-upgrade-data.py` passing against the release on the feed.
 - `CFBundleVersion` = `git rev-list --count HEAD` of the outer repo. It increases with
   every commit on the release branch, which is what LaunchServices and Sparkle compare.
   Cut releases from one branch (main).
-- `ReArcEngineVersion` = the Chromium version (156.0.8078.96), `ReArcEngineRevision` = the
+- `ReArcEngineVersion` = the Chromium version (156.0.8078.100), `ReArcEngineRevision` = the
   overlay commit, `ReArcSourceRevision` = the outer commit (`-dirty` for `--worktree`).
-- The framework keeps `Versions/156.0.8078.96` and its own plist. Never rename it.
+- The framework keeps `Versions/156.0.8078.100` and its own plist. Never rename it.
 - Constraint: Chromium's upgrade detector (`updater::CurrentlyInstalledVersion`) compares
   the outer `CFBundleShortVersionString` with the running Chromium version and reports an
   update only when the outer one is **higher**. Keep the ReArc version below the Chromium
