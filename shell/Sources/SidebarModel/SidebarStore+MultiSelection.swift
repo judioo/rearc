@@ -219,6 +219,33 @@ extension SidebarStore {
         }
     }
 
+    // MARK: - Move to another profile
+
+    /// Move to Profile's choices for rows of `spaceID`: every other profile
+    /// that has spaces, in picker order, with its spaces.
+    public func profileMoveDestinations(from spaceID: Space.ID) -> [(profile: Profile, spaces: [Space])] {
+        guard let owner = space(withID: spaceID)?.profileID else { return [] }
+        return profiles.filter { $0.id != owner }.compactMap { profile in
+            let spaces = spaces(in: profile.id)
+            return spaces.isEmpty ? nil : (profile, spaces)
+        }
+    }
+
+    /// Whether moving `ids` to `spaceID` takes them to another profile.
+    public func crossesProfile(_ ids: [UUID], toSpace spaceID: Space.ID) -> Bool {
+        guard let destination = space(withID: spaceID)?.profileID else { return false }
+        return ids.contains { id in
+            spaceContaining(entryID: id).flatMap { space(withID: $0)?.profileID }.map { $0 != destination } ?? false
+        }
+    }
+
+    /// Every tab a move of `ids` carries: plain tabs, split panes, folder
+    /// contents at any depth. Their pages must change session on a move to
+    /// another profile.
+    public func carriedTabIDs(_ ids: [UUID]) -> [Tab.ID] {
+        linkTabIDs(for: topmostEntries(ids))
+    }
+
     /// Move to Folder for each row not already there, appended in order.
     @discardableResult
     public func moveEntries(_ ids: [UUID], intoFolder folderID: UUID) -> [UUID] {

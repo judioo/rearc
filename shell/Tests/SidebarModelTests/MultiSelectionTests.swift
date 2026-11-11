@@ -288,4 +288,64 @@ final class MultiSelectionTests: XCTestCase {
                        [f.google[0].id, f.google[1].id])
         XCTAssertEqual(f.store.outline(for: f.space).pinned.map(\.id), [f.folder.id, f.google[0].id, f.google[1].id])
     }
+
+    // MARK: - Move to another profile
+
+    private func addWorkProfile(_ store: SidebarStore) -> (Profile, Space.ID) {
+        let profile = store.addProfile(name: "Work")
+        return (profile, store.spaces(in: profile.id)[0].id)
+    }
+
+    func testProfileDestinationsListOtherProfilesWithSpaces() {
+        let f = makeFixture()
+        XCTAssertTrue(f.store.profileMoveDestinations(from: f.space).isEmpty, "one profile: nothing to offer")
+        let (work, workSpace) = addWorkProfile(f.store)
+        _ = f.store.addProfile(name: "Empty", createInitialSpace: false)
+        let destinations = f.store.profileMoveDestinations(from: f.space)
+        XCTAssertEqual(destinations.map(\.profile.id), [work.id], "a profile without spaces is left out")
+        XCTAssertEqual(destinations.first?.spaces.map(\.id), [workSpace])
+        XCTAssertTrue(f.store.crossesProfile([f.mail.id], toSpace: workSpace))
+        XCTAssertFalse(f.store.crossesProfile([f.mail.id], toSpace: f.store.spaces[1].id))
+    }
+
+    func testOneTabMovesToAnotherProfileKeepingItsPlace() {
+        let f = makeFixture()
+        let (work, workSpace) = addWorkProfile(f.store)
+        let before = f.store.tab(withID: f.google[1].id)!
+        XCTAssertEqual(f.store.moveEntries([f.google[1].id], toSpace: workSpace), [f.google[1].id])
+        let after = f.store.tab(withID: f.google[1].id)!
+        XCTAssertEqual(f.store.spaceContaining(tabID: after.id), workSpace)
+        XCTAssertEqual(f.store.space(withID: workSpace)?.profileID, work.id)
+        XCTAssertEqual(after.kind, .today)
+        // Nothing but its rank changes: the record carries no profile's data.
+        var expected = before
+        expected.sortRank = after.sortRank
+        XCTAssertEqual(after, expected)
+        XCTAssertEqual(f.store.carriedTabIDs([f.google[1].id]), [f.google[1].id])
+    }
+
+    func testASelectionMovesToAnotherProfileWithFoldersSplitsAndPins() {
+        let f = makeFixture()
+        let (work, workSpace) = addWorkProfile(f.store)
+        let split = f.store.createSplit(tabIDs: [f.google[1].id, f.google[2].id], orientation: .horizontal)!
+        f.store.selectTab(f.google[0].id)
+        let source = f.space
+        let ids = [f.mail.id, f.folder.id, f.docs.id, f.google[0].id, split.id]
+        XCTAssertEqual(Set(f.store.carriedTabIDs(ids)),
+                       Set([f.mail.id, f.docs.id, f.wiki.id, f.google[0].id, f.google[1].id, f.google[2].id]),
+                       "folder contents and split panes go too")
+        XCTAssertTrue(f.store.crossesProfile(ids, toSpace: workSpace))
+        XCTAssertEqual(Set(f.store.moveEntries(ids, toSpace: workSpace)), [f.mail.id, f.folder.id, f.google[0].id, split.id])
+        let outline = f.store.outline(for: workSpace)
+        XCTAssertEqual(outline.pinned.map(\.id), [f.mail.id, f.folder.id], "pinned rows stay pinned, in order")
+        XCTAssertEqual(outline.today.map(\.id), [f.google[0].id, split.id], "Today rows keep their order")
+        XCTAssertEqual(f.store.folder(withID: f.folder.id)?.children.map(\.id), [f.docs.id, f.wiki.id])
+        XCTAssertEqual(f.store.split(withID: split.id)?.tabs.map(\.id), [f.google[1].id, f.google[2].id])
+        XCTAssertEqual(f.store.tab(withID: f.mail.id)?.savedURL, URL(string: "https://mail.test"), "a pin keeps its saved URL")
+        // The shown tab went along: its new space and profile are shown.
+        XCTAssertEqual(f.store.activeSpaceID, workSpace)
+        XCTAssertEqual(f.store.activeProfileID, work.id)
+        XCTAssertEqual(f.store.selectedTabID, f.google[0].id)
+        XCTAssertTrue(f.store.outline(for: source).pinned.isEmpty && f.store.outline(for: source).today.isEmpty)
+    }
 }
