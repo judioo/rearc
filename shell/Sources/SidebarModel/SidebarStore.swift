@@ -87,8 +87,14 @@ public final class SidebarStore {
         didSet { contentDidChange(from: oldValue) }
     }
     public internal(set) var selectedItemID: UUID? {
-        didSet { if selectedItemID != oldValue { refreshSelectionObservers() } }
+        didSet {
+            guard selectedItemID != oldValue else { return }
+            refreshSelectionObservers()
+            onSelectionChange?(oldValue, selectedItemID)
+        }
     }
+    /// Each change of `selectedItemID` (diagnostics: the shell traces who moved it).
+    @ObservationIgnored public var onSelectionChange: ((UUID?, UUID?) -> Void)?
     public private(set) var closedTabStack = ClosedTabStack()
     public internal(set) var commandBarUsageBumps: [String: Int] = [:]
     public internal(set) var littleArcWindows: [LittleArcWindow] = []
