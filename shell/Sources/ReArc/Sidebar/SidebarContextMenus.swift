@@ -272,8 +272,13 @@ struct SelectionContextMenu: View {
         if !tabs.isEmpty {
             Button(tabs.count == 1 ? "Archive Tab" : "Archive \(tabs.count) Tabs") { model.archiveTabs(tabs) }
         }
-        Button(model.closeMenuTitle(for: ids)) { model.closeItems(ids) }
-            .disabled(tabs.isEmpty && !ids.contains { store.split(withID: $0) != nil })
+        // Plain tabs that ⌘W would archive: "Archive N Tabs" above is the same command.
+        let hasSplit = ids.contains { store.split(withID: $0) != nil }
+        let closeTitle = model.closeMenuTitle(for: ids)
+        if hasSplit || tabs.isEmpty || closeTitle != "Archive Tabs" {
+            Button(closeTitle) { model.closeItems(ids) }
+                .disabled(tabs.isEmpty && !hasSplit)
+        }
     }
 }
 
