@@ -19,18 +19,27 @@ public struct CloudSidebarSummary: Equatable, Sendable {
     public var favorites: Int
     /// The newest edit any Mac made to it.
     public var lastUpdated: Date?
+    /// Of `spaces`, empty or same-profile copies of one Arc space (608 and
+    /// earlier), which using or merging it tidies away.
+    public var arcCopies: Int
 
-    public init(spaces: Int, pinnedTabs: Int, favorites: Int, lastUpdated: Date?) {
+    public init(spaces: Int, pinnedTabs: Int, favorites: Int, lastUpdated: Date?, arcCopies: Int = 0) {
         self.spaces = spaces
         self.pinnedTabs = pinnedTabs
         self.favorites = favorites
         self.lastUpdated = lastUpdated
+        self.arcCopies = arcCopies
     }
 
-    /// "14 spaces, 210 pinned tabs and 12 favorites".
+    /// "14 spaces, 210 pinned tabs and 12 favorites", with "(26 of them
+    /// copies of the same Arc spaces)" after the spaces when there are some.
     public var counts: String {
         func part(_ n: Int, _ one: String, _ many: String) -> String { "\(n.formatted()) \(n == 1 ? one : many)" }
-        let parts = [part(spaces, "space", "spaces"), part(pinnedTabs, "pinned tab", "pinned tabs"), part(favorites, "favorite", "favorites")]
+        var spacesPart = part(spaces, "space", "spaces")
+        if arcCopies > 0 {
+            spacesPart += " (\(arcCopies.formatted()) of them \(arcCopies == 1 ? "a copy" : "copies") of the same Arc spaces)"
+        }
+        let parts = [spacesPart, part(pinnedTabs, "pinned tab", "pinned tabs"), part(favorites, "favorite", "favorites")]
         return parts.dropLast().joined(separator: ", ") + " and " + parts.last!
     }
 
@@ -95,7 +104,9 @@ extension CloudSidebarSummary {
         let pinned = spaces.reduce(0) { $0 + SidebarTree.leaves(scratch.content(for: $1.id).pinned).count }
         let favorites = scratch.profiles.reduce(0) { $0 + scratch.favorites(in: $1.id).count }
         let newest = records.values.compactMap(\.latestStamp).map(\.millis).max()
+        let copies = ArcTwinSpaces.repair(scratch.makeSnapshot()).1
         return CloudSidebarSummary(spaces: spaces.count, pinnedTabs: pinned, favorites: favorites,
-                                   lastUpdated: newest.map { Date(timeIntervalSince1970: Double($0) / 1000) })
+                                   lastUpdated: newest.map { Date(timeIntervalSince1970: Double($0) / 1000) },
+                                   arcCopies: copies.mergedSameProfile + copies.removedEmpty)
     }
 }

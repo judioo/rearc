@@ -93,6 +93,38 @@ final class ArcTwinSpacesTests: XCTestCase {
         XCTAssertTrue(a.store.spaces.contains { $0.id == work.id })
     }
 
+    /// iCloud as 608 left it: two installs' copies of every Arc space. Its
+    /// summary says so, and using it on a third Mac tidies them, there and
+    /// then in iCloud, without losing a row.
+    func testUsingAnICloudFullOfCopiesTidiesThem() async throws {
+        let a = try install("A", legacy: true)
+        await cycle(a)
+        // 608's join on B: B's copies and rows go up beside A's, matched by
+        // record name only, so B's rows (same ids) now name B's spaces.
+        let own = server!
+        server = InMemorySyncServer()
+        let b = try install("B", legacy: true)
+        await cycle(b)
+        for wire in server.records(account: "alice").values { own.overwrite(account: "alice", record: wire) }
+        server = own
+        let rows = Set(allRowIDs(b.store))
+        let c = (store: SidebarStore(), sync: SidebarSyncCoordinator(transport: server.transport(account: "alice"), stateStore: InMemorySyncStateStore(),
+                                                                      deviceID: "C", now: { [unowned self] in self.date }))
+        c.sync.host = c.store
+        let detected = await c.sync.detectCloudSidebar()
+        let found = try XCTUnwrap(detected.found)
+        let copies = a.store.spaces.count
+        XCTAssertEqual(found.summary.spaces, 2 * copies, "both installs' copies")
+        XCTAssertGreaterThan(found.summary.arcCopies, 0)
+        XCTAssertTrue(found.summary.counts.contains("of them copies of the same Arc spaces"))
+        c.sync.apply(.useCloud, from: found)
+        XCTAssertEqual(Set(allRowIDs(c.store)), rows, "no row lost")
+        XCTAssertLessThan(c.store.spaces.count, found.summary.spaces)
+        await cycle(c)
+        await cycle(a)
+        XCTAssertEqual(SidebarSyncProjection.extract(a.store.makeSnapshot()).keys.sorted(), SidebarSyncProjection.extract(c.store.makeSnapshot()).keys.sorted())
+    }
+
     /// The owner's report: imported spaces seemed to lose their rows as they
     /// moved between spaces. Rows never move or hide when switching.
     func testSwitchingSpacesNeverMovesOrHidesRows() async throws {

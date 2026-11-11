@@ -262,7 +262,7 @@ public enum SyncCloudText {
         case .replaceCloud:
             return "iCloud's sidebar is replaced with this one, and your other Macs get this Mac's sidebar."
         case .merge:
-            return "Both come together. Spaces imported from the same Arc space appear once; where both have an item, iCloud's version is kept."
+            return "Both come together. Each Arc space appears once; where both have an item, iCloud's version is kept."
         }
     }
 

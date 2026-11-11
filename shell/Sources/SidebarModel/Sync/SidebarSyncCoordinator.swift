@@ -262,6 +262,7 @@ public final class SidebarSyncCoordinator {
             if choice == .useCloud {
                 var outcome = SyncCycleOutcome()
                 applyToHost(&outcome)
+                tidyArcCopies()
             } else {
                 capture(host.syncSnapshot())
             }
@@ -359,7 +360,8 @@ public final class SidebarSyncCoordinator {
             persist()
         }
         var remoteChanged: Bool
-        if !state.joined {
+        let joining = !state.joined
+        if joining {
             // First sync: look at the server before stamping local rows, so a
             // fresh install adopts the iCloud sidebar instead of duplicating it.
             remoteChanged = try await pullAll(&outcome)
@@ -384,6 +386,7 @@ public final class SidebarSyncCoordinator {
             remoteChanged = try await pullAll(&outcome)
         }
         if remoteChanged { applyToHost(&outcome) }
+        if joining { tidyArcCopies() }
 
         for _ in 0 ..< 3 {
             let mergedConflicts = try await pushPending(&outcome)
@@ -399,6 +402,17 @@ public final class SidebarSyncCoordinator {
         // The rest synced; still report a type the schema keeps out.
         if let rejected = activeSchemaRejection() { throw rejected }
         update(state.pendingCount == 0 ? .upToDate : .waiting("\(state.pendingCount) changes waiting to upload"))
+    }
+
+    /// iCloud's sidebar just came in (Use, or a first join): copies of one Arc
+    /// space that 608 and earlier left in it are merged as on load
+    /// (`ArcTwinSpaces.repair`, which loses no row), and the merge syncs as an edit.
+    private func tidyArcCopies() {
+        guard let host else { return }
+        let (tidied, report) = ArcTwinSpaces.repair(host.syncSnapshot())
+        guard report.changed else { return }
+        host.applySyncedSnapshot(tidied)
+        capture(host.syncSnapshot())
     }
 
     /// Rebuilds the sidebar from the merged records, then stamps whatever the
