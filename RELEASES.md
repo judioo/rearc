@@ -11,7 +11,48 @@ committed `RELEASES.md` has a heading for the build it is about to make:
 commit before the release, with `echo $(( $(git rev-list --count HEAD) + 1 ))` as the
 number. Details: engine/docs/RELEASE.md, "Release notes".
 
+## ReArc 0.1.0 (594) — 2026-11-11
+
+**New**
+- Your Arc card comes with you. Settings › your name › Import Your Card from Arc brings over
+  your Arc membership card: its title, shape and colours, and your Arc member-since date. The
+  card plays an Arc to ReArc transition that you can replay, and the import is offered again
+  after Randomize. From Arc's sign-in file ReArc reads only the account's creation date and
+  name.
+- Manage Extensions: the site control panel has a Manage link beside the "+" that opens the
+  Chrome Web Store, and every extension tile's right-click menu has Manage Extensions….
+- Sync Sidebar is on by default once onboarding finishes, when you are signed in to iCloud. If
+  you turned it off, it stays off. Sync problems show a plain message, with the technical text
+  under Details.
+- Little Arc is now called Little ReArc.
+
+**Security**
+- Safe Browsing now works. Builds 544 and 564 said it did, but their engine never received
+  Google's threat lists, so they showed no phishing or malware warnings. The engine no longer
+  runs Chromium's test configuration, the lists arrive within a few minutes of first launch,
+  and Settings › Profiles shows the real state: Starting, On, Not working or Out of date. A
+  release cannot be built unless a test launch receives the lists.
+- With the address bar auto-hidden, it shows for three seconds whenever you arrive at a
+  different site, and stays while a permission, sign-in or certificate prompt is up.
+- A popup or new tab opened from a Little ReArc in another container opens in that container,
+  under its own badge. Links, searches, Boosts and command-bar history no longer cross
+  containers. Deleting a container closes its Little ReArcs and removes its data.
+- Boost CSS needs your approval on each Mac, like Boost scripts, and can no longer load
+  anything from the web. Approving a script shows its code first, and a script runs only if
+  the code is what you approved.
+- Extension install and permission sheets appear one at a time, and Return always cancels.
+- A release build no longer runs its self-test against your real profile.
+
+**Fixes**
+- Sidebar text is readable on every space colour. On mid-tone and vivid themes the space
+  name, New Tab and icons were almost the colour of the sidebar.
+- Syncing Boosts no longer fails with "Cannot create new type SidebarBoostRecord", and one
+  rejected kind of record no longer holds up everything else waiting to sync.
+- Settings › Links shows rearc.imara.ae, and Share ReArc links to it.
+
 ## ReArc 0.1.0 (564) — 2026-11-10
+
+Correction, 2026-11-11: Safe Browsing did not work in this build. See the next release.
 
 **New**
 - Auto-hide address bar: Settings › Advanced › Auto-hide address bar. The address bar slides
@@ -41,8 +82,9 @@ Security release candidate. It fixes the findings of the security review of buil
 - The engine moves to Chromium 156.0.8078.96, with 65 security fixes from Google, including
   CVE-2026-125350, which is exploited in the wild. Release builds now refuse an engine that is
   behind Chrome's latest Mac security release.
-- Safe Browsing works: ReArc warns before known phishing and malware pages and dangerous
-  downloads. Settings says when Safe Browsing is unavailable instead of claiming protection.
+- Safe Browsing was meant to work from this build: the key and the page checks are in.
+  Correction, 2026-11-11: it did not. The engine never received Google's threat lists, so this
+  build showed no warnings. The next release fixes it.
 - ReArc ignores debugging and sandbox-weakening launch switches, so another program can no
   longer relaunch it with remote debugging to read your cookies.
 - Permission prompts ignore clicks and keys for half a second after they appear, and
