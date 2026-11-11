@@ -90,8 +90,6 @@ number. Details: engine/docs/RELEASE.md, "Release notes".
   on that Mac. Sites then ask you to sign in again there, and the cookies and history of the
   profile those spaces were in stay on disk, where ReArc no longer shows them. The sheet warns
   about the sign-ins. Replace keeps no copy of what iCloud held.
-
-
 - A page that adds history entries from script, without a click, gets no Back entry for them
   in a Peek or after Expand, as in Chrome.
 - For sites opened in 605, their older local storage is still on disk but not yet restored
