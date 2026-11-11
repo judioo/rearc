@@ -9,6 +9,13 @@ extension BrowserViewModel {
         return session.windowID == nil ? isKeyBrowserWindow(window) : session.windowID == window
     }
 
+    /// The sidebar width the Peek is centred beside in `window`: the mini
+    /// column or the full width, and while ⇧⌘S moves the edge, the edge as
+    /// drawn, so the card moves with it (`SidebarWidthMorph`).
+    func peekSidebarWidth(in window: SidebarWindowID?) -> Double {
+        sidebarMorph(in: window)?.shown ?? Double(sidebarWidth(in: window))
+    }
+
     /// The Peek's page is fullscreen: the card fills the window, with no chrome.
     var isPeekPageFullscreen: Bool {
         (peekEngine as? PageFullscreenControlling)?.isPageFullscreen ?? false

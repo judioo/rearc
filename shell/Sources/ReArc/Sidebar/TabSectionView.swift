@@ -82,11 +82,9 @@ struct SidebarEntryRow: View, Equatable {
     /// In this window's ⇧/⌘-click selection, drawn grey unless it is the active row.
     private func isMultiSelected(_ id: UUID) -> Bool { model.store.isMultiSelected(id, in: window) }
 
-    /// A ⇧- or ⌘-click changes the selection instead of `action`.
+    /// A ⇧- or ⌘-click changes the selection instead of `action` (`BrowserViewModel.rowClick`).
     private func click(_ id: UUID, _ action: @escaping () -> Void) -> () -> Void {
-        { [model, window] in
-            if !model.handleSelectionClick(on: id, in: window) { action() }
-        }
+        model.rowClick(id, in: window, action)
     }
 
     @ViewBuilder

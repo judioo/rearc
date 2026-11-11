@@ -28,6 +28,22 @@ extension BrowserViewModel {
         return true
     }
 
+    /// A sidebar row's click, full or mini (⇧⌘S): ⇧ and ⌘ change the
+    /// selection instead of `action`; a plain click drops it and runs
+    /// `action`. While a Peek is open in the window the click only closes
+    /// it, as a click anywhere outside its card does (`PeekDismissal`).
+    func rowClick(_ id: UUID, in window: SidebarWindowID?, _ action: @escaping () -> Void) -> () -> Void {
+        { [self] in handleRowClick(id, in: window, modifiers: NSEvent.modifierFlags, action) }
+    }
+
+    func handleRowClick(_ id: UUID, in window: SidebarWindowID?, modifiers: NSEvent.ModifierFlags, _ action: () -> Void) {
+        if showsPeek(in: window) {
+            performPeekAction(.close)
+            return
+        }
+        if !handleSelectionClick(on: id, in: window, modifiers: modifiers) { action() }
+    }
+
     /// Tabs, splits and folders take part; easels open as before.
     static func isSelectableRow(_ entry: SidebarEntry?) -> Bool {
         switch entry {
@@ -51,10 +67,19 @@ extension BrowserViewModel {
         }
     }
 
+    /// `window`'s selected rows, in sidebar order, while there are several
+    /// and nothing is in front of them. An open Peek sets the selection
+    /// aside: it stays drawn, and ⌘C, ⌘W, ⇧⌘C and the rest act as they do
+    /// without one until the Peek closes (Esc closes the Peek first).
+    func activeSelectionIDs(in window: SidebarWindowID?) -> [UUID]? {
+        guard !showsPeek(in: window) else { return nil }
+        return store.multiSelectedIDs(in: window)
+    }
+
     /// The key window's selected rows, in sidebar order, while there are several.
     var keySelectionIDs: [UUID]? {
         guard keyPrivateWindow == nil, keyLittleArcEngine == nil else { return nil }
-        return store.multiSelectedIDs(in: store.keyWindowID)
+        return activeSelectionIDs(in: store.keyWindowID)
     }
 
     func clearSelection(in window: SidebarWindowID?) {

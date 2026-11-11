@@ -354,7 +354,7 @@ struct BrowserView: View {
         let besideSidebar = model.isSidebarVisible && model.isSidebarLaidOut && !isPageFullscreen
         return PeekLayout(region: PeekLayout.region(
             windowSize: windowSize,
-            sidebarWidth: besideSidebar ? Double(model.sidebarWidth(in: windowID)) : 0,
+            sidebarWidth: besideSidebar ? model.peekSidebarWidth(in: windowID) : 0,
             sidebarOnLeft: placement.side == .left
         ))
     }

@@ -211,20 +211,7 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
         rebuild(animated: false, reloadAll: true)
         trackSelection()
         observeInteraction(scroll)
-        selectionKeys.onCopy = { [weak self] in
-            guard let self, let ids = model.store.multiSelectedIDs(in: context.window) else { return false }
-            model.copyLinks(of: ids)
-            return true
-        }
-        selectionKeys.onCancel = { [weak self] in
-            guard let self else { return false }
-            guard model.store.multiSelection(in: context.window) != nil else { return false }
-            model.clearSelection(in: context.window)
-            return true
-        }
-        selectionKeys.hasSelection = { [weak self] in
-            self.map { $0.model.store.multiSelectedIDs(in: $0.context.window) != nil } ?? false
-        }
+        selectionKeys.bind(to: model) { [weak self] in self?.context.window }
         scroll.addSubview(selectionKeys)
         trackMultiSelection()
         return scroll
@@ -564,6 +551,24 @@ final class SidebarSelectionKeyView: NSView, NSMenuItemValidation {
     var onCopy: () -> Bool = { false }
     var onCancel: () -> Bool = { false }
     var hasSelection: () -> Bool = { false }
+
+    /// The keys act on `model`'s selection in the window `window` names. A
+    /// Peek in front sets the selection aside (`activeSelectionIDs`): ⌘C
+    /// copies nothing, and Esc never gets here while it is open, since the
+    /// Peek's Esc runs first (`handlePeekEscape`, before the responders).
+    func bind(to model: BrowserViewModel, window: @escaping () -> SidebarWindowID?) {
+        onCopy = { [weak model] in
+            guard let model, let ids = model.activeSelectionIDs(in: window()) else { return false }
+            model.copyLinks(of: ids)
+            return true
+        }
+        onCancel = { [weak model] in
+            guard let model, model.store.multiSelection(in: window()) != nil else { return false }
+            model.clearSelection(in: window())
+            return true
+        }
+        hasSelection = { [weak model] in model?.activeSelectionIDs(in: window()) != nil }
+    }
 
     override var acceptsFirstResponder: Bool { true }
 

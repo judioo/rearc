@@ -9,10 +9,12 @@ import SidebarModel
 // tooltip; a tab's ✕ is in its context menu (and ⌘W), not on the square,
 // where it would cover the icon.
 
-/// The square highlight under a mini row: the full rows' fills, in one place
-/// so another state (a multi-selection's grey) sits beside them.
+/// The square highlight under a mini row: the full rows' fills, in one place,
+/// with a ⇧/⌘-click selection's grey veil between the active pill and the
+/// hover wash, as the full rows draw it (`SidebarRowWash.multiSelected`).
 struct MiniRowHighlight: ViewModifier {
     var isSelected = false
+    var isMultiSelected = false
     var isHovering = false
     var isDropTarget = false
     @Environment(\.themeChrome) private var chrome
@@ -28,6 +30,9 @@ struct MiniRowHighlight: ViewModifier {
                 } else if isSelected {
                     shape.fill(chrome.rowSelected)
                         .shadow(color: .black.opacity(chrome.isDark ? 0.3 : 0.08), radius: 1.5, y: 0.5)
+                } else if isMultiSelected {
+                    // Arc keeps the grey under the pointer.
+                    shape.fill(chrome.rowMultiSelected)
                 } else if isHovering {
                     shape.fill(chrome.rowHover)
                 }
@@ -102,14 +107,24 @@ private struct MiniBadgeButton: View {
 // MARK: Entries
 
 /// One outline entry at mini width (`SidebarEntryRow` in a mini sidebar).
-/// The actions are the full row's.
+/// The actions are the full row's, clicks included: ⇧ and ⌘ select through
+/// the same handler (`BrowserViewModel.rowClick`), and the row menus pick
+/// the selection's menu by the same rule.
 struct MiniSidebarEntryContent: View {
     let entry: SidebarEntry
     let spaceID: Space.ID
     let model: BrowserViewModel
     let isDropTarget: Bool
+    @Environment(\.sidebarWindow) private var window
 
     private func isSelected(_ id: UUID) -> Bool { model.store.isSelected(id, inSpace: spaceID) }
+
+    /// In this window's ⇧/⌘-click selection, drawn grey unless it is the active row.
+    private func isMultiSelected(_ id: UUID) -> Bool { model.store.isMultiSelected(id, in: window) }
+
+    private func click(_ id: UUID, _ action: @escaping () -> Void) -> () -> Void {
+        model.rowClick(id, in: window, action)
+    }
 
     var body: some View {
         switch entry {
@@ -124,7 +139,8 @@ struct MiniSidebarEntryContent: View {
                 isUnloaded: model.isTabUnloaded(tab.id),
                 isInPictureInPicture: model.isPictureInPicture(tab.id),
                 activity: model.tabActivity(tab.id),
-                onSelect: { model.selectTab(tab.id) },
+                isMultiSelected: isMultiSelected(tab.id),
+                onSelect: click(tab.id) { model.selectTab(tab.id) },
                 onMute: { model.toggleMute(tab.id) },
                 onPictureInPicture: { model.setPictureInPicture(false, tabID: tab.id) },
                 onRename: { model.beginRename(.tab(tab.id)) }
@@ -137,9 +153,11 @@ struct MiniSidebarEntryContent: View {
                 isExpanded: model.store.isFolderExpanded(folder.id),
                 isDropTarget: isDropTarget,
                 holdsOpenTabs: model.folderHoldsOpenTab(folder.id),
-                onToggle: { model.store.toggleFolderExpanded(folder.id) }
+                isMultiSelected: isMultiSelected(folder.id),
+                onToggle: click(folder.id) { model.store.toggleFolderExpanded(folder.id) }
             ) {
-                if model.folderHoldsOpenTab(folder.id) {
+                // Inside a selection the folder's menu is the selection's.
+                if model.folderHoldsOpenTab(folder.id), model.store.menuTargets(for: folder.id, in: window).count == 1 {
                     Button("Close This Folder") { model.closeFolderTabs(folder.id) }
                     Divider()
                 }
@@ -151,7 +169,7 @@ struct MiniSidebarEntryContent: View {
                 title: model.easelTitle(for: ref),
                 isNote: model.easelDocumentStore.document(id: ref.easelDocumentID)?.kind == .note,
                 isSelected: isSelected(ref.id),
-                onSelect: { model.selectEasel(ref.id) }
+                onSelect: click(ref.id) { model.selectEasel(ref.id) }
             ) {
                 SectionItemContextMenu(model: model, entry: entry)
             }
@@ -160,9 +178,10 @@ struct MiniSidebarEntryContent: View {
                 split: split,
                 isSelected: isSelected(split.id),
                 isDropTarget: isDropTarget,
+                isMultiSelected: isMultiSelected(split.id) && !isSelected(split.id),
                 favicon: { model.favicon(for: $0) },
                 isAudible: split.tabs.contains { model.showsAudibleIndicator(for: $0.id) },
-                onSelect: { model.selectSplit(split.id) },
+                onSelect: click(split.id) { model.selectSplit(split.id) },
                 isRenaming: Binding(
                     get: { model.renamingSplitID == split.id },
                     set: { model.renamingSplitID = $0 ? split.id : nil }
@@ -188,6 +207,8 @@ struct MiniTabRowView<Menu: View>: View {
     var isUnloaded = false
     var isInPictureInPicture = false
     var activity: TabActivity = .idle
+    /// In a multi-row selection (drawn grey unless it is the active row).
+    var isMultiSelected = false
     let onSelect: () -> Void
     var onMute: (() -> Void)? = nil
     var onPictureInPicture: (() -> Void)? = nil
@@ -215,7 +236,8 @@ struct MiniTabRowView<Menu: View>: View {
                                 help: isMuted ? "Unmute tab" : "Mute tab") { onMute?() }
             }
         }
-        .modifier(MiniRowHighlight(isSelected: isSelected, isHovering: isHovering, isDropTarget: isDropTarget))
+        .modifier(MiniRowHighlight(isSelected: isSelected, isMultiSelected: isMultiSelected, isHovering: isHovering,
+                                   isDropTarget: isDropTarget))
         .help(MiniSidebarTooltip.text(title: tab.displayTitle, url: tab.url, isUnloaded: isUnloaded))
         .gesture(TapGesture().onEnded(onSelect))
         .simultaneousGesture(TapGesture(count: 2).onEnded { onRename?() })
@@ -235,6 +257,8 @@ struct MiniFolderRowView<Menu: View>: View {
     let isExpanded: Bool
     let isDropTarget: Bool
     var holdsOpenTabs = false
+    /// In a multi-row selection: Arc's grey, the glyph fitted to read on it.
+    var isMultiSelected = false
     let onToggle: () -> Void
     @ViewBuilder let menu: () -> Menu
 
@@ -252,13 +276,13 @@ struct MiniFolderRowView<Menu: View>: View {
                     SidebarGlyphView(icon: folder.customIcon, fallback: "folder", size: 17)
                 }
             }
-            .foregroundStyle(chrome.accent)
+            .foregroundStyle(isMultiSelected ? chrome.multiSelectedAccent : chrome.accent)
         } top: {
             EmptyView()
         } bottom: {
             EmptyView()
         }
-        .modifier(MiniRowHighlight(isHovering: isHovering, isDropTarget: isDropTarget))
+        .modifier(MiniRowHighlight(isMultiSelected: isMultiSelected, isHovering: isHovering, isDropTarget: isDropTarget))
         .help(folder.title)
         .gesture(TapGesture().onEnded {
             let duration = isExpanded ? SidebarListController.collapseDuration : SidebarListController.expandDuration
@@ -279,6 +303,8 @@ struct MiniSplitRowView<Menu: View>: View {
     let split: SplitViewItem
     let isSelected: Bool
     let isDropTarget: Bool
+    /// In a multi-row selection without being the active row.
+    var isMultiSelected = false
     let favicon: (Tab) -> NSImage?
     let isAudible: Bool
     let onSelect: () -> Void
@@ -289,18 +315,21 @@ struct MiniSplitRowView<Menu: View>: View {
     @State private var isHovering = false
     @Environment(\.themeChrome) private var chrome
 
+    /// The split glyph's ink, fitted to the selection's grey when it is on it.
+    private var glyphInk: Color { isMultiSelected ? chrome.multiSelectedSecondaryText : chrome.secondaryText }
+
     private var splitSymbol: String { split.orientation == .horizontal ? "square.split.2x1" : "square.split.1x2" }
 
     var body: some View {
         MiniRowIcon {
             if let icon = split.customIcon {
                 SidebarGlyphView(icon: icon, fallback: splitSymbol, size: 13)
-                    .foregroundStyle(chrome.secondaryText)
+                    .foregroundStyle(glyphInk)
             } else if let first = split.tabs.first {
                 SiteIconView(image: favicon(first), token: first.faviconToken, size: SidebarMetrics.iconSize, customIcon: first.customIcon)
             } else {
                 SidebarGlyphView(icon: nil, fallback: splitSymbol, size: 13)
-                    .foregroundStyle(chrome.secondaryText)
+                    .foregroundStyle(glyphInk)
             }
         } top: {
             EmptyView()
@@ -310,7 +339,8 @@ struct MiniSplitRowView<Menu: View>: View {
                     .accessibilityHidden(true)
             }
         }
-        .modifier(MiniRowHighlight(isSelected: isSelected, isHovering: isHovering, isDropTarget: isDropTarget))
+        .modifier(MiniRowHighlight(isSelected: isSelected, isMultiSelected: isMultiSelected, isHovering: isHovering,
+                                   isDropTarget: isDropTarget))
         .help(tooltip)
         .gesture(TapGesture().onEnded(onSelect))
         .simultaneousGesture(TapGesture(count: 2).onEnded { isRenaming = true })
