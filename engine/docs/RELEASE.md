@@ -274,9 +274,18 @@ Size and launch, release vs a dev bundle of the same HEAD:
    with an app-specific password from appleid.apple.com. `notarize.sh` only names the
    profile.
 3. **iCloud for distribution**:
-   - In CloudKit Console, deploy the Development schema to **Production** for
-     `iCloud.com.rearc.browser`. Distributed builds use the Production environment, which
-     has no record types until then.
+   - Before **every release**, import `shell/cloudkit/schema.ckdb` into
+     **Development**, then deploy the schema to **Production** for
+     `iCloud.com.rearc.browser`. From the repo root:
+     `xcrun cktool import-schema --team-id <TEAM_ID> --container-id iCloud.com.rearc.browser --environment development --validate --file shell/cloudkit/schema.ckdb`.
+     Or use CloudKit Console > Development > Schema > Import Schema, then
+     Deploy Schema Changes to Production. Export/back up the current schema
+     first and review changes (docs/ICLOUD-SETUP.md §7). Confirm all five types,
+     especially `SidebarBoostRecord` and `SidebarSpaceStyleRecord`, plus encrypted
+     payload and the six integer indexes per type. A just-in-time Development
+     schema can omit types the developer's profile never saved; importing the
+     committed file is mandatory even when that Mac already syncs successfully.
+     Distributed builds cannot create missing types or fields in Production.
    - Create a **Developer ID provisioning profile** for App ID `com.rearc.browser` with
      iCloud/CloudKit and the container. Developer ID profiles list no devices. Set
      `REARC_RELEASE_PROVISIONING_PROFILE=<path>` and `REARC_ICLOUD_ENVIRONMENT=Production`.
