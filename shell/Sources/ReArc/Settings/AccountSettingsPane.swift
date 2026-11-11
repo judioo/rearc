@@ -40,7 +40,8 @@ struct AccountSettingsPane: View {
             .padding(.bottom, 24)
         }
         .onAppear {
-            if model.syncControl != nil, model.cloudDetection == nil { model.checkCloudSidebar() }
+            // In the background, once a session: the pane and the switch stay usable meanwhile.
+            if model.syncControl != nil, model.cloudDetection == nil, !model.isCheckingCloud { model.checkCloudSidebar() }
             model.membershipCard.ensureLoaded()
             canImportArc = model.canImportArcMembershipCard()
             model.membershipCard.accountTabAppeared(reduceMotion: reduceMotion)
@@ -219,10 +220,11 @@ struct AccountSettingsPane: View {
                             .frame(width: 7, height: 7)
                         Text("Last synced: \(text.lastSyncedText)").font(.system(size: 12)).foregroundStyle(.secondary)
                     }
-                    if model.isCheckingCloud {
+                    // The switch waits for the look: the same words as the iCloud box below.
+                    if model.syncSwitchWaiting {
                         HStack(spacing: 6) {
                             ProgressView().controlSize(.mini)
-                            Text("Looking at iCloud…").font(.system(size: 12)).foregroundStyle(.secondary)
+                            Text(model.cloudStatusText).font(.system(size: 12)).foregroundStyle(.secondary)
                         }
                     }
                     if let message = model.syncCloudMessage {
@@ -275,13 +277,16 @@ struct AccountSettingsPane: View {
                         Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .semibold))
                     }
                     .buttonStyle(.borderless)
-                    .disabled(model.isCheckingCloud)
+                    .disabled(model.isCheckingCloud && !model.cloudLook.isStalled)
                     .help("Look at iCloud again")
                     .accessibilityLabel("Look at iCloud again")
                 }
-                Text(model.isCheckingCloud && model.cloudDetection == nil ? "Looking at iCloud…" : SyncCloudText.status(model.cloudDetection))
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    if model.isCheckingCloud && !model.cloudLook.isStalled { ProgressView().controlSize(.mini) }
+                    Text(model.cloudStatusText)
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 SettingsHairline()
                 VStack(alignment: .leading, spacing: 6) {
                     Button("Use on This Mac…") { confirming = .use }

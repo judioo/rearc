@@ -13,6 +13,8 @@ enum ReArcMain {
             FileHandle.standardError.write(Data("ReArc: \(refusal)\n".utf8))
             exit(64)
         }
+        // A read-only timing of the look at iCloud's sidebar; exits.
+        CloudLookProbe.runIfAsked()
         // A relaunch helper only waits for the old ReArc to quit and opens this bundle again.
         ReArcRelaunch.runHelperIfAsked()
         PerfSignposts.launchEvent("Main")

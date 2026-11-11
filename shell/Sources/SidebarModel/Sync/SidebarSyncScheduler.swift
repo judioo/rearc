@@ -11,7 +11,7 @@ public protocol SyncControlling: AnyObject {
     func setUserEnabled(_ enabled: Bool)
     func syncNow()
     /// A read-only look at iCloud (Settings, and before turning sync on).
-    func detectCloudSidebar() async -> CloudSidebarDetection
+    func detectCloudSidebar(progress: @escaping @MainActor (CloudLookProgress) -> Void) async -> CloudSidebarDetection
     /// Uses, replaces or merges with what `detectCloudSidebar` found; sync is on afterwards.
     func apply(_ choice: CloudSidebarChoice, from found: CloudSidebarFound)
     /// Deletes ReArc's sidebar from iCloud; sync is off afterwards.
@@ -66,8 +66,8 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
     }
 
     @MainActor
-    public func detectCloudSidebar() async -> CloudSidebarDetection {
-        await coordinator.detectCloudSidebar()
+    public func detectCloudSidebar(progress: @escaping @MainActor (CloudLookProgress) -> Void) async -> CloudSidebarDetection {
+        await coordinator.detectCloudSidebar(progress: progress)
     }
 
     @MainActor

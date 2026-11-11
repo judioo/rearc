@@ -22,18 +22,22 @@ extension BrowserViewModel {
         MainActor.assumeIsolated { syncControl?.isUserEnabled ?? false }
     }
 
-    /// The switch in Settings › Account. Off is immediate. On looks at
-    /// iCloud first (read-only): empty, it starts syncing; holding a
-    /// sidebar, it asks what to do with it (`syncCloudChoice`); out of
-    /// reach, it says so and the switch stays off.
+    /// The switch in Settings › Account. Off is immediate. On uses this
+    /// session's look at iCloud, or waits for one (read-only): empty, it
+    /// starts syncing; holding a sidebar, it asks what to do with it
+    /// (`syncCloudChoice`); out of reach, it says so and the switch stays off.
     func setSyncEnabled(_ enabled: Bool) {
         syncCloudMessage = nil
         guard enabled else {
+            syncSwitchWaiting = false
             MainActor.assumeIsolated { syncControl?.setUserEnabled(false) }
             return
         }
-        checkCloudSidebar { [weak self] detection in
-            guard let self else { return }
+        guard syncControl != nil else { return }
+        syncSwitchWaiting = true
+        checkCloudSidebar(force: false) { [weak self] detection in
+            guard let self, self.syncSwitchWaiting else { return }
+            self.syncSwitchWaiting = false
             switch detection {
             case .empty:
                 MainActor.assumeIsolated { self.syncControl?.setUserEnabled(true) }
@@ -45,17 +49,54 @@ extension BrowserViewModel {
         }
     }
 
-    /// A read-only look at iCloud for Settings › Account; `done` gets it too.
-    /// A look already under way answers this caller too.
-    func checkCloudSidebar(_ done: ((CloudSidebarDetection) -> Void)? = nil) {
+    var isCheckingCloud: Bool { cloudLook != .idle }
+
+    /// The look in one line, the same in the iCloud box and under the switch.
+    var cloudStatusText: String {
+        switch cloudLook {
+        case .looking(nil): return "Looking at iCloud…"
+        case .looking(let count?): return "Looking at iCloud… \(count.formatted()) items"
+        case .stalled(let message): return message
+        case .idle: return SyncCloudText.status(cloudDetection)
+        }
+    }
+
+    /// A read-only look at iCloud; `done` gets the result. Without `force`
+    /// this session's result answers at once. A look under way answers
+    /// every caller; one stalled is joined by a fresh one when forced, and
+    /// whichever finishes later still replaces an earlier result.
+    func checkCloudSidebar(force: Bool = true, _ done: ((CloudSidebarDetection) -> Void)? = nil) {
         guard let control = syncControl else { return }
+        if !force, cloudLooksRunning == 0, let cached = cloudDetection {
+            switch cached {
+            case .found, .empty:
+                done?(cached)
+                return
+            default:
+                break
+            }
+        }
         if let done { cloudCheckWaiters.append(done) }
-        guard !isCheckingCloud else { return }
-        isCheckingCloud = true
+        if cloudLooksRunning > 0, !(force && cloudLook.isStalled) { return }
+        cloudLooksStarted += 1
+        cloudLooksRunning += 1
+        let look = cloudLooksStarted
+        cloudLook = .looking(nil)
+        // Owned by the model, not the Settings window: closing it cancels nothing.
         Task { @MainActor [weak self] in
-            let detection = await control.detectCloudSidebar()
+            let detection = await control.detectCloudSidebar { [weak self] step in
+                guard let self, look == self.cloudLooksStarted else { return }
+                switch step {
+                case .account: self.cloudLook = .looking(nil)
+                case .records(let count): self.cloudLook = .looking(count)
+                case .stalled(let message): self.cloudLook = .stalled(message)
+                }
+            }
             guard let self else { return }
-            self.isCheckingCloud = false
+            self.cloudLooksRunning -= 1
+            if self.cloudLooksRunning == 0 { self.cloudLook = .idle }
+            guard look > self.newestCloudLookFinished else { return }
+            self.newestCloudLookFinished = look
             self.cloudDetection = detection
             let waiters = self.cloudCheckWaiters
             self.cloudCheckWaiters = []
@@ -140,5 +181,19 @@ extension BrowserViewModel {
                 if Date().timeIntervalSince(last) > Self.syncActivationThrottle { self.syncNow() }
             }
         }
+    }
+}
+
+/// A look at iCloud from Settings, while it runs.
+enum CloudLookState: Equatable {
+    case idle
+    /// Items read so far, once the first batch is in.
+    case looking(Int?)
+    /// Nothing new for a while; the look carries on.
+    case stalled(String)
+
+    var isStalled: Bool {
+        if case .stalled = self { return true }
+        return false
     }
 }

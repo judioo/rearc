@@ -165,33 +165,49 @@ public final class SidebarSyncCoordinator {
     /// What the last `detectCloudSidebar` found, held aside: none of it is
     /// in the sidebar until `apply(_:from:)`.
     public private(set) var stagedCloudSidebar: CloudSidebarFound?
-    /// How long a look at iCloud may take before it counts as unreachable.
-    public var detectionTimeout: TimeInterval = 20
+    /// A look that brings nothing new for this long is reported stalled; it
+    /// carries on, and its result counts whenever it comes. No limit on a
+    /// look that is still reading.
+    public var stallTimeout: TimeInterval = 30
+    public nonisolated static let stalledMessage = "iCloud hasn't sent anything for a while. ReArc is still waiting; check your connection."
 
-    /// Looks at iCloud without changing anything there or here.
-    public func detectCloudSidebar() async -> CloudSidebarDetection {
+    /// Looks at iCloud without changing anything there or here. `progress`
+    /// hears how far it got (never after this returns).
+    public func detectCloudSidebar(progress: @escaping @MainActor (CloudLookProgress) -> Void = { _ in }) async -> CloudSidebarDetection {
         guard let reader = transport as? SidebarCloudReading else {
             return .unavailable("This build can't look at iCloud.")
         }
-        let timeout = detectionTimeout
-        let look = await Self.withTimeout(timeout) { () -> Result<(SyncAccountStatus, [SyncWireRecord]?), SyncTransportError> in
-            let account = await reader.accountStatus()
-            guard case .available = account else { return .success((account, nil)) }
+        let finished = LookFinished()
+        let report: @Sendable (CloudLookProgress) -> Void = { step in
+            Task { @MainActor in if !finished.value { progress(step) } }
+        }
+        let stalledMessage = Self.stalledMessage
+        let watch = LookWatch(timeout: stallTimeout) { report(.stalled(stalledMessage)) }
+        defer {
+            finished.value = true
+            watch.stop()
+        }
+        progress(.account)
+        let account = await reader.accountStatus()
+        watch.touch()
+        var wires: [SyncWireRecord]?
+        var failure: SyncTransportError?
+        if case .available = account {
             do {
-                return .success((account, try await reader.readAllRecords()))
+                wires = try await reader.readAllRecords { count in
+                    watch.touch()
+                    report(.records(count))
+                }
             } catch let error as SyncTransportError {
-                return .failure(error)
+                failure = error
             } catch {
-                return .failure(.other(error.localizedDescription))
+                failure = .other(error.localizedDescription)
             }
         }
         let detection: CloudSidebarDetection
-        switch look {
-        case nil:
-            detection = .unreachable("iCloud didn't answer. Check your connection and try again.")
-        case .failure(let error)?:
-            detection = error == .notAuthenticated ? .signedOut(error.userMessage) : .unreachable(Self.unreachableMessage(error))
-        case .success((let account, let wires))?:
+        if let failure {
+            detection = failure == .notAuthenticated ? .signedOut(failure.userMessage) : .unreachable(Self.unreachableMessage(failure))
+        } else {
             switch account {
             case .available(let userID):
                 let records = sanitized(wires ?? [])
@@ -284,20 +300,6 @@ public final class SidebarSyncCoordinator {
         stagedCloudSidebar = nil
         persist()
         update(.off)
-    }
-
-    /// `operation`'s result, or nil when it takes longer than `seconds` (it
-    /// is left to finish on its own; a CloudKit call may not notice cancelling).
-    static func withTimeout<T: Sendable>(_ seconds: TimeInterval, _ operation: @escaping @Sendable () async -> T) async -> T? {
-        let once = ResumeOnce<T?>()
-        return await withCheckedContinuation { continuation in
-            once.continuation = continuation
-            Task { once.resume(await operation()) }
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-                once.resume(nil)
-            }
-        }
     }
 
     /// Sync Now: offer schema-rejected kinds again (after a schema deployment).
@@ -699,16 +701,49 @@ public final class SidebarSyncCoordinator {
     }
 }
 
-/// Resumes a continuation with the first value only.
-private final class ResumeOnce<T: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    var continuation: CheckedContinuation<T, Never>?
+/// Set on the main actor once a look returned: its late progress is dropped.
+@MainActor
+private final class LookFinished: @unchecked Sendable {
+    var value = false
+}
 
-    func resume(_ value: T) {
-        lock.lock()
-        let pending = continuation
-        continuation = nil
-        lock.unlock()
-        pending?.resume(returning: value)
+/// Calls `stalled` once each time nothing new arrives for `timeout` seconds.
+private final class LookWatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last = Date()
+    private var reported = false
+    private var task: Task<Void, Never>?
+
+    init(timeout: TimeInterval, stalled: @escaping @Sendable () -> Void) {
+        task = Task.detached { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let (since, alreadyReported) = self.state()
+                let wait = alreadyReported ? timeout : max(0.01, timeout - Date().timeIntervalSince(since))
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                if self.markStalledIfQuiet(timeout) { stalled() }
+            }
+        }
+    }
+
+    func touch() {
+        lock.lock(); defer { lock.unlock() }
+        last = Date()
+        reported = false
+    }
+
+    func stop() { task?.cancel() }
+
+    private func state() -> (Date, Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (last, reported)
+    }
+
+    private func markStalledIfQuiet(_ timeout: TimeInterval) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !reported, Date().timeIntervalSince(last) >= timeout else { return false }
+        reported = true
+        return true
     }
 }
