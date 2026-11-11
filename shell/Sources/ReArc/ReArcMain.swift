@@ -9,6 +9,7 @@ enum ReArcMain {
     static func main() {
         PerfSignposts.launchEvent("Main")
         let info = Bundle.main.infoDictionary
+        LaunchArgumentDefaults.drop(isRelease: info?["ReArcRelease"] as? Bool == true)
         let chromiumOwnsApplication = EngineLaunchOptions.applicationClassRequiresChromium(infoDictionary: info) {
             NSClassFromString($0) != nil
         }
@@ -50,5 +51,17 @@ enum ReArcMain {
             FileHandle.standardError.write(Data("SELFTEST FAIL: Chromium engine unavailable\n".utf8))
             exit(2)
         }
+    }
+}
+
+/// Foundation reads `-Key value` launch arguments into UserDefaults' argument domain, so one
+/// launch could turn off the breach check or switch update channels for good (the shell writes
+/// those values on). A shipped build drops that domain before anything reads a preference
+/// (security RC-0.1.0-544 N-05); development builds keep it for testing.
+enum LaunchArgumentDefaults {
+    static func drop(isRelease: Bool, defaults: UserDefaults = .standard) {
+        guard isRelease else { return }
+        // removeVolatileDomain leaves the argument values readable; an empty domain replaces them.
+        defaults.setVolatileDomain([:], forName: UserDefaults.argumentDomain)
     }
 }
