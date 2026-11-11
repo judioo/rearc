@@ -49,8 +49,7 @@ public enum BookmarkHTMLImport {
             } else if match.range(at: 2).location != NSNotFound {
                 guard links < maxLinks,
                       let href = attribute("HREF", in: text.substring(with: match.range(at: 2))),
-                      let url = URL(string: href), let scheme = url.scheme?.lowercased(),
-                      scheme == "http" || scheme == "https", url.host() != nil else { continue }
+                      let url = URL(string: href), NavigationURLPolicy.isImportableWebPage(url) else { continue }
                 let title = decodeEntities(stripTags(text.substring(with: match.range(at: 3))))
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 stack[stack.count - 1].children.append(.link(title: title.isEmpty ? (url.host() ?? href) : title, url: url))

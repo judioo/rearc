@@ -62,6 +62,16 @@ public enum NavigationURLPolicy {
         }
     }
 
+    /// A web page from outside ReArc's own UI: an import (Arc, browsers,
+    /// bookmark files) or a synced tab (RC-0.1.0-602 T-07). http or https
+    /// with a host and no user name or password; never `data:`, `file:`,
+    /// `chrome:` or `javascript:`, which the trusted UI alone may open.
+    public static func isImportableWebPage(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = url.host(), !host.isEmpty else { return false }
+        return url.user == nil && url.password == nil
+    }
+
     /// `view-source:` URL for a page, when the engine can show its source.
     public static func viewSourceURL(for url: URL, engine: EngineSchemes) -> URL? {
         guard engine.contains(.viewSource),

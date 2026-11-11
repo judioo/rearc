@@ -265,8 +265,7 @@ public enum ArcSidebarReader {
         }
 
         mutating func tab(id: String, item: [String: Any], data: [String: Any]) -> ArcSidebarTab? {
-            guard let saved = data["savedURL"] as? String, let url = URL(string: saved),
-                  let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https", url.host() != nil, url.user == nil, url.password == nil else {
+            guard let saved = data["savedURL"] as? String, let url = URL(string: saved), NavigationURLPolicy.isImportableWebPage(url) else {
                 dropped.nonWebTabs += 1
                 return nil
             }

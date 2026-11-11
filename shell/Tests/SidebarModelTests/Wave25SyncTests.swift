@@ -144,7 +144,8 @@ final class Wave25SyncConvergenceTests: XCTestCase {
         XCTAssertEqual(b.store.spaces.map(\.name), ["Home", "Work"])
         XCTAssertEqual(b.space(named: "Home")?.theme, SpaceTheme.presets[4])
         XCTAssertEqual(b.space(named: "Work")?.iconName, "briefcase.fill")
-        XCTAssertEqual(b.store.favorites(in: b.store.activeProfileID).map(\.title), ["Mail"])
+        // A favorite's page title stays on its Mac (RC-0.1.0-602 T-05): until it loads, B names it by host.
+        XCTAssertEqual(b.store.favorites(in: b.store.activeProfileID).map(\.title), ["mail.test"])
         XCTAssertEqual(b.pinnedTitles("Home"), ["Docs", "Article"])
         let work = b.space(named: "Work")!
         guard case .split(let split)? = b.store.content(for: work.id).pinned.first else {

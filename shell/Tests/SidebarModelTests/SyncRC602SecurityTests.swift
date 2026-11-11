@@ -461,3 +461,70 @@ final class SyncHostileRecordTests: XCTestCase {
         XCTAssertThrowsError(try SyncRecordPayload.decode(Data(payload.utf8)))
     }
 }
+
+/// RC-0.1.0-602 T-05 (no live address uploads) and T-07 (only web pages become synced tabs).
+@MainActor
+final class SyncAddressTests: XCTestCase {
+    private var server: InMemorySyncServer!
+    private var clock: Clock!
+
+    override func setUp() async throws {
+        server = InMemorySyncServer()
+        clock = Clock()
+    }
+
+    private func on() -> SidebarSyncState {
+        var state = SidebarSyncState()
+        state.enabled = true
+        state.decision = .user
+        return state
+    }
+
+    func testNavigationInAPinnedTabOrFavoriteNeverUploadsTheLiveAddress() async throws {
+        let a = Mac("A", server: server, clock: clock, state: on())
+        let pinned = a.store.addTab(kind: .pinned, title: "Docs", url: URL(string: "https://docs.test/start")!, in: a.store.spaces[0].id)
+        let favorite = a.store.addTab(kind: .favorite, title: "Mail", url: URL(string: "https://mail.test/inbox")!)
+        await a.sync()
+        a.store.updateTab(pinned.id, title: "Secret doc 42", url: URL(string: "https://docs.test/d/42?code=SIGNIN#access_token=abc")!)
+        a.store.updateTab(favorite.id, title: "Inbox (3) – kai@example.test", url: URL(string: "https://mail.test/inbox#token=xyz")!)
+        a.edited()
+        await a.sync()
+        let records = server.records(account: "alice")
+        let pinnedValues = try XCTUnwrap(records[SyncRecordKind.item.recordName(for: pinned.id)]?.payload.values)
+        XCTAssertEqual(pinnedValues["url"], .string("https://docs.test/start"), "the pinned URL, not where it went")
+        XCTAssertEqual(pinnedValues["title"], .string("Docs"))
+        let favoriteValues = try XCTUnwrap(records[SyncRecordKind.item.recordName(for: favorite.id)]?.payload.values)
+        XCTAssertEqual(favoriteValues["url"], .string("https://mail.test/inbox"), "no fragment")
+        XCTAssertEqual(favoriteValues["title"], .string("mail.test"), "no page title")
+        let text = records.values.map { String(describing: $0.payload.values) }.joined()
+        XCTAssertFalse(text.contains("SIGNIN") || text.contains("access_token") || text.contains("kai@example.test"))
+        // A's own tabs keep their live pages through its own syncs.
+        XCTAssertEqual(a.store.tab(withID: pinned.id)?.url.absoluteString, "https://docs.test/d/42?code=SIGNIN#access_token=abc")
+        XCTAssertEqual(a.store.tab(withID: favorite.id)?.title, "Inbox (3) – kai@example.test")
+    }
+
+    func testOnlyWebPagesBecomeSyncedTabs() async throws {
+        let a = Mac("A", server: server, clock: clock, state: on())
+        await a.sync()
+        let attacker = server.transport(account: "alice")
+        let profile = a.store.profiles[0].id.uuidString.lowercased()
+        let stamp = SyncStamp(millis: Int64(clock.date.timeIntervalSince1970 * 1000), device: "evil")
+        var planted: [UUID: String] = [:]
+        for url in ["data:text/html,<h1>Bank</h1>", "file:///etc/passwd", "chrome://settings", "javascript:alert(1)",
+                    "https://user:pw@bank.test/", "https://bank.test/login"] {
+            let id = UUID()
+            planted[id] = url
+            let fields: [String: SyncField] = [
+                "type": SyncField(value: .string("tab"), stamp: stamp), "parent": SyncField(value: .string("favorites:\(profile)"), stamp: stamp),
+                "url": SyncField(value: .string(url), stamp: stamp), "title": SyncField(value: .string("My Bank"), stamp: stamp),
+                "space": SyncField(value: .null, stamp: stamp),
+            ]
+            _ = try await attacker.modify(saving: [SyncWireRecord(recordName: SyncRecordKind.item.recordName(for: id), payload: SyncRecordPayload(kind: .item, fields: fields))], deleting: [])
+        }
+        await a.sync()
+        let shown = Set(a.store.favorites(in: a.store.profiles[0].id).map(\.id))
+        for (id, url) in planted {
+            XCTAssertEqual(shown.contains(id), url == "https://bank.test/login", url)
+        }
+    }
+}

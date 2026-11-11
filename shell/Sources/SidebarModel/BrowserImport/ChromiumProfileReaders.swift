@@ -33,8 +33,7 @@ public enum ChromiumBookmarksReader {
                         out.append(.folder(title: title.isEmpty ? "Folder" : title, children: inner))
                     }
                 } else if links < BookmarkHTMLImport.maxLinks,
-                          let href = child["url"] as? String, let url = URL(string: href),
-                          let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https", url.host() != nil, url.user == nil, url.password == nil {
+                          let href = child["url"] as? String, let url = URL(string: href), NavigationURLPolicy.isImportableWebPage(url) {
                     out.append(.link(title: title.isEmpty ? (url.host() ?? href) : title, url: url))
                     links += 1
                 }

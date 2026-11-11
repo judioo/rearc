@@ -133,13 +133,39 @@ public enum SidebarSyncProjection {
 
     private static func tabBody(_ tab: Tab, parent: Parent, spaceID: UUID?, rank: String) -> SyncRecordBody {
         var values = placement(type: "tab", parent: parent, spaceID: spaceID, rank: rank)
-        values["title"] = .string(tab.title)
-        values["url"] = .string(tab.url.absoluteString)
+        let address = syncedAddress(of: tab)
+        values["title"] = .string(address.title)
+        values["url"] = .string(address.url.absoluteString)
         values["customTitle"] = tab.customTitle.map(SyncValue.string) ?? .null
         values["customIcon"] = iconValue(tab.customIcon)
         values["savedURL"] = tab.savedURL.map { .string($0.absoluteString) } ?? .null
         values["savedTitle"] = tab.savedTitle.map(SyncValue.string) ?? .null
         return SyncRecordBody(kind: .item, values: values)
+    }
+
+    /// What a tab uploads as its address (RC-0.1.0-602 T-05). Its URL and
+    /// title follow every navigation, which may carry sign-in codes or
+    /// tokens: a pinned tab sends its pinned URL and title instead, and a
+    /// favorite its address without the fragment and with no page title.
+    static func syncedAddress(of tab: Tab) -> (url: URL, title: String) {
+        if let saved = tab.savedURL {
+            return (saved, tab.savedTitle ?? saved.host() ?? saved.absoluteString)
+        }
+        var parts = URLComponents(url: tab.url, resolvingAgainstBaseURL: false)
+        parts?.fragment = nil
+        let url = parts?.url ?? tab.url
+        return (url, url.host() ?? url.absoluteString)
+    }
+
+    /// The tab a record describes, as this Mac shows it: while the synced
+    /// address is the one this Mac's own copy would send, its live page and
+    /// title stay as they are.
+    static func keepingLivePage(_ tab: Tab, local: Tab?) -> Tab {
+        guard let local, syncedAddress(of: local).url == tab.url else { return tab }
+        var tab = tab
+        tab.url = local.url
+        tab.title = local.title
+        return tab
     }
 
     // User-chosen icons sync for tabs, folders and splits; easels remain local-only.
@@ -447,7 +473,7 @@ public enum SidebarSyncProjection {
             guard values["parent"]?.stringValue.flatMap(Parent.init(key:)) != nil else { return false }
             switch values["type"]?.stringValue {
             case "tab"?:
-                return values["url"]?.stringValue.flatMap(URL.init(string:)) != nil
+                return values["url"]?.stringValue.flatMap(URL.init(string:)).map(NavigationURLPolicy.isImportableWebPage) ?? false
             case "folder"?:
                 return true
             case "split"?:
@@ -473,13 +499,20 @@ public enum SidebarSyncProjection {
             "memberPlacements": .object(Dictionary(uniqueKeysWithValues: split.memberPlacements.map {
                 ($0.key.uuidString, (try? SyncValue.encoding($0.value)) ?? .null)
             })),
-            "tabs": .array(split.tabs.map { .object(objectFields($0, dropping: localTabKeys)) }),
+            "tabs": .array(split.tabs.map { tab in
+                var fields = objectFields(tab, dropping: localTabKeys)
+                let address = syncedAddress(of: tab)
+                fields["url"] = .string(address.url.absoluteString)
+                fields["title"] = .string(address.title)
+                return .object(fields)
+            }),
         ]
     }
 
     static func makeSplit(id: UUID, values: [String: SyncValue], rank: String) -> SplitViewItem? {
         guard let tabs = try? values["tabs"]?.decoded(as: [Tab].self), (2 ... 4).contains(tabs.count),
               Set(tabs.map(\.id)).count == tabs.count, !tabs.contains(where: { $0.id == id }),
+              tabs.allSatisfy({ NavigationURLPolicy.isImportableWebPage($0.url) && ($0.savedURL.map(NavigationURLPolicy.isImportableWebPage) ?? true) }),
               let orientation = try? values["orientation"]?.decoded(as: SplitLayoutOrientation.self) else { return nil }
         var factors: [Tab.ID: Double] = [:]
         for (key, value) in values["widthFactors"]?.objectValue ?? [:] {
@@ -617,7 +650,7 @@ public enum SidebarSyncProjection {
         case "split":
             guard var split = makeSplit(id: item.id, values: item.values, rank: item.rank) else { return fallback }
             split.tabs = split.tabs.map { tab in
-                var copy = tab
+                var copy = keepingLivePage(tab, local: local.tabs[tab.id])
                 if let existing = local.tabs[tab.id] {
                     copy.lastActiveAt = existing.lastActiveAt
                     copy.isUnread = existing.isUnread
@@ -626,7 +659,9 @@ public enum SidebarSyncProjection {
             }
             return .split(split)
         default:
-            guard let urlText = item.values["url"]?.stringValue, let url = URL(string: urlText) else {
+            // Only a web page becomes a tab: a synced data:, file: or chrome: one looks like
+            // any favorite and would load unasked (RC-0.1.0-602 T-07).
+            guard let urlText = item.values["url"]?.stringValue, let url = URL(string: urlText), NavigationURLPolicy.isImportableWebPage(url) else {
                 return fallback
             }
             let isFavorite: Bool
@@ -641,7 +676,7 @@ public enum SidebarSyncProjection {
                 sortRank: item.rank,
                 customTitle: item.values["customTitle"]?.stringValue,
                 lastActiveAt: existing?.lastActiveAt ?? Date(),
-                savedURL: item.values["savedURL"]?.stringValue.flatMap(URL.init(string:)),
+                savedURL: item.values["savedURL"]?.stringValue.flatMap(URL.init(string:)).flatMap { NavigationURLPolicy.isImportableWebPage($0) ? $0 : nil },
                 savedTitle: item.values["savedTitle"]?.stringValue,
                 customIcon: icon(in: item.values)
             )
@@ -649,7 +684,7 @@ public enum SidebarSyncProjection {
                 tab.savedURL = nil
                 tab.savedTitle = nil
             }
-            return .tab(tab)
+            return .tab(keepingLivePage(tab, local: existing))
         }
     }
 
