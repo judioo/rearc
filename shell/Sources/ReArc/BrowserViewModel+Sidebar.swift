@@ -167,7 +167,9 @@ extension BrowserViewModel {
     /// The ⌘W item's title for the selected tab; a key private window
     /// closes instead, so it keeps "Close Tab".
     var closeTabMenuTitle: String {
-        guard keyPrivateWindow == nil, let id = store.selectedTabID else { return "Close Tab" }
+        guard keyPrivateWindow == nil else { return "Close Tab" }
+        if let ids = keySelectionIDs { return closeMenuTitle(for: ids) }
+        guard let id = store.selectedTabID else { return "Close Tab" }
         return closeKind(of: id).menuTitle
     }
 
@@ -205,6 +207,7 @@ extension BrowserViewModel {
 
     /// Cmd+D: pin a Today tab, unpin a pinned one.
     func togglePin(_ tabID: Tab.ID? = nil) {
+        if tabID == nil, let ids = keySelectionIDs { return togglePinned(ids) }
         guard let id = tabID ?? store.selectedTabID else { return }
         let space = store.spaceContaining(tabID: id).flatMap { store.space(withID: $0) }?.name ?? ""
         switch store.kind(of: id) {
@@ -221,6 +224,7 @@ extension BrowserViewModel {
     }
 
     func addToFavorites(_ tabID: Tab.ID? = nil) {
+        if tabID == nil, let ids = keySelectionIDs { return addTabsToFavorites(ids) }
         guard let id = tabID ?? store.selectedTabID else { return }
         // The engine follows the favorite's profile, which is the space's profile.
         store.addToFavorites(id)
@@ -444,6 +448,7 @@ extension BrowserViewModel {
     // MARK: - Tabs
 
     func duplicateTab(_ tabID: Tab.ID? = nil) {
+        if tabID == nil, let ids = keySelectionIDs { return duplicateTabs(ids) }
         guard let id = tabID ?? store.selectedTabID, let copy = store.duplicateTab(id) else { return }
         store.selectTab(copy.id)
         loadSelectedIfNeeded()
@@ -451,6 +456,7 @@ extension BrowserViewModel {
 
     /// Archive Tab (Arc keywords "Exit Tab; Unload; Close").
     func archiveTab(_ tabID: Tab.ID? = nil) {
+        if tabID == nil, let ids = keySelectionIDs { return archiveTabs(ids) }
         guard let id = tabID ?? store.selectedTabID, store.archiveTab(id) != nil else { return }
         releaseEngine(for: id)
         loadSelectedIfNeeded()

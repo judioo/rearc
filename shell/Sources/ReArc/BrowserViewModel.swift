@@ -956,6 +956,7 @@ final class BrowserViewModel {
     }
 
     func closeSelectedTab() {
+        if let ids = keySelectionIDs { return closeItems(ids) }
         guard let id = store.selectedTabID else { return }
         closeTab(id)
     }
@@ -1942,11 +1943,15 @@ final class BrowserViewModel {
     }
 
     func reopenClosedTab() {
-        guard let tab = store.reopenMostRecentClosedTab() else { return }
-        // A reopened split brings back every pane; panes already open keep their pages.
-        for pane in store.splitContaining(tabID: tab.id)?.split.tabs ?? [tab]
-        where pane.id == tab.id || engineHost.engine(forTabID: pane.id, profileID: profileID(for: pane)) == nil {
-            engineHost.engine(for: pane, profileID: profileID(for: pane)).load(pane.url)
+        // Tabs closed together (a selection's ⌘W) come back together.
+        let reopened = store.reopenMostRecentClosedBatch()
+        guard !reopened.isEmpty else { return }
+        for tab in reopened {
+            // A reopened split brings back every pane; panes already open keep their pages.
+            for pane in store.splitContaining(tabID: tab.id)?.split.tabs ?? [tab]
+            where pane.id == tab.id || engineHost.engine(forTabID: pane.id, profileID: profileID(for: pane)) == nil {
+                engineHost.engine(for: pane, profileID: profileID(for: pane)).load(pane.url)
+            }
         }
         loadSelectedIfNeeded()
     }
