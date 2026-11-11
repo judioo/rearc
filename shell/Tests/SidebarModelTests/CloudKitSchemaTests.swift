@@ -42,9 +42,9 @@ struct CloudKitSchemaTests {
                 #expect(pattern.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil, "\(type).\(field): \(value)")
             }
         }
-        // The default Users type stays as CloudKit made it.
+        // The default Users type stays as the Development export has it (no index on the record ID).
         #expect(types["Users"]?["roles"] == "LIST<INT64>")
-        #expect(types["Users"]?["___recordID"] == "REFERENCE QUERYABLE")
+        #expect(types["Users"]?["___recordID"] == "REFERENCE")
     }
 
     @Test func everyRuntimeKindAndTransportWriteHasADeployedSchemaDefinition() throws {
