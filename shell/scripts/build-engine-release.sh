@@ -80,6 +80,9 @@ GN_ARGS=(
   'generate_about_credits=true'
   'is_debug=false' 'is_component_build=false' 'dcheck_always_on=false'
   'enable_dsyms=true' 'enable_stripping=true'
+  # Chromium's field-trial testing config is for its bots: it switches on unlaunched features
+  # (among them the Safe Browsing v5 lists, which Google does not serve to our key).
+  'disable_fieldtrial_testing_config=true'
   "branding_file_path=\"$GENERATED_BRANDING\""
 )
 printf '=== gn gen %s (overlay %s) ===\nargs: %s\n' "$OUT_DIR" "$(git rev-parse --short=10 HEAD)" "${GN_ARGS[*]}"

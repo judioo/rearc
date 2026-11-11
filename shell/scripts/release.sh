@@ -72,6 +72,9 @@ if [[ $DMG == 1 ]]; then
   [[ $ALLOW_NO_SAFE_BROWSING == 0 ]] || key_gate+=(--allow-no-safe-browsing)
   python3 "$REPO/engine/scripts/google-api-keys.py" check "$OUT" ${key_gate[@]+"${key_gate[@]}"} \
     || die "the release engine has no real Google API key, so Safe Browsing cannot work; rebuild it with the key (RELEASE.md) or pass --allow-no-safe-browsing"
+  # The engine must not run Chromium's field-trial testing config (RELEASE.md, "Engine build").
+  grep -q 'BUILDFLAG_INTERNAL_FIELDTRIAL_TESTING_ENABLED() (0)' "$OUT/gen/components/variations/service/buildflags.h" 2>/dev/null \
+    || die "the release engine was built with Chromium's field-trial testing config; rebuild it with disable_fieldtrial_testing_config=true (scripts/build-engine-release.sh)"
   pinned="$(awk '!/^[[:space:]]*(#|$)/ {v=$0} END {print v}' "$REPO/engine/CHROMIUM_PIN")"
   built="$(plutil -extract CFBundleShortVersionString raw "$OUT/Chromium.app/Contents/Info.plist")"
   [[ "$built" == "$pinned" ]] || die "engine output $built does not match CHROMIUM_PIN $pinned; rebuild the release engine"

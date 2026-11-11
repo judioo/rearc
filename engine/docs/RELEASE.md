@@ -95,13 +95,20 @@ committed. Filter `AIza` out of anything copied from a build log.
 
 ```
 target_os="mac" target_cpu="arm64" is_chrome_branded=false is_official_build=false
-use_system_xcode=true use_remoteexec=false use_siso=true chrome_pgo_phase=0
+use_system_xcode=true use_remoteexec=false use_siso=true chrome_pgo_phase=0 disable_fieldtrial_testing_config=true
 symbol_level=1 treat_warnings_as_errors=false
 is_debug=false is_component_build=false dcheck_always_on=false
 enable_dsyms=true enable_stripping=true
 branding_file_path="<repo>/shell/.build-release/BRANDING"   (generated, carries MAC_TEAM_ID)
 google_api_key="…"   (appended from ~/.config/rearc/google-api-keys.gn, "Safe Browsing key")
 ```
+
+`disable_fieldtrial_testing_config=true` is required. Without it an unbranded build runs
+Chromium's bot configuration, which switches on hundreds of unlaunched features. One of them
+moves Safe Browsing to the v5 list protocol, which Google answers with 404 for our key, so no
+threat list ever arrives (security review of 544, F-02 and N-01). `release.sh --dmg` refuses an
+engine whose `gen/components/variations/service/buildflags.h` has the testing config on.
+
 
 - These are the dev args, which set no other branding arguments, with the release
   changes. `engine/scripts/build.sh --release` cannot be used because its fixed argument
