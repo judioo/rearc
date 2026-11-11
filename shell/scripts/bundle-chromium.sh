@@ -283,8 +283,8 @@ ReArc.app (Chromium ${VERSION}) assembled:
   $APP
 Run the Chromium engine:
   "$APP/Contents/MacOS/ReArc" --rearc-engine=chromium      (or REARC_ENGINE=chromium)
-Run the self-test:
-  "$APP/Contents/MacOS/ReArc" --rearc-selftest
+Run the self-test (a release bundle needs REARC_RELEASE_VERIFICATION=1 and a new, empty data dir):
+  "$APP/Contents/MacOS/ReArc" --rearc-selftest --user-data-dir="\$(mktemp -d)"
 EOF
 
 if [[ $LAUNCH_CHECK == 1 ]]; then
