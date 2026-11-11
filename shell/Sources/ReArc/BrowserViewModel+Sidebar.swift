@@ -50,6 +50,13 @@ enum TabCloseKind: Equatable {
 
 /// Destructive sidebar actions that ask first (Arc `SpaceDeletionConfiguration`,
 /// `DeleteProfileDialog`).
+/// Rows (one or a selection) moving to a space of another profile, waiting
+/// for confirmation like a space's Change Profile.
+struct SidebarProfileMove: Equatable {
+    var ids: [UUID]
+    var spaceID: Space.ID
+}
+
 /// Change Profile of a space, waiting for confirmation (Arc ConfirmInterProfileMove).
 struct SpaceProfileChange: Equatable {
     var spaceID: Space.ID
@@ -167,7 +174,9 @@ extension BrowserViewModel {
     /// The ⌘W item's title for the selected tab; a key private window
     /// closes instead, so it keeps "Close Tab".
     var closeTabMenuTitle: String {
-        guard keyPrivateWindow == nil, let id = store.selectedTabID else { return "Close Tab" }
+        guard keyPrivateWindow == nil else { return "Close Tab" }
+        if let ids = keySelectionIDs { return closeMenuTitle(for: ids) }
+        guard let id = store.selectedTabID else { return "Close Tab" }
         return closeKind(of: id).menuTitle
     }
 
@@ -205,6 +214,7 @@ extension BrowserViewModel {
 
     /// Cmd+D: pin a Today tab, unpin a pinned one.
     func togglePin(_ tabID: Tab.ID? = nil) {
+        if tabID == nil, let ids = keySelectionIDs { return togglePinned(ids) }
         guard let id = tabID ?? store.selectedTabID else { return }
         let space = store.spaceContaining(tabID: id).flatMap { store.space(withID: $0) }?.name ?? ""
         switch store.kind(of: id) {
@@ -221,6 +231,7 @@ extension BrowserViewModel {
     }
 
     func addToFavorites(_ tabID: Tab.ID? = nil) {
+        if tabID == nil, let ids = keySelectionIDs { return addTabsToFavorites(ids) }
         guard let id = tabID ?? store.selectedTabID else { return }
         // The engine follows the favorite's profile, which is the space's profile.
         store.addToFavorites(id)
@@ -444,6 +455,7 @@ extension BrowserViewModel {
     // MARK: - Tabs
 
     func duplicateTab(_ tabID: Tab.ID? = nil) {
+        if tabID == nil, let ids = keySelectionIDs { return duplicateTabs(ids) }
         guard let id = tabID ?? store.selectedTabID, let copy = store.duplicateTab(id) else { return }
         store.selectTab(copy.id)
         loadSelectedIfNeeded()
@@ -451,6 +463,7 @@ extension BrowserViewModel {
 
     /// Archive Tab (Arc keywords "Exit Tab; Unload; Close").
     func archiveTab(_ tabID: Tab.ID? = nil) {
+        if tabID == nil, let ids = keySelectionIDs { return archiveTabs(ids) }
         guard let id = tabID ?? store.selectedTabID, store.archiveTab(id) != nil else { return }
         releaseEngine(for: id)
         loadSelectedIfNeeded()
@@ -570,13 +583,21 @@ extension BrowserViewModel {
     /// `live`: the tabs that had a page before the change. Those reload now
     /// in the new container; the rest load there when first shown.
     private func reloadSpaceAfterProfileChange(_ spaceID: Space.ID, live: Set<Tab.ID>) {
-        let tabs = SidebarTree.tabs(store.content(for: spaceID).pinned + store.content(for: spaceID).today)
+        reloadTabsInTheirProfile(SidebarTree.tabs(store.content(for: spaceID).pinned + store.content(for: spaceID).today), live: live)
+    }
+
+    /// Tabs whose profile changed (their space's, or a move to another
+    /// profile's space): every engine, subscription and boost session of the
+    /// old profile goes, and the tabs that had a page load it again in the
+    /// new profile's storage.
+    func reloadTabsInTheirProfile(_ tabs: [Tab], live: Set<Tab.ID>) {
         for tab in tabs {
             let id = tab.id
             // A boost editing session belonged to the closed engine.
             boostEditorDraftByTab[id] = nil
             boostSessionApplyByTab[id] = nil
             lastPickedSnapshotByTab[id] = nil
+            boostSelectorFingerprintByTab[id] = nil
             // Clear subscriptions and page identity caches as well as the engine:
             // they are keyed by tab UUID, which survives a profile change.
             releaseEngine(for: id)

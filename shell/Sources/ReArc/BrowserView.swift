@@ -189,6 +189,7 @@ struct BrowserView: View {
             .frame(width: 0, height: 0)
         )
         .navigationTitle(contentTitle)
+        .modifier(ProfileMoveAlert(model: model, isOwner: isKeyWindowSheetOwner))
         .sheet(isPresented: $model.isCapturePreviewPresented) {
             if let record = model.lastCapturePreview {
                 CapturePreviewSheet(record: record, model: model)
@@ -387,6 +388,7 @@ struct BrowserView: View {
     private var spaceProfileChangeText: (title: String, message: String, action: String) {
         model.pendingSpaceProfileChange.map(model.spaceProfileChangeMessage) ?? ("", "", "")
     }
+
 
     /// Only the key window presents the shared sheets.
     private var isKeyWindowSheetOwner: Bool {
@@ -766,6 +768,26 @@ struct PageZoomBadge: View {
             .padding(10)
             .padding(.top, topInset)
             .help("Page zoom — click to reset to 100% (⌘0)")
+        }
+    }
+}
+
+/// Move to Profile's one confirmation, for one row or a whole selection
+/// (`BrowserViewModel.requestProfileMove`).
+private struct ProfileMoveAlert: ViewModifier {
+    let model: BrowserViewModel
+    let isOwner: Bool
+
+    func body(content: Content) -> some View {
+        let text: (title: String, message: String, action: String) = model.pendingProfileMove.map(model.profileMoveMessage) ?? ("", "", "")
+        content.alert(text.title, isPresented: Binding(
+            get: { model.pendingProfileMove != nil && isOwner },
+            set: { if !$0 { model.pendingProfileMove = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { model.pendingProfileMove = nil }
+            Button(text.action) { model.confirmProfileMove() }
+        } message: {
+            Text(text.message)
         }
     }
 }

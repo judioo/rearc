@@ -17,12 +17,17 @@ public struct ClosedTabRecord: Equatable, Codable {
     public var placement: ClosedTabPlacement?
     /// Set when a whole split was closed; reopening brings back every pane.
     public var split: SplitViewItem?
+    /// Shared by the tabs one command closed together (a multi-row
+    /// selection's ⌘W): ⇧⌘T reopens them together. Optional, so records
+    /// saved before it decode, and older builds ignore it.
+    public var batchID: UUID?
 
-    public init(tab: Tab, spaceID: Space.ID, placement: ClosedTabPlacement? = nil, split: SplitViewItem? = nil) {
+    public init(tab: Tab, spaceID: Space.ID, placement: ClosedTabPlacement? = nil, split: SplitViewItem? = nil, batchID: UUID? = nil) {
         self.tab = tab
         self.spaceID = spaceID
         self.placement = placement
         self.split = split
+        self.batchID = batchID
     }
 }
 

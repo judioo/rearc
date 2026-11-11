@@ -142,6 +142,31 @@ final class SidebarBadgeInkTests: XCTestCase {
         }
     }
 
+    /// A multi-selected row's veil (Arc's grey) keeps its title at 4.5:1:
+    /// the title is fitted again on it, or the row takes the other side's
+    /// veil. Pale themes keep Arc's 10 % black veil and their title.
+    func testMultiSelectedRowsStayLegible() {
+        var refitted = 0, fallbacks = 0
+        for (name, theme, windowDark) in Self.legibleCases {
+            let (lightInk, chrome) = SpaceThemeRoles.sidebarChrome(theme: theme, windowDark: windowDark)
+            let wash = SidebarRowWash.multiSelected(title: chrome.title, theme: theme, windowDark: windowDark, lightInk: lightInk)
+            if wash.title != chrome.title { refitted += 1 }
+            if wash.alpha == SidebarRowWash.multiSelectedFallbackAlpha {
+                fallbacks += 1
+                XCTAssertEqual(wash.title, chrome.title)
+            }
+            for background in sidebarSamples(theme, windowDark: windowDark) {
+                let row = background.mixed(with: wash.veil, fraction: wash.alpha)
+                XCTAssertGreaterThanOrEqual(contrast(wash.title, row), SidebarContrast.text,
+                                            "\(Self.label(name, windowDark)) multi-selected row on \(background.hex)")
+            }
+        }
+        XCTAssertLessThan(refitted + fallbacks, Self.legibleCases.count / 2, "most themes keep the plain veil and title")
+        let pale = SpaceThemeRoles.sidebarChrome(theme: .arcDefault, windowDark: false)
+        XCTAssertEqual(SidebarRowWash.multiSelected(title: pale.chrome.title, theme: .arcDefault, windowDark: false, lightInk: pale.lightInk).title,
+                       pale.chrome.title)
+    }
+
     func testBadgeGlyphAndEdgeReadOnEveryThemeAndAppearance() {
         for (name, theme, windowDark) in Self.legibleCases {
             let (lightInk, chrome) = SpaceThemeRoles.sidebarChrome(theme: theme, windowDark: windowDark)

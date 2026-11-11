@@ -174,6 +174,8 @@ struct FolderRowView<Menu: View>: View {
     var onCloseFolder: (() -> Void)? = nil
     /// Set while the title is being renamed in place.
     var rename: SidebarRowRename? = nil
+    /// In a multi-row selection (Arc's grey row).
+    var isMultiSelected = false
     let onToggle: () -> Void
     @ViewBuilder let menu: () -> Menu
 
@@ -199,7 +201,7 @@ struct FolderRowView<Menu: View>: View {
             } else {
                 Text(folder.title)
                     .font(.system(size: SidebarMetrics.titleSize, weight: .semibold))
-                    .foregroundStyle(chrome.title)
+                    .foregroundStyle(isMultiSelected ? chrome.multiSelectedTitle : chrome.title)
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
@@ -221,7 +223,8 @@ struct FolderRowView<Menu: View>: View {
         .frame(height: SidebarMetrics.rowHeight)
         .background(
             isDropTarget ? Color.accentColor.opacity(0.22)
-                : rename != nil ? chrome.rowSelected : chrome.rowHover.opacity(isHovering ? 1 : 0),
+                : rename != nil ? chrome.rowSelected
+                : isMultiSelected ? chrome.rowMultiSelected : chrome.rowHover.opacity(isHovering ? 1 : 0),
             in: RoundedRectangle(cornerRadius: rename == nil ? 8 : SidebarRowRename.cornerRadius, style: .continuous)
         )
         .contentShape(RoundedRectangle(cornerRadius: 8))
