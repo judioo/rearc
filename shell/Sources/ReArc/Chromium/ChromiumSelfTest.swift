@@ -1037,6 +1037,26 @@ final class ChromiumSelfTest {
 
     // MARK: Shell windows
 
+    /// What the window shows instead of `tab`: the selection, overlays, and every tab engine with its lease.
+    @MainActor
+    private func shellReport(_ model: BrowserViewModel, _ store: SidebarStore, tab: Tab, engine: ChromiumEngine) -> String {
+        func describe(_ id: UUID?) -> String {
+            guard let id else { return "nothing" }
+            if let item = store.tab(withID: id) { return "'\(item.title)' \(item.kind) \(item.url.absoluteString)" }
+            if let split = store.split(withID: id) { return "split of \(split.tabs.map(\.title))" }
+            return "item \(id.uuidString.prefix(8))"
+        }
+        let engines = model.engineHost.allTabEngines().compactMap { id, _, other -> String? in
+            guard let other = other as? ChromiumEngine else { return nil }
+            return "\(describe(id)) = tab \(other.tabID) lease \(other.attachmentID ?? 0) url \(other.currentURL?.absoluteString ?? "-")"
+        }
+        return "selected \(describe(store.selectedItemID)) (wanted \(describe(tab.id))); source tab \(engine.tabID) lease "
+            + "\(engine.attachmentID ?? 0) title \(engine.pageTitle ?? "-") loading \(engine.isLoading); command bar "
+            + "\(model.isCommandBarPresented) peek \(model.peekSession != nil) library \(model.librarySection(in: store.keyWindowID).map { "\($0)" } ?? "-") "
+            + "space \(store.spaceContaining(tabID: tab.id) == store.activeSpaceID ? "active" : "other"); engines: "
+            + engines.joined(separator: "; ")
+    }
+
     @MainActor
     private func shellEngine(_ model: BrowserViewModel, _ tab: Tab) throws -> ChromiumEngine {
         guard let engine = model.engineHost.engine(forTabID: tab.id, profileID: model.profileID(for: tab)) as? ChromiumEngine else {
@@ -4076,8 +4096,12 @@ extension ChromiumSelfTest {
             let tab = store.addTab(kind: kind, title: "Auto Peek", url: source)
             model.selectTab(tab.id)
             let engine = try shellEngine(model, tab)
-            try await wait("auto Peek source loaded", timeout: 20) {
-                engine.attachmentID != nil && engine.pageTitle == "links" && !engine.isLoading
+            do {
+                try await wait("auto Peek source loaded", timeout: 20) {
+                    engine.attachmentID != nil && engine.pageTitle == "links" && !engine.isLoading
+                }
+            } catch {
+                throw Failure(description: "the \(kind) auto Peek source never showed: " + shellReport(model, store, tab: tab, engine: engine))
             }
             try await wait("auto Peek script configured") { !engine.automaticPeekUpdating }
             let href = String(data: try JSONEncoder().encode(offSite.absoluteString), encoding: .utf8)!
