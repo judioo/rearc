@@ -340,19 +340,24 @@ public enum SidebarSyncProjection {
         for profile in profiles {
             var library = snapshot.boostLibrariesByProfileID[profile.id] ?? BoostLibraryOps.empty(for: profile.id)
             if case .bool(let enabled)? = profileValues[profile.id]?["boostsEnabled"] { library.masterEnabled = enabled }
-            library.adoptLegacyScriptApprovals()
+            // Approvals describe what this Mac ran before the change arrived; CSS and scripts
+            // that differ from them stay off until approved here (RC-0.1.0-544 N-02, F-12).
+            library.adoptLegacyApprovals()
             var pairs: [(BoostPackage, BoostInstallation)] = []
             for (id, values) in boosts where values["profileID"]?.stringValue.flatMap(UUID.init(uuidString:)) == profile.id {
                 guard var package = try? values["package"]?.decoded(as: BoostPackage.self), package.manifest.id == id else { continue }
                 let hash = BoostLibraryOps.scriptApprovalHash(package)
                 package.scriptBoost?.userScriptEnabled = hash != nil && library.approvedScriptHashes?[id] == hash
-                let installation = values["installation"].flatMap(installation(from:))
+                var installation = values["installation"].flatMap(installation(from:))
                     ?? BoostInstallation(packageID: id, order: pairs.count)
+                // Private-window use is this Mac's choice; another Mac cannot turn it on.
+                installation.allowPrivate = library.installation(for: id)?.allowPrivate ?? false
                 pairs.append((package, installation))
             }
             pairs.sort { ($0.1.order, $0.0.manifest.id.uuidString) < ($1.1.order, $1.0.manifest.id.uuidString) }
             library.packages = pairs.map(\.0)
             library.installations = pairs.map(\.1)
+            library.pruneApprovals()
             libraries[profile.id] = library
         }
 

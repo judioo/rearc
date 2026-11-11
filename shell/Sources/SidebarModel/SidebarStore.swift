@@ -1170,7 +1170,19 @@ public final class SidebarStore {
         return boostLibrariesByProfileID[id] ?? BoostLibraryOps.empty(for: id)
     }
 
+    /// Every local boost edit lands here, so CSS written or changed on this Mac is approved
+    /// here; CSS from sync is not (`approveBoostStyle`).
     private func updateBoostLibrary(_ library: ProfileBoostLibrary) {
+        var library = library
+        library.approveLocalStyleEdits(since: boostLibrariesByProfileID[library.profileID])
+        boostLibrariesByProfileID[library.profileID] = library
+        notifyMutation()
+    }
+
+    /// Applies a boost's CSS as it stands now, after the user has seen it (Boosts library).
+    public func approveBoostStyle(packageID: UUID) {
+        var library = boostLibrary(for: activeProfileID)
+        guard BoostLibraryOps.approveStyle(packageID: packageID, library: &library) else { return }
         boostLibrariesByProfileID[library.profileID] = library
         notifyMutation()
     }

@@ -17,6 +17,10 @@ public struct BoostLibraryRow: Identifiable, Equatable, Sendable {
     public var matchesCurrentPage: Bool
     /// The first site, opened by "Open Site".
     public var siteURL: URL?
+    /// The CSS came or changed through sync and is not applied until approved on this Mac.
+    public var styleNeedsApproval: Bool = false
+    /// Every host rule, one per line, for the row's tooltip and the approval prompts.
+    public var allSites: String = ""
 }
 
 public enum BoostLibraryListing {
@@ -38,7 +42,9 @@ public enum BoostLibraryListing {
                     hasScript: package.hasScript,
                     scriptAllowed: package.scriptBoost?.userScriptEnabled ?? false,
                     matchesCurrentPage: currentPage.map { BoostScopeMatcher.matches(scope: package.manifest.hostScope, url: $0) } ?? false,
-                    siteURL: hosts.first.flatMap { URL(string: "https://\($0)/") }
+                    siteURL: hosts.first.flatMap { URL(string: "https://\($0)/") },
+                    styleNeedsApproval: !library.styleApproved(package),
+                    allSites: package.manifest.hostScope.map(describe).joined(separator: "\n")
                 )
                 guard needle.isEmpty
                         || row.name.lowercased().contains(needle)
@@ -46,6 +52,14 @@ public enum BoostLibraryListing {
                 return row
             }
             .sorted { (order[$0.id] ?? 0) < (order[$1.id] ?? 0) }
+    }
+
+    /// "github.com and subdomains, https, /path".
+    public static func describe(_ rule: BoostHostRule) -> String {
+        var text = rule.host + (rule.hostMatch == .registrable ? " and subdomains" : "")
+        text += ", " + rule.schemes.joined(separator: "/")
+        if !rule.pathPrefix.isEmpty { text += ", paths under " + rule.pathPrefix }
+        return text
     }
 
     static func summary(_ hosts: [String]) -> String {

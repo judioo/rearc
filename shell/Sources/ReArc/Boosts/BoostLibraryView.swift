@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import SidebarModel
 
@@ -74,6 +75,7 @@ struct BoostLibraryView: View {
                         masterEnabled: model.boostsMasterEnabled,
                         onToggle: { model.setBoostEnabled(row.id, enabled: $0) },
                         onAllowScript: { model.setBoostScriptAllowed(row.id, allowed: $0) },
+                        onApproveStyle: { model.approveBoostStyle(row.id) },
                         onEdit: { model.editBoost(row.id) },
                         onOpenSite: { model.openBoostSite(row.id) }
                     )
@@ -175,6 +177,7 @@ private struct BoostLibraryRowView: View {
     let masterEnabled: Bool
     let onToggle: (Bool) -> Void
     let onAllowScript: (Bool) -> Void
+    let onApproveStyle: () -> Void
     let onEdit: () -> Void
     let onOpenSite: () -> Void
     @State private var isHovering = false
@@ -194,6 +197,7 @@ private struct BoostLibraryRowView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .help(row.allSites)
             }
             Spacer(minLength: 8)
             if isHovering {
@@ -202,6 +206,11 @@ private struct BoostLibraryRowView: View {
                 } else if row.siteURL != nil {
                     Button("Open Site", action: onOpenSite).controlSize(.small)
                 }
+            }
+            if row.styleNeedsApproval {
+                Button("Review CSS…", action: onApproveStyle)
+                    .controlSize(.small)
+                    .help("This boost's CSS changed on another device; it applies here once you approve it")
             }
             if row.hasScript {
                 Toggle("Allow Script", isOn: Binding(get: { row.scriptAllowed }, set: onAllowScript))
@@ -228,6 +237,35 @@ private struct BoostLibraryRowView: View {
             .padding(.vertical, 1)
             .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 3))
             .foregroundStyle(.secondary)
+    }
+}
+
+/// Shows boost code and every host rule before the user approves it on this Mac.
+/// Tests replace `confirm`.
+enum BoostCodeReview {
+    nonisolated(unsafe) static var confirm: (_ title: String, _ action: String, _ code: String, _ hosts: [BoostHostRule]) -> Bool = {
+        title, action, code, hosts in MainActor.assumeIsolated { present(title: title, action: action, code: code, hosts: hosts) }
+    }
+
+    @MainActor
+    static func present(title: String, action: String, code: String, hosts: [BoostHostRule]) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = title
+        let sites = hosts.isEmpty ? "No sites" : hosts.map(BoostLibraryListing.describe).joined(separator: "\n")
+        alert.informativeText = "It runs on:\n\(sites)\n\nRead the code below before you approve it."
+        let scroll = NSTextView.scrollableTextView()
+        scroll.frame = NSRect(x: 0, y: 0, width: 460, height: 220)
+        scroll.hasHorizontalScroller = true
+        if let text = scroll.documentView as? NSTextView {
+            text.isEditable = false
+            text.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            text.string = code
+        }
+        alert.accessoryView = scroll
+        // Cancel is the default: Return never approves code.
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\r"
+        alert.addButton(withTitle: action).keyEquivalent = ""
+        return alert.runModal() == .alertSecondButtonReturn
     }
 }
 

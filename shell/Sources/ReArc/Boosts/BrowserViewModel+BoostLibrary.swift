@@ -29,9 +29,24 @@ extension BrowserViewModel {
         syncAllTabBoosts()
     }
 
-    /// A script boost runs only once its script is allowed (BoostSecurity).
+    /// A script boost runs only once its script is allowed (BoostSecurity). Allowing shows
+    /// the script and every site it runs on first (security RC-0.1.0-544 F-12).
     func setBoostScriptAllowed(_ packageID: UUID, allowed: Bool) {
+        if allowed {
+            guard let package = store.boostLibrary().package(id: packageID), let js = package.scriptBoost?.js,
+                  BoostCodeReview.confirm("Allow the script of “\(package.manifest.name)”?",
+                                          "Allow Script", js, package.manifest.hostScope) else { return }
+        }
         store.setBoostScriptUserEnabled(packageID: packageID, enabled: allowed)
+        syncAllTabBoosts()
+    }
+
+    /// CSS that arrived through sync applies once approved here (security RC-0.1.0-544 N-02).
+    func approveBoostStyle(_ packageID: UUID) {
+        guard let package = store.boostLibrary().package(id: packageID), let css = BoostLibraryOps.combinedCSS(package),
+              BoostCodeReview.confirm("Apply the CSS of “\(package.manifest.name)”?",
+                                      "Apply CSS", css, package.manifest.hostScope) else { return }
+        store.approveBoostStyle(packageID: packageID)
         syncAllTabBoosts()
     }
 

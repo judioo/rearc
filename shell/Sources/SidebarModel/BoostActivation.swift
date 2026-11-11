@@ -81,20 +81,17 @@ public enum BoostActivation {
         guard library.profileID == context.profileID else { return [] }
         guard library.masterEnabled, context.spaceBoostsEnabled else { return [] }
         guard BoostScopeMatcher.urlIsEligibleForBoosts(context.url) else { return [] }
+        var library = library
+        library.adoptLegacyApprovals()
 
         var entries: [BoostRuntimeEntry] = []
         for install in library.installations.sorted(by: { $0.order < $1.order }) {
             guard effectiveEnabled(installation: install, library: library, context: context) else { continue }
             guard let package = library.package(id: install.packageID) else { continue }
             guard BoostSecurity.validatePackage(package).isEmpty else { continue }
-            var cssParts: [String] = []
-            if let style = package.styleBoost?.css, !style.isEmpty {
-                cssParts.append(style)
-            }
-            if let scriptCSS = package.scriptBoost?.css, !scriptCSS.isEmpty {
-                cssParts.append(scriptCSS)
-            }
-            let css = cssParts.isEmpty ? nil : cssParts.joined(separator: "\n")
+            // CSS and script each need this Mac's approval of their current bytes and hosts
+            // (security RC-0.1.0-544 N-02 and F-12); a flag in sidebar.json is not enough.
+            let css = library.styleApproved(package) ? BoostLibraryOps.combinedCSS(package) : nil
             let compiledRules: [BoostCSSRule]
             if let css, !css.isEmpty {
                 guard let rules = BoostStyleCompiler.compileStylesheet(css, allowInStyle: true) else { continue }
@@ -103,7 +100,7 @@ public enum BoostActivation {
                 compiledRules = []
             }
             let js = package.scriptBoost?.js
-            let scriptOn = package.scriptBoost?.userScriptEnabled == true
+            let scriptOn = library.scriptApproved(package)
             entries.append(
                 BoostRuntimeEntry(
                     packageID: package.manifest.id,
