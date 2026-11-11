@@ -146,20 +146,24 @@ struct ThemeChromeColors: Equatable {
     /// The profile badge beside the space name and in the toolbar.
     var badge: SidebarBadgeInk
 
-    init(theme: SpaceTheme, dark: Bool, windowDark: Bool? = nil) {
+    /// `dark` picks the chrome's roles; text and glyphs are then fitted to
+    /// the sidebar's backdrop in the window's appearance (`backdrop`, by
+    /// default the theme's own), so each clears its contrast floor.
+    init(theme: SpaceTheme, dark: Bool, windowDark: Bool? = nil, backdrop: SidebarBackdrop? = nil) {
         let roles = SpaceThemeRoles(theme: theme)
         let semantic = roles.semantic(dark: dark)
         let chrome = roles.chrome(dark: dark)
-        title = Color(semantic.title)
+            .legible(on: backdrop ?? SidebarBackdrop(theme: theme, dark: windowDark ?? dark), lightInk: dark)
+        title = Color(chrome.title)
         secondaryText = Color(chrome.secondaryText)
         tertiaryText = Color(chrome.tertiaryText)
         glyph = Color(chrome.glyph)
         separator = Color(chrome.separator)
-        accent = Color(semantic.foregroundPrimary)
+        accent = Color(chrome.accent)
         // Arc's selected row is near-white `backgroundExtra`; hover a lighter
         // wash of it (row geometry and fills are still to observe, §8).
-        rowSelected = Color(semantic.backgroundExtra).opacity(dark ? 0.16 : 0.92)
-        rowHover = Color(semantic.backgroundExtra).opacity(dark ? 0.08 : 0.42)
+        rowSelected = Color(semantic.backgroundExtra).opacity(SidebarRowWash.selectedAlpha(lightInk: dark))
+        rowHover = Color(semantic.backgroundExtra).opacity(SidebarRowWash.hoverAlpha(lightInk: dark))
         focus = Color(semantic.focus).opacity(semantic.focusAlpha)
         panel = Color(dark ? semantic.background : semantic.backgroundExtra).opacity(dark ? 0.6 : 0.55)
         toast = Color(semantic.background)
@@ -192,7 +196,8 @@ final class SpaceThemeColorCache {
         if let entry = entries[spaceID], entry.theme == theme,
            let colors = dark ? entry.dark : entry.light { return colors }
         var entry = entries[spaceID].flatMap { $0.theme == theme ? $0 : nil } ?? Entry(theme: theme)
-        let colors = ThemeChromeColors(theme: theme, dark: ThemeGradient.usesDarkChrome(theme: theme, dark: dark), windowDark: dark)
+        let backdrop = SidebarBackdrop(theme: theme, dark: dark)
+        let colors = ThemeChromeColors(theme: theme, dark: backdrop.prefersLightInk, windowDark: dark, backdrop: backdrop)
         buildCount += 1
         if dark { entry.dark = colors } else { entry.light = colors }
         entries[spaceID] = entry

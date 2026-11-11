@@ -150,7 +150,9 @@ struct CardToolbarInk {
 
     init(chrome: ThemeChromeColors, tint: PageColor?) {
         let ink = tint.map(PageColorInk.init(on:))
-        isDark = ink?.isLight ?? chrome.isDark
+        // The strip sits on the card: 62 % white in light, so dark ink even
+        // where the sidebar takes light ink; the bare gradient in dark.
+        isDark = ink?.isLight ?? (chrome.isWindowDark && chrome.isDark)
         pageInk = ink
     }
 

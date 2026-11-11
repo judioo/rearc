@@ -54,13 +54,14 @@ public struct ThemeGradient: Hashable, Sendable {
     /// `#2A1E30` past 75 % of the diagonal (frame 2365; `#261D2F` bottom left).
     public static let defaultDarkStops = [SpaceColor(hex: "#202032")!, SpaceColor(hex: "#2A1E30")!]
 
-    /// Whether the sidebar's text and glyphs use the dark roles. In dark, a
-    /// coloured theme stays light enough for Arc's dark text (its stored
+    /// Whether the sidebar's text and glyphs use the dark roles (light ink):
+    /// when white reaches more contrast than black on every part of the
+    /// sidebar (`SidebarBackdrop.prefersLightInk`). In dark, a coloured
+    /// theme stays light enough for Arc's dark text (its stored
     /// `contentOverBackgroundAppearance` is `light`); the navy default and
-    /// themes that land dark take the light text.
+    /// themes that land dark take the light text, in either appearance.
     public static func usesDarkChrome(theme: SpaceTheme, dark: Bool) -> Bool {
-        guard dark else { return false }
-        return OKLab(ThemeGradient(theme: theme, dark: true).color(u: 0.5, v: 0.5)).l < 0.6
+        SidebarBackdrop(theme: theme, dark: dark).prefersLightInk
     }
 
     /// `tBase`: projection onto the base line, 0…1.

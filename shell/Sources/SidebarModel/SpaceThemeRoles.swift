@@ -57,12 +57,17 @@ public struct ThemeSemanticPalette: Hashable, Sendable {
     public var title: SpaceColor
 }
 
-/// Text and glyph greys for chrome drawn on the theme: subtitles, the space
-/// name, the New Tab row, bottom-bar glyphs and separators (THEMES.md §4.6,
-/// §4.7). Arc's are near-neutral greys with a hint of the theme's hue, so
-/// they are fixed OKLab lightnesses at the base hue rather than black or
-/// white at an opacity.
+/// Text and glyph colours for chrome drawn on the theme: titles, subtitles,
+/// the space name, the New Tab row, bottom-bar glyphs and separators
+/// (THEMES.md §4.6, §4.7). Arc's greys are near-neutral with a hint of the
+/// theme's hue, so they are fixed OKLab lightnesses at the base hue rather
+/// than black or white at an opacity. These are the recorded values; the
+/// sidebar draws them fitted to its backdrop (`legible(on:lightInk:)`).
 public struct ThemeChromePalette: Hashable, Sendable {
+    /// Tab and folder titles (the semantic `title`).
+    public var title: SpaceColor
+    /// Folder glyphs, the space icon and the active space dot (`foregroundPrimary`).
+    public var accent: SpaceColor
     /// "3 Recent", the space name (`#6D6D79`, `#787886` on the default theme).
     public var secondaryText: SpaceColor
     /// "New Tab", space dots (`#9F9BA7`, `#AEA8B1`).
@@ -140,11 +145,11 @@ public struct SpaceThemeRoles: Hashable, Sendable {
         let hue = base.oklab.lch.h
         func grey(_ l: Double, _ c: Double) -> SpaceColor { OKLCH(l: l, c: c, h: hue).gamutMapped(to: .sRGB).lab.color.clamped }
         lightChrome = ThemeChromePalette(
-            secondaryText: grey(0.545, 0.016), tertiaryText: grey(0.70, 0.016),
+            title: light.title, accent: light.foregroundPrimary, secondaryText: grey(0.545, 0.016), tertiaryText: grey(0.70, 0.016),
             glyph: grey(0.50, 0.010), separator: grey(0.80, 0.020)
         )
         darkChrome = ThemeChromePalette(
-            secondaryText: grey(0.72, 0.016), tertiaryText: grey(0.58, 0.016),
+            title: dark.title, accent: dark.foregroundPrimary, secondaryText: grey(0.72, 0.016), tertiaryText: grey(0.58, 0.016),
             glyph: grey(0.76, 0.010), separator: grey(0.36, 0.020)
         )
     }
