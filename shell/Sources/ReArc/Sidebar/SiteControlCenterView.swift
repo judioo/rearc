@@ -146,8 +146,18 @@ struct SiteControlCenterView: View {
         VStack(alignment: .leading, spacing: 0) {
             quickActions
             if controller.isAvailable {
-                header("Extensions")
-                SiteControlsExtensionGrid(model: model, engine: engine) { id in
+                HStack(alignment: .firstTextBaseline) {
+                    header("Extensions")
+                    Spacer()
+                    // Arc has no visible control for this (2026-11-06 capture);
+                    // chrome://extensions/ in a tab, as the tiles' menus.
+                    Button("Manage", action: manageExtensions)
+                        .buttonStyle(.link)
+                        .font(.system(size: 11))
+                        .help("Manage Extensions")
+                        .accessibilityLabel("Manage Extensions")
+                }
+                SiteControlsExtensionGrid(model: model, engine: engine, manage: manageExtensions) { id in
                     dismiss()
                     // The popup opens once the panel has closed.
                     DispatchQueue.main.async { controller.run(id, for: engine, anchor: anchor) }
@@ -170,6 +180,11 @@ struct SiteControlCenterView: View {
         }
         .padding(10)
         .frame(width: Self.width + 20)
+    }
+
+    private func manageExtensions() {
+        dismiss()
+        model.openBrowserPage(.extensions)
     }
 
     // MARK: Share, Boost, Capture
@@ -272,10 +287,12 @@ private struct SiteControlsTileBackground: View {
 }
 
 /// The Extensions grid, four across; pinned extensions carry Arc's brown pin
-/// badge and right-click pins or unpins. + opens the Chrome Web Store.
+/// badge and right-click pins or unpins. + opens the Chrome Web Store;
+/// every tile's menu has Manage Extensions… (chrome://extensions/).
 struct SiteControlsExtensionGrid: View {
     let model: BrowserViewModel
     let engine: (any WebEngine)?
+    let manage: () -> Void
     let run: (String) -> Void
     let add: () -> Void
     @Environment(\.displayScale) private var displayScale
@@ -304,6 +321,8 @@ struct SiteControlsExtensionGrid: View {
                     .help(action.tooltip)
                     .accessibilityLabel(action.name)
                     .contextMenu {
+                        Button("Manage Extensions…", action: manage)
+                        Divider()
                         Button(pinned ? "Unpin \(action.name)" : "Pin \(action.name)") { controller.togglePin(action.id) }
                     }
                 case .add:
@@ -318,7 +337,7 @@ struct SiteControlsExtensionGrid: View {
                     .buttonStyle(.plain)
                     .help("Chrome Web Store")
                     .accessibilityLabel("Add Extensions")
-                    .contextMenu { Button("Manage Extensions") { model.openBrowserPage(.extensions) } }
+                    .contextMenu { Button("Manage Extensions…", action: manage) }
                 }
             }
         }

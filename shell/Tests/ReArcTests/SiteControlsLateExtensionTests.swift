@@ -48,7 +48,7 @@ final class SiteControlsLateExtensionTests: XCTestCase {
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         defer { window.close() }
-        window.contentView = NSHostingView(rootView: SiteControlsExtensionGrid(model: model, engine: engine, run: { _ in }, add: {}))
+        window.contentView = NSHostingView(rootView: SiteControlsExtensionGrid(model: model, engine: engine, manage: {}, run: { _ in }, add: {}))
         window.contentView?.layoutSubtreeIfNeeded()
         spin()
         XCTAssertEqual(backend.asked, 2, "opening the grid asks again")

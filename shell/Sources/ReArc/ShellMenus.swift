@@ -264,7 +264,7 @@ enum ShellMenus {
             ShellMenuItem("History", "y") { model.openBrowserPage(.history) },
             ShellMenuItem("Downloads", "l", [.command, .option]) { model.openBrowserPage(.downloads) },
             ShellMenuItem("Passwords") { model.openBrowserPage(.passwords) },
-            ShellMenuItem("Extensions") { model.openBrowserPage(.extensions) },
+            ShellMenuItem("Manage Extensions…") { model.openBrowserPage(.extensions) },
         ]]
     }
 

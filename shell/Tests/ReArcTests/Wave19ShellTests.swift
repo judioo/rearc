@@ -244,7 +244,7 @@ final class Wave19ShellTests: XCTestCase {
     func testDailyPageMenusExistOnlyWithTheFlag() {
         let model = makeModel()
         let titles = ShellMenus.browserPages(model).flatMap { $0 }.map(\.title)
-        XCTAssertEqual(titles, ["History", "Downloads", "Passwords", "Extensions"])
+        XCTAssertEqual(titles, ["History", "Downloads", "Passwords", "Manage Extensions…"])
         // WebKit admits no WebUI: the actions do nothing there.
         ShellMenus.browserPages(model).flatMap { $0 }.forEach { $0.action() }
         XCTAssertFalse(model.store.displayTabs().contains { $0.url.scheme == "chrome" })

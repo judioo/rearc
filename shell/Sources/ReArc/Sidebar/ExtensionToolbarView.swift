@@ -119,7 +119,10 @@ private struct ExtensionsMenu: View {
             Text("Extensions")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
-            SiteControlsExtensionGrid(model: model, engine: engine, run: run) {
+            SiteControlsExtensionGrid(model: model, engine: engine, manage: {
+                dismiss()
+                model.openBrowserPage(.extensions)
+            }, run: run) {
                 dismiss()
                 model.openChromeWebStore()
             }
