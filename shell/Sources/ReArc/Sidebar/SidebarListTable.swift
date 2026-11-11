@@ -27,6 +27,7 @@ struct SidebarListTable: NSViewRepresentable {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.sidebarCoveredByLibrary) private var covered
+    @Environment(\.isMiniSidebar) private var isMini
 
     func makeCoordinator() -> SidebarListController {
         SidebarListController(model: model, spaceID: spaceID, context: SidebarListCellContext(
@@ -65,6 +66,7 @@ struct SidebarListTable: NSViewRepresentable {
         if cells.pager !== pager { cells.pager = pager }
         if cells.colorScheme != colorScheme { cells.colorScheme = colorScheme }
         if cells.tint != tint { cells.tint = tint }
+        if cells.isMini != isMini { cells.isMini = isMini }
         let dragged = $draggedItemID, drop = $dropState
         cells.writeDragged = { dragged.wrappedValue = $0 }
         cells.writeDropState = { drop.wrappedValue = $0 }
@@ -85,6 +87,8 @@ final class SidebarListCellContext {
     var pager: SpacePagerController?
     var colorScheme: ColorScheme
     var tint: Color
+    /// The mini column (⇧⌘S): rows draw their icons only.
+    var isMini = false
     var draggedItemID: UUID?
     var dropState: SidebarDropState?
     /// The sidebar's own bindings; the mirrors above follow at once so a
@@ -574,6 +578,7 @@ struct SidebarListCell: View {
             .environment(\.sidebarWindow, context.window)
             .environment(\.spacePager, context.pager)
             .environment(\.colorScheme, context.colorScheme)
+            .environment(\.isMiniSidebar, context.isMini)
             .ignoresSafeArea()
     }
 
@@ -605,16 +610,25 @@ struct SidebarListCell: View {
             )
             .equatable()
         case .todayDivider:
-            SidebarTodayCell(model: model, spaceID: spaceID)
+            if context.isMini {
+                MiniTodayDivider()
+            } else {
+                SidebarTodayCell(model: model, spaceID: spaceID)
+            }
         case .newTab:
-            NewTabRowView { model.newTab() }
+            if context.isMini {
+                MiniNewTabRowView { model.newTab() }
+            } else {
+                NewTabRowView { model.newTab() }
+            }
         case .sectionEnd(let section, let isEmpty):
             SectionEndDropZone(
                 destination: .section(spaceID: spaceID, section: section),
                 placeholder: isEmpty ? (section == .pinned ? "Drop here to pin" : "Drop here to unpin") : nil,
                 model: model,
                 draggedItemID: context.draggedBinding,
-                dropState: context.dropStateBinding
+                dropState: context.dropStateBinding,
+                miniSymbol: section == .pinned ? "pin" : "pin.slash"
             )
         }
     }
@@ -626,17 +640,30 @@ private struct SidebarHeaderCell: View {
     let model: BrowserViewModel
     let spaceID: Space.ID
     @Environment(\.sidebarWindow) private var window
+    @Environment(\.isMiniSidebar) private var isMini
 
     var body: some View {
         let space = model.store.space(withID: spaceID) ?? model.space(in: window)
         let collapsed = model.isPinnedSectionCollapsed(spaceID: space.id, in: window)
-        SpaceHeaderView(
-            model: model,
-            space: space,
-            hasPinned: !model.store.outline(for: space.id).pinned.isEmpty,
-            isPinnedCollapsed: collapsed,
-            onTogglePinned: { model.togglePinnedSection(spaceID: space.id, in: window) }
-        )
+        Group {
+            if isMini {
+                MiniSpaceHeaderView(
+                    model: model,
+                    space: space,
+                    hasPinned: !model.store.outline(for: space.id).pinned.isEmpty,
+                    isPinnedCollapsed: collapsed,
+                    onTogglePinned: { model.togglePinnedSection(spaceID: space.id, in: window) }
+                )
+            } else {
+                SpaceHeaderView(
+                    model: model,
+                    space: space,
+                    hasPinned: !model.store.outline(for: space.id).pinned.isEmpty,
+                    isPinnedCollapsed: collapsed,
+                    onTogglePinned: { model.togglePinnedSection(spaceID: space.id, in: window) }
+                )
+            }
+        }
         .padding(.bottom, SidebarMetrics.headerToFirstRow)
     }
 }

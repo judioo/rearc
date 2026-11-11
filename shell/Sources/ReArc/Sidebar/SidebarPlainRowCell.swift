@@ -106,7 +106,7 @@ final class SidebarPlainRowCell: NSView {
         let current = generation
         let model = controller.model, spaceID = controller.spaceID, context = controller.context
         let next = withObservationTracking {
-            PlainRowState.read(id: rowID, model: model, spaceID: spaceID, chrome: context.chrome)
+            PlainRowState.read(id: rowID, model: model, spaceID: spaceID, chrome: context.chrome, isMini: context.isMini)
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 guard let self, self.generation == current else { return }
@@ -125,6 +125,8 @@ final class SidebarPlainRowCell: NSView {
             title.font = .systemFont(ofSize: SidebarMetrics.titleSize, weight: kind == .folder ? .semibold : .regular)
             title.stringValue = state.title
             title.textColor = NSColor(chrome.title)
+            // The mini column (⇧⌘S) draws the icon alone; the title is its tooltip.
+            title.isHidden = state.isMini
             if let customIcon = state.customIcon {
                 applyCustomIcon(customIcon)
             } else {
@@ -207,11 +209,15 @@ final class SidebarPlainRowCell: NSView {
 
     /// `TabRowView` and `FolderRowView`'s geometry: the 8 pt row inset, 14 pt
     /// per folder level, a 36 pt highlight centred in the 41 pt pitch, the
-    /// icon 10 pt in, the title 11 pt after it.
+    /// icon 10 pt in, the title 11 pt after it. At mini width
+    /// (`MiniSidebarLayout`) levels step 4 pt, there is no title, and the
+    /// unread dot sits on the icon's corner.
     override func layout() {
         super.layout()
         let width = bounds.width
-        let x0 = SidebarMetrics.rowInset + CGFloat(depth) * 14
+        let x0 = state.isMini
+            ? CGFloat(MiniSidebarLayout.highlight(depth: depth).x)
+            : SidebarMetrics.rowInset + CGFloat(depth) * 14
         let inset = (SidebarMetrics.rowPitch - SidebarMetrics.rowHeight) / 2
         let highlight = NSRect(x: x0, y: inset, width: max(0, width - SidebarMetrics.rowInset - x0), height: SidebarMetrics.rowHeight)
         fill.frame = highlight
@@ -239,7 +245,11 @@ final class SidebarPlainRowCell: NSView {
         title.frame = NSRect(x: titleX, y: (midY - titleHeight / 2).rounded(), width: titleWidth, height: titleHeight)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        unread.frame = CGRect(x: titleX + titleWidth + SidebarMetrics.iconToText, y: midY - 3, width: 6, height: 6)
+        if state.isMini {
+            unread.frame = CGRect(x: iconX + size - 1, y: midY - size / 2 - 5, width: 6, height: 6)
+        } else {
+            unread.frame = CGRect(x: titleX + titleWidth + SidebarMetrics.iconToText, y: midY - 3, width: 6, height: 6)
+        }
         CATransaction.commit()
     }
 
@@ -444,15 +454,18 @@ struct PlainRowState: Equatable {
     var isUnread = false
     var isExpanded = false
     var holdsOpenTabs = false
+    /// Drawn at mini width (⇧⌘S).
+    var isMini = false
     /// Something only the SwiftUI row draws (a loading ring, a crash glyph,
     /// an audio or Picture in Picture badge, the rename hint), or a rename
     /// field that keeps focus wherever the pointer goes.
     var needsHosting = false
     var chrome = ThemeChromeColors(theme: .default, dark: false)
 
-    static func read(id: UUID, model: BrowserViewModel, spaceID: Space.ID, chrome: ThemeChromeColors) -> PlainRowState {
+    static func read(id: UUID, model: BrowserViewModel, spaceID: Space.ID, chrome: ThemeChromeColors, isMini: Bool = false) -> PlainRowState {
         var state = PlainRowState()
         state.chrome = chrome
+        state.isMini = isMini
         switch model.store.entry(withID: id) {
         case .tab(let tab):
             state.title = tab.displayTitle
@@ -484,7 +497,7 @@ struct PlainRowState: Equatable {
     static func == (a: PlainRowState, b: PlainRowState) -> Bool {
         a.title == b.title && a.customIcon == b.customIcon && a.favicon === b.favicon && a.token == b.token && a.isSelected == b.isSelected
             && a.isUnloaded == b.isUnloaded && a.isUnread == b.isUnread && a.isExpanded == b.isExpanded
-            && a.holdsOpenTabs == b.holdsOpenTabs
+            && a.holdsOpenTabs == b.holdsOpenTabs && a.isMini == b.isMini
             && a.needsHosting == b.needsHosting && a.chrome == b.chrome
     }
 }

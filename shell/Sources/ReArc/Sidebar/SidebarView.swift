@@ -55,8 +55,15 @@ struct SidebarView: View {
             focused: focusedPageID
         )
         let hasFavorites = !model.store.favorites(in: focusedSpace.profileID).isEmpty
+        let mini = model.isMiniSidebar(in: window)
+        let width = model.sidebarListWidth(in: window)
         return VStack(spacing: 0) {
-            SidebarToolbarView(model: model, urlInToolbar: urlInToolbar)
+            if mini {
+                // The traffic lights' row; they sit over it and the card's strip.
+                Color.clear.frame(height: SidebarToolbarView.rowHeight)
+            } else {
+                SidebarToolbarView(model: model, urlInToolbar: urlInToolbar)
+            }
 
             // A swipe over the favorites pages the spaces under them too.
             VStack(spacing: 0) {
@@ -81,30 +88,39 @@ struct SidebarView: View {
                             && model.librarySection(in: window) == nil
                     },
                     onBegin: { pager.beginSwipe() },
-                    onChange: { pager.swipe(byPoints: $0, pageWidth: Double(model.sidebarWidth)) },
+                    onChange: { pager.swipe(byPoints: $0, pageWidth: Double(width)) },
                     onEnd: { swipeLanded(on: pager.endSwipe()) },
                     onCancel: { pager.cancelSwipe() }
                 )
             )
 
-            // Arc's media strips (and ReArc's live video) sit above the bottom bar.
-            MediaControlsStackView(model: model)
+            if mini {
+                // Media as icons, then the bar's buttons stacked; the Finish
+                // setup card is a badge on the space icon (`MiniSpaceHeaderView`).
+                MiniMediaColumn(model: model)
+                MiniBottomBar(model: model, draggedItemID: $draggedItemID)
+            } else {
+                // Arc's media strips (and ReArc's live video) sit above the bottom bar.
+                MediaControlsStackView(model: model)
 
-            // Deferred onboarding's invitation, in the strips' insets and gap.
-            if model.onboardingSetupState.showsCard {
-                FinishSetupCard(model: model)
-                    .padding(.horizontal, MediaStripMetrics.inset)
-                    .padding(.bottom, MediaStripMetrics.gap)
-                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .bottom)))
+                // Deferred onboarding's invitation, in the strips' insets and gap.
+                if model.onboardingSetupState.showsCard {
+                    FinishSetupCard(model: model)
+                        .padding(.horizontal, MediaStripMetrics.inset)
+                        .padding(.bottom, MediaStripMetrics.gap)
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .bottom)))
+                }
+
+                BottomBarView(model: model, draggedItemID: $draggedItemID)
             }
-
-            BottomBarView(model: model, draggedItemID: $draggedItemID)
         }
         .animation(.easeOut(duration: 0.2), value: model.onboardingSetupState)
-        .frame(width: model.sidebarWidth)
+        .environment(\.isMiniSidebar, mini)
+        .frame(width: width)
         .frame(maxHeight: .infinity)
         .overlay(alignment: Alignment(horizontal: model.sidebarPlacement.resizeHandleEdge.horizontalAlignment, vertical: .center)) {
-            SidebarResizeHandle(model: model)
+            // The mini column has a fixed width.
+            if !mini { SidebarResizeHandle(model: model) }
         }
         .onAppear { pager.reduceMotion = reduceMotion }
         .onChange(of: reduceMotion) { _, value in pager.reduceMotion = value }
