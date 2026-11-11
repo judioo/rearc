@@ -2181,9 +2181,10 @@ extension ChromiumSelfTest {
 
     /// Sends a synthesized (right) click to the page at a CSS point.
     @MainActor
+    /// `host` is the page's view when several are in the window (a Peek over a tab); else the first one.
     private func click(_ window: NSWindow, engine: ChromiumEngine, at css: CGPoint, right: Bool = false, control: Bool = false,
-                       modifiers: NSEvent.ModifierFlags = []) {
-        guard let host = window.contentView?.firstDescendant(ofType: ChromiumHostView.self) else { return }
+                       modifiers: NSEvent.ModifierFlags = [], host: ChromiumHostView? = nil) {
+        guard let host = host ?? window.contentView?.firstDescendant(ofType: ChromiumHostView.self) else { return }
         window.makeKeyAndOrderFront(nil)
         let viewPoint = PageZoom.viewPoint(fromCSSPoint: css, zoom: engine.zoomFactor)
         let local = NSPoint(x: viewPoint.x, y: host.isFlipped ? viewPoint.y : host.bounds.height - viewPoint.y)
@@ -3902,16 +3903,30 @@ extension ChromiumSelfTest {
     @MainActor
     private func peekChromeChecks(model: BrowserViewModel, store: SidebarStore, base: String, window: NSWindow,
                                   tabA: Tab, engineA: ChromiumEngine) async throws {
-        func openPeek(from source: Tab?) async throws -> (BrowserViewModel.PeekSession, ChromiumEngine) {
-            model.showPeek(url: URL(string: "\(base)/a")!, sourceTabID: source?.id)
+        func openPeek(from source: Tab?, path: String = "/a", title: String = Self.titleA) async throws
+            -> (BrowserViewModel.PeekSession, ChromiumEngine) {
+            model.showPeek(url: URL(string: "\(base)\(path)")!, sourceTabID: source?.id)
             guard let session = model.peekSession,
                   let peek = model.engineHost.ephemeralEngine(withID: session.engineID, profileID: session.profileID) as? ChromiumEngine else {
                 throw Failure(description: "Peek created no Chromium engine")
             }
             try await wait("peek page shown in its card", timeout: 20) {
-                peek.attachmentID != nil && peek.pageTitle == Self.titleA && !peek.isLoading && peek.leaseHolder?.window === window
+                peek.attachmentID != nil && peek.pageTitle == title && !peek.isLoading && peek.leaseHolder?.window === window
             }
             return (session, peek)
+        }
+        /// Follows the /links page's ordinary link to /a with a click on the
+        /// Peek's own page: a user's navigation, so it is a back entry.
+        /// (A script's pushState is not: without user activation Chromium's
+        /// history-manipulation intervention skips the entry it leaves, and
+        /// CanGoBack stays false.)
+        func navigateInPeek(_ peek: ChromiumEngine) async throws {
+            guard let host = peek.leaseHolder else { throw Failure(description: "the Peek's page has no view") }
+            let center = try await cssCenter(of: "#plain", in: peek)
+            click(window, engine: peek, at: center, host: host)
+            try await wait("a click in the Peek follows its link", timeout: 15) {
+                peek.currentURL?.path == "/a" && peek.pageTitle == Self.titleA && !peek.isLoading && peek.canGoBack
+            }
         }
 
         model.selectTab(tabA.id)
@@ -3974,11 +3989,11 @@ extension ChromiumSelfTest {
         model.selectTab(tabA.id)
         try await wait("the full sidebar is back") { model.sidebarWidth(in: key) == model.sidebarWidth }
 
-        let mark = "(function(){ window.__rearcPeekMark = 'kept'; history.pushState({}, '', '?peeked'); return 1; })()"
+        let mark = "(function(){ window.__rearcPeekMark = 'kept'; return 1; })()"
         let readMark = "typeof window.__rearcPeekMark === 'string' ? window.__rearcPeekMark : 'reloaded'"
-        var (session, expanding) = try await openPeek(from: tabA)
+        var (session, expanding) = try await openPeek(from: tabA, path: "/links", title: "links")
+        try await navigateInPeek(expanding)
         _ = try await expanding.evaluate(mark, in: .page)
-        try await wait("Peek page has a history entry") { expanding.canGoBack }
         let chromiumTab = expanding.tabID
         try check(model.performPeekAction(.expandToTab), "Expand did nothing")
         guard let expanded = store.selectedTab, expanded.id == session.engineID,
@@ -3990,9 +4005,14 @@ extension ChromiumSelfTest {
         }
         let kept = try await expanding.evaluate(readMark, in: .page) as? String
         try check(expanding.role == .tab && expanding.tabID == chromiumTab && kept == "kept" && expanding.canGoBack
-                      && expanding.currentURL?.query == "peeked",
+                      && expanding.currentURL?.path == "/a" && expanded.url.path == "/a",
                   "expanded Peek: role \(expanding.role) tab \(expanding.tabID) vs \(chromiumTab), mark \(kept ?? "-"), "
                       + "back \(expanding.canGoBack), url \(expanding.currentURL?.absoluteString ?? "-")")
+        // The back entry is the Peek's: Back in the tab returns to the page the Peek opened on.
+        model.goBack()
+        try await wait("Back in the expanded tab returns to the Peek's first page", timeout: 15) {
+            expanding.currentURL?.path == "/links" && expanding.pageTitle == "links" && !expanding.isLoading
+        }
         model.closeTab(expanded.id)
         model.selectTab(tabA.id)
 
