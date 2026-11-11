@@ -20,6 +20,9 @@
 #   --notarize        notarize app before DMG and DMG before appcast (opt-in)
 #   --dmg             also make the signed DMG
 #   --allow-outdated-engine  override the Mac Stable/Extended security release gate
+#   --previous-app PATH  the ReArc.app of the release now on the feed; a DMG needs it for the
+#                     upgrade check (scripts/release/check-upgrade.sh). Also REARC_PREVIOUS_RELEASE_APP.
+#   --allow-no-upgrade-check  make a DMG without the upgrade check (recorded as an override)
 #   --allow-no-safe-browsing  make a DMG from an engine without a real Google API key, and
 #                     skip the live list-download check (Safe Browsing may not work; warns
 #                     loudly). See RELEASE.md.
@@ -40,6 +43,8 @@ VERIFY=1
 DMG=0
 ALLOW_OUTDATED_ENGINE=0
 ALLOW_NO_SAFE_BROWSING=0
+ALLOW_NO_UPGRADE_CHECK=0
+PREVIOUS_APP="${REARC_PREVIOUS_RELEASE_APP:-}"
 APPCAST=""
 CHANNEL=""
 NOTARIZE=0
@@ -56,12 +61,14 @@ while [[ $# -gt 0 ]]; do
     --dmg) DMG=1 ;;
     --allow-outdated-engine) ALLOW_OUTDATED_ENGINE=1 ;;
     --allow-no-safe-browsing) ALLOW_NO_SAFE_BROWSING=1 ;;
+    --allow-no-upgrade-check) ALLOW_NO_UPGRADE_CHECK=1 ;;
+    --previous-app) PREVIOUS_APP="$(cd "$2" && pwd)"; shift ;;
     --appcast) mkdir -p "$2"; APPCAST="$(cd "$2" && pwd)"; DMG=1; shift ;;
     --channel) CHANNEL="$2"; [[ $CHANNEL == beta ]] || die "only --channel beta is supported"; shift ;;
     --notarize) NOTARIZE=1 ;;
     --selftest-timeout) SELFTEST_TIMEOUT="$2"; shift ;;
     --qa) QA=1 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
@@ -72,6 +79,7 @@ done
 OVERRIDES=()
 [[ $ALLOW_OUTDATED_ENGINE == 0 ]] || OVERRIDES+=(allow-outdated-engine)
 [[ $ALLOW_NO_SAFE_BROWSING == 0 ]] || OVERRIDES+=(allow-no-safe-browsing)
+[[ $ALLOW_NO_UPGRADE_CHECK == 0 ]] || OVERRIDES+=(allow-no-upgrade-check)
 [[ $VERIFY == 1 ]] || OVERRIDES+=(no-verify)
 [[ -z $APPCAST || ${#OVERRIDES[@]} == 0 ]] || die "--appcast refuses a build with gate overrides (${OVERRIDES[*]}); make it without them"
 [[ -z $APPCAST || $APPCAST != "$DIST" && $APPCAST != "$DIST/"* ]] || die "appcast archives must live outside the dist directory (which is replaced)"
@@ -242,7 +250,22 @@ if [[ $DMG == 1 ]]; then
   fi
 fi
 
-# 5c. The shipped bundle: without the verification key, signed again (Info.plist is sealed by
+# 5c. Upgrade check: a profile made by the previous release must open in this build. Build 602
+#     passed everything above and aborted at launch on every existing profile.
+if [[ $DMG == 1 ]]; then
+  if [[ $ALLOW_NO_UPGRADE_CHECK == 1 ]]; then
+    echo "==> WARNING: --allow-no-upgrade-check: opening a previous release's profile was NOT checked" >&2
+  else
+    [[ -n $PREVIOUS_APP && -d $PREVIOUS_APP ]] \
+      || die "a DMG needs --previous-app PATH (the ReArc.app of the release now on the feed) for the upgrade check, or --allow-no-upgrade-check for a build that is not distributed"
+    # REARC_UPGRADE_PROFILES: extra saved data directories of older builds, colon-separated.
+    IFS=: read -r -a upgrade_profiles <<<"${REARC_UPGRADE_PROFILES:-}"
+    "$SHELL_DIR/scripts/release/check-upgrade.sh" "$APP" "$PREVIOUS_APP" ${upgrade_profiles[@]+"${upgrade_profiles[@]}"} 2>&1 \
+      | tee "$DIST/check-upgrade.log" || die "the upgrade check failed (log $DIST/check-upgrade.log)"
+  fi
+fi
+
+# 5d. The shipped bundle: without the verification key, signed again (Info.plist is sealed by
 #     the signature). Its code is the code the gates ran; it takes no REARC_DATA_DIR,
 #     --user-data-dir, self-test or launch probe (RC-0.1.0-602 T-04, F-03).
 if [[ $QA == 1 ]]; then
