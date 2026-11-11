@@ -11,7 +11,7 @@ committed `RELEASES.md` has a heading for the build it is about to make:
 commit before the release, with `echo $(( $(git rev-list --count HEAD) + 1 ))` as the
 number. Details: engine/docs/RELEASE.md, "Release notes".
 
-## ReArc 0.1.0 (594) — 2026-11-11
+## ReArc 0.1.0 (602) — 2026-11-11
 
 **New**
 - Your Arc card comes with you. Settings › your name › Import Your Card from Arc brings over
@@ -19,6 +19,15 @@ number. Details: engine/docs/RELEASE.md, "Release notes".
   card plays an Arc to ReArc transition that you can replay, and the import is offered again
   after Randomize. From Arc's sign-in file ReArc reads only the account's creation date and
   name.
+- Onboarding finds all your browsers. The browser step now lists every browser on your Mac,
+  including the ones macOS keeps private: Chrome, Brave and Safari show as Locked, with one
+  Allow access… button that opens System Settings beside the onboarding. Switch ReArc on (a
+  small panel gives you the ReArc icon to drag in if it is not listed), come back, and they
+  turn to Found. If macOS reopens ReArc, the onboarding resumes at the same step. The Import
+  window works the same way.
+- More browsers to import from: Chrome Beta, Dev and Canary, Brave Beta and Nightly, Edge,
+  Vivaldi, Opera, Opera GX and Chromium, plus Safari (bookmarks, Reading List and history) and
+  Firefox (bookmarks and history). Passwords and cookies are still never read.
 - Manage Extensions: the site control panel has a Manage link beside the "+" that opens the
   Chrome Web Store, and every extension tile's right-click menu has Manage Extensions….
 - Sync Sidebar is on by default once onboarding finishes, when you are signed in to iCloud. If
