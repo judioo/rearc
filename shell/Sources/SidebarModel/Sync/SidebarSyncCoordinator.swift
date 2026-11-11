@@ -242,7 +242,16 @@ public final class SidebarSyncCoordinator {
             let adopt = hasRemoteSidebar && SidebarSyncProjection.isPristine(host.syncSnapshot())
             // Rows only the server has are new to this Mac, not deleted here;
             // rows it already has, alive or deleted, keep the server's copy.
-            if !adopt { capture(host.syncSnapshot(), joining: true) }
+            if !adopt {
+                // A space imported from an Arc space iCloud already has becomes that space.
+                let snapshot = host.syncSnapshot()
+                let matched = ArcTwinSpaces.matchingServer(snapshot, records: state.records.mapValues(\.payload))
+                if matched != snapshot {
+                    host.applySyncedSnapshot(matched)
+                    remoteChanged = true
+                }
+                capture(matched, joining: true)
+            }
             if adopt { remoteChanged = true }
             state.joined = true
         } else {

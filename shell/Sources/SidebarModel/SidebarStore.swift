@@ -351,9 +351,11 @@ public final class SidebarStore {
         name: String,
         theme: SpaceTheme = .default,
         iconName: String = "circle.fill",
-        profileID: Profile.ID? = nil
+        profileID: Profile.ID? = nil,
+        id: UUID? = nil
     ) -> Space {
         let space = Space(
+            id: id.flatMap { id in spaces.contains { $0.id == id } ? nil : id } ?? UUID(),
             name: name,
             theme: theme,
             iconName: iconName,
@@ -1486,12 +1488,15 @@ public final class SidebarStore {
             }
         }
         contentBySpace = [:]
+        // A row is in one place: a file listing one id in two spaces (copies
+        // of an Arc space, up to 608) shows it in the first only, so a later
+        // move or close never leaves a second, stale copy behind.
+        var visited = Set(favoritesByProfile.values.flatMap { $0.map(\.id) })
         for space in spaces {
             guard let bundle = snapshot.spaceContainers[space.id] else {
                 contentBySpace[space.id] = SpaceContent()
                 continue
             }
-            var visited = Set<UUID>()
             let pinned = bundle.pinned.childIDs.compactMap { resolveEntry(id: $0, snapshot: snapshot, visited: &visited) }
             let today = bundle.unpinned.childIDs.compactMap { resolveEntry(id: $0, snapshot: snapshot, visited: &visited) }
             contentBySpace[space.id] = SpaceContent(pinned: pinned, today: today)
@@ -1836,7 +1841,10 @@ public final class SidebarStore {
             let children = record.childIDs.compactMap { resolveEntry(id: $0, snapshot: snapshot, visited: &visited) }
             return .folder(SidebarFolder(id: record.id, title: record.title, children: children, sortRank: record.sortRank, customIcon: record.customIcon))
         }
-        if let split = snapshot.splitsByID[id] { return .split(split) }
+        if let split = snapshot.splitsByID[id] {
+            for tab in split.tabs { visited.insert(tab.id) }
+            return .split(split)
+        }
         if let easel = snapshot.easelRefsByID[id] { return .easel(easel) }
         if let tab = snapshot.tabsByID[id] { return .tab(tab) }
         return nil

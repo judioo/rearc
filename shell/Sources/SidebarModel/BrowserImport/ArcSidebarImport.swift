@@ -160,8 +160,11 @@ extension SidebarStore {
                 $0.profileID == target && $0.arcSourceID == nil && $0.name == arcSpace.name &&
                 !incoming.isEmpty && arcEntriesMatch(incoming, content(for: $0.id).pinned)
             }
+            // The id follows from the Arc space, like its rows' ids: two Macs
+            // importing it make one space, which sync then knows as one.
             let space = prior ?? addSpace(name: arcSpace.name, theme: arcSpace.theme ?? .arcDefault,
-                                         iconName: arcSpace.icon ?? "circle.fill", profileID: target)
+                                         iconName: arcSpace.icon ?? "circle.fill", profileID: target,
+                                         id: Self.arcSpaceID(sourceID))
             firstSpace = firstSpace ?? space.id
             var mapping = space.arcItemMapping ?? [:]
             if prior != nil && space.arcSourceID == nil {
@@ -300,6 +303,11 @@ extension SidebarStore {
             case .easel: return entry
             }
         }
+    }
+
+    /// A space imported from the Arc space `sourceID` ("<profile directory>:<Arc id>").
+    static func arcSpaceID(_ sourceID: String) -> UUID {
+        arcItemID("space:\(sourceID)")
     }
 
     static func arcItemID(_ source: String) -> UUID {

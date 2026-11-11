@@ -221,13 +221,38 @@ public final class SidebarFilePersistence: SidebarPersisting {
                 return nil
             }
             loadOutcome = .loaded
-            return snapshot
+            return repairingArcTwinsOnce(snapshot, original: data)
         } catch {
             quarantineCorruptPersistedFile()
             loadOutcome = .recoveredFromCorruptFile
             autosaveEnabled = false
             return nil
         }
+    }
+
+    /// Beside the sidebar once the duplicate-Arc-space repair ran (its report, as JSON).
+    public var arcTwinRepairMarkerURL: URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("arc-twin-repair.json", isDirectory: false)
+    }
+
+    /// Once per sidebar file: merges copies of one Arc space (`ArcTwinSpaces.repair`).
+    /// When it changes anything, the file as it was is kept beside it
+    /// (`sidebar.before-arc-twin-repair-<time>.json`) and the repaired one
+    /// is written at once; if the copy cannot be made, nothing changes and
+    /// the next launch tries again.
+    private func repairingArcTwinsOnce(_ snapshot: SidebarSnapshot, original data: Data) -> SidebarSnapshot {
+        guard !FileManager.default.fileExists(atPath: arcTwinRepairMarkerURL.path) else { return snapshot }
+        let (repaired, report) = ArcTwinSpaces.repair(snapshot)
+        if report.changed {
+            let stamp = SidebarBackup.stamp(Date())
+            let backup = fileURL.deletingLastPathComponent()
+                .appendingPathComponent("sidebar.before-arc-twin-repair-\(stamp).json", isDirectory: false)
+            guard (try? data.write(to: backup, options: [.withoutOverwriting])) != nil,
+                  let encoded = try? encoder.encode(repaired),
+                  (try? encoded.write(to: fileURL, options: [.atomic])) != nil else { return snapshot }
+        }
+        try? JSONEncoder().encode(ArcTwinRepairRecord(report)).write(to: arcTwinRepairMarkerURL, options: [.atomic])
+        return report.changed ? repaired : snapshot
     }
 
     public func noteUserEditUnlockedAutosave() {
@@ -296,5 +321,52 @@ public final class SidebarFilePersistence: SidebarPersisting {
             return store.makeSnapshot()
         }
         return DispatchQueue.main.sync { store.makeSnapshot() }
+    }
+}
+
+/// What the duplicate-Arc-space repair did, kept in its marker file.
+struct ArcTwinRepairRecord: Codable {
+    var duplicatedSources, mergedSameProfile, removedEmpty, movedRows, keptCopies, droppedRepeats: Int
+
+    init(_ report: ArcTwinSpaces.Report) {
+        duplicatedSources = report.duplicatedSources
+        mergedSameProfile = report.mergedSameProfile
+        removedEmpty = report.removedEmpty
+        movedRows = report.movedRows
+        keptCopies = report.keptCopies
+        droppedRepeats = report.droppedRepeats
+    }
+}
+
+/// Copies of the sidebar ReArc keeps before replacing it with iCloud's.
+public enum SidebarBackup {
+    public static func folder(besides fileURL: URL) -> URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("Backups", isDirectory: true)
+    }
+
+    static func stamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: date)
+    }
+
+    /// `Backups/sidebar-<reason>-<time>.json`, in the sidebar file's own format
+    /// (put it in place of sidebar.json, with ReArc quit, to go back to it).
+    @discardableResult
+    public static func write(_ snapshot: SidebarSnapshot, besides fileURL: URL, reason: String, now: Date = Date()) throws -> URL {
+        let directory = folder(besides: fileURL)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        var url = directory.appendingPathComponent("sidebar-\(reason)-\(stamp(now)).json", isDirectory: false)
+        var n = 2
+        while FileManager.default.fileExists(atPath: url.path) {
+            url = directory.appendingPathComponent("sidebar-\(reason)-\(stamp(now))-\(n).json", isDirectory: false)
+            n += 1
+        }
+        try encoder.encode(snapshot).write(to: url, options: [.withoutOverwriting])
+        return url
     }
 }
