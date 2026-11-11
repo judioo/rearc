@@ -457,9 +457,12 @@ struct BrowserView: View {
                                                           inset: Double(inset))
         // A split's panes are cards of their own, each with its own row (SPLIT-VIEW §3.1).
         let splitCards = !fullscreen && shownSplit != nil
+        let pageTab = model.startupDeferred || shownSplit != nil ? nil : model.selectedTab(in: windowID)
         return AddressBarContainer(
             showsToolbar: showsToolbar && shownSplit == nil,
-            holdsForAddressEditing: model.addressBarHasKeyboardFocus(for: model.selectedTab(in: windowID)?.id, in: windowID)
+            holdsForAddressEditing: model.addressBarHasKeyboardFocus(for: model.selectedTab(in: windowID)?.id, in: windowID),
+            revealOrigin: pageTab.flatMap { PageOrigin.of($0.url) },
+            holdsForPrompt: pageTab.map { model.engineHost.engine(for: $0, profileID: model.profileID(for: $0)).pagePrompts.asksUser } ?? false
         ) {
             contentArea
                 .overlay {

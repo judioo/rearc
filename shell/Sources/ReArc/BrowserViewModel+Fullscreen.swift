@@ -67,11 +67,13 @@ extension BrowserViewModel {
     }
 
     /// "bank.example" from "https://bank.example", the scheme kept for
-    /// anything but https; an opaque origin ("null") is "This page".
+    /// anything but https; an opaque origin ("null") is "This page". A long
+    /// host is cut from the left, never losing its registrable domain (N-06).
     nonisolated static func displaySite(_ origin: String) -> String {
         guard let url = URL(string: origin), let host = url.host, !host.isEmpty else { return "This page" }
         let port = url.port.map { ":\($0)" } ?? ""
-        return url.scheme == "https" ? host + port : "\(url.scheme ?? "")://\(host)\(port)"
+        let scheme = url.scheme == "https" ? "" : "\(url.scheme ?? "")://"
+        return scheme + PageOrigin.shortenedHost(host + port, limit: 36 - scheme.count)
     }
 
     /// Observes the first press without taking it away from the page or a field.

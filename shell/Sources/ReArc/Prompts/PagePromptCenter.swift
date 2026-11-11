@@ -91,7 +91,7 @@ final class PagePromptCenter {
 
     // MARK: Presented state
 
-    private(set) var dialog: Dialog?
+    private(set) var dialog: Dialog? { didSet { if oldValue != nil, dialog == nil { permissionUncovered() } } }
     /// The prompt's text field.
     var dialogText = ""
     /// "Don't allow this page to create more dialogs".
@@ -101,7 +101,7 @@ final class PagePromptCenter {
     var rememberPermission = false
     private(set) var password: Password?
     private(set) var autofillSave: AutofillSave?
-    private(set) var httpAuth: HTTPAuth?
+    private(set) var httpAuth: HTTPAuth? { didSet { if oldValue != nil, httpAuth == nil { permissionUncovered() } } }
     /// The sign-in sheet's fields; cleared as soon as it is answered.
     var authUsername = ""
     var authPassword = ""
@@ -112,7 +112,7 @@ final class PagePromptCenter {
     @ObservationIgnored private var autofillShownAt = Date.distantPast
     @ObservationIgnored private var autofillActions: AutofillActions?
     @ObservationIgnored private var authQueue: [HTTPAuth] = []
-    private(set) var clientCertificate: ClientCertificate?
+    private(set) var clientCertificate: ClientCertificate? { didSet { if oldValue != nil, clientCertificate == nil { permissionUncovered() } } }
     /// The identity selected in the certificate sheet.
     var selectedCertificate: String?
     @ObservationIgnored private var certificateQueue: [ClientCertificate] = []
@@ -145,7 +145,19 @@ final class PagePromptCenter {
 
     /// The UI also disables the whole card; checking the deadline here covers
     /// keys/clicks already queued when the card appeared or the window focused.
-    var permissionInteractionAllowed: Bool { permissionClock() >= permissionReadyAt }
+    var permissionInteractionAllowed: Bool { !permissionCovered && permissionClock() >= permissionReadyAt }
+
+    /// A JavaScript dialog, sign-in or certificate sheet is drawn over the permission card.
+    /// The card takes no input then, and its delay restarts once it is uncovered (F-04).
+    var permissionCovered: Bool { dialog != nil || httpAuth != nil || clientCertificate != nil }
+
+    /// The page is asking the user something (a permission, automatic downloads included, a
+    /// sign-in, a certificate or a dialog); an auto-hiding address bar stays shown meanwhile.
+    var asksUser: Bool { permission != nil || permissionCovered }
+
+    private func permissionUncovered() {
+        if !permissionCovered { rearmPermissionInteractionDelay() }
+    }
 
     func rearmPermissionInteractionDelay() {
         guard permission != nil else { return }

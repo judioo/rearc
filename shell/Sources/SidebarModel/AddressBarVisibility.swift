@@ -18,8 +18,13 @@ public struct AddressBarVisibility: Equatable {
     }
 
     public static let hideDelay: TimeInterval = 0.35
+    /// How long the bar shows by itself after the page's origin changes, so the trusted
+    /// origin is seen without hovering (security RC-0.1.0-564 S-02).
+    public static let originRevealDuration: TimeInterval = 3
     public private(set) var isRevealed: Bool
     public private(set) var hideDeadline: TimeInterval?
+    /// A timed reveal: the bar does not hide before this, whatever the pointer does.
+    public private(set) var revealedUntil: TimeInterval?
     public private(set) var autoHideEnabled: Bool
     public private(set) var hasKeyboardFocus = false
     public private(set) var pointer: Pointer = .outside
@@ -40,15 +45,32 @@ public struct AddressBarVisibility: Equatable {
         } else if isRevealed && pointer == .toolbar {
             hideDeadline = nil
         } else if isRevealed && hideDeadline == nil {
-            hideDeadline = now + Self.hideDelay
+            hideDeadline = max(now + Self.hideDelay, revealedUntil ?? 0)
+        }
+    }
+
+    /// Shows the bar now and keeps it for `duration` (a main-frame navigation to another
+    /// origin). Hover and focus still extend it as usual.
+    public mutating func reveal(for duration: TimeInterval, now: TimeInterval) {
+        guard autoHideEnabled else { return }
+        let until = max(revealedUntil ?? 0, now + duration)
+        revealedUntil = until
+        isRevealed = true
+        if !hasKeyboardFocus, pointer != .topEdge, pointer != .toolbar {
+            hideDeadline = max(hideDeadline ?? 0, until)
         }
     }
 
     public mutating func hideIfDue(at now: TimeInterval) {
         guard autoHideEnabled, !hasKeyboardFocus, pointer == .outside,
               let hideDeadline, now >= hideDeadline else { return }
+        if let revealedUntil, now < revealedUntil {
+            self.hideDeadline = revealedUntil
+            return
+        }
         isRevealed = false
         self.hideDeadline = nil
+        revealedUntil = nil
     }
 }
 

@@ -8,6 +8,11 @@ struct AddressBarContainer<Page: View, Toolbar: View>: View {
     var showsToolbar: Bool
     var holdsForAddressEditing: Bool
     var revealsAtWindowTop = true
+    /// The page's committed origin: a change reveals the bar for a few seconds (S-02).
+    var revealOrigin: String? = nil
+    /// A permission, sign-in, certificate or dialog prompt is up: the bar stays shown so the
+    /// asking site's real origin is on screen (S-02).
+    var holdsForPrompt = false
     @ViewBuilder var page: () -> Page
     @ViewBuilder var toolbar: () -> Toolbar
     @AppStorage(AutoHideAddressBarPreference.key) private var autoHide = AutoHideAddressBarPreference.defaultValue
@@ -18,13 +23,14 @@ struct AddressBarContainer<Page: View, Toolbar: View>: View {
     @State private var menuIsTracking = false
 
     private var isVisible: Bool { showsToolbar && (!autoHide || visibility.isRevealed) }
-    private var holdsFocus: Bool { holdsForAddressEditing || toolbarHasFocus || menuIsTracking }
+    private var holdsFocus: Bool { holdsForAddressEditing || toolbarHasFocus || menuIsTracking || holdsForPrompt }
 
     var body: some View {
         ZStack(alignment: .top) {
             page()
                 .padding(.top, showsToolbar && !autoHide ? CardToolbarView.height : 0)
                 .environment(\.addressBarOverlayInset, autoHide && isVisible ? CardToolbarView.height : 0)
+                .environment(\.addressBarAutoHides, autoHide && showsToolbar)
             if showsToolbar {
                 toolbar()
                     .background { if autoHide { Rectangle().fill(.regularMaterial) } }
@@ -48,6 +54,10 @@ struct AddressBarContainer<Page: View, Toolbar: View>: View {
         .onChange(of: pointer) { _, _ in updateVisibility() }
         .onChange(of: holdsFocus) { _, _ in updateVisibility() }
         .onChange(of: showsToolbar) { _, _ in updateVisibility() }
+        .onChange(of: revealOrigin) { _, origin in
+            guard autoHide, showsToolbar, origin != nil else { return }
+            animate { visibility.reveal(for: AddressBarVisibility.originRevealDuration, now: ProcessInfo.processInfo.systemUptime) }
+        }
         .task(id: visibility.hideDeadline) {
             guard let deadline = visibility.hideDeadline else { return }
             let delay = max(0, deadline - ProcessInfo.processInfo.systemUptime)
@@ -76,6 +86,8 @@ extension EnvironmentValues {
     /// How far a revealed auto-hiding toolbar covers the page's top; the
     /// find bar moves down by it instead of sitting under the strip.
     @Entry var addressBarOverlayInset: CGFloat = 0
+    /// The page sits under an auto-hiding toolbar (revealed or not).
+    @Entry var addressBarAutoHides = false
 }
 
 /// Focus from actual toolbar buttons/menus, plus any presented site controls

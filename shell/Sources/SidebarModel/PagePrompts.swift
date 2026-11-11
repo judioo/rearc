@@ -26,6 +26,31 @@ public enum PageOrigin {
         return URLComponents(string: origin)?.scheme?.lowercased() == "http" ? "http://" + host : host
     }
 
+    /// A host for one line of trusted UI: whole labels from the right, the registrable domain
+    /// always kept, and "…" in front of what was cut. A long host such as
+    /// `accounts.google.com.verify-session.evil.example` then shows its real domain rather than
+    /// its trusted-looking start (security RC-0.1.0-544 N-06). An `http://` prefix and a port stay.
+    public static func shortenedHost(_ text: String, limit: Int = 36) -> String {
+        guard text.count > limit else { return text }
+        let scheme = text.hasPrefix("http://") ? "http://" : ""
+        var host = String(text.dropFirst(scheme.count))
+        var port = ""
+        if let colon = host.lastIndex(of: ":"), host[host.index(after: colon)...].allSatisfy(\.isNumber) {
+            port = String(host[colon...])
+            host = String(host[..<colon])
+        }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        let floor = BoostScopeMatcher.registrableDomain(host).split(separator: ".").count
+        var kept = Array(labels.suffix(min(floor, labels.count)))
+        for label in labels.dropLast(kept.count).reversed() {
+            let candidate = ([label] + kept).joined(separator: ".")
+            guard scheme.count + 1 + candidate.count + port.count <= limit else { break }
+            kept.insert(label, at: 0)
+        }
+        let shown = kept.joined(separator: ".")
+        return scheme + (kept.count < labels.count ? "…" : "") + shown + port
+    }
+
     /// The origin of a page URL (scheme://host[:port]); nil without a host.
     public static func of(_ url: URL) -> String? {
         guard let scheme = url.scheme?.lowercased(), let host = url.host()?.lowercased(), !host.isEmpty else { return nil }

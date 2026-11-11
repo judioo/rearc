@@ -15,6 +15,9 @@ extension View {
 
 private struct PagePromptOverlay: ViewModifier {
     let prompts: PagePromptCenter
+    /// With an auto-hiding address bar the cards sit a bar's height lower, always, so the
+    /// revealed bar never covers them and they never move under the pointer (S-08, F-04).
+    @Environment(\.addressBarAutoHides) private var addressBarAutoHides
 
     func body(content: Content) -> some View {
         content
@@ -24,6 +27,7 @@ private struct PagePromptOverlay: ViewModifier {
                     PermissionPromptCard(prompts: prompts, permission: permission)
                         .id(permission.id)
                         .transition(.move(edge: .top).combined(with: .opacity))
+                        .padding(.top, addressBarAutoHides ? CardToolbarView.height : 0)
                 }
             }
             .overlay(alignment: .topTrailing) {
@@ -39,6 +43,7 @@ private struct PagePromptOverlay: ViewModifier {
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
+                .padding(.top, addressBarAutoHides ? CardToolbarView.height : 0)
             }
             .overlay {
                 if let dialog = prompts.dialog {
@@ -196,10 +201,11 @@ private struct PermissionPromptCard: View {
                     .frame(width: 28, height: 28)
                     .background(Circle().fill(Color.accentColor))
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("\(request.host) wants to")
+                    // The host keeps its end (the registrable domain) whatever its length (N-06).
+                    Text("\(PageOrigin.shortenedHost(request.host)) wants to")
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
-                        .truncationMode(.middle)
+                        .truncationMode(.head)
                     ForEach(request.phrases, id: \.self) { phrase in
                         Text(phrase)
                             .font(.system(size: 13))
@@ -245,8 +251,16 @@ private struct PermissionPromptCard: View {
         .padding(.leading, 12)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(request.host) wants to \(request.phrases.joined(separator: ", "))")
-        .disabled(!prompts.permissionInteractionEnabled)
+        .disabled(!prompts.permissionInteractionEnabled || prompts.permissionCovered)
         .onAppear { prompts.rearmPermissionInteractionDelay() }
+        // Uncovered or moved (an overlay closed, the sidebar hid for page fullscreen): the card
+        // serves its delay again where the user can see it (F-04).
+        .onChange(of: prompts.permissionCovered) { _, covered in
+            if !covered { prompts.rearmPermissionInteractionDelay() }
+        }
+        .onGeometryChange(for: CGRect.self, of: { $0.frame(in: .global) }) { _ in
+            prompts.rearmPermissionInteractionDelay()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { notification in
             guard let window = notification.object as? NSWindow, window === prompts.hostWindow else { return }
             prompts.rearmPermissionInteractionDelay()

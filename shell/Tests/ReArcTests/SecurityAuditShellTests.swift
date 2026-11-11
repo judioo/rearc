@@ -42,3 +42,38 @@ final class LaunchArgumentDefaultsTests: XCTestCase {
         XCTAssertNil(PasswordLeakDetectionPreference.load(from: defaults).explicitChoice)
     }
 }
+
+/// Security RC-0.1.0-544 F-04: a permission card under a dialog or sign-in sheet takes no
+/// input, and serves its delay again once uncovered.
+final class PermissionCardCoverTests: XCTestCase {
+    func testACoveredCardIsInertUntilItHasBeenVisibleForTheDelay() {
+        var now: TimeInterval = 100
+        let prompts = PagePromptCenter(permissionClock: { now })
+        prompts.sitePermissions = SitePermissionsController(fileURL: nil)
+        prompts.profileID = UUID()
+        var replies: [PermissionDecision] = []
+        prompts.presentDialog(JavaScriptDialogRequest(id: 1, kind: .alert, message: "click fast", origin: "https://game.test")) { _ in }
+        prompts.presentPermission(PermissionPromptRequest(id: 2, origin: "https://game.test", types: [.camera])) { decision, _ in
+            replies.append(decision)
+        }
+        XCTAssertTrue(prompts.permissionCovered)
+        XCTAssertTrue(prompts.asksUser)
+        now += 5
+        prompts.answerPermission(.allow)
+        XCTAssertEqual(replies, [], "no input while covered, however long it waited")
+        prompts.answerDialog(accept: true)
+        XCTAssertFalse(prompts.permissionCovered)
+        prompts.answerPermission(.allow)
+        XCTAssertEqual(replies, [], "the delay starts when it is uncovered")
+        now += 0.5
+        prompts.answerPermission(.allow)
+        XCTAssertEqual(replies, [.allow])
+    }
+
+    func testLongHostsInToastsKeepTheirDomain() {
+        let site = BrowserViewModel.displaySite("https://accounts.google.com.verify-session.evil.example")
+        XCTAssertTrue(site.hasSuffix("evil.example"), site)
+        XCTAssertEqual(BrowserViewModel.displaySite("https://bank.example"), "bank.example")
+        XCTAssertEqual(BrowserViewModel.displaySite("http://bank.example:8080"), "http://bank.example:8080")
+    }
+}
