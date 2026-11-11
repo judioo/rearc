@@ -653,12 +653,27 @@ final class BrowserViewModel {
         return starter
     }
 
+    /// Set once this launch's first-run onboarding completed or was deferred.
+    private var syncOnboardingResolved = false
+    private var syncStarted = false
+
+    /// Sync starts with the services, but on a first run only after onboarding
+    /// completed or was deferred, so the starter sidebar and a half-done import
+    /// never upload.
+    private func startSyncIfReady() {
+        guard didFinishStartup, !syncStarted, !isFirstRun || syncOnboardingResolved else { return }
+        syncStarted = true
+        syncEngine.start()
+    }
+
     /// “Onboard later” keeps setup available inside the browser, including
     /// after a restart, without playing the takeover on each launch.
     func deferFirstRunOnboarding() {
         persistence.flush()
         persistence.deferOnboarding()
         onboardingSetupState = persistence.onboardingSetupState
+        syncOnboardingResolved = true
+        startSyncIfReady()
     }
 
     func dismissOnboardingCard() {
@@ -673,6 +688,8 @@ final class BrowserViewModel {
         persistence.flush()
         persistence.finishOnboarding()
         onboardingSetupState = persistence.onboardingSetupState
+        syncOnboardingResolved = true
+        startSyncIfReady()
     }
 
     /// The cached sidebar can render before page/profile creation, archive,
@@ -686,7 +703,7 @@ final class BrowserViewModel {
         LaunchTimeline.servicesStarted = ProcessInfo.processInfo.systemUptime
         #endif
         PerfSignposts.launchEvent("ServicesStarting")
-        syncEngine.start()
+        startSyncIfReady()
         observeSearchProvider()
         wireMediaKeyHandlers()
         runAutoArchive()

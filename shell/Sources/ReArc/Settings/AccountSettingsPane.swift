@@ -209,6 +209,13 @@ struct AccountSettingsPane: View {
                         }
                         .font(.system(size: 12))
                         .padding(.top, 4)
+                        if let technicalError = text.technicalError {
+                            Text(technicalError)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .padding(.top, 4)
+                        }
                         Button("Sync Now") { model.syncNow() }
                             .disabled(!text.canSyncNow)
                             .controlSize(.small)

@@ -801,8 +801,9 @@ final class Wave25SchedulerTests: XCTestCase {
         final class Log: @unchecked Sendable { var statuses: [SyncEngineStatus] = [] }
         let log = Log()
         scheduler.onStatusChange = { log.statuses.append($0) }
+        coordinator.setEnabled(false)
         scheduler.start()
-        XCTAssertEqual(scheduler.status, .local, "off until the user turns it on")
+        XCTAssertEqual(scheduler.status, .local, "an explicit off is preserved")
         XCTAssertEqual(server.fetchCount, 0)
 
         scheduler.setUserEnabled(true)

@@ -43,10 +43,10 @@ final class Wave25ShellTests: XCTestCase {
         let model = makeModel(syncEngine: scheduler)
         XCTAssertNil(model.syncUnavailableReason)
         XCTAssertNotNil(model.syncControl)
-        XCTAssertEqual(model.syncDetails?.phase, .off)
+        XCTAssertEqual(model.syncDetails?.phase, .waiting("Waiting to sync"))
         _ = model.store.addTab(kind: .pinned, title: "Synced", url: URL(string: "https://synced.test")!)
 
-        model.setSyncEnabled(true)
+        model.finishFirstRunOnboarding()
         await scheduler.runCycle()
         XCTAssertTrue(model.isSyncEnabled)
         XCTAssertEqual(model.syncDetails?.phase, .upToDate)

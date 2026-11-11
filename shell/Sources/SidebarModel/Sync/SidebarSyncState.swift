@@ -21,7 +21,9 @@ public struct SidebarSyncState: Equatable, Codable, Sendable {
     public static let version = 1
 
     public var version = SidebarSyncState.version
-    public var enabled = false
+    /// Missing state means the user never chose: sync by default. Existing
+    /// files decode their saved Bool, including an explicit earlier off.
+    public var enabled = true
     public var accountID: String?
     public var zoneReady = false
     /// Opaque transport position (a CKSyncEngine state serialization, or the
@@ -57,15 +59,24 @@ public protocol SidebarSyncStateStoring: AnyObject {
 public final class SidebarSyncStateFile: SidebarSyncStateStoring {
     public static let fileName = "sync-state.json"
     public let fileURL: URL
+    /// The toggle when the file is missing: on, except in a `REARC_DATA_DIR`
+    /// launch (benchmarks, manual tests), whose throwaway sidebar must not
+    /// merge into the user's iCloud one unless sync is turned on there.
+    public let defaultEnabled: Bool
 
-    public init(fileURL: URL) {
+    public init(fileURL: URL, defaultEnabled: Bool = !ShellDataLocation.isOverridden) {
         self.fileURL = fileURL
+        self.defaultEnabled = defaultEnabled
     }
 
     public func load() -> SidebarSyncState {
         guard let data = try? Data(contentsOf: fileURL),
               let state = try? SyncCoding.decoder.decode(SidebarSyncState.self, from: data),
-              state.version == SidebarSyncState.version else { return SidebarSyncState() }
+              state.version == SidebarSyncState.version else {
+            var state = SidebarSyncState()
+            state.enabled = defaultEnabled
+            return state
+        }
         return state
     }
 

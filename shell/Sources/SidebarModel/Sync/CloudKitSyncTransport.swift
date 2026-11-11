@@ -95,7 +95,19 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, CKSyncEngineDele
         do {
             try await engine.sendChanges(CKSyncEngine.SendChangesOptions(scope: .recordIDs(ckRecords.map(\.recordID) + deleteIDs)))
         } catch {
-            throw Self.map(error, zoneID: zoneID)
+            let mapped = Self.map(error, zoneID: zoneID)
+            // A send may throw after delivering per-record results. Keep the
+            // confirmed saves rather than making the whole batch pending again.
+            let partial = withLock { () -> SyncModifyResult? in
+                guard !sent.saved.isEmpty || !sent.deleted.isEmpty || !sent.failures.isEmpty else { return nil }
+                let confirmed = Set(sent.saved.map(\.recordName) + sent.deleted + Array(sent.failures.keys))
+                for name in records.map(\.recordName) + names where !confirmed.contains(name) {
+                    sent.failures[name] = mapped
+                }
+                return sent
+            }
+            if let partial { return partial }
+            throw mapped
         }
         return withLock { sent }
     }
@@ -151,10 +163,12 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, CKSyncEngineDele
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
         let changes = syncEngine.state.pendingRecordZoneChanges.filter { context.options.scope.contains($0) }
         guard !changes.isEmpty else { return nil }
-        return await CKSyncEngine.RecordZoneChangeBatch(pendingChanges: changes) { [weak self] id in
+        var batch = await CKSyncEngine.RecordZoneChangeBatch(pendingChanges: changes) { [weak self] id in
             guard let self else { return nil }
             return self.withLock { self.outgoing[id] }
         }
+        batch?.atomicByZone = false
+        return batch
     }
 
     // MARK: Records
@@ -221,8 +235,19 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, CKSyncEngineDele
         case .quotaExceeded: return .quotaExceeded
         case .notAuthenticated, .accountTemporarilyUnavailable: return .notAuthenticated
         case .permissionFailure, .missingEntitlement, .badContainer: return .permissionFailure
+        case .serverRejectedRequest, .invalidArguments:
+            // Production refuses types and fields not deployed to it: "Cannot
+            // create new type X in production schema", "Cannot create or
+            // modify field 'y' in record 'X' in production schema".
+            let message = error.localizedDescription
+            if message.range(of: "cannot (create|modify).*production schema", options: [.regularExpression, .caseInsensitive]) != nil {
+                return .schemaNotDeployed(message)
+            }
+            return .other(message)
         case .partialFailure:
-            if let first = error.partialErrorsByItemID?.values.first { return map(first, zoneID: zoneID) }
+            let failures = error.partialErrorsByItemID?.values.map { map($0, zoneID: zoneID) } ?? []
+            if let schema = failures.first(where: \.isSchemaError) { return schema }
+            if let first = failures.first { return first }
             return .other(error.localizedDescription)
         default:
             return .other(error.localizedDescription)

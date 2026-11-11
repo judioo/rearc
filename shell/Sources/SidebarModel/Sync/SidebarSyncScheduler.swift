@@ -55,7 +55,7 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
     @MainActor
     public func setUserEnabled(_ enabled: Bool) {
         coordinator.setEnabled(enabled)
-        if enabled {
+        if enabled, started {
             startPolling()
             schedule(after: 0)
         } else {
@@ -66,6 +66,7 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
 
     @MainActor
     public func syncNow() {
+        coordinator.retrySchemaRejectedKinds() // An explicit retry after a schema deployment.
         schedule(after: 0)
     }
 
@@ -94,7 +95,7 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
     public func push(_ entries: [SidebarJournalEntry]) {
         guard !entries.isEmpty else { return }
         Task { @MainActor [weak self] in
-            guard let self, self.coordinator.isEnabled else { return }
+            guard let self, self.started, self.coordinator.isEnabled else { return }
             self.coordinator.captureLocalChanges()
             self.schedule(after: Self.editDebounce)
         }
@@ -109,7 +110,7 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
 
     @MainActor
     private func schedule(after delay: TimeInterval) {
-        guard coordinator.isEnabled else { return }
+        guard started, coordinator.isEnabled else { return }
         scheduled?.cancel()
         scheduled = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -134,6 +135,7 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
 
     @MainActor
     func runCycle() async {
+        guard started, coordinator.isEnabled else { return }
         if running {
             rerun = true
             return
@@ -143,12 +145,14 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
         repeat {
             rerun = false
             let outcome = await coordinator.sync()
+            // A schema rejection holds back only its own record type (the
+            // coordinator's cooldown), so the rest keeps its usual cadence.
             if let error = outcome.error, error.isTransient || error == .quotaExceeded {
                 failures += 1
                 let base = min(Self.maxBackoff, 5 * pow(2, Double(failures - 1)))
                 let delay = max(error.retryAfter ?? 0, base * Double.random(in: 0.8 ... 1.2))
                 schedule(after: error == .quotaExceeded ? Self.maxBackoff : delay)
-            } else if outcome.error == nil {
+            } else if outcome.error == nil || outcome.error?.isSchemaError == true {
                 failures = 0
             }
         } while rerun
@@ -169,6 +173,7 @@ public struct SyncSettingsPresentation: Equatable, Sendable {
     public var lastSyncedText: String
     public var pendingText: String?
     public var errorText: String?
+    public var technicalError: String?
     public var canSyncNow: Bool
 
     public init(details: SyncStatusDetails, enabled: Bool, now: Date = Date()) {
@@ -194,6 +199,7 @@ public struct SyncSettingsPresentation: Equatable, Sendable {
         case .waiting(let message), .failed(let message), .signedOut(let message): errorText = message
         default: errorText = nil
         }
+        technicalError = details.technicalError
         canSyncNow = enabled && details.phase != .syncing
     }
 }

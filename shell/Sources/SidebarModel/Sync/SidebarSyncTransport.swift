@@ -28,7 +28,20 @@ public enum SyncTransportError: Error, Equatable, Sendable {
     case quotaExceeded
     case notAuthenticated
     case permissionFailure
+    case schemaNotDeployed(String)
     case other(String)
+
+    public var technicalDetail: String? {
+        switch self {
+        case .schemaNotDeployed(let message), .other(let message): return message
+        default: return nil
+        }
+    }
+
+    public var isSchemaError: Bool {
+        if case .schemaNotDeployed = self { return true }
+        return false
+    }
 
     /// Worth retrying later without anything changing on this Mac.
     public var isTransient: Bool {
@@ -58,7 +71,10 @@ public enum SyncTransportError: Error, Equatable, Sendable {
         case .quotaExceeded: return "Your iCloud storage is full. Changes are queued until there is space."
         case .notAuthenticated: return "Sign in to iCloud to sync."
         case .permissionFailure: return "iCloud refused access to ReArc's container."
-        case .other(let message): return message
+        case .schemaNotDeployed:
+            return "iCloud can't accept some changes from this version of ReArc yet. They're kept on this Mac and upload once it can."
+        case .other:
+            return "Sync isn't available right now. Your sidebar is safe on this Mac and will sync when it is."
         }
     }
 }

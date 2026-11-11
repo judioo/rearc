@@ -36,6 +36,7 @@ public struct SyncStatusDetails: Equatable, Sendable {
     public var lastSyncedAt: Date?
     public var pendingCount: Int
     public var account: SyncAccountStatus?
+    public var technicalError: String?
 
     public init(phase: Phase, lastSyncedAt: Date? = nil, pendingCount: Int = 0, account: SyncAccountStatus? = nil) {
         self.phase = phase
@@ -88,6 +89,9 @@ public final class SidebarSyncCoordinator {
     public static let batchSize = 200
     /// Tombstones live this long before they are deleted from the server (§5.4).
     public static let tombstoneLifetime: TimeInterval = 30 * 24 * 3600
+    /// A record type the server's schema rejected is offered again after
+    /// this long (or on Sync Now); every other type keeps syncing meanwhile.
+    public static let schemaRetryInterval: TimeInterval = 900
 
     public let transport: SidebarSyncTransport
     public weak var host: SidebarSyncHost?
@@ -98,6 +102,8 @@ public final class SidebarSyncCoordinator {
 
     private let stateStore: SidebarSyncStateStoring
     private var clock: HybridLogicalClock
+    /// Kinds whose upload the schema rejected: until when they wait, and why.
+    private var schemaRejections: [SyncRecordKind: (until: Date, error: SyncTransportError)] = [:]
 
     public init(
         transport: SidebarSyncTransport,
@@ -128,6 +134,11 @@ public final class SidebarSyncCoordinator {
         update(enabled ? .waiting("Waiting to sync") : .off)
     }
 
+    /// Sync Now: offer schema-rejected kinds again (after a schema deployment).
+    public func retrySchemaRejectedKinds() {
+        schemaRejections = [:]
+    }
+
     // MARK: - Cycle
 
     @discardableResult
@@ -137,6 +148,7 @@ public final class SidebarSyncCoordinator {
             outcome.skipped = true
             return outcome
         }
+        details.technicalError = nil
         update(.syncing)
         let account = await transport.accountStatus()
         details.account = account
@@ -206,6 +218,8 @@ public final class SidebarSyncCoordinator {
         state.lastSyncedAt = now()
         state.lastError = nil
         persist()
+        // The rest synced; still report a type the schema keeps out.
+        if let rejected = activeSchemaRejection() { throw rejected }
         update(state.pendingCount == 0 ? .upToDate : .waiting("\(state.pendingCount) changes waiting to upload"))
     }
 
@@ -328,19 +342,37 @@ public final class SidebarSyncCoordinator {
         var mergedRemote = false
         var skipped = Set<String>()
         for _ in 0 ..< 4 {
-            let pending = state.records.filter { $0.value.pending && !skipped.contains($0.key) }
+            let pending = state.records.filter { $0.value.pending && !skipped.contains($0.key) && !isSchemaRejected($0.value.payload.kind) }
                 .sorted { $0.key < $1.key }
             let expired = expiredTombstones()
             guard !pending.isEmpty || !expired.isEmpty else { break }
             var conflicts = false
-            var batches = stride(from: 0, to: pending.count, by: Self.batchSize).map {
-                Array(pending[$0 ..< min($0 + Self.batchSize, pending.count)])
+            // A rejected type must not hold every later type behind it.
+            var batches = SyncRecordKind.allCases.flatMap { kind in
+                let sameKind = pending.filter { $0.value.payload.kind == kind }
+                return stride(from: 0, to: sameKind.count, by: Self.batchSize).map {
+                    Array(sameKind[$0 ..< min($0 + Self.batchSize, sameKind.count)])
+                }
             }
             if batches.isEmpty { batches = [[]] }
-            for (index, batch) in batches.enumerated() {
+            var deletesSent = false
+            for batch in batches {
+                // A later batch of a kind rejected earlier in this pass waits too.
+                if let kind = batch.first?.value.payload.kind, isSchemaRejected(kind) {
+                    skipped.formUnion(batch.map(\.key))
+                    continue
+                }
                 let wires = batch.map { SyncWireRecord(recordName: $0.key, payload: $0.value.payload, serverTag: $0.value.serverTag) }
-                let deletes = index == 0 ? expired : []
-                let result = try await transport.modify(saving: wires, deleting: deletes)
+                let deletes = deletesSent ? [] : expired
+                let result: SyncModifyResult
+                do {
+                    result = try await transport.modify(saving: wires, deleting: deletes)
+                } catch let error as SyncTransportError where error.isSchemaError {
+                    if let kind = batch.first?.value.payload.kind { rejectSchema(of: kind, error) }
+                    skipped.formUnion(batch.map(\.key))
+                    continue
+                }
+                deletesSent = true
                 let sent = Dictionary(uniqueKeysWithValues: wires.map { ($0.recordName, $0.payload) })
                 for saved in result.saved {
                     guard var record = state.records[saved.recordName] else { continue }
@@ -363,6 +395,9 @@ public final class SidebarSyncCoordinator {
                             state.records[name] = record
                             conflicts = true
                         }
+                    case .schemaNotDeployed:
+                        if let kind = state.records[name]?.payload.kind { rejectSchema(of: kind, error) }
+                        skipped.insert(name)
                     case .zoneNotFound, .userDeletedZone, .notAuthenticated, .quotaExceeded:
                         persist()
                         throw error
@@ -381,6 +416,22 @@ public final class SidebarSyncCoordinator {
             if !conflicts { break }
         }
         return mergedRemote
+    }
+
+    private func isSchemaRejected(_ kind: SyncRecordKind) -> Bool {
+        guard let rejection = schemaRejections[kind] else { return false }
+        return rejection.until > now()
+    }
+
+    private func rejectSchema(of kind: SyncRecordKind, _ error: SyncTransportError) {
+        schemaRejections[kind] = (now().addingTimeInterval(Self.schemaRetryInterval), error)
+    }
+
+    /// A schema rejection still keeping queued records of its kind back.
+    private func activeSchemaRejection() -> SyncTransportError? {
+        let waiting = Set(state.records.values.filter(\.pending).map(\.payload.kind))
+        return schemaRejections.filter { waiting.contains($0.key) && isSchemaRejected($0.key) }
+            .min { $0.key.rawValue < $1.key.rawValue }?.value.error
     }
 
     private func expiredTombstones() -> [String] {
@@ -408,6 +459,7 @@ public final class SidebarSyncCoordinator {
 
     private func fail(_ error: SyncTransportError, _ outcome: inout SyncCycleOutcome) {
         outcome.error = error
+        details.technicalError = error.technicalDetail
         state.lastError = error.userMessage
         switch error {
         case .userDeletedZone:
