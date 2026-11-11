@@ -135,7 +135,7 @@ final class SidebarPlainRowCell: NSView {
                 case .folder:
                     icon.image = SidebarFolderGlyph.image(isOpen: state.isExpanded, holdsOpenTabs: state.holdsOpenTabs)
                     icon.imageScaling = .scaleNone
-                    icon.contentTintColor = NSColor(chrome.accent)
+                    icon.contentTintColor = NSColor(state.isMultiSelected ? chrome.multiSelectedAccent : chrome.accent)
                     icon.layer?.cornerRadius = 0
                     icon.isHidden = false
                     icon.alphaValue = 1
@@ -187,7 +187,10 @@ final class SidebarPlainRowCell: NSView {
             icon.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: size, weight: .medium))
             icon.imageScaling = .scaleProportionallyUpOrDown
-            icon.contentTintColor = NSColor(kind == .folder ? state.chrome.accent : state.chrome.title)
+            let multi = state.isMultiSelected && !(state.isSelected && kind != .folder)
+            icon.contentTintColor = NSColor(kind == .folder
+                ? (multi ? state.chrome.multiSelectedAccent : state.chrome.accent)
+                : (multi ? state.chrome.multiSelectedTitle : state.chrome.title))
             icon.isHidden = false
             tokenBadge.isHidden = true
         case .emoji(let text):
@@ -467,7 +470,10 @@ struct PlainRowState: Equatable {
     /// an audio or Picture in Picture badge, the rename hint), or a rename
     /// field that keeps focus wherever the pointer goes.
     var needsHosting = false
-    var chrome = ThemeChromeColors(theme: .default, dark: false)
+    var chrome = PlainRowState.blankChrome
+    /// Built once: every read starts from a blank state, and the chrome's
+    /// fitting (the multi-selection veil's included) samples the theme finely.
+    private static let blankChrome = ThemeChromeColors(theme: .default, dark: false)
 
     static func read(id: UUID, model: BrowserViewModel, spaceID: Space.ID, window: SidebarWindowID? = nil,
                      chrome: ThemeChromeColors, isMini: Bool = false) -> PlainRowState {

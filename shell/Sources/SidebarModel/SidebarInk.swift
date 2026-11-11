@@ -158,6 +158,23 @@ public enum SidebarRowWash {
     }
 }
 
+public extension SidebarRowWash.MultiSelected {
+    /// A glyph on this veil, fitted to the glyph floor as the title is to
+    /// its own: a folder's glyph in the accent, and in the mini sidebar
+    /// (⇧⌘S), whose 36 pt square has no title, a split's or an easel's
+    /// glyph in the secondary ink. The other side's veil only adds contrast,
+    /// so there the ink stays.
+    func glyph(_ ink: SpaceColor, theme: SpaceTheme, windowDark: Bool, lightInk: Bool) -> SpaceColor {
+        glyph(ink, backdrop: SidebarBackdrop(theme: theme, dark: windowDark, rows: 20, columns: 10), lightInk: lightInk)
+    }
+
+    func glyph(_ ink: SpaceColor, backdrop: SidebarBackdrop, lightInk: Bool) -> SpaceColor {
+        let row = SidebarBackdrop(darkest: backdrop.darkest.mixed(with: veil, fraction: alpha),
+                                  lightest: backdrop.lightest.mixed(with: veil, fraction: alpha))
+        return row.legible(ink, floor: SidebarContrast.glyph, lightInk: lightInk)
+    }
+}
+
 public extension SpaceTexture {
     /// The tile's mean grey and alpha (`ThemeTextureGenerator`'s targets).
     var meanTexel: SpaceColor {

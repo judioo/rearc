@@ -193,7 +193,7 @@ struct FolderRowView<Menu: View>: View {
                     SidebarGlyphView(icon: folder.customIcon, fallback: "folder", size: 17)
                 }
             }
-                .foregroundStyle(chrome.accent)
+                .foregroundStyle(isMultiSelected ? chrome.multiSelectedAccent : chrome.accent)
                 .frame(width: SidebarMetrics.iconSize + 3, height: SidebarMetrics.iconSize + 3)
                 .padding(.leading, -1.5)
             if let rename {

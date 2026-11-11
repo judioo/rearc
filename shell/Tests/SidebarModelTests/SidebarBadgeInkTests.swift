@@ -167,6 +167,31 @@ final class SidebarBadgeInkTests: XCTestCase {
                        pale.chrome.title)
     }
 
+    /// The mini sidebar's square (⇧⌘S) takes the same veil with no title:
+    /// what must read on it are the glyphs, a folder's in the accent and a
+    /// split's or easel's in the secondary ink, at 3:1. The mini column is
+    /// the sidebar's leading 52 pt, inside the samples the full rows use.
+    func testMultiSelectedMiniSquaresKeepTheirGlyphsLegible() {
+        var moved = 0
+        for (name, theme, windowDark) in Self.legibleCases {
+            let (lightInk, chrome) = SpaceThemeRoles.sidebarChrome(theme: theme, windowDark: windowDark)
+            let wash = SidebarRowWash.multiSelected(title: chrome.title, theme: theme, windowDark: windowDark, lightInk: lightInk)
+            for (role, ink) in [("accent", chrome.accent), ("secondary", chrome.secondaryText)] {
+                let glyph = wash.glyph(ink, theme: theme, windowDark: windowDark, lightInk: lightInk)
+                if glyph != ink { moved += 1 }
+                for background in sidebarSamples(theme, windowDark: windowDark) {
+                    let square = background.mixed(with: wash.veil, fraction: wash.alpha)
+                    XCTAssertGreaterThanOrEqual(contrast(glyph, square), SidebarContrast.glyph,
+                                                "\(Self.label(name, windowDark)) mini \(role) glyph on \(background.hex)")
+                }
+            }
+        }
+        XCTAssertLessThan(moved, Self.legibleCases.count, "most glyphs read on the veil as they are")
+        let pale = SpaceThemeRoles.sidebarChrome(theme: .arcDefault, windowDark: false)
+        let wash = SidebarRowWash.multiSelected(title: pale.chrome.title, theme: .arcDefault, windowDark: false, lightInk: pale.lightInk)
+        XCTAssertEqual(wash.glyph(pale.chrome.accent, theme: .arcDefault, windowDark: false, lightInk: pale.lightInk), pale.chrome.accent)
+    }
+
     func testBadgeGlyphAndEdgeReadOnEveryThemeAndAppearance() {
         for (name, theme, windowDark) in Self.legibleCases {
             let (lightInk, chrome) = SpaceThemeRoles.sidebarChrome(theme: theme, windowDark: windowDark)
