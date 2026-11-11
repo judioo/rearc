@@ -244,7 +244,7 @@ public enum SyncCloudText {
         "It has " + summary.counts + (summary.updatedText(now: now).map { ", " + $0 } ?? "") + "."
     }
 
-    public static let sheetWarning = "Using it can replace or change what is on this Mac, including what you just imported."
+    public static let sheetWarning = "Using it can replace or change what is on this Mac, including what you just imported. Sites may ask you to sign in again on this Mac."
 
     public static func title(_ choice: CloudSidebarChoice) -> String {
         switch choice {

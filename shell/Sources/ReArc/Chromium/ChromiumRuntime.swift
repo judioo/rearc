@@ -6,7 +6,11 @@ import SidebarModel
 
 enum ChromiumLog {
     /// Per-event tracing; on with REARC_CHROMIUM_TRACE=1 and in the self-test.
+    /// A shipped bundle ignores the variable: the lines hold addresses and titles,
+    /// and standard error belongs to whoever starts the process (RC-0.1.0-670 V-07).
     static var traceEnabled = ProcessInfo.processInfo.environment["REARC_CHROMIUM_TRACE"] == "1"
+        && EngineLaunchOptions.allowsVerification(infoDictionary: Bundle.main.infoDictionary,
+                                                  environment: ProcessInfo.processInfo.environment)
 
     static func info(_ message: @autoclosure () -> String) {
         FileHandle.standardError.write(Data("[ReArc/Chromium] \(message())\n".utf8))

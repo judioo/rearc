@@ -90,7 +90,7 @@ Flags and environment:
 | `--rearc-selftest` | Chromium runtime proof; exits 0 on success, nonzero on failure, 124 on the 300 s watchdog |
 | `--rearc-launch-probe=PATH` | reach `ready` on a temp profile, write `ready=1 engine=… source=… links=…` to PATH, quit (`scripts/check-launch.sh`) |
 | `--user-data-dir=PATH` | Chromium profile dir (default `~/Library/Application Support/ReArc/Chromium`; temp dir for the self-test) |
-| `REARC_CHROMIUM_TRACE=1` | log every tab/service event and engine call (including script evaluations) to stderr |
+| `REARC_CHROMIUM_TRACE=1` | log every tab/service event and engine call (including script evaluations) to stderr; a shipped bundle ignores it |
 
 ### ABI 1.5 adoption
 

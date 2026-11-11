@@ -126,17 +126,16 @@ extension BrowserViewModel {
     }
 
     /// The person's answer for the sidebar in iCloud; sync is on afterwards.
-    /// Using iCloud's backs this Mac's sidebar up first, and does nothing if that fails.
+    /// Every choice backs this Mac's sidebar up first (a merge changes it too,
+    /// RC-0.1.0-670 V-03), and does nothing if that fails.
     func chooseCloudSidebar(_ choice: CloudSidebarChoice, from found: CloudSidebarFound) {
         syncCloudChoice = nil
         syncCloudMessage = nil
-        if choice == .useCloud {
-            do {
-                _ = try SidebarBackup.write(store.makeSnapshot(), besides: persistence.fileURL, reason: "before-icloud")
-            } catch {
-                syncCloudMessage = "ReArc couldn't save a copy of this Mac's sidebar, so nothing was changed."
-                return
-            }
+        do {
+            _ = try SidebarBackup.write(store.makeSnapshot(), besides: persistence.fileURL, reason: "before-icloud")
+        } catch {
+            syncCloudMessage = "ReArc couldn't save a copy of this Mac's sidebar, so nothing was changed."
+            return
         }
         MainActor.assumeIsolated { syncControl?.apply(choice, from: found) }
         reconcileEngineOwnership()
