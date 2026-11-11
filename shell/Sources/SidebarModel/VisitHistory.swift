@@ -13,13 +13,22 @@ public struct VisitRecord: Codable, Equatable, Sendable {
     public var visitCount: Int
     public var firstVisit: Date
     public var lastVisit: Date
+    /// The containers (profiles) whose tabs visited it. nil: recorded before containers
+    /// were told apart, or imported; such records belong to the first profile
+    /// (security RC-0.1.0-564 S-06).
+    public var profileIDs: [UUID]?
 
-    public init(url: URL, title: String, visitCount: Int = 1, firstVisit: Date, lastVisit: Date? = nil) {
+    public init(url: URL, title: String, visitCount: Int = 1, firstVisit: Date, lastVisit: Date? = nil, profileIDs: [UUID]? = nil) {
         self.url = url
         self.title = title
         self.visitCount = visitCount
         self.firstVisit = firstVisit
         self.lastVisit = lastVisit ?? firstVisit
+        self.profileIDs = profileIDs
+    }
+
+    public func isVisible(to profileID: UUID, defaultProfileID: UUID) -> Bool {
+        profileIDs.map { $0.contains(profileID) } ?? (profileID == defaultProfileID)
     }
 
     public var displayTitle: String {
@@ -87,20 +96,29 @@ public struct VisitHistory: Codable, Equatable, Sendable {
         return components.string
     }
 
-    /// A new top-level visit to `url`.
-    public mutating func recordVisit(url: URL, title: String?, at date: Date) {
+    /// A new top-level visit to `url`, by a tab of `profileID` when given.
+    public mutating func recordVisit(url: URL, title: String?, at date: Date, profileID: UUID? = nil) {
         guard let key = Self.key(for: url) else { return }
         if var existing = records[key] {
             existing.visitCount += 1
             existing.lastVisit = date
             existing.url = url
             if let title, !title.isEmpty { existing.title = title }
+            if let profileID, existing.profileIDs?.contains(profileID) != true {
+                existing.profileIDs = (existing.profileIDs ?? []) + [profileID]
+            }
             records[key] = existing
         } else {
-            records[key] = VisitRecord(url: url, title: title ?? "", firstVisit: date)
+            records[key] = VisitRecord(url: url, title: title ?? "", firstVisit: date, profileIDs: profileID.map { [$0] })
             evictIfNeeded()
         }
         searchIndex.update(records[key], for: key)
+    }
+
+    /// Only what `profileID`'s tabs visited, for the command bar and inline completion:
+    /// typing in one container never completes to a host seen only in another (S-06).
+    public func visible(to profileID: UUID, defaultProfileID: UUID) -> VisitHistory {
+        VisitHistory(records: records.values.filter { $0.isVisible(to: profileID, defaultProfileID: defaultProfileID) })
     }
 
     /// The page's title arrived after its commit; not a new visit.

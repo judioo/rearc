@@ -17,7 +17,7 @@ extension BrowserViewModel {
             guard isCommandBarPresented, !commandBarText.isEmpty, !commandBarText.hasPrefix(">"),
                   !commandBarSuppressesInlineCompletion, commandBarSiteSearch == nil,
                   commandBarURLIntent == nil else { return nil }
-            let candidates = commandBarDomainCache.value { InlineDomainCompletion.candidates(history: visitHistory) }
+            let candidates = commandBarDomainCache.value { InlineDomainCompletion.candidates(history: visitHistory(for: store.activeProfileID)) }
             return InlineDomainCompletion.complete(commandBarText, candidates: candidates)
         }
     }

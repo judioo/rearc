@@ -350,6 +350,8 @@ final class BrowserViewModel {
     @ObservationIgnored let commandBarResultCache = ObservedCache<[CommandBarSearch.Result]>()
     @ObservationIgnored let commandBarCatalogCache = ObservedCache<[AppCommand]>()
     @ObservationIgnored let commandBarDomainCache = ObservedCache<[String]>()
+    /// The active container's share of `visitHistory`.
+    @ObservationIgnored let commandBarHistoryCache = ObservedCache<VisitHistory>()
     @ObservationIgnored let commandBarInlineCache = ObservedCache<String?>()
     /// Open tabs and enabled commands prepared for matching, rebuilt when the
     /// sidebar or the catalog changes rather than on every keystroke.
@@ -387,7 +389,7 @@ final class BrowserViewModel {
             mediaByTab: mediaStateByTab,
             tabMuteModel: tabMuteModel,
             navigationSchemes: engineHost.navigationSchemes,
-            history: visitHistory,
+            history: visitHistory(for: store.activeProfileID),
             liveHistory: commandBarLiveHistory,
             tabIndex: commandBarTabIndex,
             commandIndex: commandIndex,

@@ -72,4 +72,25 @@ final class ContainerRoutingSecurityTests: XCTestCase {
         XCTAssertEqual(reloaded.spaces.first { $0.id == bankSpace.id }?.profileID, banking.id)
         XCTAssertEqual(reloaded.profile(withID: banking.id)?.name, "Recovered Container")
     }
+
+    /// S-06: the shell's command-bar history is kept per container.
+    func testCommandBarHistoryIsPerContainer() throws {
+        let personal = UUID(), work = UUID()
+        var history = VisitHistory()
+        history.recordVisit(url: url("intranet.corp.test"), title: "Intranet", at: Date(), profileID: work)
+        history.recordVisit(url: url("news.test"), title: "News", at: Date(), profileID: personal)
+        history.recordVisit(url: url("news.test"), title: "News", at: Date(), profileID: work)
+        history.recordVisit(url: url("legacy.test"), title: "Old", at: Date())
+        let seenByPersonal = history.visible(to: personal, defaultProfileID: personal)
+        XCTAssertNil(seenByPersonal.record(for: url("intranet.corp.test")), "never completes to another container's hosts")
+        XCTAssertNotNil(seenByPersonal.record(for: url("news.test")))
+        XCTAssertNotNil(seenByPersonal.record(for: url("legacy.test")), "older records stay with the first profile")
+        let seenByWork = history.visible(to: work, defaultProfileID: personal)
+        XCTAssertNotNil(seenByWork.record(for: url("intranet.corp.test")))
+        XCTAssertNil(seenByWork.record(for: url("legacy.test")))
+        XCTAssertEqual(InlineDomainCompletion.complete("intra", candidates: InlineDomainCompletion.candidates(history: seenByPersonal)), nil)
+        // Records saved before this keep decoding.
+        let old = try JSONDecoder().decode(VisitHistory.self, from: Data(#"{"records":{"https://a.test":{"url":"https://a.test","title":"A","visitCount":1,"firstVisit":0,"lastVisit":0}}}"#.utf8))
+        XCTAssertNil(old.records.values.first?.profileIDs)
+    }
 }

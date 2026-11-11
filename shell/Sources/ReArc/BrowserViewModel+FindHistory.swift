@@ -54,9 +54,20 @@ extension BrowserViewModel {
             if let title, !title.isEmpty { visitHistory.updateTitle(url: url, title: title) }
         } else {
             lastRecordedVisit[tabID] = key
-            visitHistory.recordVisit(url: url, title: title, at: date)
+            let profile = store.tab(withID: tabID).map(profileID(for:))
+            visitHistory.recordVisit(url: url, title: title, at: date, profileID: profile)
         }
         scheduleVisitHistorySave()
+    }
+
+    /// The shell history `profileID` may see (security RC-0.1.0-564 S-06).
+    func visitHistory(for profileID: Profile.ID) -> VisitHistory {
+        if profileID == store.activeProfileID {
+            return commandBarHistoryCache.value {
+                visitHistory.visible(to: store.activeProfileID, defaultProfileID: store.profiles[0].id)
+            }
+        }
+        return visitHistory.visible(to: profileID, defaultProfileID: store.profiles[0].id)
     }
 
     func clearVisitHistory() {

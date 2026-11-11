@@ -217,7 +217,7 @@ struct LittleArcWindowView: View {
     private func address(for record: LittleArcWindow, engine: any WebEngine) -> some View {
         Group {
             if isEditingAddress {
-                let suffix = InlineDomainCompletion.complete(addressText, candidates: InlineDomainCompletion.candidates(history: model.visitHistory))
+                let suffix = InlineDomainCompletion.complete(addressText, candidates: InlineDomainCompletion.candidates(history: model.visitHistory(for: record.profileID)))
                     .flatMap { InlineDomainCompletion.suffix(typed: addressText, completion: $0) }
                 TextField("Search or enter URL", text: $addressText)
                     .textFieldStyle(.plain)
