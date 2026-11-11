@@ -149,12 +149,28 @@ public final class InMemorySyncServer: @unchecked Sendable {
         return SyncFetchResult(changed: page.map(\.wire), deleted: deleted, token: token, moreComing: more)
     }
 
-    func read(account: String) throws -> [SyncWireRecord]? {
+    /// A look's batches: `pageSize` records each, `readDelay` seconds apart.
+    public var readDelay: TimeInterval = 0
+    /// While set, a look waits before its next batch (a stalled connection).
+    public var readHold: (() async -> Void)?
+
+    func read(account: String, progress: @escaping @Sendable (Int) -> Void) async throws -> [SyncWireRecord]? {
         try checkFault()
-        lock.lock(); defer { lock.unlock() }
-        readCount += 1
-        guard let zone = zones[account] else { return nil }
-        return zone.records.values.sorted { $0.changeSequence < $1.changeSequence }.map(\.wire)
+        let all: [SyncWireRecord]? = {
+            lock.lock(); defer { lock.unlock() }
+            readCount += 1
+            return zones[account].map { $0.records.values.sorted { $0.changeSequence < $1.changeSequence }.map(\.wire) }
+        }()
+        guard let all else { return nil }
+        var read: [SyncWireRecord] = []
+        repeat {
+            if let readHold { await readHold() }
+            if readDelay > 0 { try? await Task.sleep(nanoseconds: UInt64(readDelay * 1_000_000_000)) }
+            try checkFault()
+            read += all[read.count ..< min(all.count, read.count + max(1, pageSize))]
+            progress(read.count)
+        } while read.count < all.count
+        return read
     }
 
     func deleteZone(account: String) throws {
@@ -236,8 +252,8 @@ public final class InMemorySyncTransport: SidebarSyncTransport, SidebarCloudRead
         try server.modify(account: try signedIn(), saving: records, deleting: names)
     }
 
-    public func readAllRecords() async throws -> [SyncWireRecord]? {
-        try server.read(account: try signedIn())
+    public func readAllRecords(progress: @escaping @Sendable (Int) -> Void) async throws -> [SyncWireRecord]? {
+        try await server.read(account: try signedIn(), progress: progress)
     }
 
     public func deleteZone() async throws {

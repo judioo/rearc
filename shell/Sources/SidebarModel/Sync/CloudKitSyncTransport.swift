@@ -46,7 +46,8 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, SidebarCloudRead
     // MARK: SidebarSyncTransport
 
     public func accountStatus() async -> SyncAccountStatus {
-        accessLog?("read account status")
+        let started = Date()
+        defer { accessLog?(String(format: "read account status (%.2f s)", Date().timeIntervalSince(started))) }
         do {
             switch try await container.accountStatus() {
             case .available:
@@ -131,34 +132,65 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, SidebarCloudRead
 
     // MARK: SidebarCloudReading
 
+    /// How a look reads the zone (the probe compares settings).
+    public struct ReadTuning: Sendable {
+        /// The person is waiting: CloudKit treats lower qualities as discretionary.
+        public var qualityOfService: QualityOfService = .userInitiated
+        /// The server sends 200 records a batch unless asked for more, and
+        /// each batch costs it 1.3 to 2 s whatever its size: against 3,048
+        /// records, 1,000 took 18 to 25 s where the default took 27 to 30 s.
+        /// It caps a batch itself (often about 375).
+        public var resultsLimit: Int? = 1000
+        public var desiredKeys: [String]?
+        public init() {}
+    }
+
+    public var readTuning = ReadTuning()
+
     /// A plain zone read, outside CKSyncEngine (which would set up a
-    /// subscription): nothing in iCloud changes.
-    public func readAllRecords() async throws -> [SyncWireRecord]? {
-        var records: [SyncWireRecord] = []
-        var token: CKServerChangeToken?
-        var pages = 0
+    /// subscription): nothing in iCloud changes. Each batch is logged with
+    /// how long it took to fetch and to decode.
+    public func readAllRecords(progress: @escaping @Sendable (Int) -> Void) async throws -> [SyncWireRecord]? {
+        let tuning = readTuning
+        let configuration = CKOperation.Configuration()
+        configuration.qualityOfService = tuning.qualityOfService
+        let zoneID = zoneID
+        let log = accessLog
+        let started = Date()
         do {
-            while true {
-                let page = try await database.recordZoneChanges(inZoneWith: zoneID, since: token)
-                for case .success(let modification) in page.modificationResultsByID.values {
-                    if let wire = Self.wire(from: modification.record) { records.append(wire) }
+            let records = try await database.configuredWith(configuration: configuration) { database -> [SyncWireRecord] in
+                var records: [SyncWireRecord] = []
+                var token: CKServerChangeToken?
+                var pages = 0
+                while true {
+                    let asked = Date()
+                    let page = try await database.recordZoneChanges(inZoneWith: zoneID, since: token, desiredKeys: tuning.desiredKeys,
+                                                                    resultsLimit: tuning.resultsLimit)
+                    let fetched = Date()
+                    for case .success(let modification) in page.modificationResultsByID.values {
+                        if let wire = Self.wire(from: modification.record) { records.append(wire) }
+                    }
+                    token = page.changeToken
+                    pages += 1
+                    log?(String(format: "read batch %d: %d records (fetch %.2f s, decode %.2f s)", pages, page.modificationResultsByID.count,
+                                fetched.timeIntervalSince(asked), Date().timeIntervalSince(fetched)))
+                    progress(records.count)
+                    // Bounded like a merge (RC-0.1.0-602 T-10): past the limit, the rest is ignored.
+                    guard page.moreComing, records.count <= Self.readLimit, pages < 1000 else { break }
                 }
-                token = page.changeToken
-                pages += 1
-                // Bounded like a merge (RC-0.1.0-602 T-10): past the limit, the rest is ignored.
-                guard page.moreComing, records.count <= Self.readLimit, pages < 1000 else { break }
+                return records
             }
+            log?(String(format: "read the sidebar zone: %d records in %.2f s", records.count, Date().timeIntervalSince(started)))
+            return records
         } catch {
             let mapped = Self.map(error, zoneID: zoneID)
             if mapped == .zoneNotFound || mapped == .userDeletedZone {
-                accessLog?("read the sidebar zone: none")
+                log?("read the sidebar zone: none")
                 return nil
             }
-            accessLog?("read the sidebar zone: failed")
+            log?("read the sidebar zone: failed")
             throw mapped
         }
-        accessLog?("read the sidebar zone: \(records.count) records")
-        return records
     }
 
     public func deleteZone() async throws {

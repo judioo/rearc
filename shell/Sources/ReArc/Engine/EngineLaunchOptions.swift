@@ -129,6 +129,14 @@ struct EngineLaunchOptions: Equatable {
         }
     }
 
+    /// Self-test, launch probes and the iCloud look probe: a development
+    /// build, or a release verification bundle launched with
+    /// `REARC_RELEASE_VERIFICATION=1`; never a shipped bundle.
+    static func allowsVerification(infoDictionary: [String: Any]?, environment: [String: String]) -> Bool {
+        !ShippedBuild.isRelease(infoDictionary: infoDictionary)
+            || (ShippedBuild.isVerificationBundle(infoDictionary: infoDictionary) && environment[releaseVerificationEnvironmentKey] == "1")
+    }
+
     /// The command-line flag wins over `REARC_ENGINE`, which wins over the
     /// bundle default; unknown values mean WebKit.
     static func parse(
@@ -148,8 +156,7 @@ struct EngineLaunchOptions: Equatable {
             source = .environment
         }
         let isRelease = ShippedBuild.isRelease(infoDictionary: infoDictionary)
-        let verificationAllowed = !isRelease
-            || (ShippedBuild.isVerificationBundle(infoDictionary: infoDictionary) && environment[releaseVerificationEnvironmentKey] == "1")
+        let verificationAllowed = allowsVerification(infoDictionary: infoDictionary, environment: environment)
         var selfTest = false
         var probe: String?
         for argument in arguments.dropFirst() {

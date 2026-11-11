@@ -45,10 +45,17 @@ final class BrowserViewModel {
     private(set) var syncStatus: SyncEngineStatus = .local
     /// Settings > iCloud Sync; nil when this build has no iCloud entitlement.
     var syncDetails: SyncStatusDetails?
-    /// What the last look at iCloud found (Settings › Account's iCloud box); nil until one ran.
+    /// What the last look at iCloud found (Settings › Account's iCloud box); nil until one
+    /// finished. Kept for the session: a look runs again only when asked (the refresh arrow).
     var cloudDetection: CloudSidebarDetection?
-    var isCheckingCloud = false
+    /// A look under way, and how far it got.
+    var cloudLook: CloudLookState = .idle
+    /// The switch was pressed and waits for the look before it does anything.
+    var syncSwitchWaiting = false
     @ObservationIgnored var cloudCheckWaiters: [(CloudSidebarDetection) -> Void] = []
+    @ObservationIgnored var cloudLooksStarted = 0
+    @ObservationIgnored var cloudLooksRunning = 0
+    @ObservationIgnored var newestCloudLookFinished = 0
     /// Switching sync on found a sidebar in iCloud: the sheet asking what to do with it.
     var syncCloudChoice: CloudSidebarFound?
     /// Why the switch stayed off, or an iCloud action failed.

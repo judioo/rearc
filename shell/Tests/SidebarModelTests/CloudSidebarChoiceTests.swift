@@ -113,24 +113,52 @@ final class CloudSidebarChoiceTests: XCTestCase {
         XCTAssertLessThan(found.summary.lastUpdated ?? .distantFuture, Date(timeIntervalSince1970: 1_900_000_000))
     }
 
-    func testALookThatTakesTooLongIsUnreachable() async throws {
-        final class Slow: SidebarSyncTransport, SidebarCloudReading, @unchecked Sendable {
-            func accountStatus() async -> SyncAccountStatus {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                return .available(userID: "alice")
-            }
-            func readAllRecords() async throws -> [SyncWireRecord]? { nil }
-            func deleteZone() async throws {}
-            func prepareZone() async throws {}
-            func fetchChanges(since token: Data?) async throws -> SyncFetchResult { SyncFetchResult(token: nil) }
-            func modify(saving records: [SyncWireRecord], deleting names: [String]) async throws -> SyncModifyResult { SyncModifyResult() }
-        }
-        let coordinator = SidebarSyncCoordinator(transport: Slow(), stateStore: InMemorySyncStateStore(), deviceID: "A")
-        coordinator.detectionTimeout = 0.05
+    /// A big sidebar read in many slow batches takes longer than any fixed
+    /// limit would allow: it is still reading, so it is never cut short.
+    func testASlowBatchedReadStillSucceeds() async throws {
+        _ = await otherMacInICloud()
+        let here = mac("A", on: false)
+        here.sync.stallTimeout = 0.2
+        server.pageSize = 1
+        server.readDelay = 0.08
+        let total = server.records(account: "alice").count
+        var steps: [CloudLookProgress] = []
         let started = Date()
-        let detection = await coordinator.detectCloudSidebar()
-        guard case .unreachable = detection else { return XCTFail("\(detection)") }
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+        let detection = await here.sync.detectCloudSidebar { steps.append($0) }
+        XCTAssertGreaterThan(Date().timeIntervalSince(started), 0.2 * 2, "longer than the stall limit, more than once over")
+        XCTAssertEqual(detection.found?.records.count, total)
+        XCTAssertFalse(steps.contains { if case .stalled = $0 { return true } else { return false } })
+        XCTAssertEqual(steps.first, .account)
+        let counts = steps.compactMap { step -> Int? in if case .records(let n) = step { return n } else { return nil } }
+        XCTAssertEqual(counts.last, total)
+        XCTAssertEqual(counts, counts.sorted(), "progress only goes up")
+    }
+
+    /// Nothing new for the stall limit: said once, and the look carries on;
+    /// its result, when it comes, is the answer.
+    func testAStalledReadIsReportedAndItsLateResultStillCounts() async throws {
+        _ = await otherMacInICloud()
+        let here = mac("A", on: false)
+        here.sync.stallTimeout = 0.1
+        let writes = server.modifyCount
+        let gate = Gate()
+        server.readHold = { await gate.wait() }
+        var steps: [CloudLookProgress] = []
+        Task { try? await Task.sleep(nanoseconds: 400_000_000); gate.open() }
+        let detection = await here.sync.detectCloudSidebar { steps.append($0) }
+        XCTAssertEqual(steps.filter { $0 == .stalled(SidebarSyncCoordinator.stalledMessage) }.count, 1)
+        XCTAssertNotNil(detection.found, "the late result is used")
+        XCTAssertEqual(server.modifyCount, writes, "a look writes nothing")
+    }
+
+    func testAReadThatFailsSaysSo() async throws {
+        _ = await otherMacInICloud()
+        let here = mac("A", on: false)
+        server.pageSize = 1
+        server.fault = .networkUnavailable
+        server.faultBudget = 1
+        let detection = await here.sync.detectCloudSidebar()
+        XCTAssertEqual(detection, .unreachable("ReArc can't reach iCloud. Check your connection and try again."))
     }
 
     // MARK: - Choices
@@ -222,5 +250,23 @@ final class CloudSidebarChoiceTests: XCTestCase {
         XCTAssertNotEqual(first, second, "a second copy never overwrites the first")
         XCTAssertEqual(first.deletingLastPathComponent(), SidebarBackup.folder(besides: sidebar))
         XCTAssertEqual(try JSONDecoder().decode(SidebarSnapshot.self, from: Data(contentsOf: first)), snapshot)
+    }
+}
+
+/// Opens once; waiters before and after go on.
+final class Gate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+
+    func open() {
+        lock.lock(); isOpen = true; lock.unlock()
+    }
+
+    func wait() async {
+        while true {
+            lock.lock(); let done = isOpen; lock.unlock()
+            if done { return }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 }

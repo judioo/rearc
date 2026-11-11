@@ -4,10 +4,11 @@ import Foundation
 /// created, nothing is saved, no subscription is made. Turning Sync Sidebar
 /// on looks first, so the person is told what iCloud holds before anything
 /// is downloaded into the sidebar or uploaded (docs/SYNC-RUNTIME.md).
-public protocol SidebarCloudReading: AnyObject {
+public protocol SidebarCloudReading: AnyObject, Sendable {
     func accountStatus() async -> SyncAccountStatus
     /// Every live record in the sidebar zone; nil when the zone does not exist.
-    func readAllRecords() async throws -> [SyncWireRecord]?
+    /// `progress` gets the running count after each batch.
+    func readAllRecords(progress: @escaping @Sendable (Int) -> Void) async throws -> [SyncWireRecord]?
     /// Deletes the sidebar zone and everything in it.
     func deleteZone() async throws
 }
@@ -78,6 +79,17 @@ public enum CloudSidebarDetection: Equatable, Sendable {
         if case .found(let found) = self { return found }
         return nil
     }
+}
+
+/// How a look at iCloud is going, while it runs.
+public enum CloudLookProgress: Equatable, Sendable {
+    /// Asking iCloud which account is signed in.
+    case account
+    /// Records read so far.
+    case records(Int)
+    /// Nothing new for `SidebarSyncCoordinator.stallTimeout`: the look carries
+    /// on, and its result still counts when it comes.
+    case stalled(String)
 }
 
 /// What to do with a sidebar already in iCloud, when sync is turned on or
