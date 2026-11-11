@@ -50,6 +50,13 @@ enum TabCloseKind: Equatable {
 
 /// Destructive sidebar actions that ask first (Arc `SpaceDeletionConfiguration`,
 /// `DeleteProfileDialog`).
+/// Rows (one or a selection) moving to a space of another profile, waiting
+/// for confirmation like a space's Change Profile.
+struct SidebarProfileMove: Equatable {
+    var ids: [UUID]
+    var spaceID: Space.ID
+}
+
 /// Change Profile of a space, waiting for confirmation (Arc ConfirmInterProfileMove).
 struct SpaceProfileChange: Equatable {
     var spaceID: Space.ID
@@ -576,13 +583,21 @@ extension BrowserViewModel {
     /// `live`: the tabs that had a page before the change. Those reload now
     /// in the new container; the rest load there when first shown.
     private func reloadSpaceAfterProfileChange(_ spaceID: Space.ID, live: Set<Tab.ID>) {
-        let tabs = SidebarTree.tabs(store.content(for: spaceID).pinned + store.content(for: spaceID).today)
+        reloadTabsInTheirProfile(SidebarTree.tabs(store.content(for: spaceID).pinned + store.content(for: spaceID).today), live: live)
+    }
+
+    /// Tabs whose profile changed (their space's, or a move to another
+    /// profile's space): every engine, subscription and boost session of the
+    /// old profile goes, and the tabs that had a page load it again in the
+    /// new profile's storage.
+    func reloadTabsInTheirProfile(_ tabs: [Tab], live: Set<Tab.ID>) {
         for tab in tabs {
             let id = tab.id
             // A boost editing session belonged to the closed engine.
             boostEditorDraftByTab[id] = nil
             boostSessionApplyByTab[id] = nil
             lastPickedSnapshotByTab[id] = nil
+            boostSelectorFingerprintByTab[id] = nil
             // Clear subscriptions and page identity caches as well as the engine:
             // they are keyed by tab UUID, which survives a profile change.
             releaseEngine(for: id)

@@ -127,4 +127,64 @@ final class MultiSelectionShellTests: XCTestCase {
         let folder = model.store.outline(for: model.store.activeSpaceID).pinned.first { $0.kind == .folder }
         XCTAssertEqual(folder?.children.map(\.id), [memo.id, google[2].id])
     }
+
+    // MARK: Move to Profile
+
+    func testMovingASelectionToAnotherProfileAsksOnceAndChangesEverySession() throws {
+        let (model, memo, google) = makeFixture()
+        let source = model.store.activeProfileID
+        let work = model.store.addProfile(name: "Work")
+        let workSpace = model.store.spaces(in: work.id)[0].id
+        let old = google.map { model.engineHost.engine(for: $0, profileID: source) }
+        model.boostSelectorFingerprintByTab[google[0].id] = BoostSelectorFingerprint(tag: "div", classHints: ["inbox"])
+        _ = model.handleSelectionClick(on: google[2].id, in: nil, modifiers: .shift)
+        let ids = try XCTUnwrap(model.keySelectionIDs)
+
+        model.requestProfileMove(ids, toSpace: workSpace)
+        let pending = try XCTUnwrap(model.pendingProfileMove, "one confirmation for the three tabs")
+        let text = model.profileMoveMessage(pending)
+        XCTAssertEqual(text.title, "Move to Work?")
+        XCTAssertTrue(text.message.hasPrefix("These 3 tabs will reload in Work."), text.message)
+        XCTAssertEqual(model.store.spaceContaining(tabID: google[0].id), model.store.spaces(in: source)[0].id, "nothing moves before Move")
+
+        model.confirmProfileMove()
+        XCTAssertNil(model.pendingProfileMove)
+        XCTAssertEqual(model.store.outline(for: workSpace).today.map(\.id), google.map(\.id), "order and section kept")
+        XCTAssertEqual(model.store.tab(withID: google[1].id)?.url, google[1].url)
+        XCTAssertEqual(model.store.activeProfileID, work.id, "the shown tab went along")
+        XCTAssertEqual(model.store.selectedTabID, google[0].id)
+        let keys = model.engineHost.allTabEngines()
+        for (tab, previous) in zip(google, old) {
+            XCTAssertFalse(keys.contains { $0.0 == tab.id && $0.1 == source }, "no engine of the old profile stays")
+            let current = try XCTUnwrap(model.engineHost.engine(forTabID: tab.id, profileID: work.id), "a live page reloads in Work")
+            XCTAssertFalse(current === previous)
+        }
+        XCTAssertEqual(model.store.spaceContaining(tabID: memo.id), model.store.spaces(in: source)[0].id, "unselected rows stay")
+        XCTAssertNil(model.boostSelectorFingerprintByTab[google[0].id], "the old page's boost picking does not follow")
+    }
+
+    func testOneFolderOrSplitMovesToAnotherProfileWithItsTabs() throws {
+        let (model, memo, google) = makeFixture()
+        let work = model.store.addProfile(name: "Work")
+        let workSpace = model.store.spaces(in: work.id)[0].id
+        let folder = try XCTUnwrap(model.store.createFolder(containing: [memo.id]))
+        let split = try XCTUnwrap(model.store.createSplit(tabIDs: [google[1].id, google[2].id], orientation: .horizontal))
+
+        model.requestProfileMove([folder.id], toSpace: workSpace)
+        XCTAssertTrue(try XCTUnwrap(model.pendingProfileMove.map(model.profileMoveMessage)).message.hasPrefix("This tab will reload in Work."))
+        model.confirmProfileMove()
+        XCTAssertEqual(model.store.parentFolderID(of: memo.id), folder.id)
+        XCTAssertEqual(model.store.spaceContaining(entryID: folder.id), workSpace)
+        XCTAssertEqual(model.store.kind(of: memo.id), .pinned)
+
+        model.requestProfileMove([split.id], toSpace: workSpace)
+        model.confirmProfileMove()
+        XCTAssertEqual(model.store.split(withID: split.id)?.tabs.map(\.id), [google[1].id, google[2].id])
+        XCTAssertEqual(model.store.spaceContaining(entryID: split.id), workSpace)
+
+        // Within one profile there is nothing to confirm.
+        model.requestProfileMove([google[0].id], toSpace: model.store.spaces(in: model.store.profiles[0].id)[1].id)
+        XCTAssertNil(model.pendingProfileMove)
+        XCTAssertEqual(model.store.spaceContaining(tabID: google[0].id), model.store.spaces(in: model.store.profiles[0].id)[1].id)
+    }
 }

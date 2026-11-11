@@ -158,11 +158,49 @@ extension BrowserViewModel {
 
     // MARK: - Move
 
-    /// Move to Space: each row keeps its section and its page, as one row's move does.
+    /// Move to Space: each row keeps its section and its page, as one row's
+    /// move does. A space of another profile changes the rows' session.
     func moveItems(_ ids: [UUID], toSpace spaceID: Space.ID) {
+        if store.crossesProfile(ids, toSpace: spaceID) { return moveItemsToProfile(ids, toSpace: spaceID) }
         guard !store.moveEntries(ids, toSpace: spaceID).isEmpty else { return }
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
+    }
+
+    // MARK: - Move to another profile
+
+    /// Move to Profile (row menu, one row or a selection): asks once, like a
+    /// space's Change Profile, for however many tabs go.
+    func requestProfileMove(_ ids: [UUID], toSpace spaceID: Space.ID) {
+        guard store.crossesProfile(ids, toSpace: spaceID) else { return moveItems(ids, toSpace: spaceID) }
+        pendingProfileMove = SidebarProfileMove(ids: ids, spaceID: spaceID)
+    }
+
+    func confirmProfileMove() {
+        defer { pendingProfileMove = nil }
+        guard let move = pendingProfileMove else { return }
+        moveItemsToProfile(move.ids, toSpace: move.spaceID)
+    }
+
+    func profileMoveMessage(_ move: SidebarProfileMove) -> (title: String, message: String, action: String) {
+        let destination = store.space(withID: move.spaceID).flatMap { store.profile(withID: $0.profileID) }?.name ?? "the other profile"
+        let source = move.ids.first.flatMap { store.spaceContaining(entryID: $0) }.flatMap { store.space(withID: $0) }
+            .flatMap { store.profile(withID: $0.profileID) }?.name ?? "this profile"
+        let count = store.carriedTabIDs(move.ids).count
+        let these = count == 1 ? "This tab" : "These \(count) tabs"
+        return ("Move to \(destination)?",
+                "\(these) will reload in \(destination). Cookies, sign-ins and site data stay in \(source), so you may need to sign in again. Back and forward history is lost.",
+                "Move")
+    }
+
+    /// The rows move as Move to Space moves them (section, order, folder
+    /// contents, split panes); then their pages change session as a space's
+    /// do on Change Profile. The tab records carry nothing of the old profile.
+    func moveItemsToProfile(_ ids: [UUID], toSpace spaceID: Space.ID) {
+        let carried = store.carriedTabIDs(ids)
+        let live = Set(engineHost.allTabEngines().map(\.0))
+        guard !store.moveEntries(ids, toSpace: spaceID).isEmpty else { return }
+        reloadTabsInTheirProfile(carried.compactMap { store.tab(withID: $0) }, live: live)
     }
 
     func moveItems(_ ids: [UUID], intoFolder folderID: UUID) {

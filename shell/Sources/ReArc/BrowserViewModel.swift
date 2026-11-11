@@ -270,6 +270,8 @@ final class BrowserViewModel {
     var pendingDeletion: SidebarDeletionRequest?
     /// A space waiting for confirmation to move to another profile.
     var pendingSpaceProfileChange: SpaceProfileChange?
+    /// Rows moving to a space of another profile, waiting for confirmation.
+    var pendingProfileMove: SidebarProfileMove?
     @ObservationIgnored var autoArchiveTimer: Timer?
     /// Engine whose favicon is being tracked, per tab.
     @ObservationIgnored var faviconObservedEngines: [Tab.ID: ObjectIdentifier] = [:]

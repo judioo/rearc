@@ -78,6 +78,9 @@ struct TabContextMenu: View {
                     }
                 }
             }
+            if let spaceID = store.spaceContaining(tabID: tab.id) {
+                MoveToProfileMenu(model: model, ids: [tab.id], spaceID: spaceID)
+            }
         }
         if model.canSplitWithSelectedTab(tab.id) {
             Button("Split with Current Tab") { model.splitWithSelectedTab(tab.id) }
@@ -123,6 +126,9 @@ struct FolderContextMenu: View {
         Button("Rename Folder…") { model.beginRename(.folder(folder.id)) }
         ItemIconMenu(model: model, itemID: folder.id)
         Button("New Folder Inside") { model.newFolder(parentFolderID: folder.id) }
+        if let spaceID = store.spaceContaining(entryID: folder.id) {
+            MoveToProfileMenu(model: model, ids: [folder.id], spaceID: spaceID)
+        }
         Divider()
         Button(expanded ? "Collapse Folder" : "Expand Folder") { store.setFolderExpanded(folder.id, !expanded) }
         Button("Expand All Folders") { store.setAllFoldersExpanded(true) }
@@ -193,6 +199,9 @@ struct SectionItemContextMenu: View {
             Button("Copy Links") { model.copySplitLinks(split.id, markdown: false) }
             Button("Copy Links as Markdown") { model.copySplitLinks(split.id, markdown: true) }
             Divider()
+            if let spaceID = store.spaceContaining(entryID: split.id) {
+                MoveToProfileMenu(model: model, ids: [split.id], spaceID: spaceID)
+            }
             Button("Close Split View") { model.closeSplit(split.id) }
         case .easel(let ref):
             Divider()
@@ -257,6 +266,7 @@ struct SelectionContextMenu: View {
                     }
                 }
             }
+            MoveToProfileMenu(model: model, ids: ids, spaceID: spaceID)
         }
         Divider()
         if !tabs.isEmpty {
@@ -264,6 +274,30 @@ struct SelectionContextMenu: View {
         }
         Button(model.closeMenuTitle(for: ids)) { model.closeItems(ids) }
             .disabled(tabs.isEmpty && !ids.contains { store.split(withID: $0) != nil })
+    }
+}
+
+/// Move to Profile ▸: the other profiles' spaces under each profile's name.
+/// Move to Space lists only the row's own profile, so a move that changes
+/// the tabs' cookies and sign-ins is always a choice made here, and confirmed.
+struct MoveToProfileMenu: View {
+    let model: BrowserViewModel
+    let ids: [UUID]
+    let spaceID: Space.ID
+
+    var body: some View {
+        let destinations = model.store.profileMoveDestinations(from: spaceID)
+        if !destinations.isEmpty {
+            Menu("Move to Profile") {
+                ForEach(destinations, id: \.profile.id) { destination in
+                    Section(destination.profile.name) {
+                        ForEach(destination.spaces) { space in
+                            Button(space.name) { model.requestProfileMove(ids, toSpace: space.id) }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
