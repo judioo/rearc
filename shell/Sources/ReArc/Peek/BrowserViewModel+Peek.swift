@@ -32,15 +32,17 @@ extension BrowserViewModel {
         return true
     }
 
-    /// Esc closes the Peek wherever the keys are, its own page included, as
-    /// in Arc. The page keeps Esc while it is fullscreen or shows a prompt;
-    /// the command bar, sheets, panels and shell text fields keep theirs.
+    /// Esc closes the Peek wherever the keys are in its window, its own page
+    /// included, as in Arc. The page keeps Esc while it is fullscreen or shows
+    /// a prompt; the command bar, sheets, panels and shell text fields keep theirs.
     func handlePeekEscape(_ event: NSEvent) -> Bool {
         guard peekSession != nil, event.type == .keyDown, event.keyCode == 53, !event.isARepeat,
               event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
               !isCommandBarPresented, showsPeek(in: store.keyWindowID) else { return false }
-        if let window = event.window, window is NSPanel || window.attachedSheet != nil || window.firstResponder is NSText {
-            return false
+        if let window = event.window {
+            // Another window's Esc (a Little ReArc, Settings) is its own.
+            if let host = peekHostWindow, window !== host { return false }
+            if window is NSPanel || window.attachedSheet != nil || window.firstResponder is NSText { return false }
         }
         let input = PeekInput.escape(pageFullscreen: isPeekPageFullscreen,
                                      promptOpen: peekEngine?.pagePrompts.hasPendingPrompt ?? false)

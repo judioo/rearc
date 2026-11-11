@@ -495,11 +495,6 @@ struct BrowserView: View {
         ) {
             contentArea
                 .overlay {
-                    PeekBackdropWash(isShown: model.showsPeek(in: windowID) && !model.isPeekPageFullscreen) {
-                        SpaceThemeBackground(model: model, window: windowID, pager: pager)
-                    }
-                }
-                .overlay {
                     if let session = model.pageCaptureSession,
                        session.window == nil ? isKeyWindowSheetOwner : session.window == windowID {
                         PageCaptureOverlay(model: model)
@@ -519,6 +514,12 @@ struct BrowserView: View {
         .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil,
                     toolbarHeight: showsCardToolbar ? CardToolbarView.height : 0) { start in
             if start { model.startPendingExtensionReinstall() } else { model.postponePendingExtensionReinstall() }
+        }
+        // The whole card, its toolbar strip too, as in Arc.
+        .overlay {
+            PeekBackdropWash(isShown: model.showsPeek(in: windowID) && !model.isPeekPageFullscreen) {
+                SpaceThemeBackground(model: model, window: windowID, pager: pager)
+            }
         }
         .clipShape(shape)
         .background(shape.fill(splitCards ? .clear : cardFill))

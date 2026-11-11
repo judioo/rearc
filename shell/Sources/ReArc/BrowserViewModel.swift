@@ -483,6 +483,8 @@ final class BrowserViewModel {
 
     var peekSession: PeekSession?
     var peekClosing: PeekClosing?
+    /// The NSWindow the Peek opened in: only its keys (Esc) reach it.
+    @ObservationIgnored weak var peekHostWindow: NSWindow?
     var focusedLittleArcID: LittleArcWindow.ID?
     var littleArcOpenRequests: [LittleArcWindow.ID] = []
     /// Opens Little Arc windows when the app has no SwiftUI scenes (Chromium path).
@@ -1429,6 +1431,7 @@ final class BrowserViewModel {
         engine.load(url)
         scheduleTransientWarmup()
         peekClosing = nil
+        peekHostWindow = NSApp.keyWindow
         peekSession = PeekSession(
             url: url,
             title: url.host() ?? url.absoluteString,
