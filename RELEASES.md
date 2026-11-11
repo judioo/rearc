@@ -11,7 +11,15 @@ committed `RELEASES.md` has a heading for the build it is about to make:
 commit before the release, with `echo $(( $(git rev-list --count HEAD) + 1 ))` as the
 number. Details: engine/docs/RELEASE.md, "Release notes".
 
-## ReArc 0.1.0 (602) — 2026-11-11
+## ReArc 0.1.0 (605) — 2026-11-11
+
+This build replaces 602, which was withdrawn an hour after release: it quit at launch on any
+profile made by an earlier build. If 602 will not open, install this build from
+rearc.imara.ae over it; your spaces, tabs and settings are untouched.
+
+**Fixes since 602**
+- ReArc opens again on profiles made by builds 500, 544 and 564. Every release now has to
+  open a profile made by the release before it.
 
 **New**
 - Your Arc card comes with you. Settings › your name › Import Your Card from Arc brings over
@@ -58,6 +66,10 @@ number. Details: engine/docs/RELEASE.md, "Release notes".
 - Syncing Boosts no longer fails with "Cannot create new type SidebarBoostRecord", and one
   rejected kind of record no longer holds up everything else waiting to sync.
 - Settings › Links shows rearc.imara.ae, and Share ReArc links to it.
+
+## ReArc 0.1.0 (602) — 2026-11-11
+
+Withdrawn. It quit at launch on existing profiles. Everything it added is in the next build.
 
 ## ReArc 0.1.0 (564) — 2026-11-10
 
