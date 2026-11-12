@@ -134,6 +134,7 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
     private var isActive = true
     private var heightsPending: Set<SidebarListRow.ID> = []
     private var shownSelection: UUID?
+    private var shownReveal: SidebarReveal?
     private var externalDrag = false
     private var externalDragTimer: Timer?
     private var observers: [NSObjectProtocol] = []
@@ -435,18 +436,26 @@ final class SidebarListController: NSObject, NSTableViewDataSource, NSTableViewD
     // MARK: Scroll to the selection
 
     /// Keeps the space's selection in view when it changes (a shortcut, ⌃Tab,
-    /// a new tab), the way Arc's outline does.
+    /// a new tab), the way Arc's outline does, and scrolls to a row the model
+    /// reveals (a media strip's go to tab, which can open a folder around a
+    /// selection that did not move).
     private func trackSelection() {
         guard isActive else { return }
-        let selected = withObservationTracking {
-            model.store.selectedItemID(inSpace: spaceID)
+        let (selected, reveal) = withObservationTracking {
+            (model.store.selectedItemID(inSpace: spaceID), model.sidebarRowReveal)
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 // After the rows' own rebuild, which is queued the same way.
                 DispatchQueue.main.async { self?.trackSelection() }
             }
         }
-        defer { shownSelection = selected }
+        defer {
+            shownSelection = selected
+            shownReveal = reveal
+        }
+        if let reveal, reveal != shownReveal, model.store.spaceContaining(entryID: reveal.id) == spaceID {
+            return scrollToVisible(reveal.id)
+        }
         guard let selected, selected != shownSelection else { return }
         scrollToVisible(selected)
     }

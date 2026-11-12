@@ -11,13 +11,16 @@ public struct MediaControlsModel: Equatable, Sendable {
 
     public struct Entry: Equatable, Sendable {
         public var tabID: UUID
-        /// `userRequestedClose`: hidden until the tab starts playing again.
+        /// `userRequestedClose`: hidden until the tab starts playing again or
+        /// moves to another item (Arc keys it on the media content: the next
+        /// video of a playlist brings the strip back).
         public var isDismissed = false
     }
 
     /// Newest active first.
     public private(set) var entries: [Entry] = []
     private var playing: Set<UUID> = []
+    private var titles: [UUID: String] = [:]
 
     public init() {}
 
@@ -31,6 +34,11 @@ public struct MediaControlsModel: Equatable, Sendable {
         }
         playing = startedNow
         entries.removeAll { media[$0.tabID]?.hasSession != true }
+        for index in entries.indices where entries[index].isDismissed {
+            let id = entries[index].tabID
+            if let title = media[id]?.title, let before = titles[id], title != before { entries[index].isDismissed = false }
+        }
+        titles = media.compactMapValues(\.title)
     }
 
     /// The strip's close button (Arc "Close Mini Player").
@@ -51,6 +59,38 @@ public struct MediaControlsModel: Equatable, Sendable {
 
     public func contains(_ tabID: UUID) -> Bool {
         entries.contains { $0.tabID == tabID }
+    }
+
+    /// The sources whose video a Picture in Picture window really shows now,
+    /// so their strips stay hidden (Arc swaps the two). The shell's floating
+    /// panel counts only while it is on a screen with that tab's video
+    /// (`panelTabID`); a `.panel` placement alone is not a player. An engine's
+    /// own PiP window (WebKit's, Chromium's without `pip_embedded`) counts
+    /// while the page is in PiP with no shell placement; with `pip_embedded`
+    /// the engine opens none, so such a session has no player until the
+    /// panel shows it. A sidebar card carries its strip row and a minimized
+    /// panel is the strip, so neither hides one.
+    public static func playersOnScreen(media: [UUID: WebMediaState], placements: [UUID: LiveVideoPlacement],
+                                       panelTabID: UUID?, engineHasOwnPiPWindow: Bool) -> Set<UUID> {
+        var shown: Set<UUID> = []
+        if let panelTabID, placements[panelTabID]?.suppressesStrip == true { shown.insert(panelTabID) }
+        guard engineHasOwnPiPWindow else { return shown }
+        for (id, state) in media where state.isPictureInPicture && placements[id] == nil {
+            shown.insert(id)
+        }
+        return shown
+    }
+}
+
+/// Asks the sidebar list to scroll a row into view (a strip's go to tab).
+/// `serial` makes a repeat a new request, though the selection did not move.
+public struct SidebarReveal: Equatable, Sendable {
+    public let id: UUID
+    public let serial: Int
+
+    public init(id: UUID, serial: Int) {
+        self.id = id
+        self.serial = serial
     }
 }
 
@@ -91,5 +131,24 @@ public enum LiveVideoLayout {
         var aspect = 16.0 / 9.0
         if let size = naturalSize, size.width > 0, size.height > 0 { aspect = size.width / size.height }
         return min(160, max(90, (width / aspect).rounded()))
+    }
+}
+
+/// Whether a live video's view shows a picture: read back from its view a few
+/// times while it plays (MINI-PLAYER.md §5.5). Nothing read back, or nothing
+/// but black, is a blank player: the strip stays and the card shows a still.
+/// A still non-black picture (a song's artwork) is a picture.
+public enum LiveVideoDrawing {
+    /// Each channel at most this: the overlay's own black, or a surface that never arrived.
+    public static let blackLevel: UInt32 = 0x18
+
+    public static func isBlank(_ samples: [UInt32?]) -> Bool {
+        let read = samples.compactMap { $0 }
+        return read.allSatisfy(isBlack)
+    }
+
+    /// 0xRRGGBBAA.
+    public static func isBlack(_ rgba: UInt32) -> Bool {
+        (rgba >> 24) & 0xFF <= blackLevel && (rgba >> 16) & 0xFF <= blackLevel && (rgba >> 8) & 0xFF <= blackLevel
     }
 }

@@ -83,6 +83,15 @@ final class BrowserViewModel {
     @ObservationIgnored lazy var livePanel = MainActor.assumeIsolated { LiveVideoPanelController(model: self) }
     /// Where each tab's live video shows (Chromium `pip_embedded`).
     var livePlacements: [Tab.ID: LiveVideoPlacement] = [:]
+    /// The tab whose video the floating panel shows on a screen now.
+    var livePanelTabID: Tab.ID?
+    /// Live videos whose view showed no picture while playing (`LiveVideoDrawing`):
+    /// their strip stays and the player shows a still of the tab instead of black.
+    var blankLiveVideos: Set<Tab.ID> = []
+    /// The still each blank live video shows (the tab's snapshot), when one was taken.
+    var liveVideoStills: [Tab.ID: NSImage] = [:]
+    /// The row the sidebar list scrolls to (the media strip's go to tab).
+    var sidebarRowReveal: SidebarReveal?
     /// Tabs whose next PiP session was asked for in the floating panel ("Open Picture in Picture").
     @ObservationIgnored var livePanelRequests: Set<Tab.ID> = []
     /// ReArc > Video in Sidebar: a live video plays in the sidebar above its

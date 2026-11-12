@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import Network
 import PDFKit
+import ScreenCaptureKit
 import ReArcEngine
 import SidebarModel
 import SwiftUI
@@ -1271,6 +1272,9 @@ final class ChromiumSelfTest {
             try await pictureInPictureChecks(model: model, tab: tabA, engine: engineA, other: tabB)
             if runtime.capabilities.pipEmbedded {
                 try await liveVideoChecks(model: model, store: store, home: tabA, homeEngine: engineA, other: tabB, window: first)
+                // The owner's black panel: YouTube's hardware-decoded MSE video, not /pip's software VP8.
+                try await liveVideoChecks(model: model, store: store, home: tabA, homeEngine: engineA, other: tabB, window: first,
+                                          path: "/pip-mse")
             } else {
                 log("ABI-GAP pip_embedded not advertised (ABI minor < 43): PiP uses Chromium's window and strips have no track state")
             }
@@ -1291,6 +1295,7 @@ final class ChromiumSelfTest {
         try await settingsWindowChecks(model: model, shell: shell, window: first)
         try await wave33UIChecks(model: model, store: store, tab: tabA, engine: engineA, other: tabB, window: first)
         try await pinnedLifecycleChecks(model: model, store: store, home: tabA, homeEngine: engineA, window: first)
+        try await mediaStripElsewhereChecks(model: model, store: store, home: tabA, homeEngine: engineA, window: first)
 
         // Private window: PrivateWindowModel on an off-the-record profile under the
         // active profile; its end closes that profile, and a new one starts empty.
@@ -3168,8 +3173,11 @@ extension ChromiumSelfTest {
     /// while its tab is hidden, pause and play work through the strip, the
     /// same view moves to the floating panel, minimizes into the strip and
     /// comes back, and closing the tab removes both. No synthesized input.
+    /// The card and the panel must show the video on screen, read from the
+    /// screen (the compositor's own copy changed while the owner saw black).
     @MainActor
-    private func liveVideoChecks(model: BrowserViewModel, store: SidebarStore, home: Tab, homeEngine: ChromiumEngine, other: Tab, window: NSWindow) async throws {
+    private func liveVideoChecks(model: BrowserViewModel, store: SidebarStore, home: Tab, homeEngine: ChromiumEngine, other: Tab, window: NSWindow,
+                                 path: String = "/pip") async throws {
         let embeds = model.embedsVideoInSidebar, automatic = model.automaticPictureInPicture
         model.embedsVideoInSidebar = true
         // Video in Sidebar alone enters PiP on the switch away; no occlusion trigger.
@@ -3178,14 +3186,15 @@ extension ChromiumSelfTest {
             model.embedsVideoInSidebar = embeds
             model.automaticPictureInPicture = automatic
         }
-        let tab = store.addTab(kind: .today, title: "Live video", url: URL(string: "\(serverBase)/pip")!)
+        let tab = store.addTab(kind: .today, title: "Live video \(path)", url: URL(string: "\(serverBase)\(path)")!)
         model.selectTab(tab.id)
         let engine = try shellEngine(model, tab)
-        loadShellTab(model, tab, engine, URL(string: "\(serverBase)/pip")!)
+        loadShellTab(model, tab, engine, URL(string: "\(serverBase)\(path)")!)
         try await wait("live video fixture playing", timeout: 25) {
             engine.pageTitle == "pip-playing" || engine.pageTitle?.hasPrefix("pip-err") == true
         }
-        try check(engine.pageTitle == "pip-playing", "live video fixture: '\(engine.pageTitle ?? "")'")
+        try check(engine.pageTitle == "pip-playing", "live video fixture \(path): '\(engine.pageTitle ?? "")'")
+        let decoding = ((try? await engine.evaluate("window.hw", in: .page)) as? String) ?? "software (VP8 blob)"
         try await wait("pip_available for the live video tab", timeout: 15) { model.mediaState(for: tab.id).canPictureInPicture }
         try check(!model.mediaStrips(in: nil).contains(tab.id), "a strip showed while its tab is on screen")
 
@@ -3229,6 +3238,8 @@ extension ChromiumSelfTest {
         try check(rvfc2 > rvfc1, "the hidden tab's video presented no frames (requestVideoFrameCallback \(rvfc1) -> \(rvfc2))")
         try check(read.count == pixels.count, "the view's output could not be read back: \(hex)")
         try check(showsVideo && pixelsChanged, "the view's pixels did not advance with the video: \(hex)")
+        let cardScreen = try await onScreenVideo(video.view, label: "the sidebar card (\(path), \(decoding))")
+        try check(!model.blankLiveVideos.contains(tab.id), "the shell judged the sidebar card blank though it shows the video")
 
         // 3. Pause and play through the strip; the paused strip stays.
         model.mediaTogglePlayPause(tab.id)
@@ -3245,6 +3256,7 @@ extension ChromiumSelfTest {
             model.livePanel.isShowing && video.view.window === model.livePanel.window
         }
         try check(!model.mediaStrips(in: nil).contains(tab.id), "the strip showed beside the floating panel")
+        let panelScreen = try await onScreenVideo(video.view, label: "the floating panel (\(path), \(decoding))")
         model.minimizeLiveVideo(tab.id)
         try await wait("minimized into the strip", timeout: 5) {
             !model.livePanel.isShowing && model.mediaStrips(in: nil).contains(tab.id)
@@ -3270,10 +3282,70 @@ extension ChromiumSelfTest {
         try await wait("tab A shown after the live video checks") {
             homeEngine.leaseHolder?.window === window && homeEngine.attachmentID != nil
         }
-        log("PASS live video and media strip (ABI 1.43): switch away -> strip + sidebar video \(Int(size.width))x\(Int(size.height)); "
+        log("PASS live video and media strip (ABI 1.43, \(path), \(decoding) decoding): switch away -> strip + sidebar video \(Int(size.width))x\(Int(size.height)); "
+            + "on screen: card \(cardScreen), panel \(panelScreen); "
             + String(format: "hidden tab at %.1f fps (rVFC) with the view's pixels changing (%@); ", videoRate, hex)
             + "strip pause/play kept the strip; pop-out, minimize, Open Picture in Picture and dock kept overlay \(overlayID); "
             + "tab close removed it; frames_advancing=\(liveFramesAdvancing ? "yes" : "no")")
+    }
+}
+
+extension ChromiumSelfTest {
+    /// The live video as it is on screen: a 3 x 3 grid inside `view`, read
+    /// twice 400 ms apart from a ScreenCaptureKit picture of its window. The
+    /// overlay's read-back (`readPixel`) is the compositor's own copy, which
+    /// changed while the owner's panel was black; this reads what is shown.
+    /// Throws when the screen cannot be read: a black player must not pass.
+    @MainActor
+    private func onScreenVideo(_ view: NSView, label: String) async throws -> String {
+        guard CGPreflightScreenCaptureAccess() else {
+            throw Failure(description: "\(label): cannot read the screen to check the video is visible "
+                          + "(grant Screen Recording to the app running the self-test; the compositor's copy alone passed on black)")
+        }
+        guard let window = view.window else { throw Failure(description: "\(label): the video view is in no window") }
+        func capture() async throws -> [UInt32] {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let scWindow = content.windows.first(where: { $0.windowID == CGWindowID(window.windowNumber) }) else {
+                throw Failure(description: "\(label): its window is not on screen")
+            }
+            let scale = window.backingScaleFactor
+            let config = SCStreamConfiguration()
+            config.width = Int(window.frame.width * scale)
+            config.height = Int(window.frame.height * scale)
+            config.showsCursor = false
+            let image = try await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: scWindow),
+                                                                   configuration: config)
+            let width = image.width, height = image.height
+            var bytes = [UInt8](repeating: 0, count: width * height * 4)
+            guard let context = CGContext(data: &bytes, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                          space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return [] }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            // The view's rect in the picture: window points, top-left origin, scaled.
+            let rect = view.convert(view.bounds, to: nil)
+            let sx = Double(width) / window.frame.width, sy = Double(height) / window.frame.height
+            var grid: [UInt32] = []
+            for fx in [0.3, 0.5, 0.7] {
+                for fy in [0.3, 0.5, 0.7] {
+                    let x = Int((rect.minX + rect.width * fx) * sx)
+                    let y = Int((window.frame.height - (rect.minY + rect.height * fy)) * sy)
+                    guard (0 ..< width).contains(x), (0 ..< height).contains(y) else { continue }
+                    let i = (y * width + x) * 4
+                    grid.append(UInt32(bytes[i]) << 24 | UInt32(bytes[i + 1]) << 16 | UInt32(bytes[i + 2]) << 8 | 0xFF)
+                }
+            }
+            return grid
+        }
+        let first = try await capture()
+        try await Task.sleep(nanoseconds: 400_000_000)
+        let second = try await capture()
+        let hex = (first + second).map { String(format: "%08X", $0) }.joined(separator: ",")
+        let black = !first.isEmpty && (first + second).allSatisfy(LiveVideoDrawing.isBlack)
+        try check(!first.isEmpty, "\(label): the video view lies outside its window's picture")
+        try check(!black, "\(label) is black on screen (\(hex)) while the compositor's copy shows the video: "
+                  + "the engine's CALayer presentation of the frames fails, not their decoding")
+        try check(first != second, "\(label) is frozen on screen (\(hex))")
+        return "\(first.count) points changing"
     }
 }
 
@@ -4743,6 +4815,13 @@ extension ChromiumSelfTest {
 
         func accessibilityLabel() -> String? { read("accessibilityLabel") as? String }
         func accessibilityFrame() -> NSRect { (read("accessibilityFrame") as? NSValue)?.rectValue ?? .zero }
+        /// VoiceOver's press: a SwiftUI button runs its action, with no synthesized input.
+        func press() -> Bool {
+            let selector = NSSelectorFromString("accessibilityPerformPress")
+            guard object.responds(to: selector) else { return false }
+            typealias Press = @convention(c) (NSObject, Selector) -> Bool
+            return unsafeBitCast(object.method(for: selector), to: Press.self)(object, selector)
+        }
         var children: [TestAccessibilityElement] {
             (read("accessibilityChildren") as? [NSObject] ?? []).map { TestAccessibilityElement(object: $0) }
         }
@@ -5234,6 +5313,177 @@ extension ChromiumSelfTest {
             homeEngine.attachmentID != nil && homeEngine.leaseHolder?.window === window
         }
         log("PASS pinned lifecycle: " + results.joined(separator: "; "))
+    }
+}
+
+// MARK: Media strip in another space (the owner's report on build 726)
+
+extension ChromiumSelfTest {
+    /// A video plays in a tab inside a folder in one space; with another tab
+    /// of that space selected and the folder collapsed, it has a strip there,
+    /// and another space shows the strip at the bottom of the sidebar, drawn,
+    /// with its title and its space and folder;
+    /// the strip's go to tab brings back the space, opens the folder and
+    /// selects the tab. With Automatic Picture in Picture on, the strip or a
+    /// panel really on screen shows it, never neither (MINI-PLAYER.md §3.2).
+    /// No synthesized input: the strip's button is pressed through accessibility.
+    @MainActor
+    func mediaStripElsewhereChecks(model: BrowserViewModel, store: SidebarStore, home: Tab, homeEngine: ChromiumEngine, window: NSWindow) async throws {
+        guard await bringToFront(window, for: "media strip in another space") else {
+            log("NOTE media strip in another space skipped: it needs the window on an unlocked screen")
+            return
+        }
+        let embeds = model.embedsVideoInSidebar, automatic = model.automaticPictureInPicture, sidebarShown = model.isSidebarVisible
+        model.embedsVideoInSidebar = false
+        // Off until (4): a covered or locked session's occlusion trigger opens the panel at once.
+        model.automaticPictureInPicture = false
+        if !sidebarShown { model.toggleSidebar() }
+        defer {
+            model.embedsVideoInSidebar = embeds
+            model.automaticPictureInPicture = automatic
+        }
+        let homeSpace = store.activeSpaceID
+        let mediaSpace = store.addSpace(name: "Strip Media", profileID: store.activeProfileID)
+        let otherSpace = store.addSpace(name: "Strip Elsewhere", profileID: store.activeProfileID)
+        var results: [String] = []
+
+        // (1) Play the local media page in a tab inside a folder of its own space.
+        model.selectSpace(mediaSpace.id)
+        let tab = store.addTab(kind: .pinned, title: "Strip video", url: URL(string: "\(serverBase)/pip")!, in: mediaSpace.id)
+        guard let folder = store.createFolder(title: "Strip Folder", in: mediaSpace.id, containing: [tab.id]) else {
+            throw Failure(description: "no folder for the media tab")
+        }
+        store.setFolderExpanded(folder.id, true)
+        model.selectTab(tab.id)
+        let engine = try shellEngine(model, tab)
+        loadShellTab(model, tab, engine, URL(string: "\(serverBase)/pip")!)
+        try await wait("media page playing in the folder tab", timeout: 25) {
+            engine.pageTitle == "pip-playing" || engine.pageTitle?.hasPrefix("pip-err") == true
+        }
+        try check(engine.pageTitle == "pip-playing", "media page: '\(engine.pageTitle ?? "")'")
+        try await wait("the folder tab's media session reached the model (else: entry never made, no media snapshot)", timeout: 15) {
+            model.mediaState(for: tab.id).isPlaying && model.mediaControls.contains(tab.id)
+        }
+        try check(!model.mediaStrips(in: store.keyWindowID).contains(tab.id), "a strip showed while its tab is on screen")
+        // The state the owner's run did not try: another tab of the space selected, the folder collapsed.
+        let neighbour = store.addTab(kind: .today, title: "Strip neighbour", url: URL(string: "\(serverBase)/a")!, in: mediaSpace.id)
+        model.selectTab(neighbour.id)
+        store.setFolderExpanded(folder.id, false)
+        do {
+            try await wait("a strip in the tab's own space once another tab is selected", timeout: 10) {
+                model.mediaStrips(in: store.keyWindowID).contains(tab.id)
+            }
+        } catch {
+            throw Failure(description: "no strip beside the collapsed folder: " + stripDiagnosis(model: model, tab: tab))
+        }
+        results.append("(1) '\(engine.pageTitle ?? "")' plays in a tab inside '\(folder.title)', collapsed, another tab selected: strip shown")
+
+        // (2) Another space: the strip is in the window's view tree, drawn, with its title.
+        model.selectSpace(otherSpace.id)
+        try await wait("space switch to '\(otherSpace.name)'", timeout: 5) { store.activeSpaceID == otherSpace.id }
+        do {
+            try await wait("a strip in '\(otherSpace.name)' for the playing tab", timeout: 10) {
+                model.mediaStrips(in: store.keyWindowID).contains(tab.id)
+            }
+        } catch {
+            throw Failure(description: "no strip in another space: " + stripDiagnosis(model: model, tab: tab))
+        }
+        guard let info = model.mediaStripInfo(for: tab.id), !info.title.isEmpty else {
+            throw Failure(description: "the strip has no title (mediaStripInfo: tab not resolved through its space or folder)")
+        }
+        func stripElement() -> TestAccessibilityElement? {
+            accessibilityElement(in: window, labelled: "Media controls for \(info.title)")
+        }
+        do {
+            try await wait("the strip in the window's view tree", timeout: 5) {
+                guard let frame = stripElement()?.accessibilityFrame() else { return false }
+                return frame.width > 1 && frame.height > 1 && window.frame.intersects(frame)
+            }
+        } catch {
+            let frame = stripElement().map { NSStringFromRect($0.accessibilityFrame()) } ?? "absent"
+            throw Failure(description: "the model has the strip but the window does not draw it (view not drawn: the stack missing, "
+                          + "zero height or off the window; mini sidebar \(model.isMiniSidebar(in: store.keyWindowID)), "
+                          + "sidebar shown \(model.isSidebarVisible)); element \(frame)")
+        }
+        let location = "\(mediaSpace.name) › \(folder.title)"
+        try check(info.location == location && (stripElement()?.accessibilityLabel() ?? "").contains(location),
+                  "the strip does not say where the tab is: '\(info.location)', label '\(stripElement()?.accessibilityLabel() ?? "")'")
+        let stripFrame = stripElement()!.accessibilityFrame()
+        try check(stripFrame.minY < window.frame.minY + window.frame.height / 3,
+                  "the strip \(NSStringFromRect(stripFrame)) is not at the bottom of the sidebar in \(NSStringFromRect(window.frame))")
+        results.append(String(format: "(2) '%@' shows the strip '%@' in '%@', %.0f x %.0f pt, %.0f pt above the window's bottom",
+                              otherSpace.name, info.title, location, stripFrame.width, stripFrame.height, stripFrame.minY - window.frame.minY))
+
+        // (3) The strip's go to tab: its space, the folder open, the tab selected and its row on screen.
+        guard let goTo = accessibilityElement(in: window, labelled: "Go to \(info.title)") else {
+            throw Failure(description: "the strip has no Go to button in the view tree")
+        }
+        try check(goTo.press(), "the strip's Go to button took no accessibility press")
+        do {
+            try await wait("go to tab: space, folder and tab", timeout: 10) {
+                store.activeSpaceID == mediaSpace.id && store.isFolderExpanded(folder.id) && store.selectedTabID == tab.id
+            }
+        } catch {
+            throw Failure(description: "go to tab: space \(store.activeSpaceID == mediaSpace.id ? "ok" : "not selected"), "
+                          + "folder \(store.isFolderExpanded(folder.id) ? "open" : "still collapsed"), "
+                          + "tab \(store.selectedTabID == tab.id ? "selected" : "not selected")")
+        }
+        do {
+            try await wait("the tab's row on screen in the list", timeout: 5) { self.sidebarRowFrame(tab.id, in: window) != nil }
+        } catch {
+            throw Failure(description: "go to tab selected the tab but its row is not on screen (folder not drawn open, or not scrolled to)")
+        }
+        try await wait("the strip leaves once its tab is on screen", timeout: 5) { stripElement() == nil }
+        results.append("(3) Go to opened '\(folder.title)', selected the tab in '\(mediaSpace.name)' and showed its row")
+
+        // (4) The owner's settings: Automatic Picture in Picture on. The strip or a panel on screen shows the video.
+        model.automaticPictureInPicture = true
+        model.selectSpace(otherSpace.id)
+        try await wait("space switch back to '\(otherSpace.name)'", timeout: 5) { store.activeSpaceID == otherSpace.id }
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        // A panel counts only on the window's display (the owner's window was on his external one).
+        let panelShows = model.livePanelTabID == tab.id && model.livePanel.isShowing
+            && model.livePanel.window?.screen == window.screen
+        let stripShows = model.mediaStrips(in: store.keyWindowID).contains(tab.id) && stripElement() != nil
+        try check(panelShows || stripShows, "Automatic Picture in Picture on: neither a strip nor a panel on screen: "
+                  + stripDiagnosis(model: model, tab: tab))
+        results.append("(4) with Automatic Picture in Picture on, " + (panelShows ? "the floating panel on screen shows it" : "the strip shows it")
+                       + " (placement \(model.livePlacements[tab.id].map { "\($0)" } ?? "none"))")
+
+        model.selectSpace(homeSpace)
+        model.deleteTab(tab.id)
+        model.deleteTab(neighbour.id)
+        _ = store.removeSpace(mediaSpace.id)
+        _ = store.removeSpace(otherSpace.id)
+        model.selectTab(home.id)
+        try await wait("tab A back after the media strip checks", timeout: 15) {
+            homeEngine.attachmentID != nil && homeEngine.leaseHolder?.window === window
+        }
+        log("PASS media strip in another space: " + results.joined(separator: "; "))
+    }
+
+    /// Which reason a playing tab has no strip in the key window.
+    @MainActor
+    private func stripDiagnosis(model: BrowserViewModel, tab: Tab) -> String {
+        let media = model.mediaState(for: tab.id)
+        let window = model.store.keyWindowID
+        if model.store.tab(withID: tab.id) == nil { return "the tab is gone" }
+        if model.engineHost.engine(forTabID: tab.id, profileID: model.profileID(for: tab)) == nil {
+            return "entry never made: the tab's engine was released when its space went off screen"
+        }
+        if !media.hasSession { return "entry never made: no media snapshot for the tab (media subscription or engine) [\(media)]" }
+        guard model.mediaControls.contains(tab.id) else { return "entry never made though the session is live [\(media)]" }
+        if model.mediaControls.entries.first(where: { $0.tabID == tab.id })?.isDismissed == true {
+            return "strip suppressed: a dismissed entry that never reset"
+        }
+        if model.visibleTabIDs(in: window).contains(tab.id) { return "the window counts the tab as on screen" }
+        if model.captureStateByTab[tab.id] != nil { return "strip suppressed: call card" }
+        if let placement = model.effectiveLivePlacement(for: tab.id) {
+            return "live video placement \(placement), panel \(model.livePanel.isShowing ? "showing" : "not showing") "
+                + "tab \(model.livePanelTabID == tab.id ? "this one" : "\(model.livePanelTabID.map { "\($0)" } ?? "none")")"
+        }
+        if media.isPictureInPicture { return "strip suppressed: a PiP session with no shell placement (pip_embedded \(runtime.capabilities.pipEmbedded))" }
+        return "strips \(model.mediaStrips(in: window)), entries \(model.mediaControls.entries.map(\.tabID)), media \(media)"
     }
 }
 

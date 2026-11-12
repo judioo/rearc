@@ -36,16 +36,17 @@ extension SidebarStore {
     }
 
     /// Archives Today tabs (not splits or easels) not selected within their
-    /// profile's threshold. The selected tab is never archived. Returns the ids.
+    /// profile's threshold. The selected tab is never archived, nor a `spared`
+    /// one (playing media or a call: archiving would stop it). Returns the ids.
     @discardableResult
-    public func autoArchiveIdleTodayTabs() -> [Tab.ID] {
+    public func autoArchiveIdleTodayTabs(sparing spared: Set<Tab.ID> = []) -> [Tab.ID] {
         let reference = now()
         let selected = selectedTabID
         var archived: [Tab.ID] = []
         for space in spaces {
             let threshold = autoArchiveThreshold(for: space.profileID)
             for entry in content(for: space.id).todayLeaves {
-                guard case .tab(let tab) = entry, tab.id != selected else { continue }
+                guard case .tab(let tab) = entry, tab.id != selected, !spared.contains(tab.id) else { continue }
                 let lastActive = tab.lastActiveAt ?? reference
                 guard reference.timeIntervalSince(lastActive) >= threshold.interval else { continue }
                 if archiveTab(tab.id, reason: .auto) != nil {

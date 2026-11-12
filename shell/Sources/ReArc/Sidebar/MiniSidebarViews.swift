@@ -571,7 +571,7 @@ struct MiniMediaColumn: View {
 
     var body: some View {
         let calls = model.callCards(in: window)
-        let strips = model.mediaStrips(in: window).compactMap { model.mediaStripInfo(for: $0) }
+        let strips = model.mediaStrips(in: window).compactMap { model.mediaStripInfo(for: $0, in: window) }
         VStack(spacing: 4) {
             ForEach(calls, id: \.self) { id in
                 if let tab = model.store.tab(withID: id), let capture = model.captureStateByTab[id] {
@@ -589,7 +589,7 @@ struct MiniMediaColumn: View {
             ForEach(strips) { info in
                 MiniMediaTile(favicon: info.favicon, token: info.faviconToken,
                               badge: info.isPlaying ? (info.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill") : "pause.fill",
-                              badgeTint: nil, help: "\(info.title)\n\(info.site)\nClick to \(info.isPlaying ? "pause" : "play")",
+                              badgeTint: nil, help: "\(info.title)\n\(info.location)\nClick to \(info.isPlaying ? "pause" : "play")",
                               action: { model.mediaTogglePlayPause(info.id) }) {
                     Button("Back to Tab") { model.goToMediaTab(info.id) }
                     Button(info.isPlaying ? "Pause" : "Play") { model.mediaTogglePlayPause(info.id) }

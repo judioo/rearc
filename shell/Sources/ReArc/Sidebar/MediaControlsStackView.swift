@@ -7,6 +7,8 @@ struct MediaStripInfo: Identifiable {
     let id: Tab.ID
     let title: String
     let site: String
+    /// Where the tab lives: "Space › Folder", its profile first when the window shows another.
+    let location: String
     let favicon: NSImage?
     let faviconToken: String
     let isPlaying: Bool
@@ -17,12 +19,18 @@ struct MediaStripInfo: Identifiable {
     let offersPictureInPicture: Bool
 }
 
-/// Arc's media strip tokens (MINI-PLAYER.md §2.1).
+/// Arc's media strip tokens (MINI-PLAYER.md §2.1, §2.3).
 enum MediaStripMetrics {
     static let height: CGFloat = 33
     static let radius: CGFloat = 8
     static let inset: CGFloat = 8
     static let gap: CGFloat = 8
+    /// The favicon's and the speaker's centres, and the × above the speaker, from the strip's edges.
+    static let edgeSlot: CGFloat = 44
+    /// The title's leading inset in the expanded row.
+    static let titleInset: CGFloat = 14
+    /// The expanded title row with ReArc's location line under the title [RA]; Arc's has the title alone in 33 pt.
+    static let titleRowHeight: CGFloat = 42
 
     /// #FDFDFF in light mode; an opaque elevated grey in dark mode (Arc's is palette-driven, [RA]).
     static func fill(dark: Bool) -> Color {
@@ -72,13 +80,13 @@ struct MediaControlsStackView: View {
             }
             // The stack grows upwards from a fixed bottom edge: a new card
             // enters at the top from behind the one below, which stays put.
-            if let live, let info = model.mediaStripInfo(for: live) {
+            if let live, let info = model.mediaStripInfo(for: live, in: window) {
                 LivePlayerCard(model: model, info: info)
                     .transition(MediaStackMotion.card(reduceMotion: reduceMotion))
                     .zIndex(0)
             }
             if !strips.isEmpty {
-                MediaStripStack(model: model, infos: strips.compactMap { model.mediaStripInfo(for: $0) })
+                MediaStripStack(model: model, infos: strips.compactMap { model.mediaStripInfo(for: $0, in: window) })
                     .transition(MediaStackMotion.card(reduceMotion: reduceMotion))
                     .zIndex(1)
             }
@@ -156,12 +164,14 @@ struct MediaStripStack: View {
     }
 }
 
-/// One strip card. Collapsed it is Arc's 33 pt row of five equal slots:
-/// favicon (go to tab), previous, play/pause, next and volume. Hovered it
-/// grows upward by a title row: the media title, a pop-out (Picture in
-/// Picture) button and ×. The controls row keeps its five cells
-/// (ARC-RECORDING-ANALYSIS.md §7, frames 2691–2692). A title too long for
-/// the row scrolls while the pointer is on the card or the strip is alone.
+/// One strip card. Collapsed it is Arc's 33 pt row: favicon (go to tab),
+/// previous, play/pause, next and volume. Hovered it grows upward by a
+/// title row: the tab's title over where it lives (space and folder, a
+/// ReArc addition so the strip says where to find the tab), a pop-out
+/// (Picture in Picture) button and ×.
+/// The controls row keeps its five cells (ARC-RECORDING-ANALYSIS.md §7,
+/// frames 2691–2692; MINI-PLAYER.md §2.3). A title too long for the row
+/// scrolls while the pointer is on the card or the strip is alone.
 struct MediaStripCard: View {
     let model: BrowserViewModel
     let info: MediaStripInfo
@@ -179,18 +189,27 @@ struct MediaStripCard: View {
         }
         .background(MediaStripBackground())
         .onHover { isHovering = $0 }
+        .help("\(info.title)\n\(info.location)")
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Media controls for \(info.title)")
+        .accessibilityLabel("Media controls for \(info.title), in \(info.location)")
     }
 
     private var titleRow: some View {
         HStack(spacing: 2) {
             Button { model.goToMediaTab(info.id) } label: {
-                MarqueeText(text: info.title, font: .system(size: 12, weight: .medium),
-                            color: chrome.isDark ? Color.white.opacity(0.9) : Color.black.opacity(0.8),
-                            isActive: isHovering || isAlone)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+                VStack(alignment: .leading, spacing: 1) {
+                    MarqueeText(text: info.title, font: .system(size: 13),
+                                color: chrome.isDark ? Color.white.opacity(0.9) : Color.black.opacity(0.8),
+                                isActive: isHovering || isAlone)
+                    Text(info.location)
+                        .font(.system(size: 11))
+                        .foregroundStyle(chrome.secondaryText)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .accessibilityLabel("In \(info.location)")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("Back to Tab")
@@ -199,43 +218,60 @@ struct MediaStripCard: View {
                 MediaStripButton(systemName: "rectangle.on.rectangle", size: 11, help: "Open Picture in Picture") {
                     model.openPictureInPicture(info.id)
                 }
-                .frame(width: 26)
+                .frame(width: 24)
             }
+            // Above the speaker, 22 pt from the edge as in Arc.
             MediaStripButton(systemName: "xmark", size: 10, help: "Close Mini Player") { model.closeMediaStrip(info.id) }
-                .frame(width: 26)
+                .frame(width: 24)
         }
-        .padding(.leading, 12)
-        .padding(.trailing, 4)
-        .frame(height: MediaStripMetrics.height - 4)
+        .padding(.leading, MediaStripMetrics.titleInset)
+        .padding(.trailing, MediaStripMetrics.edgeSlot / 2 - 12)
+        .frame(height: MediaStripMetrics.titleRowHeight)
     }
 }
 
-/// The collapsed row: five equal slots, glyphs centred (§2.1).
+/// The collapsed row (§2.1, §2.3): the favicon and the speaker centred
+/// 22 pt in from the edges, the three transport buttons centred on the
+/// strip a fifth of its width apart. At Arc's default 212 pt that is five
+/// equal slots; wider, the ends stay at the edges.
 struct MediaStripRow: View {
     let model: BrowserViewModel
     let info: MediaStripInfo
 
     var body: some View {
-        HStack(spacing: 0) {
-            Button { model.goToMediaTab(info.id) } label: {
-                SiteIconView(image: info.favicon, token: info.faviconToken, size: 16)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
+        GeometryReader { geometry in
+            let pitch = geometry.size.width / 5
+            ZStack {
+                HStack(spacing: 0) {
+                    Button { model.goToMediaTab(info.id) } label: {
+                        SiteIconView(image: info.favicon, token: info.faviconToken, size: 16)
+                            .frame(maxHeight: .infinity)
+                            .frame(width: MediaStripMetrics.edgeSlot)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Back to Tab")
+                    .accessibilityLabel("Go to \(info.title)")
+                    Spacer(minLength: 0)
+                    MediaStripButton(systemName: info.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill", size: 13,
+                                     help: info.isMuted ? "Unmute" : "Mute") { model.toggleMute(info.id) }
+                        .frame(width: MediaStripMetrics.edgeSlot)
+                }
+                HStack(spacing: 0) {
+                    MediaStripButton(systemName: "backward.end.fill", size: 11, help: "Previous", enabled: info.canPreviousTrack) {
+                        model.mediaPreviousTrack(info.id)
+                    }
+                    .frame(width: pitch)
+                    MediaStripButton(systemName: info.isPlaying ? "pause.fill" : "play.fill", size: 12,
+                                     help: info.isPlaying ? "Pause" : "Play") { model.mediaTogglePlayPause(info.id) }
+                        .accessibilityIdentifier(info.isPlaying ? "mediaControlsPauseButton" : "mediaControlsPlayButton")
+                        .frame(width: pitch)
+                    MediaStripButton(systemName: "forward.end.fill", size: 11, help: "Next", enabled: info.canNextTrack) {
+                        model.mediaNextTrack(info.id)
+                    }
+                    .frame(width: pitch)
+                }
             }
-            .buttonStyle(.plain)
-            .help("Back to Tab")
-            .accessibilityLabel("Go to \(info.title)")
-            MediaStripButton(systemName: "backward.end.fill", size: 11, help: "Previous", enabled: info.canPreviousTrack) {
-                model.mediaPreviousTrack(info.id)
-            }
-            MediaStripButton(systemName: info.isPlaying ? "pause.fill" : "play.fill", size: 12,
-                             help: info.isPlaying ? "Pause" : "Play") { model.mediaTogglePlayPause(info.id) }
-                .accessibilityIdentifier(info.isPlaying ? "mediaControlsPauseButton" : "mediaControlsPlayButton")
-            MediaStripButton(systemName: "forward.end.fill", size: 11, help: "Next", enabled: info.canNextTrack) {
-                model.mediaNextTrack(info.id)
-            }
-            MediaStripButton(systemName: info.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill", size: 13,
-                             help: info.isMuted ? "Unmute" : "Mute") { model.toggleMute(info.id) }
         }
         .frame(height: MediaStripMetrics.height)
     }
