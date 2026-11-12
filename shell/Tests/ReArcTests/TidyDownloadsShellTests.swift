@@ -139,6 +139,8 @@ struct TidyDownloadsShellTests {
         model.setMaxFeature(.tidyDownloads, on: true)
         finish(model.downloads, id: "private", path: path, origin: DownloadOrigin(page: page.page, isPrivate: true))
         finish(model.downloads, id: "unknown", path: path, origin: nil)
+        // Under load the controller spreads events over later turns: wait for them, then for a rename that must not come.
+        await waitFor { !model.downloads.hasPendingWork && model.downloads.list.record(withID: "private") != nil }
         try await Task.sleep(nanoseconds: 300_000_000)
         #expect(try names() == ["download.pdf"])
         #expect(BrowserViewModel.tidyDownloadName(for: try #require(model.downloads.list.record(withID: "private")),
