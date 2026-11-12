@@ -98,6 +98,7 @@ struct SidebarView: View {
                 // Media as icons, then the bar's buttons stacked; the Finish
                 // setup card is a badge on the space icon (`MiniSpaceHeaderView`).
                 MiniMediaColumn(model: model)
+                MiniUpdateNotice(model: model)
                 MiniBottomBar(model: model, draggedItemID: $draggedItemID)
             } else {
                 // Arc's media strips (and ReArc's live video) sit above the bottom bar.

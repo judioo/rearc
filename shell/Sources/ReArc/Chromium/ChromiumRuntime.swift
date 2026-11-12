@@ -566,6 +566,9 @@ final class ChromiumRuntime {
     private(set) var readyAt: TimeInterval?
     /// Runs before shutdown starts for an AppKit quit request (persist shell state here).
     var onTerminateRequested: (() -> Void)?
+    /// Posted when a page's beforeunload kept a quit from finishing (the
+    /// update notice's Restart and Update offers Try Again).
+    static let shutdownVetoedNotification = Notification.Name("ReArcShutdownVetoed")
     /// A leak check found a breached credential for this origin (ABI 1.60).
     var onCredentialLeak: ((String) -> Void)?
 
@@ -1678,6 +1681,7 @@ final class ChromiumRuntime {
                 isStopping = false
                 shutdownVetoed = true
                 ChromiumLog.info("shutdown vetoed by beforeunload; the next quit forces it")
+                NotificationCenter.default.post(name: ChromiumRuntime.shutdownVetoedNotification, object: nil)
             } else {
                 shutdownCompleted = status == .rearcOK
                 ChromiumLog.info("shutdown completion: \(status.rearcName)")

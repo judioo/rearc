@@ -207,10 +207,13 @@ final class BrowserViewModel {
     var library = LibraryPresentation()
     /// Windows whose sidebar the Library is widening (animated).
     var libraryGrowth: [SidebarWindowID?: LibrarySidebarGrowth] = [:]
-    /// Shown in the bottom bar's update slot. Nothing sets it until an updater exists.
-    var availableUpdate: AvailableUpdate?
-    /// Installs `availableUpdate`; the updater provides it.
-    @ObservationIgnored var installUpdate: (() -> Void)?
+    /// Shown in the bottom bar's update slot: the update the sidebars'
+    /// notice shows (`UpdateNoticeCenter`), shared by every browser window.
+    @MainActor var availableUpdate: AvailableUpdate? { UpdateNoticeCenter.shared.sidebarUpdate }
+    /// Restart and Update for `availableUpdate`.
+    @MainActor var installUpdate: (() -> Void)? {
+        availableUpdate == nil ? nil : { UpdateNoticeCenter.shared.install() }
+    }
     /// Where links from other apps open; remembered across launches.
     var externalLinkDestination: ExternalLinkDestination = .load(from: .standard) {
         didSet { externalLinkDestination.save(to: externalLinkDefaults) }
