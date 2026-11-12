@@ -11,7 +11,15 @@ final class UpdateNoticeCenterTests: XCTestCase {
     private final class FakeDriver: UpdateNoticeDriving {
         var automaticallyDownloadsUpdates = false
         var installs = 0
+        var informationChecks = 0
+        var sessionRunning = false
+        var lastUpdateCheckDate: Date?
         func installFromNotice() { installs += 1 }
+        func checkForUpdateInformation() -> Bool {
+            guard !sessionRunning else { return false }
+            informationChecks += 1
+            return true
+        }
     }
 
     private let update = AvailableUpdate(version: "0.1.0", build: UpdateBuild(700))
@@ -133,5 +141,78 @@ final class UpdateNoticeCenterTests: XCTestCase {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         XCTAssertEqual(center.notice.phase, .installing, "the preview stops at Restarting ReArc… and nothing quits")
+    }
+
+    // MARK: About ReArc
+
+    func testAboutAsksTheFeedAtMostOnceAMinute() {
+        let center = UpdateNoticeCenter()
+        let driver = FakeDriver()
+        center.driver = driver
+        let opened = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        center.checkUpdateInformation(now: opened)
+        XCTAssertEqual(driver.informationChecks, 1)
+        XCTAssertEqual(center.aboutLine?.text, "Checking…")
+        center.checkUpdateInformation(now: opened.addingTimeInterval(5))
+        XCTAssertEqual(driver.informationChecks, 1, "not while one runs")
+
+        driver.lastUpdateCheckDate = opened
+        center.updateInformationFinished(.notFound)
+        XCTAssertEqual(center.aboutLine?.text, "You have the latest version.")
+        XCTAssertEqual(center.lastUpdateCheckDate, opened)
+        center.checkUpdateInformation(now: opened.addingTimeInterval(59))
+        XCTAssertEqual(driver.informationChecks, 1, "a minute-old answer stands")
+        XCTAssertEqual(center.aboutLine?.text, "You have the latest version.")
+        center.checkUpdateInformation(now: opened.addingTimeInterval(60))
+        XCTAssertEqual(driver.informationChecks, 2)
+    }
+
+    func testAboutReusesTheNoticesUpdate() {
+        let center = UpdateNoticeCenter()
+        let driver = FakeDriver()
+        center.driver = driver
+        center.send(.found(AvailableUpdate(version: "2026.1114.741", build: UpdateBuild(741)), downloaded: false))
+        center.checkUpdateInformation()
+        XCTAssertEqual(driver.informationChecks, 0, "the notice already knows")
+        XCTAssertEqual(center.aboutLine, AboutUpdateLine(text: "Latest: 2026.1114.741 — Update available", action: .install))
+        // Hidden from the sidebar, it is still the latest, and About installs it the notice's way.
+        center.hide()
+        XCTAssertNil(center.sidebarUpdate)
+        XCTAssertEqual(center.aboutLine?.action, .install)
+        center.installFromAbout()
+        XCTAssertEqual(driver.installs, 1)
+        XCTAssertEqual(center.aboutLine, AboutUpdateLine(text: "Latest: 2026.1114.741 — Update available", detail: "Downloading…"))
+        center.installFromAbout()
+        XCTAssertEqual(driver.installs, 1, "the button is gone while it downloads")
+    }
+
+    func testAboutWaitsForASessionAlreadyRunning() {
+        let center = UpdateNoticeCenter()
+        let driver = FakeDriver()
+        driver.sessionRunning = true
+        center.driver = driver
+        center.checkUpdateInformation()
+        XCTAssertEqual(driver.informationChecks, 0, "never interrupts a session")
+        XCTAssertEqual(center.aboutLine?.text, "Checking…")
+        center.updateInformationFinished(.failed)
+        XCTAssertEqual(center.aboutLine, AboutUpdateLine(text: "Couldn't check for updates.", action: .checkAgain))
+        // Try Again is the person's: it asks at once, the minute notwithstanding.
+        driver.sessionRunning = false
+        center.checkUpdateInformation(force: true)
+        XCTAssertEqual(driver.informationChecks, 1)
+    }
+
+    func testAboutWithoutAnUpdaterSaysNothing() {
+        let center = UpdateNoticeCenter()
+        center.checkUpdateInformation()
+        XCTAssertNil(center.aboutLine)
+    }
+
+    func testAboutShowsThisVersion() {
+        XCTAssertEqual(AboutInfo.version(["CFBundleShortVersionString": "2026.1112.726", "CFBundleVersion": "726"]),
+                       "Version 2026.1112.726")
+        XCTAssertEqual(AboutInfo.version(["CFBundleShortVersionString": "0.1.0", "CFBundleVersion": "726"]),
+                       "Version 0.1.0 (726)", "a build from before the dated version")
+        XCTAssertEqual(AboutInfo.version(["CFBundleShortVersionString": "0.1.0"]), "Version 0.1.0")
     }
 }

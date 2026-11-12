@@ -1,20 +1,25 @@
 import AppKit
 import ImageIO
+import SidebarModel
 import SwiftUI
 
 /// ReArc › About ReArc: Arc's small About window (close only, no title),
 /// with the ReArc sting where Arc shows its icon. The sting plays once each
 /// time the window opens and rests on its last frame, the sunrise mark and
-/// the wordmark; with Reduce Motion it shows only that frame.
+/// the wordmark; with Reduce Motion it shows only that frame. Under the
+/// version, the latest version in the update feed (`AboutUpdateLine`).
 final class AboutWindowController: NSWindowController {
     static let width: CGFloat = 360
 
     /// The WebKit shell's; the Chromium host keeps its own, whose links open tabs there.
-    static let shared = AboutWindowController { NSWorkspace.shared.open($0) }
+    @MainActor static let shared = AboutWindowController(center: .shared) { NSWorkspace.shared.open($0) }
 
     private let sting = AboutStingView()
+    private let center: UpdateNoticeCenter?
 
-    init(openLink: @escaping (URL) -> Void) {
+    /// `center`: where the latest version comes from; nil shows none.
+    @MainActor init(center: UpdateNoticeCenter?, openLink: @escaping (URL) -> Void) {
+        self.center = center
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 300),
             styleMask: [.titled, .closable, .fullSizeContentView],
@@ -28,7 +33,7 @@ final class AboutWindowController: NSWindowController {
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
         super.init(window: window)
-        let hosting = NSHostingView(rootView: AboutView(sting: sting, openLink: openLink))
+        let hosting = NSHostingView(rootView: AboutView(sting: sting, center: center, openLink: openLink))
         // The sting runs under the transparent title bar, behind the close
         // button, and the window is exactly as tall as the view.
         hosting.safeAreaRegions = []
@@ -43,16 +48,22 @@ final class AboutWindowController: NSWindowController {
     func present() {
         if window?.isVisible != true { sting.play() }
         window?.makeKeyAndOrderFront(nil)
+        center?.checkUpdateInformation()
     }
 }
 
 /// The versions the release script stamps into Info.plist (RELEASE.md, "Versioning").
 enum AboutInfo {
-    static var version: String {
-        let info = Bundle.main.infoDictionary ?? [:]
-        let marketing = info["CFBundleShortVersionString"] as? String ?? "–"
-        guard let build = info["CFBundleVersion"] as? String, !build.isEmpty else { return "Version \(marketing)" }
-        return "Version \(marketing) (\(build))"
+    static var version: String { version(Bundle.main.infoDictionary ?? [:]) }
+
+    /// "Version 2026.1112.726"; a version without its build, as before
+    /// 2026.1112, keeps it after: "Version 0.1.0 (726)".
+    static func version(_ info: [String: Any]) -> String {
+        let display = info["CFBundleShortVersionString"] as? String ?? "–"
+        let build = (info["CFBundleVersion"] as? String).flatMap(UpdateBuild.init)
+        if let shown = ReArcVersion.display(display, build: build) { return "Version \(shown)" }
+        guard let build = info["CFBundleVersion"] as? String, !build.isEmpty else { return "Version \(display)" }
+        return "Version \(display) (\(build))"
     }
 
     static var engine: String? {
@@ -66,6 +77,7 @@ enum AboutInfo {
 
 struct AboutView: View {
     let sting: AboutStingView
+    var center: UpdateNoticeCenter?
     let openLink: (URL) -> Void
 
     var body: some View {
@@ -76,6 +88,10 @@ struct AboutView: View {
             VStack(spacing: 4) {
                 Text(AboutInfo.version)
                 if let engine = AboutInfo.engine { Text(engine) }
+                if let center, center.driver != nil {
+                    AboutUpdateView(center: center)
+                        .padding(.top, 6)
+                }
                 Text(AboutInfo.copyright)
                     .padding(.top, 10)
                 Text(attribution)
@@ -103,6 +119,46 @@ struct AboutView: View {
             text[run.range].underlineStyle = .single
         }
         return text
+    }
+}
+
+/// The latest version in the feed, under the engine line. Its height never
+/// changes, so the window keeps its size as the state does; nothing animates.
+struct AboutUpdateView: View {
+    var center: UpdateNoticeCenter
+    static let rowHeight: CGFloat = 22
+
+    var body: some View {
+        let line = center.aboutLine
+        VStack(spacing: 2) {
+            Text(line?.text ?? " ")
+                .lineLimit(1)
+                .accessibilityHidden(line == nil)
+            HStack(spacing: 8) {
+                if let detail = line?.detail {
+                    Text(detail)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(detail)
+                }
+                if let action = line?.action {
+                    Button(action.title) { perform(action) }
+                        .controlSize(.small)
+                        .accessibilityHint(action == .checkAgain ? "Checks for updates again" : "Quits ReArc, installs the update and opens it again")
+                }
+            }
+            .frame(height: Self.rowHeight)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Updates")
+    }
+
+    private func perform(_ action: AboutUpdateLine.Action) {
+        switch action {
+        case .install, .retryInstall: center.installFromAbout()
+        case .checkAgain: center.checkUpdateInformation(force: true)
+        }
     }
 }
 

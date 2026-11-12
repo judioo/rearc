@@ -688,7 +688,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     func presentAbout() {
         guard let model, !terminating else { return }
         if aboutWindow == nil {
-            aboutWindow = AboutWindowController { [weak self] url in
+            aboutWindow = AboutWindowController(center: .shared) { [weak self] url in
                 if BrowserInternalPage.credits.isShown(by: url) {
                     if BrowserInternalPage.credits.isAvailable(engine: model.engineHost.navigationSchemes) {
                         model.openBrowserPage(.credits)
