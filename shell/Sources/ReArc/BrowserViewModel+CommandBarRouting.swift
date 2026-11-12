@@ -22,9 +22,12 @@ extension BrowserViewModel {
         }
     }
 
-    /// The grey text after the caret.
+    /// The grey text after the caret: the domain, or with a chip the earlier query.
     var commandBarInlineSuffix: String? {
-        commandBarInlineCompletion.flatMap { InlineDomainCompletion.suffix(typed: commandBarText, completion: $0) }
+        if commandBarSiteSearch != nil {
+            return commandBarSiteSearchCompletion.flatMap { SiteSearchQueries.suffix(typed: commandBarText, completion: $0) }
+        }
+        return commandBarInlineCompletion.flatMap { InlineDomainCompletion.suffix(typed: commandBarText, completion: $0) }
     }
 
     /// Right Arrow at the end of the field takes the completion into the text.

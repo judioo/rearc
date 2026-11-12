@@ -23,6 +23,14 @@ protocol CommandBarServices: AnyObject {
     func deleteFromHistory(_ url: URL, profileID: Profile.ID, completion: @escaping (Bool) -> Void) -> Bool
     /// Runs when a profile's default search changes (menus and rows re-read it).
     var onSearchProviderChange: (() -> Void)? { get set }
+    /// Pages of the profile's engine history at `host`, for a site search's
+    /// earlier queries. None when the engine keeps none the shell can reach;
+    /// never asks an off-the-record profile and never the network.
+    func siteSearchHistory(host: String, profileID: Profile.ID, completion: @escaping ([VisitRecord]) -> Void)
+}
+
+extension CommandBarServices {
+    func siteSearchHistory(host: String, profileID: Profile.ID, completion: @escaping ([VisitRecord]) -> Void) {}
 }
 
 /// One in-flight suggest request.

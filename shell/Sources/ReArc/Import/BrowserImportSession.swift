@@ -26,6 +26,8 @@ final class BrowserImportSession {
         var newHistoryPages: Int?
         /// Already in the target ReArc profile (`BrowserViewModel.installedExtensionsReader`).
         var installedExtensionIDs: Set<String> = []
+        /// The profile's own site searches (`Web Data` keywords: name, keyword, template).
+        var siteSearches: [ChromiumKeywordsReader.Row] = []
     }
 
     private(set) var browsers: [DiscoveredBrowser] = []
@@ -56,6 +58,7 @@ final class BrowserImportSession {
     var includeBookmarks = true
     var includeHistory = true
     var includeSearchEngine = true
+    var includeSiteSearches = true
     var includeExtensions = true
     /// Extensions unticked in the list.
     var skippedExtensions: Set<String> = []
@@ -234,6 +237,7 @@ final class BrowserImportSession {
             detail.newHistoryPages = historyThrough == nil ? detail.inventory.historyPages
                 : profile.historyPageCount(after: historyThrough)
             detail.installedExtensionIDs = installed(target)
+            if chromium { detail.siteSearches = ChromiumKeywordsReader.read(profile: profile.url) }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.targetProfileID == target else { return }
                 self.details[profile.id] = detail
@@ -257,6 +261,12 @@ final class BrowserImportSession {
               let choice = settings.engines(for: targetProfileID).first(where: { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }),
               settings.defaultEngine(for: targetProfileID) != choice.id else { return nil }
         return choice
+    }
+
+    /// Site searches the target profile does not have yet.
+    func newSiteSearchCount(_ detail: ProfileDetail) -> Int {
+        guard let model else { return 0 }
+        return model.importedSiteSearches.newCount(detail.siteSearches, into: model.store.owningProfileID(of: targetProfileID))
     }
 
     private func refreshArcSummary() {
@@ -338,6 +348,7 @@ final class BrowserImportSession {
             return (includeBookmarks && !bookmarkPlan(for: profile, detail).isEmpty)
                 || (includeHistory && (detail.newHistoryPages ?? 0) > 0)
                 || (includeSearchEngine && newSearchEngine(detail) != nil)
+                || (includeSiteSearches && newSiteSearchCount(detail) > 0)
                 || (includeExtensions && canReinstallExtensions && !chosenExtensions(detail).isEmpty)
         }
     }
@@ -376,6 +387,7 @@ final class BrowserImportSession {
             let wantsBookmarks = includeBookmarks && !bookmarkPlan(for: profile, detail).isEmpty
             let wantsHistory = includeHistory && (detail.newHistoryPages ?? 0) > 0
             let engine = includeSearchEngine ? newSearchEngine(detail)?.name : nil
+            let siteSearches = includeSiteSearches ? detail.siteSearches : []
             let chosen = includeExtensions && canReinstallExtensions ? chosenExtensions(detail) : []
             let installed = model.installedExtensionsReader()
             let target = targetProfileID
@@ -390,7 +402,7 @@ final class BrowserImportSession {
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     var lines = model.applyChromiumImport(from: profile, bookmarks: bookmarks, history: history,
-                                                          searchEngine: engine, into: target)
+                                                          searchEngine: engine, siteSearches: siteSearches, into: target)
                     let queue = ExtensionReinstallQueue(consented, into: target, installedIDs: installedIDs)
                     if !queue.isFinished {
                         model.queueExtensionReinstall(queue, from: profile.browser.name,
@@ -466,7 +478,8 @@ extension BrowserViewModel {
     /// (command-bar suggestions) and search engine, each only what an earlier
     /// import did not bring. Returns one line per thing imported.
     func applyChromiumImport(from source: ImportSourceProfile, bookmarks: [BookmarkNode]?, history: [VisitRecord]?,
-                             searchEngine: String?, into profileID: Profile.ID) -> [String] {
+                             searchEngine: String?, siteSearches: [ChromiumKeywordsReader.Row] = [],
+                             into profileID: Profile.ID) -> [String] {
         var lines: [String] = []
         if let bookmarks, let result = store.importBookmarks(bookmarks, spaceName: "\(source.browser.name) – \(source.name)",
                                                              profileID: profileID, sourceID: source.id,
@@ -489,6 +502,8 @@ extension BrowserViewModel {
             settings.setDefaultEngine(choice.id, for: profileID)
             lines.append("search with \(choice.name)")
         }
+        let shortcuts = importSiteSearches(siteSearches, from: source.id, into: profileID)
+        if shortcuts > 0 { lines.append("\(shortcuts) site search\(shortcuts == 1 ? "" : "es")") }
         if !lines.isEmpty { showToast("Imported " + lines.joined(separator: ", "), systemImage: "square.and.arrow.down") }
         return lines
     }

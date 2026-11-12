@@ -195,7 +195,8 @@ final class Wave23ShellTests: XCTestCase {
             SearchSuggestion(text: "panda facts", destinationURL: URL(string: "https://www.google.com/search?q=panda%20facts")!),
         ]))
         XCTAssertEqual(model.commandBarResults.filter { $0.kind == .suggestion }.map(\.title), ["panda facts"])
-        XCTAssertEqual(model.commandBarResults.last?.destinationURL?.host(), "www.google.com", "the engine's provider searches")
+        XCTAssertEqual(model.commandBarResults.first { $0.kind == .search }?.destinationURL?.host(), "www.google.com",
+                       "the engine's provider searches")
 
         model.commandBarText = ">rel"
         XCTAssertEqual(services.queries.count, 2, "command mode asks nothing")

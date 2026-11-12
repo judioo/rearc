@@ -7,7 +7,10 @@ struct CommandBarContainer: View {
     @Bindable var model: BrowserViewModel
     let width: CGFloat
 
+    @Environment(\.themeChrome) private var themeChrome
+
     var body: some View {
+        let siteSearch = model.commandBarSiteSearch
         CommandBarOverlay(
             text: $model.commandBarText,
             inlineSuffix: model.commandBarInlineSuffix,
@@ -16,8 +19,12 @@ struct CommandBarContainer: View {
             results: model.commandBarResults,
             highlightedIndex: model.commandBarHighlightedIndex,
             errorMessage: model.commandBarError,
-            siteSearch: model.commandBarSiteSearch,
+            siteSearch: siteSearch,
             siteSearchSuggestion: model.commandBarSiteSearchSuggestion,
+            siteSearchFill: siteSearch.map {
+                model.commandBarSiteFill($0, accentFill: themeChrome.commandBarFill, dark: themeChrome.isWindowDark)
+            },
+            collapseCount: model.commandBarCollapseCount,
             onTab: { model.enterCommandBarSiteSearch() },
             onDeleteBackward: { model.exitCommandBarSiteSearch() },
             onDeleteHighlighted: { model.deleteHighlightedCommandBarHistoryRow() },
@@ -32,7 +39,8 @@ struct CommandBarContainer: View {
             onCancel: { model.dismissCommandBar() },
             focusRequest: model.commandBarFocusRequest,
             width: width,
-            spaceName: { model.store.space(withID: $0)?.name }
+            spaceName: { id in id == model.store.activeSpaceID ? nil : model.store.space(withID: id)?.name },
+            favicon: { model.faviconStore.image(for: $0) }
         )
     }
 

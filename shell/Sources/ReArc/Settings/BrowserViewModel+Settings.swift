@@ -23,10 +23,13 @@ protocol SearchEngineSettings: AnyObject {
     func setDefaultEngine(_ id: SearchEngineChoice.ID, for profileID: Profile.ID)
     /// False while policy manages the default.
     func isEditable(for profileID: Profile.ID) -> Bool
+    /// The profile's engines as command-bar site searches (keyword, name, template).
+    func siteSearchEngines(for profileID: Profile.ID) -> [SiteSearchEngine]
 }
 
 extension SearchEngineSettings {
     func isEditable(for profileID: Profile.ID) -> Bool { true }
+    func siteSearchEngines(for profileID: Profile.ID) -> [SiteSearchEngine] { [] }
 }
 
 /// The WebKit path's provider preference, the same for every profile.

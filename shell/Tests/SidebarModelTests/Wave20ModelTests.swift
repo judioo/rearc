@@ -245,9 +245,9 @@ final class Wave20ModelTests: XCTestCase {
         let historyRows = results.filter { $0.kind == .history }
         XCTAssertEqual(historyRows.map(\.destinationURL?.absoluteString), ["https://docs.test/api"], "an open tab is not repeated")
         XCTAssertEqual(historyRows.first?.subtitle, "docs.test/api")
-        XCTAssertEqual(results.last?.kind, .search)
+        // Arc's order: tabs, the plain search for the typed text, then pages.
         let historyIndex = results.firstIndex { $0.kind == .history }!
-        XCTAssertLessThan(historyIndex, results.firstIndex { $0.kind == .search }!)
+        XCTAssertLessThan(results.firstIndex { $0.kind == .search }!, historyIndex)
     }
 
     func testTypedAddressGoesAheadOfHistory() {

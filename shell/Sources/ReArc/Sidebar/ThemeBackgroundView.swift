@@ -147,6 +147,9 @@ struct ThemeChromeColors: Equatable {
     /// The command bar's selected row: the accent lightened toward white
     /// (`#2731FF` → `#858AFF` on the default theme, ARC-RECORDING-ANALYSIS.md §8).
     var selection: Color
+    /// The command bar's selected row: `selection` darkened until white text
+    /// on it clears 4.5:1 (`CommandBarInk.selectionFill`).
+    var commandBarFill: SpaceColor
     /// The chrome's text roles are the dark ones (`ThemeGradient.usesDarkChrome`).
     var isDark: Bool
     /// The space is in dark appearance, whatever its chrome text uses.
@@ -185,6 +188,7 @@ struct ThemeChromeColors: Equatable {
         panel = Color(dark ? semantic.background : semantic.backgroundExtra).opacity(dark ? 0.6 : 0.55)
         toast = Color(semantic.background)
         selection = Color(Self.selection(accent: semantic.foregroundPrimary))
+        commandBarFill = CommandBarInk.selectionFill(Self.selection(accent: semantic.foregroundPrimary))
         isDark = dark
         isWindowDark = windowDark ?? dark
         badge = SidebarBadgeInk(chrome: chrome, dark: dark)
