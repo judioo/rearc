@@ -210,7 +210,7 @@ struct ProfilesSettingsPane: View {
             .padding(.top, 10)
         }
         .sheet(item: $editor) { request in
-            ProfileEditorView(draft: request.draft, isCreating: request.profileID == nil) { draft in
+            ProfileEditorView(draft: request.draft, isCreating: request.profileID == nil, images: model.avatarImages) { draft in
                 guard let profile = model.saveProfile(draft, id: request.profileID, selecting: false) else { return false }
                 selection = profile.id
                 return true
