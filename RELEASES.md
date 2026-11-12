@@ -16,18 +16,101 @@ number. Details: engine/docs/RELEASE.md, "Release notes".
 Merged since the last release and not yet in a build. The next release's entry takes these
 lines and this section starts empty again.
 
+## ReArc 0.1.0 (726) — 2026-11-12
+
 **New**
+- The command bar looks and moves like Arc's. ⌘T opens a solid card over the page, with no
+  dimming behind it. The selected row is filled with the space's colour. Results are in a
+  clearer order: open tabs that start with what you typed, then the site the field completed
+  to, then a plain search for your text, then history. An empty ⌘T lists your five most
+  recent tabs.
+- Site search shortcuts. Type a site search's keyword and the field shows "Search <name>"
+  with a Tab key. Press Tab and the site's name appears as a chip in the site's colour, the
+  list folds away, and you finish the search. From then on only your earlier searches on that
+  site are suggested. Nothing is sent anywhere while you type in this mode.
+- Bring your site searches from another browser. File › Import from Another Browser… has a
+  new "Site searches" choice for Arc, Chrome and the other Chromium browsers. It brings the
+  keyword, name and search address of the ones you added yourself.
+- A container now belongs to its profile. "New Container for This Space" keeps the space
+  where it is, in the same profile and the same place in the strip, and gives that space its
+  own cookies, sign-ins and site data. A container is no longer listed as a profile. Every
+  tab in a container shows a chip with the container's name in the address area, in split
+  panes, in the tab's hover card and in a Peek, and the space's icon carries a badge. The
+  space menu has "Remove Container…", which puts the space back in the profile's own session
+  and deletes the container's data after a confirmation.
+- Profile menus tell you more. Each profile shows its avatar, its number of spaces and a
+  checkmark when it is the active one. The menu on the avatar at the top is headed "Switch
+  to Profile"; the one beside the space name is headed "Switch Space to Profile".
+- A picture as a profile's avatar. Settings › Profiles › Avatar and colour › Edit… has
+  Choose Image…, and you can also drop or paste one. ReArc keeps its own small copy with the
+  metadata removed. The picture stays on this Mac; other Macs show the profile's symbol or
+  emoji.
+- See and manage your profiles in iCloud. Settings › Profiles shows whether each profile is
+  on this Mac and in iCloud or only on this Mac, and lists the profiles that are in iCloud
+  only, with their spaces. "Delete from iCloud…" removes one profile, its spaces and their
+  tabs from iCloud and nothing else. It works with Sync Sidebar off, and it saves what it
+  deletes to a file in ReArc's Backups folder first.
+- A new version shows the way it does in Arc. A pill at the bottom of the sidebar reads "New
+  ReArc Version Available". Rest the pointer on it for the "Automatic Updates" checkbox and
+  "Restart and Update", which installs and reopens ReArc with your windows. A security fix
+  reads "Critical Update Available"; an update that a build can no longer do without reads
+  "Required Update". Neither forces anything: you still choose when to restart.
+- Settings › Max is back, and none of it is AI. Tidy Tab Titles, Tidy Downloads, Tidy Tabs
+  and Instant Links are small scripted helpers: each follows fixed rules on your Mac and
+  sends nothing anywhere. The assistants in the command bar are only shortcuts that open
+  ChatGPT, Claude or another company's own site with what you typed. ReArc itself runs no
+  AI. Everything in the tab is off until you turn it on.
+  - Tidy Tab Titles shortens a tab's title when you pin it. A title you typed is never
+    replaced, and Reset Title brings the page's own title back.
+  - Tidy Downloads gives a finished download a clearer name. It never overwrites a file,
+    never changes the extension, and leaves installers, disk images and scripts alone. The
+    Downloads tray shows the earlier name with "Use Original Name".
+  - Tidy Tabs: with more than six Today tabs, a broom by the Today divider files them into
+    folders by topic and site. One Undo puts every tab back.
+  - Instant Links: ⇧↩ on a search opens its first result (DuckDuckGo and Google; other
+    search engines open their results page). Searches separated by commas open one tab each,
+    five at most.
+  - Assistants: ChatGPT, Claude, Perplexity, Grok, Le Chat and HuggingChat open with your
+    text filled in. Gemini, Copilot, DeepSeek and Kimi cannot take text in their address, so
+    ReArc opens the site and copies your text for you to paste. You can add your own.
 - New app icons, all drawn from ReArc's own sunrise. Settings › Icon has two lists. Along the
   Sun's Path shows the mark at five moments of the sunrise: ReArc, First Light, Daybreak,
   Golden Hour and Moonrise. Treatments shows it in other finishes: Neon, Fluted Glass,
   Sorbet, Sketchbook, Prism and Graphite. Each row says in a few words what it is, and the
   one in use is marked Current icon. As before, the Dock shows your choice while ReArc is
   running; Finder and Launchpad keep the standard icon.
+- The first time you switch to the mini sidebar (⇧⌘S), a note says the address bar can hide
+  itself, with a button to the setting.
 
 **Changed**
+- Containers you made before this build still show as profiles, because nothing recorded
+  which profile they came from. Settings › Profiles offers "Make This a Container of ▸" on
+  any profile with exactly one space. Nothing changes until you choose.
+- Deleting a profile deletes its containers too; the confirmation names them.
+- "Auto-hide address bar" in Settings › Advanced no longer needs "Show URL in toolbar" to be
+  on, because the mini sidebar always puts the address in the toolbar.
+- With Instant Links on, ⇧↩ on a plain web search opens the first result. It used to open
+  the search in Little ReArc, and still does for addresses, tabs, history and site searches.
+- The command bar no longer has a row of key hints under the list; a row's tooltip shows
+  them.
+- In the space header, the "…" button now appears to the left of the profile avatar, so the
+  avatar no longer moves when the pointer comes over the header.
 - The old alternate icons (Sextant, Compass, Loupe, Arch, Aperture, Monogram and Electric
   Arc) are gone. If you had chosen one, ReArc shows its standard icon after this update;
   pick a new one in Settings › Icon.
+
+**Known**
+- Site searches you add in the engine's own search settings page do not become shortcuts
+  yet; imported ones and the built-in list do.
+- Tidy Tabs puts its folders in the Pinned section, because folders only exist there. Until
+  you undo, those tabs are pinned, and with Sync Sidebar on they sync.
+- With Instant Links on, a single search that contains a comma is split into several.
+- After Tidy Downloads renames a file, the engine's own downloads page still shows the
+  earlier name.
+- "Delete from This Mac and iCloud" on a profile does not delete its containers' records
+  from iCloud when Sync Sidebar is off; the confirmation says so.
+- Clear Browsing Data does not clear your earlier site-search queries; Clear Command Bar
+  History does.
 
 ## ReArc 0.1.0 (677) — 2026-11-12
 
