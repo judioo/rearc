@@ -39,6 +39,8 @@ final class BrowserViewModel {
     let easelStore = EaselDocumentStore()
     let captureFileStore = CaptureFileStore()
     let faviconStore: FaviconStore
+    /// Profile pictures, beside the sidebar file.
+    @ObservationIgnored let avatarImages: ProfileAvatarImageStore
     let persistence: SidebarFilePersistence
     private let syncPipeline: SyncOutboundPipeline
     let syncEngine: SyncEngine
@@ -606,6 +608,7 @@ final class BrowserViewModel {
         self.persistence = persistence
         self.faviconStore = faviconStore
             ?? FaviconStore(directory: persistence.fileURL.deletingLastPathComponent().appendingPathComponent("Favicons", isDirectory: true))
+        self.avatarImages = ProfileAvatarImageStore(besideSidebarFile: persistence.fileURL)
         self.store = store ?? SidebarFilePersistence.loadStore(persistence: persistence)
         self.sidebarRecoveredFromCorruption = persistence.loadOutcome == .recoveredFromCorruptFile
         self.isFirstRun = persistence.isFirstRun

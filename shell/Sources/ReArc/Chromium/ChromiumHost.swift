@@ -306,6 +306,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             ?? SidebarFilePersistence.loadStore(persistence: persistence)
         runtime.legacyDefaultOwner = store.profiles.first?.id
         let model = BrowserViewModel(store: store, persistence: persistence, preparedStartup: prepared, deferStartup: true)
+        model.removeUnusedProfileAvatarImages()
         // Profile opens complete asynchronously; each gets this policy before its first tab.
         runtime.downloadDirectory = model.downloads.directory
         PerfSignposts.launchEvent("ModelLoaded")
