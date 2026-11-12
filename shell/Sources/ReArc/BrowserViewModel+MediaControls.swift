@@ -190,6 +190,9 @@ extension BrowserViewModel {
     /// then the strip stays and the player shows a still of the tab.
     /// The read-back is the compositor's copy of the view, so it sees a
     /// surface that never arrives, not a CALayer that fails to present it.
+    /// On the main actor: the engine's read-back aborts off the main thread, and this
+    /// model's state is the main thread's (the first build of this crashed the self-test).
+    @MainActor
     func watchLiveVideo(_ tabID: Tab.ID) async {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         while !Task.isCancelled {
@@ -212,6 +215,7 @@ extension BrowserViewModel {
     }
 
     /// The tab's page as it is now, for a blank player's still.
+    @MainActor
     private func takeLiveVideoStill(_ tabID: Tab.ID) async {
         guard liveVideoStills[tabID] == nil, let engine = mediaEngine(for: tabID),
               let data = try? await engine.captureSnapshot(scope: .visible), let image = NSImage(data: data) else { return }
