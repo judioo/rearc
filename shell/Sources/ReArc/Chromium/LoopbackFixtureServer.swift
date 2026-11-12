@@ -130,6 +130,58 @@ final class LoopbackFixtureServer {
         rec.start(); setTimeout(function () { rec.stop(); }, 2500);
         </script></body></html>
         """,
+        // The /pip player the way YouTube plays in ReArc: VP9 at 1280x720 through
+        // Media Source Extensions, which VideoToolbox decodes in hardware on
+        // Apple silicon (the engine has no H.264: proprietary_codecs is off, so
+        // YouTube sends VP9 or AV1). /pip's 320x180 VP8 blob is always decoded
+        // in software. `window.hw` is MediaCapabilities' powerEfficient for it.
+        "/pip-mse": """
+        <!doctype html><html><head><title>pip-loading</title></head><body style="margin:0">
+        <video id="v" playsinline style="width:640px;height:360px"></video><script>
+        var v = document.getElementById('v'), W = 1280, H = 720;
+        var c = document.createElement('canvas'); c.width = W; c.height = H;
+        var g = c.getContext('2d'), n = 0;
+        setInterval(function () {
+          g.fillStyle = 'hsl(' + (n * 10 % 360) + ',80%,50%)'; g.fillRect(0, 0, W, H);
+          g.fillStyle = '#fff'; g.fillRect((n * 23) % W, 0, 80, H); n++;
+        }, 50);
+        var type = 'video/webm; codecs="vp9,opus"';
+        window.hw = 'unknown';
+        if (navigator.mediaCapabilities) {
+          navigator.mediaCapabilities.decodingInfo({ type: 'media-source', video: { contentType: 'video/webm; codecs="vp09.00.31.08"',
+            width: W, height: H, bitrate: 4000000, framerate: 20 } })
+            .then(function (r) { window.hw = r.supported ? (r.powerEfficient ? 'hardware' : 'software') : 'unsupported'; });
+        }
+        var stream = c.captureStream(20), ac = new AudioContext(), osc = ac.createOscillator();
+        var dest = ac.createMediaStreamDestination(), gain = ac.createGain();
+        gain.gain.value = 0; osc.connect(gain); gain.connect(dest); osc.start();
+        stream.addTrack(dest.stream.getAudioTracks()[0]);
+        var parts = [], rec = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9,opus', videoBitsPerSecond: 4000000 });
+        rec.ondataavailable = function (e) { parts.push(e.data); };
+        rec.onstop = function () {
+          if (!window.MediaSource || !MediaSource.isTypeSupported(type)) { document.title = 'pip-err:no-mse-vp9'; return; }
+          var ms = new MediaSource();
+          ms.addEventListener('sourceopen', function () {
+            var sb = ms.addSourceBuffer(type);
+            sb.addEventListener('updateend', function () {
+              if (ms.readyState === 'open') ms.endOfStream();
+              v.loop = true;
+              v.play().then(function () { document.title = 'pip-playing'; }, function (e) { document.title = 'pip-err:' + e.name; });
+            }, { once: true });
+            new Blob(parts, { type: 'video/webm' }).arrayBuffer().then(function (b) { sb.appendBuffer(b); });
+          }, { once: true });
+          v.src = URL.createObjectURL(ms);
+        };
+        window.rvfc = 0;
+        if (v.requestVideoFrameCallback) {
+          var counted = function () { window.rvfc++; v.requestVideoFrameCallback(counted); };
+          v.requestVideoFrameCallback(counted);
+        }
+        v.addEventListener('enterpictureinpicture', function () { document.title = 'pip-in'; });
+        v.addEventListener('leavepictureinpicture', function () { document.title = 'pip-out'; });
+        rec.start(); setTimeout(function () { rec.stop(); }, 3000);
+        </script></body></html>
+        """,
         // Four case-insensitive "needle"s, two of them lowercase.
         "/find": """
         <!doctype html><html><head><title>find</title></head><body style="font:24px -apple-system">
