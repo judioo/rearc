@@ -10,7 +10,7 @@ committed `RELEASES.md` has a heading for the build it is about to make:
 for example `## ReArc 2026.1114.741 — 2026-11-14`: the version is the release's date, the
 same date as after the dash, and its build. `<build>` is the commit count of the commit
 that adds the entry, so write it as the last commit before the release, with
-`echo $(( $(git rev-list --count HEAD) + 1 ))` as the number. Entries up to 726 keep their
+`echo $(( $(git rev-list --count HEAD) + 1 ))` as the number. Entries up to 677 keep their
 `## ReArc 0.1.0 (<build>) — <YYYY-MM-DD>` headings. Details: engine/docs/RELEASE.md,
 "Release notes" and "Versioning".
 
@@ -19,7 +19,7 @@ that adds the entry, so write it as the last commit before the release, with
 Merged since the last release and not yet in a build. The next release's entry takes these
 lines and this section starts empty again.
 
-## ReArc 0.1.0 (726) — 2026-11-12
+## ReArc 2026.1112.740 — 2026-11-12
 
 **New**
 - The command bar looks and moves like Arc's. ⌘T opens a solid card over the page, with no
@@ -84,6 +84,16 @@ lines and this section starts empty again.
   running; Finder and Launchpad keep the standard icon.
 - The first time you switch to the mini sidebar (⇧⌘S), a note says the address bar can hide
   itself, with a button to the setting.
+- A new version number. ReArc's version is now the release date and the build, as in
+  2026.1112.740: year, month and day, then the build. Builds up to 677 were all "0.1.0" with the
+  build in brackets. Updating from an older build works as before.
+- About ReArc shows the latest version. Under your version it says "You have the latest
+  version." with the time it last checked, or "Latest: … — Update available" with Restart
+  and Update. Opening About checks quietly, at most once a minute.
+- The media player in the sidebar tells you where the tab is. Rest the pointer on the player
+  and under the title it names the space and folder the playing tab is in. Clicking it now
+  also opens a collapsed folder, scrolls to the tab, and switches profile when the tab is in
+  another one.
 
 **Changed**
 - Containers you made before this build still show as profiles, because nothing recorded
@@ -102,7 +112,26 @@ lines and this section starts empty again.
   Arc) are gone. If you had chosen one, ReArc shows its standard icon after this update;
   pick a new one in Settings › Icon.
 
+**Fixes**
+- You can always find a playing video. The player in the sidebar now stays whenever the
+  playing tab is off screen, also while the video is in the floating Picture in Picture
+  window. Before, the player hid behind that window, and when the window showed no picture
+  (see Known) there was nothing left to click.
+- The floating Picture in Picture window opens on the display your ReArc window is on. It
+  used to open on the main display, wherever your window was.
+- When a floating or sidebar video has no picture, ReArc shows the tab's still image and "The
+  video plays in its tab" with the controls, where it can tell.
+- A tab that is playing in another space is no longer archived by "Archive tabs after". Tabs
+  in a call are spared too.
+- A player you closed with ✕ comes back when the next track of a playlist starts.
+- With the mini sidebar and "Play video in the sidebar" on, a video you leave now goes to the
+  floating window; it had nowhere to show.
+
 **Known**
+- Video from YouTube, and other sites that send video the graphics chip decodes, shows black
+  in the floating Picture in Picture window and in the sidebar video. The sound plays and the
+  video plays normally in its tab. This is also in 677. It needs a change to the engine and
+  is being worked on.
 - Site searches you add in the engine's own search settings page do not become shortcuts
   yet; imported ones and the built-in list do.
 - Tidy Tabs puts its folders in the Pinned section, because folders only exist there. Until
