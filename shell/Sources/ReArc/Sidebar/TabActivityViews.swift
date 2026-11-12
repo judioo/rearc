@@ -60,10 +60,10 @@ extension View {
     /// over the toolbar strip (ARC-RECORDING-ANALYSIS.md §6), or centred
     /// `toolbarHeight` down, under the strip, covering no control.
     func shellToast(_ toast: ShellToast?, toolbarHeight: CGFloat = 0, openSettings: @escaping (SettingsPane) -> Void = { _ in },
-                    choose: @escaping (Bool) -> Void = { _ in }) -> some View {
+                    undo: @escaping () -> Void = {}, choose: @escaping (Bool) -> Void = { _ in }) -> some View {
         overlay(alignment: .topTrailing) {
             if let toast, toast.placement == .corner {
-                ShellToastView(toast: toast, choose: choose, openSettings: openSettings)
+                ShellToastView(toast: toast, choose: choose, openSettings: openSettings, undo: undo)
                     .padding(.top, 5)
                     .padding(.trailing, 6)
                     .transition(.scale(scale: 0.5, anchor: .topTrailing).combined(with: .opacity))
@@ -72,7 +72,7 @@ extension View {
         }
         .overlay(alignment: .top) {
             if let toast, toast.placement == .belowToolbar {
-                ShellToastView(toast: toast, choose: choose, openSettings: openSettings)
+                ShellToastView(toast: toast, choose: choose, openSettings: openSettings, undo: undo)
                     .padding(.top, toolbarHeight + 8)
                     .transition(.scale(scale: 0.5, anchor: .top).combined(with: .opacity))
                     .id(toast.id)
@@ -95,6 +95,8 @@ struct ShellToastView: View {
     var choose: (Bool) -> Void = { _ in }
     /// A tip's "Settings…" button.
     var openSettings: (SettingsPane) -> Void = { _ in }
+    /// The Undo button.
+    var undo: () -> Void = {}
     @Environment(\.themeChrome) private var chrome
     @State private var shareAnchor: NSView?
 
@@ -147,6 +149,9 @@ struct ShellToastView: View {
             }
             if case .openSettings(let pane) = toast.action {
                 toastButton("Settings…", prominent: true) { openSettings(pane) }
+            }
+            if toast.action == .undo {
+                toastButton("Undo", prominent: true, action: undo)
             }
         }
         .padding(.leading, 10)

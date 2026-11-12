@@ -109,6 +109,16 @@ public enum TidyTabTitles {
         return result == clean || result.isEmpty ? nil : result
     }
 
+    /// The page's own title has not arrived: the tab shows a stand-in
+    /// (its address, host, "New Tab"), so tidying waits for it.
+    public static func isPlaceholder(_ title: String, url: URL) -> Bool {
+        let trimmed = title.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty || ["new tab", "untitled", "loading…", "loading...", "page", "about:blank"].contains(trimmed.lowercased()) { return true }
+        let host = url.host() ?? ""
+        let bareHost = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        return trimmed == url.absoluteString || trimmed == host || trimmed == bareHost
+    }
+
     /// A tab whose title should be tidied now: no custom title, or an
     /// automatic one (a page title change may tidy again); a title the
     /// person typed is theirs.

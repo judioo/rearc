@@ -1266,6 +1266,7 @@ final class BrowserViewModel {
         let resolvedTitle = (title?.isEmpty == false) ? title : nil
         let fallback = store.tab(withID: tabID)?.title ?? url.host() ?? "Page"
         store.updateTab(tabID, title: resolvedTitle ?? fallback, url: url)
+        noteTitleForTidy(tabID)
         // The new URL can change which boosts apply: this tab's now, the rest with the follow-up.
         if let tab = store.tab(withID: tabID) {
             engineHost.installBoosts(store.activeBoostEntries(for: tab), forTabID: tabID, profileID: profileID(for: tab))
@@ -2099,6 +2100,7 @@ final class BrowserViewModel {
             reopenClosedTab()
         case .pinTab:
             guard let id = store.selectedTabID, store.pinTab(id) else { return "Cannot pin this tab" }
+            tidyTitleIfNeeded(id)
             loadSelectedIfNeeded()
         case .unpinTab:
             guard let id = store.selectedTabID, store.unpinTab(id) else { return "Cannot unpin this tab" }

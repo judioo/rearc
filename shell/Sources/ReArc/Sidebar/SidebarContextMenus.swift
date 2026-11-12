@@ -44,6 +44,10 @@ struct TabContextMenu: View {
             .disabled(!model.canUnloadTab(tab.id))
             .help("Frees the page's memory; the tab stays here and reloads when you open it")
         Button("Rename…") { model.beginRename(.tab(tab.id)) }
+        if tab.customTitle != nil {
+            Button("Reset Title") { model.resetTitle(tab.id) }
+                .help("Shows the page’s own title again")
+        }
         ItemIconMenu(model: model, itemID: tab.id)
         Button("Duplicate") { model.duplicateTab(tab.id) }
         Button("Copy Link") { model.copyURL(of: tab.id) }
