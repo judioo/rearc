@@ -7,7 +7,7 @@
 # Docs: engine/docs/RELEASE.md.
 #
 # Usage: scripts/make-dmg.sh [path/to/ReArc.app] [--out FILE.dmg]
-#   default app dist/release/ReArc.app; default output next to it, ReArc-<version>-<build>.dmg
+#   default app dist/release/ReArc.app; default output next to it, ReArc-<version>.dmg
 #   Identity: REARC_RELEASE_IDENTITY, else REARC_SIGN_IDENTITY (env or signing.local.env).
 set -euo pipefail
 
@@ -39,9 +39,10 @@ grep -q 'flags=.*runtime' <<<"$app_info" || die "$APP lacks the hardened runtime
 
 VERSION="$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")"
 BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")"
-# The file name carries the build, as the version reads everywhere else: 0.1.0 (602).
+# ReArc-2026.1112.726.dmg: the version carries the build (release/version.py dmg-name).
 BUILD="$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")"
-DMG="${DMG:-$(dirname "$APP")/ReArc-$VERSION-$BUILD.dmg}"
+NAME="$(python3 -I "$SHELL_DIR/scripts/release/version.py" dmg-name "$VERSION" "$BUILD")" || die "no DMG name for $VERSION ($BUILD)"
+DMG="${DMG:-$(dirname "$APP")/$NAME}"
 VOLUME="ReArc"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rearc-dmg.XXXXXX")"
 MOUNT="$WORK/mount"

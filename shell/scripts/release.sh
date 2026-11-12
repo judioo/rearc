@@ -127,13 +127,18 @@ load_signing_env "$SHELL_DIR"
 # 1. Source: the committed shell/ at HEAD, so uncommitted work never ships. The stage keeps
 #    unchanged files' timestamps (rsync --checksum), so the release build stays incremental.
 REVISION="$(git -C "$REPO" rev-parse HEAD)"
-# A distributable build needs its entry in the committed RELEASES.md (RELEASE.md, "Release notes").
+# The version (RELEASE.md, "Versioning"): YYYY.MMDD.<build>. A distributable build is dated by
+# its entry in the committed RELEASES.md, which it needs (RELEASE.md, "Release notes"); any
+# other build by its commit, in Dubai time.
 if [[ $DMG == 1 ]]; then
-  marketing="$(tr -d '[:space:]' <"$LIVE_SHELL/scripts/release/VERSION")"
-  build="$(git -C "$REPO" rev-list --count "$REVISION")"
-  git -C "$REPO" show "$REVISION:RELEASES.md" 2>/dev/null | grep -qF "## ReArc $marketing ($build)" \
-    || die "RELEASES.md at HEAD has no \"## ReArc $marketing ($build) — <date>\" entry; commit the release notes first"
+  stamp="$(python3 -I "$LIVE_SHELL/scripts/release/version.py" release --repo "$REPO" --revision "$REVISION")" \
+    || die "RELEASES.md at HEAD needs the heading for this build (above); commit the release notes first"
+else
+  stamp="$(python3 -I "$LIVE_SHELL/scripts/release/version.py" commit --repo "$REPO" --revision "$REVISION")" \
+    || die "no version for $REVISION"
 fi
+read -r DISPLAY_VERSION BUILD_NUMBER <<<"$stamp"
+DMG_NAME="$(python3 -I "$LIVE_SHELL/scripts/release/version.py" dmg-name "$DISPLAY_VERSION" "$BUILD_NUMBER")"
 SUFFIX=""
 if [[ $FROM_HEAD == 1 ]]; then
   STAGE="${REARC_RELEASE_STAGE:-$SHELL_DIR/dist/.release-src}"
@@ -158,15 +163,12 @@ APP="$DIST/ReArc.app"
 PLIST="$APP/Contents/Info.plist"
 
 # 3. Version stamp (RELEASE.md, "Versioning"). The engine framework keeps its own version.
-MARKETING="$(tr -d '[:space:]' <"$LIVE_SHELL/scripts/release/VERSION")"
-[[ $MARKETING =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "scripts/release/VERSION must be MAJOR.MINOR.PATCH"
-BUILD_NUMBER="$(git -C "$REPO" rev-list --count "$REVISION")"
 # Checked before the build: builds from this one on must not count as required.
 [[ -z $REQUIRED_BELOW ]] || (( REQUIRED_BELOW <= BUILD_NUMBER )) \
   || die "--required-below $REQUIRED_BELOW is above this build ($BUILD_NUMBER)"
 ENGINE_VERSION="$(plutil -extract CFBundleShortVersionString raw "$OUT/Chromium.app/Contents/Info.plist")"
 OVERLAY="$(git -C "$REPO/engine/chromium/src" rev-parse HEAD)"
-plutil -replace CFBundleShortVersionString -string "$MARKETING" "$PLIST"
+plutil -replace CFBundleShortVersionString -string "$DISPLAY_VERSION" "$PLIST"
 plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$PLIST"
 plutil -replace ReArcEngineVersion -string "$ENGINE_VERSION" "$PLIST"
 plutil -replace ReArcSourceRevision -string "$REVISION$SUFFIX" "$PLIST"
@@ -186,7 +188,7 @@ if [[ ${#OVERRIDES[@]} -gt 0 ]]; then
   for override in "${OVERRIDES[@]}"; do plutil -insert ReArcReleaseGateOverrides -string "$override" -append "$PLIST"; done
   echo "==> WARNING: gate overrides recorded in Info.plist ReArcReleaseGateOverrides: ${OVERRIDES[*]}" >&2
 fi
-echo "==> version $MARKETING ($BUILD_NUMBER), engine Chromium $ENGINE_VERSION overlay ${OVERLAY:0:10}"
+echo "==> version $DISPLAY_VERSION (build $BUILD_NUMBER), engine Chromium $ENGINE_VERSION overlay ${OVERLAY:0:10}"
 
 # 4. Sign (inside-out, hardened runtime, timestamps), then keep the symbols.
 "$SHELL_DIR/scripts/sign-release.sh" "$APP" 2>&1 | tee "$DIST/sign-release.log"
@@ -311,11 +313,11 @@ if [[ $DMG == 1 ]]; then
 fi
 
 if [[ $NOTARIZE == 1 && $DMG == 1 ]]; then
-  "$SHELL_DIR/scripts/notarize.sh" "$DIST/ReArc-$MARKETING-$BUILD_NUMBER.dmg"
+  "$SHELL_DIR/scripts/notarize.sh" "$DIST/$DMG_NAME"
 fi
 if [[ -n $APPCAST ]]; then
-  cp "$DIST/ReArc-$MARKETING-$BUILD_NUMBER.dmg" "$APPCAST/ReArc-$MARKETING-$BUILD_NUMBER.dmg"
-  levels=(--version "$BUILD_NUMBER")
+  cp "$DIST/$DMG_NAME" "$APPCAST/$DMG_NAME"
+  levels=(--version "$BUILD_NUMBER" --display-version "$DISPLAY_VERSION")
   [[ $CRITICAL == 0 ]] || levels+=(--critical)
   [[ -z $REQUIRED_BELOW ]] || levels+=(--required-below "$REQUIRED_BELOW")
   "$SHELL_DIR/scripts/release/generate-appcast.sh" "$APPCAST" "$CHANNEL" "${levels[@]}"
