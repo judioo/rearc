@@ -258,6 +258,34 @@ final class CloudProfileTests: XCTestCase {
         XCTAssertEqual(server.records(account: "alice"), before)
     }
 
+    /// The real writer: the records as read land in Backups beside
+    /// sidebar.json and read back; where the folder can't be made, nothing is deleted.
+    func testTheBackupBesideTheSidebarFile() async throws {
+        let other = await otherMacInICloud()
+        let (here, _, _) = thisMac(other)
+        let found = try await look(here)
+        let plan = try plan(other.akilu, found)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("profile-backup-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let sidebar = folder.appendingPathComponent("sidebar.json")
+
+        // "Backups" is a file here: the folder can't be made.
+        try Data().write(to: SidebarBackup.folder(besides: sidebar))
+        let before = server.records(account: "alice")
+        let refused = await here.sync.deleteCloudProfile(plan, in: found, backup: { try SidebarBackup.writeCloudRecords($0, besides: sidebar) })
+        XCTAssertEqual(refused, .failed(SidebarSyncCoordinator.profileBackupFailedMessage))
+        XCTAssertEqual(server.records(account: "alice"), before)
+
+        try FileManager.default.removeItem(at: SidebarBackup.folder(besides: sidebar))
+        let result = await here.sync.deleteCloudProfile(plan, in: found, backup: { try SidebarBackup.writeCloudRecords($0, besides: sidebar, now: self.date) })
+        guard case .deleted(let url, _, _) = result else { return XCTFail("\(result)") }
+        XCTAssertEqual(url.deletingLastPathComponent(), SidebarBackup.folder(besides: sidebar))
+        XCTAssertTrue(url.lastPathComponent.hasPrefix("icloud-profile-before-delete-"))
+        let saved = try JSONDecoder().decode([SyncWireRecord].self, from: Data(contentsOf: url))
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: saved.map { ($0.recordName, $0) }), before.filter { other.akiluRecords.contains($0.key) })
+    }
+
     func testAProfileThatChangedSinceItWasShownIsAskedAgain() async throws {
         let other = await otherMacInICloud()
         let (here, _, _) = thisMac(other)
