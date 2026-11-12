@@ -18,6 +18,11 @@ does that, with its own scratch path `.build-chromium/`).
 Settings → Advanced also offers **Auto-hide address bar** (off by default).
 See [behavior and visual verification](../docs/AUTO-HIDE-ADDRESS-BAR.md).
 
+Settings → Max holds scripted helpers, not AI: Tidy Tab Titles, Tidy
+Downloads, Tidy Tabs and Instant Links follow fixed rules on this Mac and
+send nothing, and the assistants are shortcuts to each company's own site
+(all off by default; see [docs/FEATURE-SPECS/MAX.md](../docs/FEATURE-SPECS/MAX.md)).
+
 ## Engines
 
 `WKEngine` (WKWebView) is the default. The Chromium engine (`ChromiumEngine`,
