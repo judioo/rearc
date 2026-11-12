@@ -87,7 +87,10 @@ final class Wave32ShellTests: XCTestCase {
         model.isSidebarVisible = true
 
         model.popOutLiveVideo(a.id)
+        XCTAssertEqual(model.mediaStrips(in: nil), [a.id], "no panel on screen yet: the strip stays")
+        model.livePanelTabID = a.id
         XCTAssertEqual(model.mediaStrips(in: nil), [], "Arc hides the strip while the panel shows the video")
+        model.livePanelTabID = nil
         model.minimizeLiveVideo(a.id)
         XCTAssertEqual(model.mediaStrips(in: nil), [a.id])
         XCTAssertEqual(model.mediaStripInfo(for: a.id)?.offersPictureInPicture, true, "Open Picture in Picture")

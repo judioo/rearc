@@ -22,6 +22,9 @@ struct LivePlayerCard: View {
                     LiveVideoHostView(video: video, owner: .sidebar)
                         .opacity(video.hasFirstFrame ? 1 : 0)
                         .animation(.easeOut(duration: 0.2), value: video.hasFirstFrame)
+                    if model.blankLiveVideos.contains(info.id) {
+                        LiveVideoStill(model: model, tabID: info.id)
+                    }
                     LiveVideoControls(model: model, tabID: info.id, video: video, style: .sidebar)
                 }
             }
@@ -32,8 +35,43 @@ struct LivePlayerCard: View {
         .clipShape(RoundedRectangle(cornerRadius: MediaStripMetrics.radius, style: .continuous))
         .background(MediaStripBackground())
         .animation(.spring(response: 0.3, dampingFraction: 0.9), value: height)
+        .task(id: video?.overlayID) { await model.watchLiveVideo(info.id) }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Video from \(info.title)")
+    }
+}
+
+/// What a live video shows when its view has no picture (`watchLiveVideo`):
+/// the tab's snapshot, else its icon and title, and where the video plays.
+/// Never a black box; the controls stay over it and a click goes to the tab.
+struct LiveVideoStill: View {
+    let model: BrowserViewModel
+    let tabID: Tab.ID
+
+    var body: some View {
+        let tab = model.store.tab(withID: tabID)
+        ZStack {
+            Color.black
+            if let still = model.liveVideoStills[tabID] {
+                Image(nsImage: still)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .opacity(0.7)
+            } else if let tab {
+                SiteIconView(image: model.favicon(for: tab), token: tab.faviconToken, size: 28)
+            }
+            VStack {
+                Spacer(minLength: 0)
+                Text("The video plays in its tab")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding(.bottom, 22)
+            }
+        }
+        .clipped()
+        .allowsHitTesting(false)
+        .accessibilityElement()
+        .accessibilityLabel("No picture from \(tab?.displayTitle ?? "the video"); it plays in its tab")
     }
 }
 

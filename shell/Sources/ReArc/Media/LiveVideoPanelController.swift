@@ -7,6 +7,8 @@ import SidebarModel
 /// same engine view the sidebar card shows. It follows the model: shown
 /// while a tab's effective placement is `.panel`, ordered out otherwise
 /// (minimized into the strip, docked, or the session ended).
+/// `BrowserViewModel.livePanelTabID` says whose video it has on a screen:
+/// the strip of that tab hides only then.
 @MainActor
 final class LiveVideoPanelController {
     private weak var model: BrowserViewModel?
@@ -61,18 +63,30 @@ final class LiveVideoPanelController {
             panel.contentAspectRatio = size
         }
         if !panel.isVisible {
-            panel.setFrame(lastFrame ?? defaultFrame(for: video.naturalSize), display: false)
+            // On the display the person is looking at: the last frame's place
+            // there, or the corner; a panel on another display is out of sight.
+            let screens = NSScreen.screens.map(\.visibleFrame)
+            let target = anchorScreen()?.visibleFrame ?? screens.first ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+            panel.setFrame(Self.frame(last: lastFrame, naturalSize: video.naturalSize, screens: screens, on: target), display: false)
             panel.orderFrontRegardless()
         }
+        let shown = panel.isVisible && Self.isOnScreen(panel.frame) ? tabID : nil
+        if model.livePanelTabID != shown { model.livePanelTabID = shown }
     }
 
     private func hide() {
+        if model?.livePanelTabID != nil { model?.livePanelTabID = nil }
         guard let panel, panel.isVisible || panel.contentView != nil else { return }
         lastFrame = panel.frame
         panel.orderOut(nil)
         // Dropping the hosting view takes the video view out of this window.
         panel.contentView = nil
         tabID = nil
+    }
+
+    /// Most of the panel lies on some display.
+    private static func isOnScreen(_ frame: NSRect) -> Bool {
+        NSScreen.screens.contains { $0.frame.intersection(frame).area >= frame.area / 2 }
     }
 
     private var dragAnchor: NSPoint?
@@ -90,7 +104,8 @@ final class LiveVideoPanelController {
     }
 
     private func makePanel() -> NSPanel {
-        let panel = NSPanel(contentRect: defaultFrame(for: nil), styleMask: [.borderless, .nonactivatingPanel, .resizable],
+        let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let panel = NSPanel(contentRect: Self.frame(last: nil, naturalSize: nil, screens: [visible], on: visible), styleMask: [.borderless, .nonactivatingPanel, .resizable],
                             backing: .buffered, defer: false)
         panel.level = .floating
         panel.isFloatingPanel = true
@@ -106,13 +121,35 @@ final class LiveVideoPanelController {
         return panel
     }
 
-    /// 320 pt wide at the video's aspect, 16 pt in from the main screen's bottom right.
-    private func defaultFrame(for natural: CGSize?) -> NSRect {
-        let visible = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+    /// The screen of the browser window the person is in (the strip's button,
+    /// the switch away that started automatic PiP), else the main screen.
+    private func anchorScreen() -> NSScreen? {
+        let window = [NSApp.keyWindow, NSApp.mainWindow].compactMap { $0 }.first { $0 !== panel && !($0 is NSPanel) }
+            ?? NSApp.orderedWindows.first { $0 !== panel && !($0 is NSPanel) && $0.isVisible }
+        return window?.screen ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
+    /// Where the panel opens on `target` (a screen's visible frame): the
+    /// last frame when it is there; a last frame from another display at the
+    /// same place relative to `target`, kept inside it; otherwise 320 pt wide
+    /// at the video's aspect, 16 pt in from the bottom right.
+    nonisolated static func frame(last: NSRect?, naturalSize natural: CGSize?, screens: [NSRect], on target: NSRect) -> NSRect {
+        if let last {
+            if target.intersection(last).area >= last.area / 2 { return last }
+            if let source = screens.max(by: { $0.intersection(last).area < $1.intersection(last).area }),
+               source.intersection(last).area > 0 {
+                let size = NSSize(width: min(last.width, target.width), height: min(last.height, target.height))
+                let x = target.minX + (last.minX - source.minX) / max(1, source.width - last.width) * (target.width - size.width)
+                let y = target.minY + (last.minY - source.minY) / max(1, source.height - last.height) * (target.height - size.height)
+                return NSRect(x: min(max(x, target.minX), target.maxX - size.width).rounded(),
+                              y: min(max(y, target.minY), target.maxY - size.height).rounded(),
+                              width: size.width, height: size.height)
+            }
+        }
         var aspect = 16.0 / 9.0
         if let natural, natural.width > 0, natural.height > 0 { aspect = natural.width / natural.height }
         let width: CGFloat = 320, height = (width / aspect).rounded()
-        return NSRect(x: visible.maxX - width - 16, y: visible.minY + 16, width: width, height: height)
+        return NSRect(x: target.maxX - width - 16, y: target.minY + 16, width: width, height: height)
     }
 }
 
@@ -129,11 +166,19 @@ struct LiveVideoPanelContent: View {
         ZStack {
             Color.black
             LiveVideoHostView(video: video, owner: .panel)
+            if model.blankLiveVideos.contains(tabID) {
+                LiveVideoStill(model: model, tabID: tabID)
+            }
             LiveVideoControls(model: model, tabID: tabID, video: video, style: .panel)
                 .simultaneousGesture(DragGesture(minimumDistance: 4)
                     .onChanged { _ in onDrag(false) }
                     .onEnded { _ in onDrag(true) })
         }
         .ignoresSafeArea()
+        .task(id: video.overlayID) { await model.watchLiveVideo(tabID) }
     }
+}
+
+private extension NSRect {
+    var area: CGFloat { isNull || isEmpty ? 0 : width * height }
 }

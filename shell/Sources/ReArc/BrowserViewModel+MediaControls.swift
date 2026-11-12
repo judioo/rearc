@@ -19,14 +19,18 @@ extension BrowserViewModel {
     }
 
     /// The strips for a window, front first. A source whose video shows in
-    /// the floating panel has none until the panel is minimized, and one in
-    /// the page's own Picture in Picture window has none while it is open
-    /// (Arc's pop-out, ARC-RECORDING-ANALYSIS.md §7).
+    /// the floating panel has none while the panel is on screen, and one in
+    /// the engine's own Picture in Picture window has none while it is open
+    /// (Arc's pop-out, ARC-RECORDING-ANALYSIS.md §7). Any other source that
+    /// is off screen here has one, whatever space, folder or profile it is in.
     func mediaStrips(in window: SidebarWindowID?) -> [Tab.ID] {
-        var suppressed = Set(livePlacements.keys.filter { effectiveLivePlacement(for: $0)?.suppressesStrip == true })
-        for (id, media) in mediaStateByTab where media.isPictureInPicture && livePlacements[id] == nil {
-            suppressed.insert(id)
-        }
+        var suppressed = MediaControlsModel.playersOnScreen(
+            media: mediaStateByTab,
+            placements: livePlacements.compactMapValues { $0.effective(sidebarVisible: showsLiveCardInSidebar) },
+            // A panel showing black is no player.
+            panelTabID: livePanelTabID.flatMap { blankLiveVideos.contains($0) ? nil : $0 },
+            engineHasOwnPiPWindow: !engineHost.supportsLiveVideo
+        )
         // A tab in a call shows its call card instead of a strip, as in Arc.
         suppressed.formUnion(captureStateByTab.keys)
         return mediaControls.strips(visibleTabIDs: visibleTabIDs(in: window), suppressed: suppressed)
@@ -107,20 +111,28 @@ extension BrowserViewModel {
         return engine.liveVideo
     }
 
-    /// Where the tab's live video is now: a sidebar placement falls back to the panel while the sidebar is hidden.
+    /// Where the tab's live video is now: a sidebar placement falls back to
+    /// the panel while the sidebar is hidden or mini (the column has no card).
     func effectiveLivePlacement(for tabID: Tab.ID) -> LiveVideoPlacement? {
-        livePlacements[tabID]?.effective(sidebarVisible: isSidebarVisible)
+        livePlacements[tabID]?.effective(sidebarVisible: showsLiveCardInSidebar)
     }
 
-    func mediaStripInfo(for tabID: Tab.ID) -> MediaStripInfo? {
+    private var showsLiveCardInSidebar: Bool {
+        isSidebarVisible && !isMiniSidebar(in: store.keyWindowID)
+    }
+
+    func mediaStripInfo(for tabID: Tab.ID, in window: SidebarWindowID? = nil) -> MediaStripInfo? {
         guard let tab = store.tab(withID: tabID) else { return nil }
         let media = mediaState(for: tabID)
         let video = liveVideo(for: tabID)
         let placement = livePlacements[tabID]
         return MediaStripInfo(
             id: tabID,
-            title: media.title ?? tab.displayTitle,
+            // Arc titles the strip with the tab as the sidebar names it (a
+            // renamed tab's own name), not the media session's title.
+            title: tab.displayTitle,
             site: tab.url.host() ?? tab.displayTitle,
+            location: mediaTabLocation(tab, in: window),
             favicon: favicon(for: tab),
             faviconToken: tab.faviconToken,
             isPlaying: video?.isPlaying ?? media.isPlaying,
@@ -130,6 +142,30 @@ extension BrowserViewModel {
             offersPictureInPicture: placement?.offersBackToPiP == true
                 || (placement == nil && media.canPictureInPicture && !media.isPictureInPicture)
         )
+    }
+
+    /// Where a strip's tab lives, so the strip says where to find it: its
+    /// space and the folders around it ("Demo › Project C"), a favorite's
+    /// Favorites, with the profile first when `window` shows another one.
+    func mediaTabLocation(_ tab: Tab, in window: SidebarWindowID?) -> String {
+        var parts: [String] = []
+        let owner = store.owningProfileID(of: profileID(for: tab))
+        if owner != store.owningProfileID(of: space(in: window).profileID), let profile = store.profile(withID: owner) {
+            parts.append(profile.name)
+        }
+        if store.favoriteOwner(of: tab.id) != nil {
+            parts.append("Favorites")
+        } else {
+            if let space = store.spaceContaining(tabID: tab.id).flatMap(store.space(withID:)) { parts.append(space.name) }
+            var folders: [String] = []
+            var id = store.splitContaining(tabID: tab.id)?.split.id ?? tab.id
+            while let folderID = store.parentFolderID(of: id), let folder = store.folder(withID: folderID) {
+                folders.insert(folder.title, at: 0)
+                id = folderID
+            }
+            parts += folders
+        }
+        return parts.joined(separator: " › ")
     }
 
     /// New live videos start in the sidebar (Video in Sidebar) or the panel;
@@ -142,6 +178,43 @@ extension BrowserViewModel {
         for id in livePlacements.keys where mediaStateByTab[id]?.hasLiveVideo != true {
             livePlacements[id] = nil
         }
+        for id in blankLiveVideos where livePlacements[id] == nil { blankLiveVideos.remove(id) }
+        for id in liveVideoStills.keys where livePlacements[id] == nil { liveVideoStills[id] = nil }
+    }
+
+    /// While a view shows `tabID`'s live video: is there a picture? Read back
+    /// four times a quarter second apart, a second after it appears and every
+    /// two seconds after, while it plays. Hardware-decoded video (YouTube's
+    /// VP9 and AV1) has shown black here while the page's own video played;
+    /// then the strip stays and the player shows a still of the tab.
+    /// The read-back is the compositor's copy of the view, so it sees a
+    /// surface that never arrives, not a CALayer that fails to present it.
+    func watchLiveVideo(_ tabID: Tab.ID) async {
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        while !Task.isCancelled {
+            if let video = liveVideo(for: tabID), video.isPlaying {
+                var samples: [UInt32?] = []
+                for index in 0 ..< 4 {
+                    if index > 0 { try? await Task.sleep(nanoseconds: 250_000_000) }
+                    samples.append(await withCheckedContinuation { done in video.readPixel { done.resume(returning: $0) } })
+                }
+                guard !Task.isCancelled, liveVideo(for: tabID) === video else { return }
+                if LiveVideoDrawing.isBlank(samples) {
+                    if blankLiveVideos.insert(tabID).inserted { await takeLiveVideoStill(tabID) }
+                } else if blankLiveVideos.contains(tabID) {
+                    blankLiveVideos.remove(tabID)
+                    liveVideoStills[tabID] = nil
+                }
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+    }
+
+    /// The tab's page as it is now, for a blank player's still.
+    private func takeLiveVideoStill(_ tabID: Tab.ID) async {
+        guard liveVideoStills[tabID] == nil, let engine = mediaEngine(for: tabID),
+              let data = try? await engine.captureSnapshot(scope: .visible), let image = NSImage(data: data) else { return }
+        if blankLiveVideos.contains(tabID) { liveVideoStills[tabID] = image }
     }
 
     // MARK: - Strip buttons
@@ -150,14 +223,20 @@ extension BrowserViewModel {
     /// video ends its session first (Chromium focuses the tab as PiP's back to tab).
     func goToMediaTab(_ tabID: Tab.ID) {
         liveVideo(for: tabID)?.perform(.backToTab)
-        if let spaceID = store.spaceContaining(tabID: tabID), spaceID != store.activeSpaceID {
-            store.selectSpace(spaceID)
-        }
-        if let location = store.splitContaining(tabID: tabID) {
-            store.selectSplit(location.split.id, focusTabID: tabID)
-        } else {
-            store.selectTab(tabID)
-        }
+        showTab(tabID)
+    }
+
+    /// Shows a tab wherever it is, as Arc's strip does: another profile's
+    /// tab switches profile as the profile menu would, then its space, its
+    /// collapsed folders open, a split focuses its pane, and the list scrolls
+    /// to its row.
+    func showTab(_ tabID: Tab.ID) {
+        guard let tab = store.tab(withID: tabID) else { return }
+        let owner = store.owningProfileID(of: profileID(for: tab))
+        if owner != store.activeOwningProfileID { store.selectProfile(owner) }
+        guard store.focusTab(tabID) else { return }
+        let row = store.splitContaining(tabID: tabID)?.split.id ?? tabID
+        sidebarRowReveal = SidebarReveal(id: row, serial: (sidebarRowReveal?.serial ?? 0) + 1)
         loadSelectedIfNeeded()
     }
 

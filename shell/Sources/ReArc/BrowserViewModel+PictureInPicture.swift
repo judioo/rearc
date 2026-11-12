@@ -78,17 +78,9 @@ extension BrowserViewModel {
     /// PiP's back-to-tab button (Chromium phase 2): show that tab in its space.
     func revealTab(showing engine: AnyObject) {
         guard let id = engineHost.allTabEngines().first(where: { ($0.2 as AnyObject) === engine })?.0 else { return }
-        if let spaceID = store.spaceContaining(tabID: id), spaceID != store.activeSpaceID {
-            store.selectSpace(spaceID)
-        }
-        if let location = store.splitContaining(tabID: id) {
-            store.selectSplit(location.split.id, focusTabID: id)
-        } else {
-            store.selectTab(id)
-        }
         // Coming back by hand is not a switch away: no automatic PiP for the tab left now.
         autoPiPEnteredTabIDs.remove(id)
-        loadSelectedIfNeeded()
+        showTab(id)
     }
 
     // MARK: - Printing (Chromium ABI 1.28, WebKit printOperation)
