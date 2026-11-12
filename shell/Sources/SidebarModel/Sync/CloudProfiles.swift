@@ -443,13 +443,37 @@ public enum ProfileCloudText {
             + removal(plan, receiving: receiving) + " A copy of iCloud's is saved first in \(backupFolder)."
     }
 
-    /// A profile of this Mac whose place in iCloud isn't known: only this Mac changes.
-    public static func localDeleteMessage(_ presence: ProfileCloudPresence) -> String {
+    /// The delete of a profile that is only on this Mac, or whose place in
+    /// iCloud isn't known (only this Mac changes then, unless sync is on).
+    public static func localDeleteMessage(_ presence: ProfileCloudPresence, syncOn: Bool) -> String {
         let base = "Its spaces and their tabs are deleted too. This can't be undone."
+        if syncOn { return base + " Sync Sidebar is on, so it is also deleted from iCloud and other Macs that sync." }
         switch presence {
         case .looking: return base + " iCloud is still being checked, so only this Mac changes."
         case .unknown: return base + " ReArc couldn't check iCloud, so only this Mac changes."
         case .inICloud, .onlyHere: return base
         }
+    }
+
+    /// The detail pane's note for a profile of this Mac.
+    public static func note(_ presence: ProfileCloudPresence, syncOn: Bool) -> String? {
+        switch presence {
+        case .inICloud: return syncOn ? syncOnNote : syncOffNote
+        case .onlyHere: return syncOn ? "Sync Sidebar is on, so it goes to iCloud with the next sync." : nil
+        case .looking, .unknown: return nil
+        }
+    }
+
+    public static let deleteFromICloudDetail = "Removes it, its spaces and what is in them from iCloud. This Mac is not changed."
+
+    public static func deleted(_ name: String, fromThisMacToo: Bool, queued: Bool, backupFolder: String) -> String {
+        let done = queued
+            ? "“\(name)” was deleted here. iCloud gets the change when sync next reaches it."
+            : "“\(name)” was deleted from \(fromThisMacToo ? "this Mac and iCloud" : "iCloud")."
+        return done + " A copy of what was deleted from iCloud is in \(backupFolder)."
+    }
+
+    public static func gone(_ name: String) -> String {
+        "“\(name)” is no longer in iCloud, so nothing was deleted."
     }
 }

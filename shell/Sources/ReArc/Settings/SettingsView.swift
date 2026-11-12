@@ -186,6 +186,8 @@ struct ProfilesSettingsPane: View {
     var capabilities = SettingsCapabilities()
     @State private var editor: ProfileEditorRequest?
     @State private var selection: Profile.ID?
+    /// A profile only iCloud has, selected in the list's "In iCloud only".
+    @State private var cloudSelection: Profile.ID?
     @State private var renaming: Profile.ID?
     @State private var renameDraft = ""
     @State private var deleting: Profile.ID?
@@ -197,13 +199,22 @@ struct ProfilesSettingsPane: View {
         model.store.profile(withID: selection ?? model.store.activeProfileID) ?? model.store.profiles.first
     }
 
+    private var selectedCloud: CloudProfile? {
+        cloudSelection.flatMap(model.cloudOnlyProfile)
+    }
+
     var body: some View {
         SettingsPage {
             intro
             HStack(alignment: .top, spacing: 10) {
                 profileList
                 VStack(alignment: .leading, spacing: SettingsMetrics.boxSpacing) {
-                    if let profile = selected { profileSettings(profile) }
+                    if let cloud = selectedCloud {
+                        CloudProfileDetail(model: model, cloud: cloud)
+                    } else if let profile = selected {
+                        ProfileCloudStatusGroup(model: model, profileID: profile.id)
+                        profileSettings(profile)
+                    }
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -234,8 +245,9 @@ struct ProfilesSettingsPane: View {
                 deleting = nil
             }
         } message: {
-            Text("Its spaces and their tabs are deleted too. This can't be undone.")
+            Text(ProfileCloudText.localDeleteMessage(deleting.map(model.cloudPresence(of:)) ?? .onlyHere, syncOn: model.isSyncEnabled))
         }
+        .cloudProfileDeleteAlert(model)
     }
 
     /// Arc's text; its "Learn more." opens the explanation here, not a web page.
@@ -278,6 +290,7 @@ struct ProfilesSettingsPane: View {
                     ForEach(model.store.profiles) { profile in
                         profileRow(profile)
                     }
+                    CloudOnlyProfilesSection(model: model, selection: $cloudSelection)
                 }
                 .padding(.horizontal, 15)
                 .padding(.vertical, 14)
@@ -286,10 +299,10 @@ struct ProfilesSettingsPane: View {
             HStack(spacing: 0) {
                 listButton("plus", help: "Add Profile") { editor = ProfileEditorRequest() }
                 Divider().frame(height: 18)
-                listButton("minus", help: model.store.profiles.count < 2 ? "The last profile can't be deleted." : "Delete Profile") {
-                    deleting = selected?.id
+                listButton("minus", help: model.store.profiles.count < 2 && selectedCloud == nil ? "The last profile can't be deleted." : "Delete Profile") {
+                    deleteSelected()
                 }
-                .disabled(model.store.profiles.count < 2)
+                .disabled(model.store.profiles.count < 2 && selectedCloud == nil)
                 Divider().frame(height: 18)
                 listButton("pencil", help: "Rename Profile") {
                     renameDraft = selected?.name ?? ""
@@ -304,14 +317,30 @@ struct ProfilesSettingsPane: View {
         .overlay(RoundedRectangle(cornerRadius: SettingsMetrics.boxRadius, style: .continuous).strokeBorder(SettingsColors.border))
     }
 
+    /// A profile iCloud has too asks where to delete it from; one only here
+    /// (or not known yet) deletes as it always did; one only in iCloud is deleted there.
+    private func deleteSelected() {
+        if let cloud = selectedCloud { return model.requestCloudProfileDeletion(cloud.id) }
+        guard let id = selected?.id else { return }
+        if model.cloudPresence(of: id) == .inICloud, model.canDeleteFromICloud {
+            model.requestCloudProfileDeletion(id)
+        } else {
+            deleting = id
+        }
+    }
+
     private func profileRow(_ profile: Profile) -> some View {
-        let isSelected = profile.id == selected?.id
-        return Button { selection = profile.id } label: {
+        let isSelected = selectedCloud == nil && profile.id == selected?.id
+        return Button {
+            selection = profile.id
+            cloudSelection = nil
+        } label: {
             HStack(spacing: 6) {
                 ProfileAvatarView(profile: profile, diameter: 16)
                 Text(profile.name).font(.system(size: 13)).lineLimit(1)
                 Spacer(minLength: 4)
                 Text(model.spaceCountText(for: profile.id)).font(.system(size: 11)).foregroundStyle(.secondary)
+                CloudPresenceMark(presence: model.cloudPresence(of: profile.id))
             }
             .padding(.horizontal, 7)
             .frame(height: 32)
