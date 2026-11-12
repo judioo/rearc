@@ -158,7 +158,7 @@ class MarkerTests(unittest.TestCase):
 class GenerateLevelsTests(unittest.TestCase):
     """generate-appcast.sh with stub generate_appcast / sign_update that sign like Sparkle."""
 
-    def tools(self, root):
+    def tools(self, root, template=FEED):
         tools = root / "tools"
         tools.mkdir()
         key = root / "test-key.pem"
@@ -166,7 +166,7 @@ class GenerateLevelsTests(unittest.TestCase):
         der = subprocess.run([OPENSSL, "pkey", "-in", str(key), "-pubout", "-outform", "DER"], capture_output=True, check=True).stdout
         public = base64.b64encode(der[-32:]).decode()
         (root / "public-key.txt").write_text(public + "\n")
-        (root / "template.xml").write_text(FEED)
+        (root / "template.xml").write_text(template)
         (tools / "generate_keys").write_text(f"#!/bin/bash\nprintf '%s' '{public}'\n")
         # Writes the feed for TEST_VERSION (critical when asked) and signs it, as 2.10.1 does.
         (tools / "generate_appcast").write_text(
@@ -189,8 +189,8 @@ class GenerateLevelsTests(unittest.TestCase):
             tool.chmod(0o755)
         return tools, key, public
 
-    def generate(self, root, *args, version=700):
-        tools, key, public = self.tools(root)
+    def generate(self, root, *args, version=700, template=FEED):
+        tools, key, public = self.tools(root, template)
         archives = root / "archives"
         archives.mkdir()
         log = root / "calls"
@@ -275,6 +275,60 @@ class GenerateLevelsTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("does not carry the flags", result.stderr)
             self.assertFalse(feed_path.exists())
+
+
+    def test_the_new_item_must_show_the_release_version(self):
+        with tempfile.TemporaryDirectory(prefix="rearc-levels-test-") as temp:
+            result, feed_path, _, _ = self.generate(Path(temp), "--version", 700, "--display-version", "2026.1112.700",
+                                                    template=dated_feed_template())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            item = ET.fromstring(self.signed_bytes(feed_path)).find("channel/item")
+            self.assertEqual(item.findtext(f"{{{SPARKLE}}}shortVersionString"), "2026.1112.700")
+        with tempfile.TemporaryDirectory(prefix="rearc-levels-test-") as temp:
+            # generate_appcast read the app's version, 0.1.0; the release stamped 2026.1112.700.
+            result, feed_path, _, _ = self.generate(Path(temp), "--version", 700, "--display-version", "2026.1112.700")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("shows '0.1.0'", result.stderr)
+            self.assertFalse(feed_path.exists())
+        with tempfile.TemporaryDirectory(prefix="rearc-levels-test-") as temp:
+            result, _, calls, _ = self.generate(Path(temp), "--display-version", "2026.1112.700")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse([c for c in calls if c.startswith("generate:")], "nothing generated")
+
+
+def dated_feed_template():
+    """FEED with the new item in the dated form (version.py) and the 677 item as it was."""
+    head, rest = FEED.split("<item>", 1)
+    new_item, old_items = rest.split("</item>", 1)
+    new_item = new_item.replace("<title>0.1.0</title>", "<title>2026.1112.{version}</title>").replace(
+        "<sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>",
+        "<sparkle:shortVersionString>2026.1112.{version}</sparkle:shortVersionString>").replace(
+        "ReArc-0.1.0-{version}.dmg", "ReArc-2026.1112.{version}.dmg")
+    return head + "<item>" + new_item + "</item>" + old_items
+
+
+class DisplayVersionTests(unittest.TestCase):
+    """sparkle:shortVersionString is display only: its shape is checked, nothing is decided by it."""
+
+    def check(self, text, ok, args=(), message=None):
+        MarkerTests.check(self, text, ok, args, message)
+
+    def test_old_and_dated_items_together(self):
+        text = dated_feed_template().format(version=726, critical="")
+        self.check(text, ok=True)
+        self.check(text, ok=True, args=("--version", 726, "--display-version", "2026.1112.726"))
+        self.check(text, ok=False, args=("--version", 726, "--display-version", "2026.1113.726"), message="expected '2026.1113.726'")
+        self.check(text, ok=False, args=("--display-version", "2026.1112.726"), message="needs --version")
+        self.check(text.replace("ReArc-2026.1112.726.dmg", "ReArc-0.1.0-726.dmg"), ok=False,
+                   args=("--version", 726, "--display-version", "2026.1112.726"), message="expected ReArc-2026.1112.726.dmg")
+
+    def test_a_display_version_that_is_not_one_is_refused(self):
+        text = dated_feed_template().format(version=726, critical="")
+        for bad, message in [("2026.1112.725", "another build's version"), ("0.1.0 beta", "not a version"),
+                             ("‮0.1.0", "not a version"), ("1." * 20 + "1", "not a version"), ("", "not a version")]:
+            with self.subTest(bad):
+                self.check(text.replace("<sparkle:shortVersionString>2026.1112.726<",
+                                        f"<sparkle:shortVersionString>{bad}<"), ok=False, message=message)
 
 
 class ReleaseFlagsTests(unittest.TestCase):
