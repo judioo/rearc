@@ -30,6 +30,9 @@ REPORTS="$HOME/Library/Logs/DiagnosticReports"
 BUNDLES="$(cd "$(dirname "$0")" && pwd)/upgrade-bundles.sh"
 "$BUNDLES" new "$NEW" || exit 1
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rearc-upgrade.XXXXXX")"
+# The path a process runs under: launch() finds the copy of a shipped previous release by it,
+# and TMPDIR ("/var/…/T/") gave "/var/…/T//rearc-upgrade…" for a process at "/private/var/…/T/rearc-upgrade…".
+WORK="$(cd "$WORK" && pwd -P)"
 trap 'rm -rf "$WORK"' EXIT
 crashes() { ls "$REPORTS" 2>/dev/null | grep -c '^ReArc-' || true; }
 

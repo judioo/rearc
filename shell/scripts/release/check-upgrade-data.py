@@ -159,7 +159,8 @@ def main():
             sys.exit(f"check-upgrade-data: no ReArc.app at {app}")
     if subprocess.run([BUNDLES, "new", apps[-1]]).returncode != 0:
         sys.exit("check-upgrade-data: the new build must be the bundle release.sh is verifying")
-    work = tempfile.mkdtemp(prefix="rearc-upgrade-data.")
+    # The path a process runs under (pids() matches on it): /var is a link to /private/var.
+    work = os.path.realpath(tempfile.mkdtemp(prefix="rearc-upgrade-data."))
     try:
         launchable = {}
         for app in apps[:-1]:
