@@ -19,7 +19,7 @@ that adds the entry, so write it as the last commit before the release, with
 Merged since the last release and not yet in a build. The next release's entry takes these
 lines and this section starts empty again.
 
-## ReArc 2026.1112.740 — 2026-11-12
+## ReArc 2026.1112.747 — 2026-11-12
 
 **New**
 - The command bar looks and moves like Arc's. ⌘T opens a solid card over the page, with no
@@ -30,7 +30,8 @@ lines and this section starts empty again.
 - Site search shortcuts. Type a site search's keyword and the field shows "Search <name>"
   with a Tab key. Press Tab and the site's name appears as a chip in the site's colour, the
   list folds away, and you finish the search. From then on only your earlier searches on that
-  site are suggested. Nothing is sent anywhere while you type in this mode.
+  site are suggested. While a chip is on, what you type goes nowhere until you press Return.
+  The exception is your default search engine, which suggests as it does in the plain bar.
 - Bring your site searches from another browser. File › Import from Another Browser… has a
   new "Site searches" choice for Arc, Chrome and the other Chromium browsers. It brings the
   keyword, name and search address of the ones you added yourself.
@@ -50,9 +51,10 @@ lines and this section starts empty again.
   emoji.
 - See and manage your profiles in iCloud. Settings › Profiles shows whether each profile is
   on this Mac and in iCloud or only on this Mac, and lists the profiles that are in iCloud
-  only, with their spaces. "Delete from iCloud…" removes one profile, its spaces and their
+  only, with their spaces. "Delete from iCloud…" deletes one profile, its spaces and their
   tabs from iCloud and nothing else. It works with Sync Sidebar off, and it saves what it
-  deletes to a file in ReArc's Backups folder first.
+  deletes to a file in ReArc's Backups folder first. The records are marked deleted the way
+  sync deletes; a Mac that syncs clears them out for good after 30 days.
 - A new version shows the way it does in Arc. A pill at the bottom of the sidebar reads "New
   ReArc Version Available". Rest the pointer on it for the "Automatic Updates" checkbox and
   "Restart and Update", which installs and reopens ReArc with your windows. A security fix
@@ -85,7 +87,7 @@ lines and this section starts empty again.
 - The first time you switch to the mini sidebar (⇧⌘S), a note says the address bar can hide
   itself, with a button to the setting.
 - A new version number. ReArc's version is now the release date and the build, as in
-  2026.1112.740: year, month and day, then the build. Builds up to 677 were all "0.1.0" with the
+  2026.1112.747: year, month and day, then the build. Builds up to 677 were all "0.1.0" with the
   build in brackets. Updating from an older build works as before.
 - About ReArc shows the latest version. Under your version it says "You have the latest
   version." with the time it last checked, or "Latest: … — Update available" with Restart
@@ -96,6 +98,8 @@ lines and this section starts empty again.
   another one.
 
 **Changed**
+- "Play video in the sidebar" is gone from Settings › Advanced for now. It used the same
+  drawing that was black, and comes back when that is fixed.
 - Containers you made before this build still show as profiles, because nothing recorded
   which profile they came from. Settings › Profiles offers "Make This a Container of ▸" on
   any profile with exactly one space. Nothing changes until you choose.
@@ -113,25 +117,18 @@ lines and this section starts empty again.
   pick a new one in Settings › Icon.
 
 **Fixes**
+- Picture in Picture shows the video again. In every build so far the floating video window
+  was black: sound, no picture. You saw it when you left a playing video's tab with the
+  window covered or minimized, or pressed the player's Picture in Picture button. The
+  floating window is now the engine's own, and it shows the video.
 - You can always find a playing video. The player in the sidebar now stays whenever the
-  playing tab is off screen, also while the video is in the floating Picture in Picture
-  window. Before, the player hid behind that window, and when the window showed no picture
-  (see Known) there was nothing left to click.
-- The floating Picture in Picture window opens on the display your ReArc window is on. It
-  used to open on the main display, wherever your window was.
-- When a floating or sidebar video has no picture, ReArc shows the tab's still image and "The
-  video plays in its tab" with the controls, where it can tell.
+  playing tab is off screen, also while the video is in the floating window. Before, the
+  player hid behind that window, and with the window black there was nothing left to click.
 - A tab that is playing in another space is no longer archived by "Archive tabs after". Tabs
   in a call are spared too.
 - A player you closed with ✕ comes back when the next track of a playlist starts.
-- With the mini sidebar and "Play video in the sidebar" on, a video you leave now goes to the
-  floating window; it had nowhere to show.
 
 **Known**
-- Video from YouTube, and other sites that send video the graphics chip decodes, shows black
-  in the floating Picture in Picture window and in the sidebar video. The sound plays and the
-  video plays normally in its tab. This is also in 677. It needs a change to the engine and
-  is being worked on.
 - Site searches you add in the engine's own search settings page do not become shortcuts
   yet; imported ones and the built-in list do.
 - Tidy Tabs puts its folders in the Pinned section, because folders only exist there. Until
