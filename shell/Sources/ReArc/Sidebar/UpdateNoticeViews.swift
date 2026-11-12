@@ -48,6 +48,9 @@ struct UpdateNoticePill: View {
                 UpdateNoticeCard(update: update, center: center, install: install, focus: $focus)
                     .fixedSize(horizontal: false, vertical: true)
                     .onHover { inside in
+                        // A card open without hover (critical, required, progress) stays
+                        // open until the pointer that came over it leaves again.
+                        if inside, !reveal.isShown { pinned = true }
                         setHover(inside, .content)
                         if inside { center.pointerVisited() }
                     }
