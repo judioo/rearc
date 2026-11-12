@@ -1,16 +1,33 @@
 import Foundation
 
-/// Visual identity for a profile in the chrome (SF Symbol or emoji on a tinted circle).
+/// Visual identity for a profile in the chrome (SF Symbol, emoji or picture on a tinted circle).
 public struct ProfileAvatarDescriptor: Hashable, Codable, Sendable {
     public enum Kind: Hashable, Codable, Sendable {
         case sfSymbol(name: String)
         case emoji(String)
     }
 
+    /// The symbol or emoji, also shown wherever `image` cannot be: on a Mac
+    /// without the file, and in builds before pictures (677 and older).
     public var kind: Kind
+    /// A picture chosen in Settings, by its file in `ProfileAvatarImageStore`.
+    /// Its own key, not a `Kind` case: older builds throw on a case they do
+    /// not know, which quarantines sidebar.json, and skip a key they do not know.
+    public var image: ProfileAvatarImageName?
 
-    public init(kind: Kind) {
+    public init(kind: Kind, image: ProfileAvatarImageName? = nil) {
         self.kind = kind
+        self.image = image
+    }
+
+    enum CodingKeys: String, CodingKey { case kind, image }
+
+    /// Total: a kind from a later build shows the default symbol, and a bad
+    /// image name shows the kind.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = (try? c.decode(Kind.self, forKey: .kind)) ?? Self.personalDefault().kind
+        image = try? c.decodeIfPresent(ProfileAvatarImageName.self, forKey: .image)
     }
 
     public static func personalDefault() -> ProfileAvatarDescriptor {
@@ -49,7 +66,7 @@ public struct Profile: Identifiable, Hashable, Codable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
         name = try c.decode(String.self, forKey: .name)
-        avatar = try c.decodeIfPresent(ProfileAvatarDescriptor.self, forKey: .avatar) ?? .personalDefault()
+        avatar = (try? c.decodeIfPresent(ProfileAvatarDescriptor.self, forKey: .avatar)) ?? .personalDefault()
         themeColor = try c.decodeIfPresent(SpaceTheme.self, forKey: .themeColor) ?? .default
     }
 
