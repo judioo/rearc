@@ -13,6 +13,15 @@ public protocol SidebarCloudReading: AnyObject, Sendable {
     func deleteZone() async throws
 }
 
+/// Changes records already in the sidebar zone outside CKSyncEngine, so it
+/// works with Sync Sidebar off: no zone is created, no record is added, and
+/// this Mac's sync state is not involved (deleting one profile from iCloud).
+public protocol SidebarCloudEditing: SidebarCloudReading {
+    /// New versions of records a look read: all of them or none, each only
+    /// while it is unchanged in iCloud since that read (its `serverTag`).
+    func saveExisting(_ records: [SyncWireRecord]) async throws -> SyncModifyResult
+}
+
 /// What iCloud holds, in the numbers Settings and the turn-on sheet show.
 public struct CloudSidebarSummary: Equatable, Sendable {
     public var spaces: Int
@@ -61,6 +70,8 @@ public struct CloudSidebarFound: Equatable, Sendable {
     /// (the T-03 rules a merge applies).
     public var records: [SyncWireRecord]
     public var summary: CloudSidebarSummary
+    /// Its profiles, by name (Settings › Profiles).
+    public var profiles: [CloudProfile] = []
 }
 
 /// The result of looking at iCloud.
@@ -108,17 +119,6 @@ extension CloudSidebarSummary {
     /// applies (orphans rescued, unreadable rows left out), on a scratch store.
     @MainActor
     static func of(_ records: [String: SyncRecordPayload]) -> CloudSidebarSummary {
-        let scratch = SidebarStore(mutationJournal: SidebarMutationJournal(deviceID: UUID()))
-        let base = scratch.makeSnapshot()
-        scratch.applySnapshot(SidebarSyncProjection.apply(records, onto: base))
-        let synced = Set(records.filter { $0.value.isAlive && $0.value.kind == .space }.keys)
-        let spaces = scratch.spaces.filter { synced.contains(SyncRecordKind.space.recordName(for: $0.id)) }
-        let pinned = spaces.reduce(0) { $0 + SidebarTree.leaves(scratch.content(for: $1.id).pinned).count }
-        let favorites = scratch.profiles.reduce(0) { $0 + scratch.favorites(in: $1.id).count }
-        let newest = records.values.compactMap(\.latestStamp).map(\.millis).max()
-        let copies = ArcTwinSpaces.repair(scratch.makeSnapshot()).1
-        return CloudSidebarSummary(spaces: spaces.count, pinnedTabs: pinned, favorites: favorites,
-                                   lastUpdated: newest.map { Date(timeIntervalSince1970: Double($0) / 1000) },
-                                   arcCopies: copies.mergedSameProfile + copies.removedEmpty)
+        CloudProjection(records).summary
     }
 }

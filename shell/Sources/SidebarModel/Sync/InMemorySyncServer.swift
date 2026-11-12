@@ -40,6 +40,8 @@ public final class InMemorySyncServer: @unchecked Sendable {
     /// Runs once at the start of the next modify (tests: another Mac saves in between).
     public var beforeModify: ((InMemorySyncServer) -> Void)?
     public private(set) var modifyCount = 0
+    /// Targeted saves of records already there (`SidebarCloudEditing`), also counted in `modifyCount`.
+    public private(set) var existingSaveCount = 0
     public private(set) var fetchCount = 0
     /// Read-only looks (`SidebarCloudReading.readAllRecords`).
     public private(set) var readCount = 0
@@ -219,6 +221,40 @@ public final class InMemorySyncServer: @unchecked Sendable {
         return result
     }
 
+    /// All or none: every record must be there with the tag it was read
+    /// with; a missing zone is an error, never created.
+    func saveExisting(account: String, records: [SyncWireRecord]) throws -> SyncModifyResult {
+        if let hook = beforeModify {
+            beforeModify = nil
+            hook(self)
+        }
+        try checkFault()
+        lock.lock(); defer { lock.unlock() }
+        modifyCount += 1
+        existingSaveCount += 1
+        guard var zone = zones[account] else { throw zoneError(account: account) }
+        var result = SyncModifyResult()
+        for record in records {
+            guard let existing = zone.records[record.recordName] else {
+                result.failures[record.recordName] = .unknownItem
+                continue
+            }
+            if record.serverTag == nil || record.serverTag != existing.wire.serverTag {
+                result.failures[record.recordName] = .serverRecordChanged(server: existing.wire)
+            }
+        }
+        guard result.failures.isEmpty else { return result }
+        for record in records {
+            sequence += 1
+            var stored = record
+            stored.serverTag = Data("\(zone.generation)-\(sequence)".utf8)
+            zone.records[record.recordName] = StoredRecord(wire: stored, changeSequence: sequence)
+            result.saved.append(stored)
+        }
+        zones[account] = zone
+        return result
+    }
+
     private struct Token: Codable {
         var generation: Int
         var sequence: Int
@@ -226,7 +262,7 @@ public final class InMemorySyncServer: @unchecked Sendable {
     }
 }
 
-public final class InMemorySyncTransport: SidebarSyncTransport, SidebarCloudReading, @unchecked Sendable {
+public final class InMemorySyncTransport: SidebarSyncTransport, SidebarCloudEditing, @unchecked Sendable {
     public let server: InMemorySyncServer
     /// The signed-in account; set to simulate sign-out or switching accounts.
     public var account: String?
@@ -258,6 +294,10 @@ public final class InMemorySyncTransport: SidebarSyncTransport, SidebarCloudRead
 
     public func deleteZone() async throws {
         try server.deleteZone(account: try signedIn())
+    }
+
+    public func saveExisting(_ records: [SyncWireRecord]) async throws -> SyncModifyResult {
+        try server.saveExisting(account: try signedIn(), records: records)
     }
 
     private func signedIn() throws -> String {

@@ -15,7 +15,7 @@ import Foundation
 ///
 /// Only construct after `CloudKitSyncAvailability` said `.available`:
 /// `CKContainer` traps without the entitlement.
-public final class CloudKitSyncTransport: SidebarSyncTransport, SidebarCloudReading, CKSyncEngineDelegate, @unchecked Sendable {
+public final class CloudKitSyncTransport: SidebarSyncTransport, SidebarCloudEditing, CKSyncEngineDelegate, @unchecked Sendable {
     public static let zoneName = CloudKitSyncZone.zoneName
 
     /// Every call that reaches iCloud, one line each ("read …" or "write …").
@@ -204,6 +204,47 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, SidebarCloudRead
         reset()
     }
 
+    // MARK: SidebarCloudEditing
+
+    /// A plain atomic save outside CKSyncEngine, each record rebuilt from the
+    /// system fields it was read with and saved only if the server's copy is
+    /// still that one (`ifServerRecordUnchanged`). A record without them is
+    /// refused before anything is sent: saving it could create it. A zone
+    /// that is gone fails the save; nothing creates it.
+    public func saveExisting(_ records: [SyncWireRecord]) async throws -> SyncModifyResult {
+        let marked = records.filter { !$0.payload.isAlive }.count
+        accessLog?("write: save \(records.count) existing records, \(marked) of them marked deleted (all or none)")
+        var result = SyncModifyResult()
+        var ckRecords: [CKRecord] = []
+        for wire in records {
+            guard let tag = wire.serverTag, let record = Self.record(fromSystemFields: tag),
+                  record.recordID.recordName == wire.recordName, record.recordID.zoneID.zoneName == Self.zoneName,
+                  record.recordType == wire.payload.kind.rawValue else {
+                result.failures[wire.recordName] = .unknownItem
+                continue
+            }
+            Self.fill(record, with: wire.payload)
+            ckRecords.append(record)
+        }
+        guard result.failures.isEmpty else { return result }
+        let sent = Dictionary(uniqueKeysWithValues: records.map { ($0.recordName, $0.payload) })
+        do {
+            let (saves, _) = try await database.modifyRecords(saving: ckRecords, deleting: [], savePolicy: .ifServerRecordUnchanged, atomically: true)
+            for (id, outcome) in saves {
+                switch outcome {
+                case .success(let record):
+                    guard let payload = sent[id.recordName] else { continue }
+                    result.saved.append(SyncWireRecord(recordName: id.recordName, payload: payload, serverTag: Self.systemFields(of: record)))
+                case .failure(let error):
+                    result.failures[id.recordName] = Self.map(error, zoneID: zoneID)
+                }
+            }
+        } catch {
+            throw Self.map(error, zoneID: zoneID)
+        }
+        return result
+    }
+
     // MARK: CKSyncEngineDelegate
 
     public func handleEvent(_ event: CKSyncEngine.Event, syncEngine: CKSyncEngine) async {
@@ -277,11 +318,15 @@ public final class CloudKitSyncTransport: SidebarSyncTransport, SidebarCloudRead
     private func makeRecord(_ wire: SyncWireRecord) -> CKRecord {
         let record = wire.serverTag.flatMap(Self.record(fromSystemFields:))
             ?? CKRecord(recordType: wire.payload.kind.rawValue, recordID: CKRecord.ID(recordName: wire.recordName, zoneID: zoneID))
-        record.encryptedValues["payload"] = try? wire.payload.encoded()
-        record["isDeleted"] = Int64(wire.payload.isAlive ? 0 : 1)
-        record["schemaVersion"] = Int64(SyncRecordPayload.schemaVersion)
-        record["clientTimestamp"] = wire.payload.latestStamp?.millis ?? 0
+        Self.fill(record, with: wire.payload)
         return record
+    }
+
+    private static func fill(_ record: CKRecord, with payload: SyncRecordPayload) {
+        record.encryptedValues["payload"] = try? payload.encoded()
+        record["isDeleted"] = Int64(payload.isAlive ? 0 : 1)
+        record["schemaVersion"] = Int64(SyncRecordPayload.schemaVersion)
+        record["clientTimestamp"] = payload.latestStamp?.millis ?? 0
     }
 
     static func wire(from record: CKRecord) -> SyncWireRecord? {
