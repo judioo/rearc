@@ -259,6 +259,57 @@ final class UpdateNoticeTests: XCTestCase {
         XCTAssertEqual(other.urgency(forHostBuild: UpdateBuild(1)), .normal)
     }
 
+    /// A stamped item as Sparkle 2.10.1's SUAppcast reads it: XMLDocument, then
+    /// each child under "sparkle:" + its local name in Sparkle's namespace and
+    /// under its own prefixed name otherwise, as trimmed text. This is what
+    /// `SUAppcastItem.propertiesDictionary` holds in ReArc, and what an older
+    /// ReArc (677, 608) parses and then ignores.
+    private static let stampedFeed = """
+        <?xml version="1.0" standalone="yes"?>
+        <rss xmlns:rearc="https://rearc.imara.ae/xml-namespaces/update" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+            <channel>
+                <title>ReArc</title>
+                <item>
+                    <title>0.1.0</title>
+                    <sparkle:version>700</sparkle:version>
+                    <rearc:requiredBelow>690</rearc:requiredBelow>
+                    <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+                    <sparkle:criticalUpdate></sparkle:criticalUpdate>
+                    <enclosure url="https://rearc.imara.ae/updates/ReArc-0.1.0-700.dmg" length="1" type="application/octet-stream" sparkle:edSignature="eA=="/>
+                </item>
+            </channel>
+        </rss>
+        """
+
+    private static func sparkleProperties(_ data: Data) throws -> [AnyHashable: Any] {
+        let sparkle = "http://www.andymatuschak.org/xml-namespaces/sparkle"
+        let document = try XMLDocument(data: data, options: [.nodeLoadExternalEntitiesNever])
+        let item = try XCTUnwrap(try document.nodes(forXPath: "/rss/channel/item").first as? XMLElement)
+        var properties: [AnyHashable: Any] = [:]
+        for case let node as XMLElement in item.children ?? [] {
+            let name = node.uri == sparkle ? "sparkle:" + (node.localName ?? "") : (node.name ?? "")
+            properties[name] = node.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return properties
+    }
+
+    func testSparkleReadsTheMarkerUnderItsPrefixedName() throws {
+        let properties = try Self.sparkleProperties(Data(Self.stampedFeed.utf8))
+        XCTAssertEqual(properties["rearc:requiredBelow"] as? String, "690")
+        XCTAssertEqual(properties["sparkle:version"] as? String, "700", "Sparkle's own elements read as before")
+        XCTAssertNotNil(properties["sparkle:criticalUpdate"])
+        XCTAssertEqual(UpdateFeedFlags(isCritical: true, properties: properties).urgency(forHostBuild: UpdateBuild(677)), .required)
+        XCTAssertEqual(UpdateFeedFlags(isCritical: true, properties: properties).urgency(forHostBuild: UpdateBuild(695)), .critical)
+    }
+
+    func testTheMarkerSurvivesGenerateAppcastsRewrite() throws {
+        // The next release's generate_appcast loads the feed and writes it pretty-printed.
+        let document = try XMLDocument(data: Data(Self.stampedFeed.utf8), options: [.nodeLoadExternalEntitiesNever, .nodePreserveCDATA, .nodePreserveWhitespace])
+        let rewritten = document.xmlData(options: [.nodeCompactEmptyElement, .nodePrettyPrint])
+        XCTAssertTrue(String(decoding: rewritten, as: UTF8.self).contains("xmlns:rearc=\"https://rearc.imara.ae/xml-namespaces/update\""))
+        XCTAssertEqual(try Self.sparkleProperties(rewritten)["rearc:requiredBelow"] as? String, "690")
+    }
+
     func testBuildNumbers() {
         XCTAssertEqual(UpdateBuild("677")?.number, 677)
         XCTAssertNil(UpdateBuild("0.1.0"))

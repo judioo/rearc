@@ -17,6 +17,9 @@
 #   --no-verify       skip the launch check and self-test
 #   --appcast DIR     make DMG and generate signed appcast locally in DIR (no upload)
 #   --channel beta    tag new appcast entries beta (requires --appcast)
+#   --critical        mark the new appcast entry a critical update (requires --appcast)
+#   --required-below N  mark it required for builds below N, at most this build (requires
+#                     --appcast). Both: engine/docs/RELEASE.md, "Critical and required updates"
 #   --notarize        notarize app before DMG and DMG before appcast (opt-in)
 #   --dmg             also make the signed DMG
 #   --allow-outdated-engine  override the Mac Stable/Extended security release gate
@@ -47,6 +50,8 @@ ALLOW_NO_UPGRADE_CHECK=0
 PREVIOUS_APP="${REARC_PREVIOUS_RELEASE_APP:-}"
 APPCAST=""
 CHANNEL=""
+CRITICAL=0
+REQUIRED_BELOW=""
 NOTARIZE=0
 SELFTEST_TIMEOUT=300
 LAUNCH_RETRIED=0
@@ -65,15 +70,18 @@ while [[ $# -gt 0 ]]; do
     --previous-app) PREVIOUS_APP="$(cd "$2" && pwd)"; shift ;;
     --appcast) mkdir -p "$2"; APPCAST="$(cd "$2" && pwd)"; DMG=1; shift ;;
     --channel) CHANNEL="$2"; [[ $CHANNEL == beta ]] || die "only --channel beta is supported"; shift ;;
+    --critical) CRITICAL=1 ;;
+    --required-below) REQUIRED_BELOW="$2"; [[ $REQUIRED_BELOW =~ ^[1-9][0-9]{0,8}$ ]] || die "--required-below needs a build number"; shift ;;
     --notarize) NOTARIZE=1 ;;
     --selftest-timeout) SELFTEST_TIMEOUT="$2"; shift ;;
     --qa) QA=1 ;;
-    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
   shift
 done
 [[ -z $CHANNEL || -n $APPCAST ]] || die "--channel requires --appcast DIR"
+[[ $CRITICAL == 0 && -z $REQUIRED_BELOW || -n $APPCAST ]] || die "--critical and --required-below require --appcast DIR"
 [[ $QA == 0 || ( $DMG == 0 && $NOTARIZE == 0 ) ]] || die "--qa makes a test bundle that is never distributed: no --dmg, --appcast or --notarize"
 # A feed is published only from a fully gated run (security RC-0.1.0-544 N-04).
 OVERRIDES=()
@@ -153,6 +161,9 @@ PLIST="$APP/Contents/Info.plist"
 MARKETING="$(tr -d '[:space:]' <"$LIVE_SHELL/scripts/release/VERSION")"
 [[ $MARKETING =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "scripts/release/VERSION must be MAJOR.MINOR.PATCH"
 BUILD_NUMBER="$(git -C "$REPO" rev-list --count "$REVISION")"
+# Checked before the build: builds from this one on must not count as required.
+[[ -z $REQUIRED_BELOW ]] || (( REQUIRED_BELOW <= BUILD_NUMBER )) \
+  || die "--required-below $REQUIRED_BELOW is above this build ($BUILD_NUMBER)"
 ENGINE_VERSION="$(plutil -extract CFBundleShortVersionString raw "$OUT/Chromium.app/Contents/Info.plist")"
 OVERLAY="$(git -C "$REPO/engine/chromium/src" rev-parse HEAD)"
 plutil -replace CFBundleShortVersionString -string "$MARKETING" "$PLIST"
@@ -304,7 +315,10 @@ if [[ $NOTARIZE == 1 && $DMG == 1 ]]; then
 fi
 if [[ -n $APPCAST ]]; then
   cp "$DIST/ReArc-$MARKETING-$BUILD_NUMBER.dmg" "$APPCAST/ReArc-$MARKETING-$BUILD_NUMBER.dmg"
-  "$SHELL_DIR/scripts/release/generate-appcast.sh" "$APPCAST" "$CHANNEL"
+  levels=(--version "$BUILD_NUMBER")
+  [[ $CRITICAL == 0 ]] || levels+=(--critical)
+  [[ -z $REQUIRED_BELOW ]] || levels+=(--required-below "$REQUIRED_BELOW")
+  "$SHELL_DIR/scripts/release/generate-appcast.sh" "$APPCAST" "$CHANNEL" "${levels[@]}"
 fi
 
 # Summary: what this run did not check in full (overrides are also in Info.plist).
