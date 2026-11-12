@@ -5,11 +5,14 @@ first. The entry lists everything that changed since the previous release, writt
 the people who use ReArc. `shell/scripts/release.sh --dmg` refuses to build until the
 committed `RELEASES.md` has a heading for the build it is about to make:
 
-    ## ReArc <VERSION> (<build>) — <YYYY-MM-DD>
+    ## ReArc <YYYY.MMDD>.<build> — <YYYY-MM-DD>
 
-`<build>` is the commit count of the commit that adds the entry, so write it as the last
-commit before the release, with `echo $(( $(git rev-list --count HEAD) + 1 ))` as the
-number. Details: engine/docs/RELEASE.md, "Release notes".
+for example `## ReArc 2026.1114.741 — 2026-11-14`: the version is the release's date, the
+same date as after the dash, and its build. `<build>` is the commit count of the commit
+that adds the entry, so write it as the last commit before the release, with
+`echo $(( $(git rev-list --count HEAD) + 1 ))` as the number. Entries up to 726 keep their
+`## ReArc 0.1.0 (<build>) — <YYYY-MM-DD>` headings. Details: engine/docs/RELEASE.md,
+"Release notes" and "Versioning".
 
 ## Unreleased
 
