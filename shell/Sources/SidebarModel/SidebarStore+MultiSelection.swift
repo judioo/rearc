@@ -221,12 +221,21 @@ extension SidebarStore {
 
     // MARK: - Move to another profile
 
+    /// Move to Space's choices for rows of `spaceID`: the other spaces its
+    /// profile lists, containers' included. A move into or out of a container
+    /// changes the rows' session, so `crossesProfile` has it confirmed.
+    public func spaceMoveDestinations(from spaceID: Space.ID) -> [Space] {
+        guard let source = space(withID: spaceID) else { return [] }
+        return spaces(listedIn: source.profileID).filter { $0.id != spaceID }
+    }
+
     /// Move to Profile's choices for rows of `spaceID`: every other profile
-    /// that has spaces, in picker order, with its spaces.
+    /// that has spaces, in picker order, with its spaces (its containers' too).
     public func profileMoveDestinations(from spaceID: Space.ID) -> [(profile: Profile, spaces: [Space])] {
-        guard let owner = space(withID: spaceID)?.profileID else { return [] }
-        return profiles.filter { $0.id != owner }.compactMap { profile in
-            let spaces = spaces(in: profile.id)
+        guard let source = space(withID: spaceID)?.profileID else { return [] }
+        let owner = owningProfileID(of: source)
+        return listedProfiles.filter { $0.id != owner }.compactMap { profile in
+            let spaces = spaces(listedIn: profile.id)
             return spaces.isEmpty ? nil : (profile, spaces)
         }
     }

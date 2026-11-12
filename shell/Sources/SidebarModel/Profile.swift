@@ -23,17 +23,25 @@ public struct Profile: Identifiable, Hashable, Codable, Sendable {
     public var name: String
     public var avatar: ProfileAvatarDescriptor
     public var themeColor: SpaceTheme
+    /// Set on a container: a separate browsing session for one space of this
+    /// parent profile (SPACE-CONTAINERS.md). The space stays in the parent's
+    /// strip and follows its settings; `SidebarStore.parentProfile(ofContainer:)`
+    /// says whether the link holds. Builds up to 0.1.0 (677) ignore the key
+    /// and show the container as a plain profile.
+    public var containerOf: Profile.ID?
 
     public init(
         id: UUID = UUID(),
         name: String,
         avatar: ProfileAvatarDescriptor = .personalDefault(),
-        themeColor: SpaceTheme = .default
+        themeColor: SpaceTheme = .default,
+        containerOf: Profile.ID? = nil
     ) {
         self.id = id
         self.name = name
         self.avatar = avatar
         self.themeColor = themeColor
+        self.containerOf = containerOf
     }
 
     /// The profile a space still names after it went missing: the known one when `known`
@@ -43,7 +51,7 @@ public struct Profile: Identifiable, Hashable, Codable, Sendable {
         known.first { $0.id == id } ?? Profile(id: id, name: "Recovered Container")
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, avatar, themeColor }
+    enum CodingKeys: String, CodingKey { case id, name, avatar, themeColor, containerOf }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -51,6 +59,8 @@ public struct Profile: Identifiable, Hashable, Codable, Sendable {
         name = try c.decode(String.self, forKey: .name)
         avatar = try c.decodeIfPresent(ProfileAvatarDescriptor.self, forKey: .avatar) ?? .personalDefault()
         themeColor = try c.decodeIfPresent(SpaceTheme.self, forKey: .themeColor) ?? .default
+        // A link that does not read leaves a plain profile, never a failed load.
+        containerOf = (try? c.decodeIfPresent(Profile.ID.self, forKey: .containerOf)) ?? nil
     }
 
     public static func personalDefault(id: UUID = UUID()) -> Profile {

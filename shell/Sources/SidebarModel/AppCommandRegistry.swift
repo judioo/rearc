@@ -199,7 +199,7 @@ public struct AppCommand: Equatable, Identifiable {
         case .switchToSpace(let spaceID):
             return store.activeSpaceID != spaceID
         case .switchToProfile(let profileID):
-            return store.activeProfileID != profileID
+            return store.activeOwningProfileID != profileID
         case .moveSpaceToProfile(let profileID):
             return store.profileChangeBlocker(forSpace: store.activeSpaceID, to: profileID) == nil
         case .createProfile:
@@ -338,7 +338,7 @@ public enum AppCommandRegistry {
                 action: .moveTabToSpace(space.id)
             ))
         }
-        for profile in context.store.profiles {
+        for profile in context.store.listedProfiles {
             commands.append(AppCommand(
                 id: "switch-profile-\(profile.id.uuidString)",
                 title: "Switch to \(profile.name)",
