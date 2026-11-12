@@ -184,9 +184,10 @@ extension BrowserViewModel {
     // MARK: - Move
 
     /// Move to Space: each row keeps its section and its page, as one row's
-    /// move does. A space of another profile changes the rows' session.
+    /// move does. A space of another session (another profile, or a container's
+    /// space in the same strip) changes the rows' session, so it asks first.
     func moveItems(_ ids: [UUID], toSpace spaceID: Space.ID) {
-        if store.crossesProfile(ids, toSpace: spaceID) { return moveItemsToProfile(ids, toSpace: spaceID) }
+        if store.crossesProfile(ids, toSpace: spaceID) { return requestProfileMove(ids, toSpace: spaceID) }
         guard !store.moveEntries(ids, toSpace: spaceID).isEmpty else { return }
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
@@ -208,12 +209,15 @@ extension BrowserViewModel {
     }
 
     func profileMoveMessage(_ move: SidebarProfileMove) -> (title: String, message: String, action: String) {
-        let destination = store.space(withID: move.spaceID).flatMap { store.profile(withID: $0.profileID) }?.name ?? "the other profile"
+        let target = store.space(withID: move.spaceID)
+        let destination = target.map { sessionName(of: $0.profileID) } ?? "the other profile"
         let source = move.ids.first.flatMap { store.spaceContaining(entryID: $0) }.flatMap { store.space(withID: $0) }
-            .flatMap { store.profile(withID: $0.profileID) }?.name ?? "this profile"
+            .map { sessionName(of: $0.profileID) } ?? "this profile"
         let count = store.carriedTabIDs(move.ids).count
         let these = count == 1 ? "This tab" : "These \(count) tabs"
-        return ("Move to \(destination)?",
+        // A container's space is named as itself: it is not a profile to the person.
+        let title = target.flatMap { store.isContainer($0.profileID) ? $0.name : store.profile(withID: $0.profileID)?.name } ?? destination
+        return ("Move to \(title)?",
                 "\(these) will reload in \(destination). Cookies, sign-ins and site data stay in \(source), so you may need to sign in again. Back and forward history is lost.",
                 "Move")
     }

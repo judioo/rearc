@@ -139,7 +139,7 @@ struct PrivateWindowView: View {
                 .onSubmit {
                     window.submitAddress(
                         schemes: model.engineHost.navigationSchemes,
-                        provider: model.commandBarServices.searchProvider(for: window.parentProfileID)
+                        provider: model.commandBarServices.searchProvider(for: model.settingsProfileID(for: window.parentProfileID))
                     )
                 }
             if let error = window.addressError {
