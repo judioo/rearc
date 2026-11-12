@@ -11,10 +11,12 @@ extension BrowserViewModel {
     /// Every site search the active profile has, the person's own first.
     /// A container uses its parent's (`activeSearchProfileID`).
     var commandBarSiteSearchEngines: [SiteSearchEngine] {
-        let owner = activeSearchProfileID
-        let engines = [searchProvider.siteSearchEngine].compactMap { $0 }
-            + (activeSearchEngineSettings?.siteSearchEngines(for: owner) ?? [])
-        return SiteSearchCatalog.merged(imported: importedSiteSearches.engines(for: owner), engine: engines)
+        commandBarSiteSearchCache.value {
+            let owner = activeSearchProfileID
+            let engines = [searchProvider.siteSearchEngine].compactMap { $0 }
+                + (activeSearchEngineSettings?.siteSearchEngines(for: owner) ?? [])
+            return SiteSearchCatalog.merged(imported: importedSiteSearches.engines(for: owner), engine: engines)
+        }
     }
 
     /// The site Tab would search for the typed word, shown as a hint: its

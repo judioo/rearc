@@ -401,6 +401,8 @@ final class BrowserViewModel {
     /// The last engine answer, kept while the next keystroke's is pending so
     /// rows narrow in place instead of the list emptying and refilling.
     @ObservationIgnored var commandBarLiveCarry: CommandBarLiveResults?
+    /// `commandBarSiteSearchEngines`, rebuilt when a source changes, not per keystroke.
+    @ObservationIgnored let commandBarSiteSearchCache = ObservedCache<[SiteSearchEngine]>()
     /// Site searches brought from other browsers (`SiteSearches.json`).
     var importedSiteSearches = ImportedSiteSearches()
     @ObservationIgnored var importedSiteSearchesURL: URL?
