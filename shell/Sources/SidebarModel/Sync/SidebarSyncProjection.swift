@@ -22,7 +22,7 @@ public struct SyncRecordBody: Equatable, Sendable {
 /// state, and rescues rows whose parent is gone or forms a cycle the same way
 /// on every Mac, so devices holding the same records show the same sidebar.
 public enum SidebarSyncProjection {
-    static let tabFields = ["title", "url", "customTitle", "customIcon", "savedURL", "savedTitle"]
+    static let tabFields = ["title", "url", "customTitle", "customTitleAuto", "customIcon", "savedURL", "savedTitle"]
     /// Per-Mac tab state kept out of records: it changes on every visit.
     static let localTabKeys: Set<String> = ["lastActiveAt", "isUnread", "faviconToken"]
 
@@ -146,6 +146,8 @@ public enum SidebarSyncProjection {
         values["title"] = .string(address.title)
         values["url"] = .string(address.url.absoluteString)
         values["customTitle"] = tab.customTitle.map(SyncValue.string) ?? .null
+        // Only when set, so tabs from before Max upload nothing new.
+        if tab.customTitleIsAutomatic, tab.customTitle != nil { values["customTitleAuto"] = .bool(true) }
         values["customIcon"] = iconValue(tab.customIcon)
         values["savedURL"] = tab.savedURL.map { .string($0.absoluteString) } ?? .null
         values["savedTitle"] = tab.savedTitle.map(SyncValue.string) ?? .null
@@ -714,6 +716,7 @@ public enum SidebarSyncProjection {
                 savedTitle: item.values["savedTitle"]?.stringValue,
                 customIcon: icon(in: item.values)
             )
+            if tab.customTitle != nil, case .bool(true)? = item.values["customTitleAuto"] { tab.customTitleIsAutomatic = true }
             if isFavorite {
                 tab.savedURL = nil
                 tab.savedTitle = nil

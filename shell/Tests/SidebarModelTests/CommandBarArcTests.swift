@@ -89,7 +89,10 @@ final class CommandBarArcTests: XCTestCase {
     // MARK: The hint
 
     func testAKeywordOrTheCompletedSiteOffersItsShortcut() throws {
-        let engines = SiteSearchCatalog.merged(imported: [cushwake])
+        XCTAssertNil(SiteSearchCatalog.match("chat", in: SiteSearchCatalog.merged(imported: [cushwake]), completedHost: "chatgpt.com"),
+                     "assistants are not seeded")
+        let chatGPT = try XCTUnwrap(CommandBarAssistants.builtIn.first { $0.id == "chatgpt" }?.siteSearchEngine)
+        let engines = SiteSearchCatalog.merged(imported: [cushwake], assistants: [chatGPT])
         XCTAssertEqual(SiteSearchCatalog.match("cwc", in: engines)?.name, "cushwake", "the keyword, exactly")
         XCTAssertEqual(SiteSearchCatalog.match("CWC", in: engines)?.hint, "Search cushwake")
         let chat = try XCTUnwrap(SiteSearchCatalog.match("chat", in: engines, completedHost: "chatgpt.com"))

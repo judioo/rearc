@@ -62,7 +62,17 @@ final class WebKitDownloadCenter: NSObject, DownloadBackend {
             }
         }
         items[id] = item
+        if existing == nil { controller?.noteOrigin(Self.origin(of: download.webView), for: id) }
         emit(id, kind: existing == nil ? .created : .updated)
+    }
+
+    /// The page a download started on. A private window's (non-persistent
+    /// store), or one with no page, reports nothing and is never tidied.
+    static func origin(of webView: WKWebView?) -> DownloadOrigin {
+        guard let webView, webView.configuration.websiteDataStore.isPersistent else {
+            return DownloadOrigin(page: TidyDownloads.Origin(), isPrivate: true)
+        }
+        return DownloadOrigin(page: TidyDownloads.Origin(pageTitle: webView.title, pageHost: webView.url?.host()), isPrivate: false)
     }
 
     // MARK: DownloadBackend

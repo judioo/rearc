@@ -1,9 +1,10 @@
 import Foundation
 
 /// The Settings window's toolbar items, in Arc's order (ARC-RECORDING-2026-11-06
-/// §6.1). Arc's Max pane is its AI features and is left out.
+/// §6.1). Max keeps Arc's place but holds only rule-based helpers: no AI
+/// (FEATURE-SPECS/MAX.md).
 public enum SettingsPane: String, CaseIterable, Sendable {
-    case account, general, profiles, links, shortcuts, icon, advanced
+    case account, general, profiles, max, links, shortcuts, icon, advanced
 
     public static let defaultsKey = "rearc.settingsPane"
 
@@ -12,6 +13,7 @@ public enum SettingsPane: String, CaseIterable, Sendable {
         case .account: return "Account"
         case .general: return "General"
         case .profiles: return "Profiles"
+        case .max: return "Max"
         case .links: return "Links"
         case .shortcuts: return "Shortcuts"
         case .icon: return "Icon"
@@ -26,6 +28,7 @@ public enum SettingsPane: String, CaseIterable, Sendable {
         case .account: return "person.crop.square.filled.and.at.rectangle"
         case .general: return "gearshape"
         case .profiles: return "person"
+        case .max: return "wrench.and.screwdriver"
         case .links: return "macwindow.on.rectangle"
         case .shortcuts: return "keyboard"
         case .icon: return "app.badge"

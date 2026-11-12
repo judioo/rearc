@@ -96,6 +96,8 @@ public enum AppCommandAction: Equatable, Hashable {
     case resetPinnedTabsInSpace
     case updatePinnedURL
     case clearUnpinnedTabs
+    /// Max › Tidy Tabs: Today's tabs into folders by site and topic (TidyTabs).
+    case tidyTabs
     case findInPage
     case showDownloads
     case clearCommandBarHistory
@@ -127,6 +129,8 @@ public struct CommandBarContext {
     public var externalLinkDestination: ExternalLinkDestination
     /// "Reinstall 9 extensions from Arc" while the onboarding's queue waits.
     public var pendingExtensionReinstall: String?
+    /// Settings › Max › Tidy Tabs is on (its command is offered).
+    public var tidyTabs: Bool
 
     public init(
         store: SidebarStore,
@@ -139,8 +143,10 @@ public struct CommandBarContext {
         tabMuteModel: TabMediaMuteModel = TabMediaMuteModel(),
         navigationSchemes: NavigationURLPolicy.EngineSchemes = [],
         externalLinkDestination: ExternalLinkDestination = .littleArc,
-        pendingExtensionReinstall: String? = nil
+        pendingExtensionReinstall: String? = nil,
+        tidyTabs: Bool = false
     ) {
+        self.tidyTabs = tidyTabs
         self.externalLinkDestination = externalLinkDestination
         self.pendingExtensionReinstall = pendingExtensionReinstall
         self.store = store
@@ -291,6 +297,8 @@ public struct AppCommand: Equatable, Identifiable {
             return store.selectedTab?.isAwayFromSavedURL == true
         case .resetPinnedTabsInSpace:
             return SidebarTree.tabs(store.content(for: store.activeSpaceID).pinned).contains(where: \.isAwayFromSavedURL)
+        case .tidyTabs:
+            return context.tidyTabs && store.canTidyTabs(in: store.activeSpaceID)
         case .clearUnpinnedTabs:
             return store.content(for: store.activeSpaceID).todayLeaves.contains {
                 if case .tab = $0 { return true }
@@ -313,6 +321,15 @@ public enum AppCommandRegistry {
 
     public static func all(in context: CommandBarContext) -> [AppCommand] {
         var commands = staticCommands(in: context)
+        if context.tidyTabs {
+            commands.append(AppCommand(
+                id: "tidy-tabs",
+                title: "Tidy Tabs",
+                keywords: ["tidy", "group", "organize", "organise", "folders", "today", "broom"],
+                minQueryLength: 2,
+                action: .tidyTabs
+            ))
+        }
         if let title = context.pendingExtensionReinstall {
             commands.append(AppCommand(
                 id: "reinstall-extensions",

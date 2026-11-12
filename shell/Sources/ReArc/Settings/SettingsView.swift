@@ -28,6 +28,7 @@ struct SettingsPaneView: View {
             case .account: AccountSettingsPane(model: model)
             case .general: GeneralSettingsPane(model: model)
             case .profiles: ProfilesSettingsPane(model: model, capabilities: capabilities)
+            case .max: MaxSettingsPane(model: model)
             case .links: LinksSettingsPane(model: model)
             case .shortcuts: ShortcutsSettingsPane(model: model)
             case .icon: IconSettingsPane(model: model)

@@ -14,6 +14,9 @@ public struct SiteSearchEngine: Identifiable, Hashable, Sendable {
         case imported
         /// The profile's search engines as Chromium lists them.
         case engine
+        /// An assistant switched on in Settings › Max (`CommandBarAssistants`):
+        /// a shortcut to that company's own site.
+        case assistant
         /// ReArc's own list (Arc `seededPopularSiteSearches`).
         case seeded
     }
@@ -39,10 +42,14 @@ public struct SiteSearchEngine: Identifiable, Hashable, Sendable {
     /// The engine's suggest URL (`%s`) for this entry. Only the profile's
     /// default engine has one the shell may use; nothing else asks a site.
     public var suggestTemplate: String?
+    /// An assistant whose site takes no prompt in its address: `template` is
+    /// this page with no slot, Return opens it and puts the text on the
+    /// clipboard. Nothing is typed into the page.
+    public var clipboardPage: URL?
 
     public init(id: String, name: String, keyword: String? = nil, aliases: [String] = [], domain: String, template: String,
                 color: SpaceColor? = nil, source: Source = .seeded, verb: String = "Search", placeholder: String = "Search…",
-                suggestTemplate: String? = nil) {
+                suggestTemplate: String? = nil, clipboardPage: URL? = nil) {
         self.id = id
         self.name = name
         self.keyword = keyword.flatMap { $0.isEmpty ? nil : $0.lowercased() }
@@ -54,6 +61,7 @@ public struct SiteSearchEngine: Identifiable, Hashable, Sendable {
         self.verb = verb
         self.placeholder = placeholder
         self.suggestTemplate = suggestTemplate
+        self.clipboardPage = clipboardPage
     }
 
     /// An entry from a keyword row (the engine's list, another browser's
@@ -69,9 +77,11 @@ public struct SiteSearchEngine: Identifiable, Hashable, Sendable {
                   source: source, suggestTemplate: suggestTemplate.flatMap(SiteSearchTemplate.validated))
     }
 
-    /// The site's search page for `query`, or its home page for an empty query.
+    /// The site's search page for `query`, or its home page for an empty
+    /// query. A `clipboardPage` entry has no search page.
     public func url(for query: String) -> URL? {
-        SiteSearchTemplate.expand(template, query: query)
+        if let clipboardPage { return query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? clipboardPage : nil }
+        return SiteSearchTemplate.expand(template, query: query)
     }
 
     /// "Search cushwake", "Ask ChatGPT".
@@ -244,31 +254,26 @@ public enum SiteSearchCatalog {
                          template: "https://duckduckgo.com/?q=%s", color: rgb(0xDE5833)),
         SiteSearchEngine(id: "imdb", name: "IMDb", domain: "imdb.com",
                          template: "https://www.imdb.com/find/?q=%s", color: rgb(0xF5C518)),
-        // Arc's "Ask ChatGPT" entry (`gptSiteSearch`): ChatGPT opens a new chat
-        // with `q` as the first message. The colour is Arc's chip, measured
-        // (#579F8F, 2026-11-12 recording).
-        SiteSearchEngine(id: "chatgpt", name: "ChatGPT", aliases: ["gpt"], domain: "chatgpt.com",
-                         template: "https://chatgpt.com/?q=%s", color: rgb(0x579F8F),
-                         verb: "Ask", placeholder: "Send a Message…"),
-        SiteSearchEngine(id: "perplexity", name: "Perplexity", domain: "perplexity.ai",
-                         template: "https://www.perplexity.ai/search?q=%s", color: rgb(0x20808D),
-                         verb: "Ask", placeholder: "Ask anything…"),
+        // Assistants (Arc's "Ask ChatGPT", Perplexity, …) are not seeded: they
+        // come from `CommandBarAssistants`, and only those switched on in
+        // Settings › Max.
     ]
 
     /// Shortest text that offers a site by name (one letter matches too much).
     public static let minimumLength = 2
 
     /// One list from every source: imported first (the person's own
-    /// keywords), then the profile's engines, then the seeded list. A later
+    /// keywords), then the profile's engines, then the assistants switched
+    /// on in Settings › Max, then the seeded list. A later
     /// entry for the same search page (host and path) or the same keyword
     /// is dropped, but lends the kept one its colour, verb and placeholder
     /// when that has none of its own, and its keyword as an alias.
     public static func merged(imported: [SiteSearchEngine] = [], engine: [SiteSearchEngine] = [],
-                              seeded: [SiteSearchEngine] = seeded) -> [SiteSearchEngine] {
+                              assistants: [SiteSearchEngine] = [], seeded: [SiteSearchEngine] = seeded) -> [SiteSearchEngine] {
         var kept: [SiteSearchEngine] = []
         var byPage: [String: Int] = [:]
         var byKeyword: [String: Int] = [:]
-        for entry in imported + engine + seeded {
+        for entry in imported + engine + assistants + seeded {
             let page = pageKey(entry.template)
             if let index = byPage[page] ?? entry.keyword.flatMap({ byKeyword[$0] }) {
                 var existing = kept[index]

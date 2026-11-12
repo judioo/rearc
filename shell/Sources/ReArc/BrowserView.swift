@@ -508,7 +508,7 @@ struct BrowserView: View {
         }
         .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil,
                     toolbarHeight: showsCardToolbar ? CardToolbarView.height : 0,
-                    openSettings: { model.showSettings($0) }) { start in
+                    openSettings: { model.showSettings($0) }, undo: { model.runToastUndo() }) { start in
             if start { model.startPendingExtensionReinstall() } else { model.postponePendingExtensionReinstall() }
         }
         // The whole card, its toolbar strip too, as in Arc.

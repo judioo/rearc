@@ -267,13 +267,15 @@ final class Wave35SettingsTests: XCTestCase {
 
     // MARK: Window, quit and restore
 
-    func testSettingsPanesAreArcsWithoutMaxAndTheLastIsRemembered() {
+    func testSettingsPanesAreArcsAndTheLastIsRemembered() {
         XCTAssertEqual(SettingsPane.allCases.map(\.title),
-                       ["Account", "General", "Profiles", "Links", "Shortcuts", "Icon", "Advanced"])
+                       ["Account", "General", "Profiles", "Max", "Links", "Shortcuts", "Icon", "Advanced"])
         XCTAssertEqual(SettingsPane.load(from: defaults), .general)
         SettingsPane.shortcuts.save(to: defaults)
         XCTAssertEqual(SettingsPane.load(from: defaults), .shortcuts)
         defaults.set("max", forKey: SettingsPane.defaultsKey)
+        XCTAssertEqual(SettingsPane.load(from: defaults), .max)
+        defaults.set("previews", forKey: SettingsPane.defaultsKey)
         XCTAssertEqual(SettingsPane.load(from: defaults), .general)
     }
 

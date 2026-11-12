@@ -400,13 +400,15 @@ struct SpaceHeaderView: View {
 }
 
 /// The divider above Today with Arc's Clear action (`UnpinnedSectionDividerCellView`,
-/// menu Clear Unpinned Tabs); after a clear it offers Undo.
+/// menu Clear Unpinned Tabs); after a clear it offers Undo. With Max › Tidy
+/// Tabs on and more than six Today tabs, Arc's broom sits by it.
 struct TodayHeaderView: View {
     let model: BrowserViewModel
     let spaceID: Space.ID
     let hasTabs: Bool
     @State private var isHovering = false
     @State private var isHoveringClear = false
+    @State private var isHoveringBroom = false
     @Environment(\.themeChrome) private var chrome
 
     var body: some View {
@@ -426,7 +428,25 @@ struct TodayHeaderView: View {
                         .padding(.horizontal, 6)
                         .background(Color.clear)
                         .help("Put the cleared tabs back")
-                } else if hasTabs, isHovering {
+                }
+                if hasTabs, model.canTidyTabs(in: spaceID) {
+                    Button {
+                        if model.store.activeSpaceID != spaceID { model.selectSpace(spaceID) }
+                        model.tidyTabs(in: spaceID)
+                    } label: {
+                        BroomShape()
+                            .fill(isHoveringBroom ? chrome.title : chrome.secondaryText)
+                            .frame(width: 11, height: 11)
+                            .padding(.horizontal, 4)
+                            .frame(height: 17)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Tidy Tabs: file Today’s tabs into folders by site and topic")
+                    .accessibilityLabel("Tidy Tabs")
+                    .onHover { isHoveringBroom = $0 }
+                }
+                if hasTabs, isHovering {
                     Button {
                         if model.store.activeSpaceID != spaceID { model.selectSpace(spaceID) }
                         model.clearTodayTabs()

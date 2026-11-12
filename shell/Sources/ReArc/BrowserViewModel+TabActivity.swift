@@ -28,6 +28,8 @@ struct ShellToast: Equatable, Identifiable {
         case reinstallExtensions
         /// A tip's trailing "Settings…" button, opening that pane.
         case openSettings(SettingsPane)
+        /// "Undo": runs the model's `toastUndo` for this toast (Tidy Tabs, Tidy Downloads).
+        case undo
     }
 
     /// Arc's toasts stayed 4.6 s and 5.0 s.
@@ -169,6 +171,21 @@ extension BrowserViewModel {
         }
     }
 
+    /// A toast whose Undo runs `undo`, once, while that toast is up.
+    func showUndoToast(_ message: String, systemImage: String, duration: TimeInterval = ShellToast.defaultDuration + 3,
+                       undo: @escaping () -> Void) {
+        showToast(message, systemImage: systemImage, action: .undo, duration: duration)
+        if let id = toast?.id { toastUndo = (id, undo) }
+    }
+
+    /// The toast's Undo button.
+    func runToastUndo() {
+        guard let pending = toastUndo, toast?.id == pending.toastID else { return }
+        toastUndo = nil
+        withAnimation(ShellToast.outAnimation) { toast = nil }
+        pending.run()
+    }
+
     /// Shows `message` for about 5 s. It scales in over a frame or two and
     /// out in one (§6).
     func showToast(_ message: String, systemImage: String, keycaps: [String] = [], action: ShellToast.Action? = nil,
@@ -238,6 +255,7 @@ extension BrowserViewModel {
         if !engine.isLoading, let title, !title.isEmpty, title != tab.title, !Self.isBlankDocumentTitle(title, for: tab.url),
            engine.currentURL.map({ $0.absoluteString == tab.url.absoluteString }) ?? false {
             store.updateTab(tabID, title: title)
+            noteTitleForTidy(tabID)
         }
     }
 

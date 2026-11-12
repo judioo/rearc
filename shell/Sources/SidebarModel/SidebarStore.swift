@@ -892,11 +892,15 @@ public final class SidebarStore {
     }
 
     /// Sets (or with nil/blank clears) the user title that overrides the page title.
+    /// `automatic`: Max › Tidy Tab Titles set it, so a later tidy may replace it.
     @discardableResult
-    public func renameTab(_ id: Tab.ID, to title: String?) -> Bool {
+    public func renameTab(_ id: Tab.ID, to title: String?, automatic: Bool = false) -> Bool {
         let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let custom = (trimmed?.isEmpty ?? true) ? nil : trimmed
-        guard updateTabInStore(id, { $0.customTitle = custom }) else { return false }
+        guard updateTabInStore(id, { tab in
+            tab.customTitle = custom
+            tab.customTitleIsAutomatic = automatic && custom != nil
+        }) else { return false }
         notifyMutation(.upsertItem(id: id))
         return true
     }
@@ -913,14 +917,14 @@ public final class SidebarStore {
         guard let original = tab(withID: id), let parent = parent(of: id) else { return nil }
         if case .favorites = parent {
             let copy = addTab(kind: .today, title: original.title, url: original.url)
-            renameTab(copy.id, to: original.customTitle)
+            renameTab(copy.id, to: original.customTitle, automatic: original.customTitleIsAutomatic)
             setCustomIcon(original.customIcon, for: copy.id)
             return tab(withID: copy.id)
         }
         let siblings = entries(in: parent)
         guard let sourceIndex = siblings.firstIndex(where: { $0.id == id }) else { return nil }
         let rank = rankForNewItem(in: siblings, atIndex: sourceIndex + 1)
-        let copy = Tab(
+        var copy = Tab(
             kind: original.kind,
             title: original.title,
             url: original.url,
@@ -931,6 +935,7 @@ public final class SidebarStore {
             savedTitle: original.savedTitle,
             customIcon: original.customIcon
         )
+        copy.customTitleIsAutomatic = original.customTitleIsAutomatic
         switch parent {
         case .favorites:
             return nil
@@ -1098,7 +1103,7 @@ public final class SidebarStore {
 
     /// A fresh id, so the engine and sync treat the reopened tab as new.
     private func reopenedCopy(of tab: Tab, kind: Tab.Kind, sortRank: String = "") -> Tab {
-        Tab(
+        var copy = Tab(
             kind: kind,
             title: tab.title,
             url: tab.url,
@@ -1111,6 +1116,8 @@ public final class SidebarStore {
             savedTitle: tab.savedTitle,
             customIcon: tab.customIcon
         )
+        copy.customTitleIsAutomatic = tab.customTitleIsAutomatic
+        return copy
     }
 
     private func insertReopened(_ tab: Tab, into parent: ItemParent, at index: Int) -> Tab {

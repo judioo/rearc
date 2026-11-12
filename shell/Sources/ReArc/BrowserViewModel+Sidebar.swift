@@ -207,11 +207,24 @@ extension BrowserViewModel {
         renameHint = nil
     }
 
-    /// After a move or command: a tab that was not pinned and now is shows the hint.
-    private func noteMove(of id: UUID, wasPinned: Bool) {
-        if !wasPinned, store.kind(of: id) == .pinned, store.splitContaining(tabID: id) == nil {
+    /// After a move or command: a tab that was not pinned and now is shows
+    /// the hint. One that became pinned or a favorite has its title tidied
+    /// (Max › Tidy Tab Titles); the result puts it back.
+    @discardableResult
+    private func noteMove(of id: UUID, was kind: Tab.Kind?) -> (() -> Void)? {
+        let now = store.kind(of: id)
+        if kind != .pinned, now == .pinned, store.splitContaining(tabID: id) == nil {
             showRenameHint(for: id)
         }
+        let kept = (kind == .today && (now == .pinned || now == .favorite)) || (kind == .pinned && now == .favorite)
+        guard kept, store.splitContaining(tabID: id) == nil else { return nil }
+        return tidyTitleIfNeeded(id)
+    }
+
+    /// A drag that tidied a title says so, with Undo.
+    private func noteDrag(of id: UUID, was kind: Tab.Kind?) {
+        guard let undo = noteMove(of: id, was: kind) else { return }
+        showUndoToast("Title tidied", systemImage: "textformat.size.smaller", undo: undo)
     }
 
     /// Cmd+D: pin a Today tab, unpin a pinned one.
@@ -222,8 +235,8 @@ extension BrowserViewModel {
         switch store.kind(of: id) {
         case .today:
             store.pinTab(id)
-            noteMove(of: id, wasPinned: false)
-            showToast("Pinned Tab to “\(space)”", systemImage: "pin.fill")
+            let undo = noteMove(of: id, was: .today)
+            showKeptToast("Pinned Tab to “\(space)”", systemImage: "pin.fill", titleUndo: undo)
         case .pinned:
             store.unpinTab(id)
             showToast("Un-Pinned Tab from “\(space)”", systemImage: "pin.slash")
@@ -236,7 +249,11 @@ extension BrowserViewModel {
         if tabID == nil, let ids = keySelectionIDs { return addTabsToFavorites(ids) }
         guard let id = tabID ?? store.selectedTabID else { return }
         // The engine follows the favorite's profile, which is the space's profile.
+        let kind = store.kind(of: id)
         store.addToFavorites(id)
+        if kind == .today || kind == .pinned, let undo = tidyTitleIfNeeded(id) {
+            showUndoToast("Added to Favorites · Title tidied", systemImage: "star.fill", undo: undo)
+        }
         loadSelectedIfNeeded()
     }
 
@@ -244,7 +261,7 @@ extension BrowserViewModel {
     func moveFavoriteToPinned(_ id: Tab.ID) {
         let count = store.content(for: store.activeSpaceID).pinned.count
         store.moveItem(id, to: .section(spaceID: store.activeSpaceID, section: .pinned), index: count)
-        noteMove(of: id, wasPinned: false)
+        noteMove(of: id, was: .favorite)
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
     }
@@ -378,17 +395,17 @@ extension BrowserViewModel {
     // MARK: - Drag and drop
 
     func moveItem(_ id: UUID, relativeTo targetID: UUID, after: Bool) {
-        let wasPinned = store.kind(of: id) == .pinned
+        let kind = store.kind(of: id)
         guard store.moveItem(id, relativeTo: targetID, after: after) else { return }
-        noteMove(of: id, wasPinned: wasPinned)
+        noteDrag(of: id, was: kind)
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
     }
 
     func moveItem(_ id: UUID, to destination: SidebarStore.ItemDestination, index: Int) {
-        let wasPinned = store.kind(of: id) == .pinned
+        let kind = store.kind(of: id)
         guard store.moveItem(id, to: destination, index: index) else { return }
-        noteMove(of: id, wasPinned: wasPinned)
+        noteDrag(of: id, was: kind)
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
     }
@@ -434,9 +451,9 @@ extension BrowserViewModel {
     /// Drop onto a folder row: append to the folder and open it.
     func moveItem(_ id: UUID, intoFolder folderID: UUID) {
         let count = store.folder(withID: folderID)?.children.count ?? 0
-        let wasPinned = store.kind(of: id) == .pinned
+        let kind = store.kind(of: id)
         guard store.moveItem(id, to: .folder(folderID), index: count) else { return }
-        noteMove(of: id, wasPinned: wasPinned)
+        noteDrag(of: id, was: kind)
         store.setFolderExpanded(folderID, true)
         loadSelectedIfNeeded()
     }

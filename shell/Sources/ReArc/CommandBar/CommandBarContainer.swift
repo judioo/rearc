@@ -40,7 +40,8 @@ struct CommandBarContainer: View {
             focusRequest: model.commandBarFocusRequest,
             width: width,
             spaceName: { id in id == model.store.activeSpaceID ? nil : model.store.space(withID: id)?.name },
-            favicon: { model.faviconStore.image(for: $0) }
+            favicon: { model.faviconStore.image(for: $0) },
+            instantLinks: model.isMaxFeatureOn(.instantLinks)
         )
     }
 

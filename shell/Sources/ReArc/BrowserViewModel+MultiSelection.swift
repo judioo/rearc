@@ -157,7 +157,8 @@ extension BrowserViewModel {
         let pinned = store.pinTabs(ids)
         guard !pinned.isEmpty else { return }
         let space = store.spaceContaining(tabID: pinned[0]).flatMap { store.space(withID: $0) }?.name ?? ""
-        showToast(pinned.count == 1 ? "Pinned Tab to “\(space)”" : "Pinned \(pinned.count) Tabs to “\(space)”", systemImage: "pin.fill")
+        showKeptToast(pinned.count == 1 ? "Pinned Tab to “\(space)”" : "Pinned \(pinned.count) Tabs to “\(space)”", systemImage: "pin.fill",
+                      count: pinned.count, titleUndo: tidyTitlesIfNeeded(pinned))
         loadSelectedIfNeeded()
     }
 
@@ -171,7 +172,12 @@ extension BrowserViewModel {
     }
 
     func addTabsToFavorites(_ ids: [UUID]) {
-        guard !store.addTabsToFavorites(ids).isEmpty else { return }
+        let added = store.addTabsToFavorites(ids)
+        guard !added.isEmpty else { return }
+        if let undo = tidyTitlesIfNeeded(added) {
+            showUndoToast(added.count == 1 ? "Added to Favorites · Title tidied" : "Added to Favorites · Titles tidied",
+                          systemImage: "star.fill", undo: undo)
+        }
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
     }

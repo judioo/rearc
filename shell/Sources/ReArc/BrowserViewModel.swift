@@ -154,6 +154,17 @@ final class BrowserViewModel {
     var restoresWindows = WindowRestorePreference.isEnabled(in: .standard) {
         didSet { externalLinkDefaults.set(restoresWindows, forKey: WindowRestorePreference.defaultsKey) }
     }
+    /// Settings › Max: which rule-based helpers are on (MaxFeatures.swift).
+    var maxPreferences: MaxPreferences = .load(from: .standard) {
+        didSet { if maxPreferences != oldValue { maxPreferences.save(to: externalLinkDefaults) } }
+    }
+    /// Bumped when an assistant is switched, added or removed: the registry
+    /// keeps them in defaults (`CommandBarAssistants`), so views re-read it.
+    var assistantsRevision = 0
+    /// The toast's Undo (Tidy Tabs, Tidy Downloads), for that toast only.
+    @ObservationIgnored var toastUndo: (toastID: UUID, run: () -> Void)?
+    /// Pinned tabs and favorites waiting for a page title to tidy.
+    @ObservationIgnored var pendingTitleTidies: Set<Tab.ID> = []
     /// The Settings window's pane; it opens on the one shown last.
     var settingsPane: SettingsPane = .load(from: .standard) {
         didSet { settingsPane.save(to: externalLinkDefaults) }
@@ -487,7 +498,7 @@ final class BrowserViewModel {
                     peekURL: peekSession?.url, focusedLittleArcID: focusedLittleArcID,
                     mediaByTab: mediaStateByTab, tabMuteModel: tabMuteModel,
                     navigationSchemes: engineHost.navigationSchemes, externalLinkDestination: externalLinkDestination,
-                    pendingExtensionReinstall: pendingExtensionReinstall?.title))
+                    pendingExtensionReinstall: pendingExtensionReinstall?.title, tidyTabs: isMaxFeatureOn(.tidyTabs)))
             })
         }
     }
@@ -677,6 +688,7 @@ final class BrowserViewModel {
             self?.syncPipeline.handleJournalEntry(entry)
         }
         engineHost.linkRouter = self
+        installTidyDownloads()
         // A close or unload never hands the selection to a saved pin or
         // favorite without a live page: selecting it would load it.
         self.store.isTabOpen = { [weak self] id in self?.canUnloadTab(id) ?? false }
@@ -1289,6 +1301,7 @@ final class BrowserViewModel {
         let resolvedTitle = (title?.isEmpty == false) ? title : nil
         let fallback = store.tab(withID: tabID)?.title ?? url.host() ?? "Page"
         store.updateTab(tabID, title: resolvedTitle ?? fallback, url: url)
+        noteTitleForTidy(tabID)
         // The new URL can change which boosts apply: this tab's now, the rest with the follow-up.
         if let tab = store.tab(withID: tabID) {
             engineHost.installBoosts(store.activeBoostEntries(for: tab), forTabID: tabID, profileID: profileID(for: tab))
@@ -1819,7 +1832,12 @@ final class BrowserViewModel {
 
     /// Return in the command bar; ⌘↩, ⌥↩ and ⇧↩ pick another destination
     /// for a page result (`CommandBarRoute`). Commands ignore the route.
+    /// With Max › Instant Links on, ⇧↩ on a plain search opens its top result.
     func submitCommandBar(route: CommandBarRoute = .current) {
+        if route == .littleArc, let query = instantLinksQuery {
+            submitInstantLinks(query)
+            return
+        }
         if commandBarSiteSearch != nil {
             submitCommandBarSiteSearch(route: route)
             return
@@ -2104,6 +2122,7 @@ final class BrowserViewModel {
             reopenClosedTab()
         case .pinTab:
             guard let id = store.selectedTabID, store.pinTab(id) else { return "Cannot pin this tab" }
+            tidyTitleIfNeeded(id)
             loadSelectedIfNeeded()
         case .unpinTab:
             guard let id = store.selectedTabID, store.unpinTab(id) else { return "Cannot unpin this tab" }
@@ -2329,6 +2348,8 @@ final class BrowserViewModel {
             updateSavedURLToCurrent()
         case .clearUnpinnedTabs:
             clearTodayTabs()
+        case .tidyTabs:
+            guard tidyTabs() else { return "No tabs to tidy" }
         case .findInPage:
             guard findTargetEngine != nil else { return "No page to search" }
             dismissCommandBar()

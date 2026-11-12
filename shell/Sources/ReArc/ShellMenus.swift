@@ -372,6 +372,8 @@ enum ShellMenus {
                 ShellMenuItem("Reset Tab to Original URL") { model.resetTabToSavedURL() },
                 ShellMenuItem("Reset All Tabs in This Space") { model.resetPinnedTabs() },
                 ShellMenuItem("Clear Unpinned Tabs", "k", [.command, .shift]) { model.clearTodayTabs() },
+                // Max › Tidy Tabs: shown while it can run.
+                ShellMenuItem("Tidy Tabs", liveTitle: { model.canTidyTabs() ? "Tidy Tabs" : nil }) { model.tidyTabs() },
             ],
             [
                 ShellMenuItem("Flip Split Orientation") { model.flipSplitOrientation() },
