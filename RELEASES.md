@@ -19,7 +19,7 @@ that adds the entry, so write it as the last commit before the release, with
 Merged since the last release and not yet in a build. The next release's entry takes these
 lines and this section starts empty again.
 
-## ReArc 2026.1112.747 — 2026-11-12
+## ReArc 2026.1112.749 — 2026-11-12
 
 **New**
 - The command bar looks and moves like Arc's. ⌘T opens a solid card over the page, with no
@@ -87,7 +87,7 @@ lines and this section starts empty again.
 - The first time you switch to the mini sidebar (⇧⌘S), a note says the address bar can hide
   itself, with a button to the setting.
 - A new version number. ReArc's version is now the release date and the build, as in
-  2026.1112.747: year, month and day, then the build. Builds up to 677 were all "0.1.0" with the
+  2026.1112.749: year, month and day, then the build. Builds up to 677 were all "0.1.0" with the
   build in brackets. Updating from an older build works as before.
 - About ReArc shows the latest version. Under your version it says "You have the latest
   version." with the time it last checked, or "Latest: … — Update available" with Restart
