@@ -356,17 +356,30 @@ public enum SidebarBackup {
     /// (put it in place of sidebar.json, with ReArc quit, to go back to it).
     @discardableResult
     public static func write(_ snapshot: SidebarSnapshot, besides fileURL: URL, reason: String, now: Date = Date()) throws -> URL {
+        try save(snapshot, named: "sidebar-\(reason)", besides: fileURL, now: now)
+    }
+
+    /// `Backups/icloud-profile-before-delete-<time>.json`: iCloud's records
+    /// of a profile as read just before deleting them there, each with its
+    /// stamped fields (`serverTag` is CloudKit's system fields). Saving
+    /// them again by hand undoes the delete.
+    @discardableResult
+    public static func writeCloudRecords(_ records: [SyncWireRecord], besides fileURL: URL, now: Date = Date()) throws -> URL {
+        try save(records, named: "icloud-profile-before-delete", besides: fileURL, now: now)
+    }
+
+    private static func save<T: Encodable>(_ value: T, named name: String, besides fileURL: URL, now: Date) throws -> URL {
         let directory = folder(besides: fileURL)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        var url = directory.appendingPathComponent("sidebar-\(reason)-\(stamp(now)).json", isDirectory: false)
+        var url = directory.appendingPathComponent("\(name)-\(stamp(now)).json", isDirectory: false)
         var n = 2
         while FileManager.default.fileExists(atPath: url.path) {
-            url = directory.appendingPathComponent("sidebar-\(reason)-\(stamp(now))-\(n).json", isDirectory: false)
+            url = directory.appendingPathComponent("\(name)-\(stamp(now))-\(n).json", isDirectory: false)
             n += 1
         }
-        try encoder.encode(snapshot).write(to: url, options: [.withoutOverwriting])
+        try encoder.encode(value).write(to: url, options: [.withoutOverwriting])
         return url
     }
 }

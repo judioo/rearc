@@ -54,7 +54,9 @@ struct SidebarToolbarView: View {
                 Spacer(minLength: 0)
                 if model.store.profiles.count > 1 {
                     Menu {
-                        ProfileMenuChoices(store: model.store, active: profile.id) { model.selectProfile($0) }
+                        Section("Switch to Profile") {
+                            ProfileMenuChoices(store: model.store, active: profile.id) { model.selectProfile($0) }
+                        }
                     } label: {
                         ProfileAvatarView(profile: profile, diameter: 18, sidebarBadge: chrome.badge)
                     }

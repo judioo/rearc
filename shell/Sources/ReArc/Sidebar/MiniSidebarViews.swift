@@ -501,7 +501,7 @@ struct MiniSpaceHeaderView: View {
             Button(isPinnedCollapsed ? "Expand Pinned Section" : "Collapse Pinned Section", action: onTogglePinned)
         }
         if model.store.profiles.count > 1 {
-            Menu("Switch Profile") {
+            Menu("Switch to Profile") {
                 ProfileMenuChoices(store: model.store, active: space.profileID) { model.selectProfile($0) }
             }
         }

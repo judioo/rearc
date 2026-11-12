@@ -344,21 +344,7 @@ struct SpaceHeaderView: View {
                 .accessibilityLabel(isPinnedCollapsed ? "Expand Pinned Section" : "Collapse Pinned Section")
             }
             Spacer(minLength: 0)
-            if let profile = model.store.profile(withID: space.profileID) {
-                Menu {
-                    SpaceProfileChoices(model: model, space: space)
-                } label: {
-                    ProfileAvatarView(profile: profile, diameter: 18, sidebarBadge: chrome.badge)
-                }
-                    // A plain button draws the badge as is (the borderless style dims it).
-                    .menuStyle(.button)
-                    .buttonStyle(.plain)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
-                    .help("Profile: \(profile.name) — choose a container")
-                    .accessibilityLabel("Profile: \(profile.name)")
-                    .padding(.trailing, 6)
-            }
+            // Before the avatar, so the avatar keeps its place when the pointer comes over the header.
             if isHovering {
                 Menu {
                     SpaceContextMenu(model: model, space: space)
@@ -372,6 +358,21 @@ struct SpaceHeaderView: View {
                 .fixedSize()
                 .padding(.trailing, 8)
                 .help("Space options")
+            }
+            if let profile = model.store.profile(withID: space.profileID) {
+                Menu {
+                    SpaceProfileChoices(model: model, space: space, heading: "Switch Space to Profile")
+                } label: {
+                    ProfileAvatarView(profile: profile, diameter: 18, sidebarBadge: chrome.badge)
+                }
+                    // A plain button draws the badge as is (the borderless style dims it).
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Profile: \(profile.name) — switch this space to another profile")
+                    .accessibilityLabel("Profile: \(profile.name)")
+                    .padding(.trailing, 6)
             }
         }
         .frame(height: SidebarMetrics.headerHeight)

@@ -62,6 +62,8 @@ final class BrowserViewModel {
     var syncCloudChoice: CloudSidebarFound?
     /// Why the switch stayed off, or an iCloud action failed.
     var syncCloudMessage: String?
+    /// Settings › Profiles: deleting one profile from iCloud.
+    let cloudProfileDeletes = CloudProfileDeletes()
     @ObservationIgnored var syncActivationObserver: NSObjectProtocol?
     private let nowPlaying: MediaKeyRouting
     private var mediaSubscriptions: [Tab.ID: AnyCancellable] = [:]
