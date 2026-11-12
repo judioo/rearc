@@ -358,18 +358,29 @@ struct SpaceContextMenu: View {
 struct SpaceProfileChoices: View {
     let model: BrowserViewModel
     let space: Space
+    /// The heading over the profile rows where the menu opens from an avatar,
+    /// which says nothing by itself; a submenu already has its title.
+    var heading: String? = nil
     var onSelect: ((Profile.ID) -> Void)? = nil
 
     var body: some View {
         if model.store.space(withID: space.id) != nil {
-            ProfileMenuChoices(store: model.store, active: space.profileID, disablesActive: true) { profileID in
-                if let onSelect { onSelect(profileID) }
-                else { model.requestSpaceProfileChange(space.id, to: profileID) }
+            if let heading {
+                Section(heading) { rows }
+            } else {
+                rows
             }
         }
         Divider()
         Button("New Profile…") { model.beginProfileCreation(forSpace: space.id) }
         Button("New Container for This Space") { model.createContainerForSpace(space.id) }
+    }
+
+    private var rows: some View {
+        ProfileMenuChoices(store: model.store, active: space.profileID, disablesActive: true) { profileID in
+            if let onSelect { onSelect(profileID) }
+            else { model.requestSpaceProfileChange(space.id, to: profileID) }
+        }
     }
 }
 
