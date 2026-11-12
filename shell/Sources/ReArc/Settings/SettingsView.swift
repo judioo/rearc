@@ -822,36 +822,36 @@ private struct ShortcutListRowView: View {
 // MARK: Icon
 
 /// ReArc's app icons in Arc's rows: a radio, a 64 pt preview, the name and,
-/// on the current one, CURRENT ICON in the accent colour. None is locked.
+/// on the current one, CURRENT ICON in the accent colour; in two lists,
+/// the Sun's Path and Treatments. None is locked.
 struct IconSettingsPane: View {
     @Bindable var model: BrowserViewModel
 
     var body: some View {
         SettingsPage {
-            let choices = AppIconChoice.available
-            VStack(spacing: 0) {
-                ForEach(choices) { choice in
-                    row(choice)
-                    if choice != choices.last { SettingsHairline().padding(.horizontal, 40) }
+            let available = AppIconChoice.available
+            ForEach(AppIconChoice.Group.allCases) { group in
+                let choices = available.filter { $0.group == group }
+                if !choices.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        SettingsHeader(title: group.title)
+                        VStack(spacing: 0) {
+                            ForEach(choices) { choice in
+                                row(choice)
+                                if choice != choices.last { SettingsHairline().padding(.horizontal, 40) }
+                            }
+                        }
+                        .padding(.vertical, 8)
+                        .background(SettingsColors.box, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(SettingsColors.border))
+                    }
                 }
             }
-            .padding(.vertical, 8)
-            .background(SettingsColors.box, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(SettingsColors.border))
             Text("The Dock shows the icon while ReArc is running. Finder and Launchpad keep the standard icon.")
                 .font(.system(size: 11))
                 .foregroundStyle(SettingsColors.tertiary)
                 .padding(.horizontal, SettingsMetrics.rowInset)
         }
-    }
-
-    /// Some alternates fill their whole canvas where macOS icons keep a
-    /// margin; they are inset to the same tile size.
-    private static func isFullBleed(_ image: NSImage) -> Bool {
-        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              let rep = Optional(NSBitmapImageRep(cgImage: cg)),
-              let colour = rep.colorAt(x: rep.pixelsWide / 40, y: rep.pixelsHigh / 2) else { return false }
-        return colour.alphaComponent > 0.5
     }
 
     private func row(_ choice: AppIconChoice) -> some View {
@@ -862,7 +862,6 @@ struct IconSettingsPane: View {
                 Group {
                     if let image = choice.image {
                         Image(nsImage: image).resizable().interpolation(.high)
-                            .padding(Self.isFullBleed(image) ? 6 : 0)
                     } else {
                         RoundedRectangle(cornerRadius: 14).fill(.quaternary)
                     }
@@ -873,6 +872,8 @@ struct IconSettingsPane: View {
                     Text(choice.title).font(.system(size: 14, weight: .semibold))
                     if current {
                         Text("CURRENT ICON").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.accentColor)
+                    } else {
+                        Text(choice.caption).font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                 }
                 .padding(.leading, 14)
