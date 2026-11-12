@@ -145,7 +145,9 @@ final class Wave33ShellTests: XCTestCase {
 
     // MARK: Media strip (§7)
 
-    func testTheStripHidesWhileItsVideoIsInPictureInPicture() {
+    /// Arc removes the strip while Picture in Picture is open (270.1 s to 276.5 s of its
+    /// recording). ReArc keeps it: the floating window has been black, and on another display.
+    func testTheStripStaysWhileItsVideoIsInPictureInPicture() {
         var a: SidebarModel.Tab!
         var b: SidebarModel.Tab!
         let model = makeModel { store in
@@ -156,8 +158,8 @@ final class Wave33ShellTests: XCTestCase {
         model.mediaStateByTab[a.id] = WebMediaState(isPlaying: true, canPictureInPicture: true)
         XCTAssertEqual(model.mediaStrips(in: nil), [a.id])
         model.mediaStateByTab[a.id] = WebMediaState(isPlaying: true, canPictureInPicture: true, isPictureInPicture: true)
-        XCTAssertEqual(model.mediaStrips(in: nil), [], "pop-out removes the strip while PiP is open (270.1 s)")
+        XCTAssertEqual(model.mediaStrips(in: nil), [a.id], "the strip stays beside the Picture in Picture window")
         model.mediaStateByTab[a.id] = WebMediaState(isPaused: true, canPictureInPicture: true)
-        XCTAssertEqual(model.mediaStrips(in: nil), [a.id], "it comes back when PiP closes (276.5 s)")
+        XCTAssertEqual(model.mediaStrips(in: nil), [a.id], "and after it closes")
     }
 }
