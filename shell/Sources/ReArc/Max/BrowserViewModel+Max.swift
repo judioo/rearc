@@ -33,6 +33,12 @@ extension BrowserViewModel {
         return CommandBarAssistants.all(in: externalLinkDefaults)
     }
 
+    /// The command bar's assistants (its site searches): the ones switched on.
+    var enabledAssistantSiteSearches: [SiteSearchEngine] {
+        _ = assistantsRevision
+        return CommandBarAssistants.siteSearchEngines(in: externalLinkDefaults)
+    }
+
     func isAssistantEnabled(_ id: String) -> Bool {
         _ = assistantsRevision
         return CommandBarAssistants.enabledIDs(in: externalLinkDefaults).contains(id)

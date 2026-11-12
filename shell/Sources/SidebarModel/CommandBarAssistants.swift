@@ -21,13 +21,13 @@ public struct CommandBarAssistant: Identifiable, Hashable, Codable, Sendable {
     public var template: String
     public var delivery: Delivery
     public var placeholder: String
-    public var tint: SpaceTheme
+    public var tint: SpaceColor
     /// Where the prompt address was checked (MAX.md lists them); empty for the person's own.
     public var source: String
     public var isCustom: Bool
 
     public init(id: String, name: String, keyword: String, template: String, delivery: Delivery = .url,
-                placeholder: String = "Send a Message…", tint: SpaceTheme, source: String = "", isCustom: Bool = false) {
+                placeholder: String = "Send a Message…", tint: SpaceColor, source: String = "", isCustom: Bool = false) {
         self.id = id
         self.name = name
         self.keyword = keyword
@@ -47,17 +47,45 @@ public struct CommandBarAssistant: Identifiable, Hashable, Codable, Sendable {
         }
     }
 
-    /// What opening it with `text` does.
+    /// Other words Tab takes for it ("gpt").
+    public var aliases: [String] { CommandBarAssistants.aliases[id] ?? [] }
+
+    /// What opening it with `text` does. The address is built and encoded
+    /// as every site search's is (`SiteSearchTemplate.expand`).
     public func action(for text: String) -> CommandBarAssistants.Action? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         switch delivery {
         case .url:
-            guard let url = CommandBarAssistants.fill(template, with: trimmed) else { return nil }
+            guard let url = SiteSearchTemplate.expand(template, query: trimmed) else { return nil }
             return .open(url)
         case .clipboard:
-            guard let url = URL(string: template) else { return nil }
+            guard let url = URL(string: template), url.scheme == "https" else { return nil }
             return trimmed.isEmpty ? .open(url) : .openCopying(url, text: trimmed)
         }
+    }
+
+    /// The command bar's site search for it: keyword, name and domain take
+    /// Tab, the chip says "Ask …". A site that takes no prompt in its address
+    /// has no slot: its `clipboardPage` opens and the text is copied.
+    public var siteSearchEngine: SiteSearchEngine? {
+        let host: String?
+        let template: String
+        var clipboardPage: URL?
+        switch delivery {
+        case .url:
+            guard let valid = SiteSearchTemplate.validated(self.template) else { return nil }
+            template = valid
+            host = SiteSearchTemplate.host(of: valid)
+        case .clipboard:
+            guard let page = URL(string: self.template), page.scheme == "https", let pageHost = page.host()?.lowercased() else { return nil }
+            template = self.template
+            host = pageHost.hasPrefix("www.") ? String(pageHost.dropFirst(4)) : pageHost
+            clipboardPage = page
+        }
+        guard let host else { return nil }
+        return SiteSearchEngine(id: "assistant-\(id)", name: name, keyword: keyword, aliases: aliases, domain: host,
+                                template: template, color: tint, source: .assistant, verb: "Ask",
+                                placeholder: placeholder, clipboardPage: clipboardPage)
     }
 }
 
@@ -73,20 +101,21 @@ public enum CommandBarAssistants {
         case openCopying(URL, text: String)
     }
 
-    private static func rgb(_ hex: UInt32) -> SpaceTheme {
-        SpaceTheme(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
+    private static func rgb(_ hex: UInt32) -> SpaceColor {
+        SpaceColor(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
     }
 
     /// Checked 2026-11-12 (MAX.md §4 has the links). A site whose prompt
     /// parameter could not be confirmed, or is reported to have stopped
     /// filling the box, opens with the text copied instead.
     public static let builtIn: [CommandBarAssistant] = [
+        // Arc's "Ask ChatGPT" (`gptSiteSearch`), its chip colour measured (#579F8F).
         CommandBarAssistant(id: "chatgpt", name: "ChatGPT", keyword: "chatgpt", template: "https://chatgpt.com/?q=%s",
-                            tint: rgb(0x10A37F), source: "Tenable advisory TRA-2025-22 on chatgpt.com's ?q= (fills the box)"),
+                            tint: rgb(0x579F8F), source: "Tenable advisory TRA-2025-22 on chatgpt.com's ?q= (fills the box)"),
         CommandBarAssistant(id: "claude", name: "Claude", keyword: "claude", template: "https://claude.ai/new?q=%s",
                             tint: rgb(0xD97757), source: "Anthropic support 14729294: q prefills the prompt (claude://claude.ai/new?q=, the same path)"),
         CommandBarAssistant(id: "perplexity", name: "Perplexity", keyword: "perplexity", template: "https://www.perplexity.ai/search?q=%s",
-                            placeholder: "Ask Anything…", tint: rgb(0x20808D), source: "Public default-search-engine guides (SSW rules)"),
+                            placeholder: "Ask anything…", tint: rgb(0x20808D), source: "Public default-search-engine guides (SSW rules)"),
         CommandBarAssistant(id: "grok", name: "Grok", keyword: "grok", template: "https://grok.com/?q=%s",
                             tint: rgb(0x1A1A1A), source: "Public reports of grok.com/?q= prefilling (r/grok)"),
         CommandBarAssistant(id: "lechat", name: "Le Chat", keyword: "lechat", template: "https://chat.mistral.ai/chat?q=%s",
@@ -94,14 +123,19 @@ public enum CommandBarAssistants {
         CommandBarAssistant(id: "huggingchat", name: "HuggingChat", keyword: "huggingchat", template: "https://huggingface.co/chat/?prompt=%s",
                             tint: rgb(0xFFB000), source: "huggingface/chat-ui source: the prompt parameter prefills the input"),
         CommandBarAssistant(id: "gemini", name: "Gemini", keyword: "gemini", template: "https://gemini.google.com/app", delivery: .clipboard,
-                            tint: rgb(0x4285F4), source: "No documented prompt parameter; extensions fill ?q= by script"),
+                            placeholder: copyPlaceholder, tint: rgb(0x4285F4), source: "No documented prompt parameter; extensions fill ?q= by script"),
         CommandBarAssistant(id: "copilot", name: "Copilot", keyword: "copilot", template: "https://copilot.microsoft.com/", delivery: .clipboard,
-                            tint: rgb(0x0078D4), source: "Microsoft Q&A 2025-11-07: ?q= no longer fills the box"),
+                            placeholder: copyPlaceholder, tint: rgb(0x0078D4), source: "Microsoft Q&A 2025-11-07: ?q= no longer fills the box"),
         CommandBarAssistant(id: "deepseek", name: "DeepSeek", keyword: "deepseek", template: "https://chat.deepseek.com/", delivery: .clipboard,
-                            tint: rgb(0x4D6BFE), source: "No prompt parameter documented or reported"),
+                            placeholder: copyPlaceholder, tint: rgb(0x4D6BFE), source: "No prompt parameter documented or reported"),
         CommandBarAssistant(id: "kimi", name: "Kimi", keyword: "kimi", template: "https://www.kimi.com/", delivery: .clipboard,
-                            tint: rgb(0x111111), source: "Kimi help centre documents none"),
+                            placeholder: copyPlaceholder, tint: rgb(0x111111), source: "Kimi help centre documents none"),
     ]
+
+    static let aliases: [String: [String]] = ["chatgpt": ["gpt"], "lechat": ["mistral"], "huggingchat": ["hf"]]
+
+    /// The field's text while a copy-and-open assistant's chip is on.
+    static let copyPlaceholder = "Type, then Return to copy it and open the site…"
 
     // MARK: Switches
 
@@ -132,12 +166,18 @@ public enum CommandBarAssistants {
         return all(in: defaults).filter { ids.contains($0.id) }
     }
 
-    /// The command bar's side of the registry: one shortcut per assistant
+    /// The site searches the command bar merges (`SiteSearchCatalog.merged`'s
+    /// assistants): one per assistant switched on.
+    public static func siteSearchEngines(in defaults: UserDefaults) -> [SiteSearchEngine] {
+        enabled(in: defaults).compactMap(\.siteSearchEngine)
+    }
+
+    /// The registry as plain shortcuts: one per assistant
     /// switched on. `template` has `%s` for the typed text; without one it
     /// is the site's home page, to open while the text goes on the
     /// clipboard (`CommandBarAssistant.action(for:)` does both).
     public static func shortcuts(in defaults: UserDefaults)
-        -> [(keyword: String, name: String, template: String, placeholder: String, tint: SpaceTheme)] {
+        -> [(keyword: String, name: String, template: String, placeholder: String, tint: SpaceColor)] {
         enabled(in: defaults).map { ($0.keyword, $0.name, $0.template, $0.placeholder, $0.tint) }
     }
 
@@ -180,19 +220,22 @@ public enum CommandBarAssistants {
             throw ValidationError.keyword
         }
         guard !(builtIn + existing).contains(where: { $0.keyword == keyword }) else { throw ValidationError.keywordTaken }
-        let template = template.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isValidTemplate(template) else { throw ValidationError.template }
+        guard let template = validatedTemplate(template) else { throw ValidationError.template }
         return CommandBarAssistant(id: "custom-\(keyword)", name: name, keyword: keyword, template: template,
-                                   tint: SpaceTheme(red: 0.55, green: 0.45, blue: 0.85), isCustom: true)
+                                   tint: SpaceColor(red: 0.55, green: 0.45, blue: 0.85), isCustom: true)
     }
 
-    /// https, a host, no user or password, exactly one `%s`, at most 2,048 characters.
+    /// The site search's own check (`SiteSearchTemplate.validated`: a host,
+    /// no credentials, the slot after the host, bounded), and for an
+    /// assistant also https and a single slot.
+    public static func validatedTemplate(_ template: String) -> String? {
+        guard let valid = SiteSearchTemplate.validated(template), valid.lowercased().hasPrefix("https://"),
+              valid.components(separatedBy: SiteSearchTemplate.slot).count == 2 else { return nil }
+        return valid
+    }
+
     public static func isValidTemplate(_ template: String) -> Bool {
-        guard template.count <= 2048, template.components(separatedBy: "%s").count == 2,
-              let parts = URLComponents(string: template.replacingOccurrences(of: "%s", with: "q")),
-              parts.scheme?.lowercased() == "https", let host = parts.host, !host.isEmpty,
-              parts.user == nil, parts.password == nil else { return false }
-        return true
+        validatedTemplate(template) != nil
     }
 
     public static func add(_ assistant: CommandBarAssistant, in defaults: UserDefaults) throws {
@@ -207,15 +250,5 @@ public enum CommandBarAssistants {
         let saved = custom(in: defaults).filter { $0.id != id }
         defaults.set(try? JSONEncoder().encode(saved), forKey: customKey)
         setEnabled(id, false, in: defaults)
-    }
-
-    /// `%s` replaced by the percent-encoded text (at most 4,000 characters of it).
-    static func fill(_ template: String, with text: String) -> URL? {
-        guard isValidTemplate(template) else { return nil }
-        var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: "&+=?#/;%")
-        let bounded = String(TidyText.singleLine(text).prefix(4000))
-        guard let encoded = bounded.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
-        return URL(string: template.replacingOccurrences(of: "%s", with: encoded))
     }
 }

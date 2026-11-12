@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import ReArc
 @testable import SidebarModel
@@ -154,8 +155,48 @@ final class CommandBarSiteSearchShellTests: XCTestCase {
         XCTAssertTrue(model.commandBarSiteSearchQueries.isEmpty, "clearing history clears them")
     }
 
+    /// Assistants come from Settings › Max (`CommandBarAssistants`), off until switched on.
+    private func switchOnAssistants(_ ids: [String], in model: BrowserViewModel) {
+        model.externalLinkDefaults = UserDefaults(suiteName: "CommandBarSiteSearchShellTests.\(UUID().uuidString)")!
+        model.maxPreferences = MaxPreferences(enabled: [.assistants])
+        for id in ids { model.setAssistant(id, enabled: true) }
+    }
+
+    func testChatGPTIsOfferedOnlyOnceSwitchedOnInMax() throws {
+        let (model, _) = makeModel()
+        model.externalLinkDefaults = UserDefaults(suiteName: "CommandBarSiteSearchShellTests.\(UUID().uuidString)")!
+        model.maxPreferences = MaxPreferences()
+        model.newTab()
+        model.commandBarText = "chatgpt"
+        XCTAssertNil(model.commandBarSiteSearchSuggestion, "nothing seeded: someone updating from 677 had no assistant")
+        model.setAssistant("chatgpt", enabled: true)
+        XCTAssertNil(model.commandBarSiteSearchSuggestion, "the assistants row itself is still off")
+        model.setMaxFeature(.assistants, on: true)
+        XCTAssertEqual(model.commandBarSiteSearchSuggestion?.hint, "Ask ChatGPT")
+        model.setAssistant("chatgpt", enabled: false)
+        XCTAssertNil(model.commandBarSiteSearchSuggestion)
+    }
+
+    func testAnAssistantWithoutAPromptAddressOpensItsPageAndCopiesTheText() throws {
+        let (model, _) = makeModel()
+        switchOnAssistants(["deepseek"], in: model)
+        model.newTab()
+        model.commandBarText = "deepseek"
+        XCTAssertTrue(model.enterCommandBarSiteSearch())
+        model.commandBarText = "summarise this"
+        XCTAssertTrue(model.commandBarResults.isEmpty, "no address carries the text, so no row pretends to")
+        let pasteboard = NSPasteboard.general
+        let saved = pasteboard.string(forType: .string)
+        defer { pasteboard.clearContents(); if let saved { pasteboard.setString(saved, forType: .string) } }
+        model.submitCommandBar()
+        XCTAssertEqual(pasteboard.string(forType: .string), "summarise this")
+        XCTAssertEqual(model.store.selectedTab?.url.absoluteString, "https://chat.deepseek.com/")
+        XCTAssertEqual(model.toast?.message, "Copied: press ⌘V in DeepSeek")
+    }
+
     func testChatCompletesToChatGPTWhichOffersAsk() throws {
         let (model, services) = makeModel()
+        switchOnAssistants(["chatgpt"], in: model)
         model.newTab()
         model.commandBarText = "chat"
         XCTAssertEqual(model.commandBarInlineCompletion, "chatgpt.com")

@@ -3,8 +3,9 @@ import SidebarModel
 
 /// Site search in the command bar (Arc scoped search, COMMAND-BAR §4.2):
 /// the hint, the chip, its collapse to the field, its earlier queries and
-/// Return. Entries come from the profile's imported keywords, its engines
-/// and the seeded list (`SiteSearchCatalog.merged`); the chip, hint and the
+/// Return. Entries come from the profile's imported keywords, its engines,
+/// the assistants switched on in Settings › Max and the seeded list
+/// (`SiteSearchCatalog.merged`); the chip, hint and the
 /// address opened are always the entry's, never a page's.
 extension BrowserViewModel {
 
@@ -15,7 +16,8 @@ extension BrowserViewModel {
             let owner = activeSearchProfileID
             let engines = [searchProvider.siteSearchEngine].compactMap { $0 }
                 + (activeSearchEngineSettings?.siteSearchEngines(for: owner) ?? [])
-            return SiteSearchCatalog.merged(imported: importedSiteSearches.engines(for: owner), engine: engines)
+            let assistants = isMaxFeatureOn(.assistants) ? enabledAssistantSiteSearches : []
+            return SiteSearchCatalog.merged(imported: importedSiteSearches.engines(for: owner), engine: engines, assistants: assistants)
         }
     }
 
@@ -143,6 +145,17 @@ extension BrowserViewModel {
     /// template where a plain search would open; nothing typed opens the site.
     func submitCommandBarSiteSearch(route: CommandBarRoute) {
         guard let engine = commandBarSiteSearch else { return }
+        // An assistant whose site takes no prompt in its address: its page, the text on the clipboard.
+        if let page = engine.clipboardPage {
+            let text = commandBarText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
+            routeCommandBar(to: page, route)
+            if !text.isEmpty { showToast("Copied: press ⌘V in \(engine.name)", systemImage: "doc.on.clipboard", keycaps: ["⌘V"]) }
+            return
+        }
         let url: URL?
         if commandBarText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             url = engine.url(for: "")
