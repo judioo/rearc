@@ -1832,7 +1832,12 @@ final class BrowserViewModel {
 
     /// Return in the command bar; ⌘↩, ⌥↩ and ⇧↩ pick another destination
     /// for a page result (`CommandBarRoute`). Commands ignore the route.
+    /// With Max › Instant Links on, ⇧↩ on a plain search opens its top result.
     func submitCommandBar(route: CommandBarRoute = .current) {
+        if route == .littleArc, let query = instantLinksQuery {
+            submitInstantLinks(query)
+            return
+        }
         if commandBarSiteSearch != nil {
             submitCommandBarSiteSearch(route: route)
             return

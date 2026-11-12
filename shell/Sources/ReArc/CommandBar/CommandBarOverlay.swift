@@ -54,6 +54,8 @@ struct CommandBarOverlay: View {
     var spaceName: (Space.ID) -> String? = { _ in nil }
     /// A row's site icon, when cached.
     var favicon: (URL) -> NSImage? = { _ in nil }
+    /// Max › Instant Links is on: ⇧↩ on a search row opens its top result.
+    var instantLinks = false
 
     // Arc's card, measured on the 2026-11-12 recordings (1 px = 1 pt):
     // 765 × (64 + 13 + 50 per row), corners ≈ 10, a hairline edge.
@@ -135,6 +137,7 @@ struct CommandBarOverlay: View {
                                 dark: dark,
                                 spaceName: result.kind == .openTab ? result.spaceID.flatMap(spaceName) : nil,
                                 icon: result.destinationURL.flatMap { result.kind == .search ? nil : favicon($0) },
+                                instantLinks: instantLinks,
                                 onAction: { onRowAction($0, result) },
                                 onSelect: { onSelectResult(result.id) }
                             )
@@ -382,6 +385,7 @@ struct CommandBarResultRow: View, Equatable {
     var dark = false
     var spaceName: String?
     var icon: NSImage?
+    var instantLinks = false
     let onAction: (CommandBarRowAction) -> Void
     let onSelect: () -> Void
     @State private var isHovering = false
@@ -389,6 +393,15 @@ struct CommandBarResultRow: View, Equatable {
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.result == rhs.result && lhs.isHighlighted == rhs.isHighlighted && lhs.dark == rhs.dark
             && lhs.selection == rhs.selection && lhs.spaceName == rhs.spaceName && lhs.icon === rhs.icon
+            && lhs.instantLinks == rhs.instantLinks
+    }
+
+    /// The row's tooltip: what each modifier with Return does. With Instant
+    /// Links, ⇧↩ on a search opens its top result instead of Little ReArc.
+    static func modifierHelp(for kind: CommandBarSearch.ResultKind, instantLinks: Bool) -> String {
+        guard kind != .command else { return "" }
+        let shift = instantLinks && (kind == .search || kind == .suggestion) ? "⇧↩ Top Result" : "⇧↩ Little ReArc"
+        return "↩ Open · ⌘↩ New Tab · ⌥↩ Split View · \(shift)"
     }
 
     var body: some View {
@@ -448,7 +461,7 @@ struct CommandBarResultRow: View, Equatable {
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
-        .help(result.kind == .command ? "" : "↩ Open · ⌘↩ New Tab · ⌥↩ Split View · ⇧↩ Little ReArc")
+        .help(Self.modifierHelp(for: result.kind, instantLinks: instantLinks))
         .contextMenu {
             ForEach(actions, id: \.title) { action in
                 Button(action.title) { onAction(action) }
