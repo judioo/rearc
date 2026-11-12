@@ -20,10 +20,20 @@ extension CommandBarSearch {
             var host: PreparedText?
             /// `VisitHistory.key(for: tab.url)`: an open page is not repeated as history.
             var historyKey: String?
+            /// In a space another browser's bookmarks made (`Space.bookmarkSourceID`):
+            /// hundreds of saved pages, not tabs the person opened here.
+            var isImported = false
 
             func matches(_ needle: PreparedText.Needle) -> Bool {
                 displayTitle.contains(needle) || title.contains(needle) || url.contains(needle)
                     || host?.contains(needle) == true
+            }
+
+            /// A word of the title or of the host starts with the text, or the
+            /// address does: not text found only inside a path ("claude.ai/chat/…").
+            func isStrongMatch(_ needle: PreparedText.Needle) -> Bool {
+                displayTitle.hasWord(withPrefix: needle) || title.hasWord(withPrefix: needle)
+                    || host?.hasWord(withPrefix: needle) == true || url.hasPrefix(needle)
             }
         }
 
@@ -37,7 +47,8 @@ extension CommandBarSearch {
                                      title: PreparedText(tab.title.lowercased()),
                                      url: PreparedText(tab.url.absoluteString.lowercased()),
                                      host: tab.url.host().map { PreparedText($0.lowercased()) },
-                                     historyKey: VisitHistory.key(for: tab.url)),
+                                     historyKey: VisitHistory.key(for: tab.url),
+                                     isImported: space?.bookmarkSourceID != nil),
                                tier, recency))
             }
             for (index, tab) in store.favorites.enumerated() { add(tab, nil, tier: 0, recency: index) }
@@ -69,6 +80,27 @@ extension CommandBarSearch {
         func matching(_ needle: String) -> [Entry] {
             let prepared = PreparedText.Needle(needle)
             return entries.filter { $0.matches(prepared) }
+        }
+
+        /// The matches split for the command bar: `first`, strong matches
+        /// (`isStrongMatch`) outside bookmark-import spaces, the active
+        /// space's (and favorites) before other spaces', each in sidebar
+        /// order; `later`, the rest, except a bookmark-import space's weak
+        /// matches, which are dropped.
+        func ranked(_ needle: String, activeSpaceID: Space.ID?) -> (first: [Entry], later: [Entry]) {
+            let prepared = PreparedText.Needle(needle)
+            var first: [Entry] = [], later: [Entry] = []
+            for entry in matching(needle) {
+                let strong = entry.isStrongMatch(prepared)
+                if strong, !entry.isImported { first.append(entry) } else if strong || !entry.isImported { later.append(entry) }
+            }
+            let here = first.filter { $0.spaceID == nil || $0.spaceID == activeSpaceID }
+            let elsewhere = first.filter { $0.spaceID != nil && $0.spaceID != activeSpaceID }
+            return (here + elsewhere, later)
+        }
+
+        static func row(_ item: Entry) -> Result {
+            rows([item])[0]
         }
 
         static func rows(_ entries: [Entry]) -> [Result] {

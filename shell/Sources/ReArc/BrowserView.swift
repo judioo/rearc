@@ -111,7 +111,9 @@ struct BrowserView: View {
             }
 
             if model.isCommandBarPresented {
-                Color.black.opacity(0.2)
+                // Arc does not dim the page: a clear layer only takes the click that closes the bar.
+                Color.clear
+                    .contentShape(Rectangle())
                     .ignoresSafeArea()
                     .onTapGesture { model.dismissCommandBar() }
                 // Centred on the window, not the card, its top 38 % down (ARC-RECORDING-ANALYSIS.md §8).
@@ -121,7 +123,6 @@ struct BrowserView: View {
                         .padding(.top, max(20, min(geometry.size.height * CommandBarOverlay.topFraction, geometry.size.height - 440)))
                 }
                 .ignoresSafeArea()
-                .transition(.opacity.combined(with: .scale(scale: 0.97)))
             }
 
             if let switcher = model.tabSwitcher, isKeyWindowSheetOwner {
@@ -138,9 +139,8 @@ struct BrowserView: View {
         .environment(\.themeChrome, themeChrome)
         .environment(\.sidebarWindow, windowID)
         .environment(\.spacePager, pager)
-        // Arc's bar is complete in its first frame: it opens without a
-        // transition and only fades out (docs/PERF-BASELINE.md, "Arc vs ReArc").
-        .animation(model.isCommandBarPresented ? nil : .easeInOut(duration: 0.15), value: model.isCommandBarPresented)
+        // Arc's bar is complete in its first frame and gone in one: no
+        // transition either way (COMMAND-BAR §10, 2026-11-12 recordings).
         .frame(minWidth: Self.minimumSize.width, minHeight: Self.minimumSize.height)
         .background(
             DragSessionEndMonitor(isActive: draggedItemID != nil) { draggedItemID = nil }

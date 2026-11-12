@@ -286,16 +286,18 @@ final class Wave21ModelTests: XCTestCase {
 
     func testSiteSearchURLsEncodeTheQuery() throws {
         let youtube = try XCTUnwrap(SiteSearchCatalog.match("youtube"))
+        // Chromium's rule: a space is "+" in the query string, "%20" in a path.
         XCTAssertEqual(youtube.url(for: "cats & dogs")?.absoluteString,
-                       "https://www.youtube.com/results?search_query=cats%20%26%20dogs")
-        XCTAssertEqual(youtube.url(for: "  ")?.absoluteString, "https://youtube.com/", "no query opens the site")
+                       "https://www.youtube.com/results?search_query=cats+%26+dogs")
+        XCTAssertEqual(youtube.url(for: "  ")?.absoluteString, "https://www.youtube.com/", "no query opens the site")
         let maps = try XCTUnwrap(SiteSearchCatalog.match("maps"))
         XCTAssertEqual(maps.url(for: "a/b")?.absoluteString, "https://www.google.com/maps/search/a%2Fb")
 
         let rows = CommandBarSearch.siteSearchResults(youtube, query: "cats")
-        XCTAssertEqual(rows.map(\.title), ["Search YouTube for “cats”"])
+        XCTAssertEqual(rows.map(\.title), ["cats"], "the query alone, as Arc's rows read")
         XCTAssertEqual(rows.first?.kind, .search)
-        XCTAssertEqual(CommandBarSearch.siteSearchResults(youtube, query: "").first?.title, "Open YouTube")
+        XCTAssertEqual(rows.first?.subtitle, "youtube.com", "the host the query goes to")
+        XCTAssertTrue(CommandBarSearch.siteSearchResults(youtube, query: "").isEmpty, "nothing typed: the field alone")
     }
 
     // MARK: Boost library

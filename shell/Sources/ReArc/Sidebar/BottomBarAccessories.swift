@@ -4,29 +4,15 @@ import SidebarModel
 import UniformTypeIdentifiers
 
 /// The slot between the media stack and the bottom bar for Arc's "New Arc
-/// Version Available" pill (ARC-RECORDING-2026-11-06.md §2 rule 6). Empty
-/// until an updater sets `BrowserViewModel.availableUpdate`.
+/// Version Available" pill (ARC-RECORDING-2026-11-06.md §2 rule 6;
+/// UPDATE-NOTICE.md). Empty while `BrowserViewModel.availableUpdate` is nil.
 struct UpdateBannerSlot: View {
     let update: AvailableUpdate?
     let install: () -> Void
-    @Environment(\.themeChrome) private var chrome
 
     var body: some View {
         if let update {
-            Button(action: install) {
-                Text(AvailableUpdate.title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(chrome.title)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 28)
-                    .background(Capsule(style: .continuous).fill(chrome.isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.07)))
-                    .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .help("Install version \(update.version)")
-            .padding(.horizontal, MediaStripMetrics.inset)
-            .padding(.top, 2)
+            UpdateNoticePill(update: update, install: install)
         }
     }
 }

@@ -463,7 +463,8 @@ public enum BrowserImportDiscovery {
     }
 
     /// Counts what `profile` holds. Never opens Login Data, Cookies or Web
-    /// Data (Firefox: logins.json, cookies.sqlite, formhistory.sqlite).
+    /// Data (Firefox: logins.json, cookies.sqlite, formhistory.sqlite); the
+    /// import reads only Web Data's keywords (`ChromiumKeywordsReader`).
     public static func inventory(of profile: ImportSourceProfile,
                                  fileManager: FileManager = .default) -> ImportSourceInventory {
         var inventory = ImportSourceInventory()

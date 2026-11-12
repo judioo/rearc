@@ -527,12 +527,48 @@ Add one of these directly under `<item>` (alongside version/enclosure):
 
 Critical updates bypass phased rollout; manual checks also bypass rollout. Critical does
 not forcibly terminate the browser or defeat user consent: Sparkle removes skipping and
-uses prominent reminders. ReArc defers ordinary scheduled update alerts to the menu's
-“Update Available…” / “1 update” badge, but leaves critical alerts to Sparkle. Automatic
+uses prominent reminders. From the build with the sidebar's update notice
+(docs/FEATURE-SPECS/UPDATE-NOTICE.md), a scheduled find, critical included, shows only in
+the notice (the pill above the space strip, and the menu's “Update Available…” / “1 update”
+badge); Check for Updates… keeps Sparkle's window. Builds before it (677 and older) show
+ordinary updates on the menu's badge and critical ones in Sparkle's alert. Automatic
 downloads install on quit when eligible; Sparkle may remind a long-running app after its
 impatient interval. `minimumAutoupdateVersion` requires UI below the threshold; it does
 not establish a minimum supported build or force installation. Beta opt-in is stored in
 UserDefaults and supplied by `allowedChannels(for:)` on subsequent checks.
+
+### Critical and required updates
+
+`release.sh --appcast DIR` takes two flags that mark the new item (both need `--appcast`;
+`generate-appcast.sh` takes the same, with `--version BUILD`):
+
+- `--critical`: Sparkle's own `<sparkle:criticalUpdate/>`, for every older build. The
+  notice reads "Critical Update Available" with a shield, adds "This update fixes a
+  security problem.", stays open until the pointer has been over it and cannot be hidden;
+  Sparkle removes Skip and the item bypasses phased rollout. Use it for a security fix
+  people should install today: a Chromium security release, a fix for a ReArc
+  vulnerability. Not for features or ordinary bug fixes, or it stops meaning anything.
+- `--required-below N`: ReArc's `<rearc:requiredBelow>N</rearc:requiredBelow>` (namespace
+  `https://rearc.imara.ae/xml-namespaces/update`, declared on `<rss>`), for builds below N,
+  N at most this build (N = this build: every older one). Builds below N read "Required
+  Update" and "This version of ReArc is no longer supported. Restart to update."; builds
+  from N on see a normal (or critical) update. Use it when old builds stop working or must
+  not run any more: a sync or data format they would damage, a server change they cannot
+  follow, a Chromium base so old it is unsafe. It is display only for now: nothing is forced
+  (UPDATE-NOTICE.md §5 lists the enforcement options), and it does not bypass phased
+  rollout; add `--critical` too when it must reach everyone at once.
+
+Both can be combined. With `--required-below`, the script cuts generate_appcast's
+signature off, stamps the item (`scripts/release/appcast-marker.py stamp`: one inserted line
+and the namespace declaration, every other byte unchanged), signs again with `sign_update
+--account ReArc --disable-signing-warning` (a second Keychain grant), checks the signed bytes
+are the stamped ones exactly, verifies the signature and every ReArc marker
+(`verify-appcast.sh`), and checks the new item has exactly the flags asked for; any failure
+writes no feed. A flag applies only to an item generated in this run: generate_appcast keeps
+existing items as they are, and stamping an item that already has the marker is refused.
+Builds that predate the notice (677, 608) parse such a feed and update as usual: Sparkle keeps
+the ReArc element in the item's properties and nothing reads it; a critical item shows them
+Sparkle's alert.
 
 Signing follows Sparkle's [manual signing recipe](https://sparkle-project.org/documentation/sandboxing/):
 Installer.xpc, Downloader.xpc, Autoupdate, Updater.app, then Sparkle.framework, all with

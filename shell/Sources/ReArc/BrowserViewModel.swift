@@ -218,10 +218,13 @@ final class BrowserViewModel {
     var library = LibraryPresentation()
     /// Windows whose sidebar the Library is widening (animated).
     var libraryGrowth: [SidebarWindowID?: LibrarySidebarGrowth] = [:]
-    /// Shown in the bottom bar's update slot. Nothing sets it until an updater exists.
-    var availableUpdate: AvailableUpdate?
-    /// Installs `availableUpdate`; the updater provides it.
-    @ObservationIgnored var installUpdate: (() -> Void)?
+    /// Shown in the bottom bar's update slot: the update the sidebars'
+    /// notice shows (`UpdateNoticeCenter`), shared by every browser window.
+    @MainActor var availableUpdate: AvailableUpdate? { UpdateNoticeCenter.shared.sidebarUpdate }
+    /// Restart and Update for `availableUpdate`.
+    @MainActor var installUpdate: (() -> Void)? {
+        availableUpdate == nil ? nil : { UpdateNoticeCenter.shared.install() }
+    }
     /// Where links from other apps open; remembered across launches.
     var externalLinkDestination: ExternalLinkDestination = .load(from: .standard) {
         didSet { externalLinkDestination.save(to: externalLinkDefaults) }
@@ -378,6 +381,8 @@ final class BrowserViewModel {
             // so ↓ then Return ran the first row (Break check 2026-11-08).
             if commandBarText != oldValue {
                 commandBarHighlightedIndex = 0
+                // Typing into a fresh chip ends the beat its old rows had.
+                if !commandBarText.isEmpty, commandBarSiteSearchHeldRows != nil { collapseCommandBarSiteSearchRows() }
                 PerfSignposts.interaction(.commandBarKey, "\(commandBarText.count) chars")
                 refreshCommandBarLive()
             }
@@ -397,6 +402,26 @@ final class BrowserViewModel {
     /// What was typed before Tab, restored when the pill is removed
     /// (Arc `queryBeforeEnteringScopedSearch`).
     @ObservationIgnored var commandBarTextBeforeSiteSearch = ""
+    /// The chip's earlier queries, read from history as it is entered.
+    var commandBarSiteSearchQueries: [SiteSearchQuery] = []
+    /// The rows from before Tab, shown recoloured for a beat before the
+    /// list collapses to the field (`CommandBarOverlay.collapseHold`).
+    var commandBarSiteSearchHeldRows: [CommandBarSearch.Result]?
+    @ObservationIgnored var commandBarSiteSearchHold: DispatchWorkItem?
+    /// Bumped as the list collapses: the card's tint and pulse play once.
+    var commandBarCollapseCount = 0
+    /// How long the recoloured rows stay before collapsing (0 in tests).
+    @ObservationIgnored var commandBarCollapseHold: TimeInterval = CommandBarOverlay.collapseHold
+    /// The last engine answer, kept while the next keystroke's is pending so
+    /// rows narrow in place instead of the list emptying and refilling.
+    @ObservationIgnored var commandBarLiveCarry: CommandBarLiveResults?
+    /// `commandBarSiteSearchEngines`, rebuilt when a source changes, not per keystroke.
+    @ObservationIgnored let commandBarSiteSearchCache = ObservedCache<[SiteSearchEngine]>()
+    /// Site searches brought from other browsers (`SiteSearches.json`).
+    var importedSiteSearches = ImportedSiteSearches()
+    @ObservationIgnored var importedSiteSearchesURL: URL?
+    /// Favicon colours by host for site-search chips (nil: monochrome icon).
+    @ObservationIgnored var siteSearchFaviconColors: [String: SpaceColor?] = [:]
 
     @ObservationIgnored let commandBarResultCache = ObservedCache<[CommandBarSearch.Result]>()
     @ObservationIgnored let commandBarCatalogCache = ObservedCache<[AppCommand]>()
@@ -426,10 +451,16 @@ final class BrowserViewModel {
 
     private func computeCommandBarResults() -> [CommandBarSearch.Result] {
         if let engine = commandBarSiteSearch {
-            return CommandBarSearch.siteSearchResults(engine, query: commandBarText)
+            if let held = commandBarSiteSearchHeldRows, commandBarText.isEmpty { return held }
+            return CommandBarSearch.siteSearchResults(engine, query: commandBarText, queries: commandBarSiteSearchQueries,
+                                                      suggestions: commandBarSiteSearchSuggestions,
+                                                      completion: commandBarSiteSearchCompletion)
         }
         let (mode, needle) = CommandBarSearch.parseMode(commandBarText)
-        if mode == .blended && needle.isEmpty { return [] }
+        // An empty ⌘T bar lists recent tabs, as Arc's does.
+        if mode == .blended && needle.isEmpty {
+            return commandBarCreatesNewTab && commandBarURLIntent == nil ? CommandBarSearch.recentTabResults(in: store) : []
+        }
         let commandIndex = commandBarCommandIndex
         return CommandBarSearch.results(
             for: commandBarText,
@@ -441,12 +472,12 @@ final class BrowserViewModel {
             tabMuteModel: tabMuteModel,
             navigationSchemes: engineHost.navigationSchemes,
             history: visitHistory(for: store.activeProfileID),
-            liveHistory: commandBarLiveHistory,
+            liveHistory: commandBarLive == nil ? nil : commandBarLiveHistory,
             tabIndex: commandBarTabIndex,
             commandIndex: commandIndex,
             menuIndex: commandBarMenuIndex(registered: commandIndex.catalog),
             externalLinkDestination: externalLinkDestination,
-            live: commandBarLive,
+            live: commandBarLive ?? commandBarCarriedLive,
             searchProvider: searchProvider,
             inlineCompletion: commandBarInlineCompletion
         )
@@ -630,6 +661,9 @@ final class BrowserViewModel {
         let historyFile = Self.siblingFile(VisitHistoryFile.fileName, of: persistence.fileURL)
         self.historyFileURL = historyFile
         self.visitHistory = preparedStartup?.history ?? VisitHistoryFile.load(from: historyFile)
+        let siteSearchFile = Self.siblingFile(ImportedSiteSearches.fileName, of: persistence.fileURL)
+        self.importedSiteSearchesURL = siteSearchFile
+        self.importedSiteSearches = ImportedSiteSearches.load(from: siteSearchFile)
         let reinstallFile = Self.siblingFile(PendingExtensionReinstall.fileName, of: persistence.fileURL)
         self.pendingExtensionReinstallURL = reinstallFile
         self.pendingExtensionReinstall = PendingExtensionReinstall.load(from: reinstallFile)
@@ -1772,41 +1806,12 @@ final class BrowserViewModel {
         openCommandBar(target: selected.id, text: text)
     }
 
-    /// The site Tab would search for the typed word, shown as a hint.
-    var commandBarSiteSearchSuggestion: SiteSearchEngine? {
-        guard commandBarSiteSearch == nil, commandBarURLIntent == nil, !commandBarText.hasPrefix(">") else { return nil }
-        return SiteSearchCatalog.match(commandBarText)
-    }
-
-    /// Tab in the command bar: the typed site name becomes a search pill.
-    /// Returns false (Tab keeps its usual meaning) when nothing matches.
-    @discardableResult
-    func enterCommandBarSiteSearch() -> Bool {
-        guard let engine = commandBarSiteSearchSuggestion else { return false }
-        commandBarTextBeforeSiteSearch = commandBarText
-        commandBarSiteSearch = engine
-        commandBarText = ""
-        commandBarError = nil
-        return true
-    }
-
-    /// Delete on an empty query removes the pill and restores the text.
-    @discardableResult
-    func exitCommandBarSiteSearch() -> Bool {
-        guard commandBarSiteSearch != nil, commandBarText.isEmpty else { return false }
-        commandBarSiteSearch = nil
-        commandBarText = commandBarTextBeforeSiteSearch
-        commandBarTextBeforeSiteSearch = ""
-        return true
-    }
-
     func dismissCommandBar() {
         commandBarCreatesNewTab = false
         isCommandBarPresented = false
         commandBarMenuSnapshot = nil
         cancelCommandBarLive()
-        commandBarSiteSearch = nil
-        commandBarTextBeforeSiteSearch = ""
+        resetCommandBarSiteSearch()
         commandBarTargetID = nil
         commandBarText = ""
         commandBarHighlightedIndex = 0
@@ -1828,6 +1833,10 @@ final class BrowserViewModel {
     /// Return in the command bar; ⌘↩, ⌥↩ and ⇧↩ pick another destination
     /// for a page result (`CommandBarRoute`). Commands ignore the route.
     func submitCommandBar(route: CommandBarRoute = .current) {
+        if commandBarSiteSearch != nil {
+            submitCommandBarSiteSearch(route: route)
+            return
+        }
         if let intent = commandBarURLIntent {
             guard let url = URLEntry.resolve(commandBarText, engine: engineHost.navigationSchemes, provider: searchProvider) else {
                 commandBarError = "Enter a valid URL"
@@ -1947,7 +1956,7 @@ final class BrowserViewModel {
     private func openCommandBar(target: Tab.ID?, text: String) {
         commandBarMenuSnapshot = nil
         commandBarCreatesNewTab = false
-        commandBarSiteSearch = nil
+        resetCommandBarSiteSearch()
         commandBarSplitAnchorID = nil
         commandBarTargetID = target
         commandBarText = text
@@ -1977,12 +1986,18 @@ final class BrowserViewModel {
     /// thread. Keys typed within one frame ask only for the newest text.
     func refreshCommandBarLive(immediately: Bool = false) {
         let text = commandBarText
-        guard isCommandBarPresented, commandBarSiteSearch == nil, commandBarURLIntent == nil, !text.hasPrefix(">"),
+        // A site search asks only when it is the default engine, whose own
+        // suggestions the normal bar asks for anyway.
+        let asks = commandBarSiteSearch.map { $0.suggestTemplate != nil } ?? true
+        guard isCommandBarPresented, asks, commandBarURLIntent == nil, !text.hasPrefix(">"),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             cancelCommandBarLive()
             return
         }
-        if let live = commandBarLive, !live.applies(to: text) { commandBarLive = nil }
+        if let live = commandBarLive, !live.applies(to: text) {
+            commandBarLiveCarry = live
+            commandBarLive = nil
+        }
         let generation = commandBarGate.begin(text)
         let waiting = pendingCommandBarQuery != nil
         pendingCommandBarQuery = (text, generation)
@@ -2009,6 +2024,7 @@ final class BrowserViewModel {
         pendingCommandBarQuery = nil
         commandBarServices.cancel()
         commandBarLive = nil
+        commandBarLiveCarry = nil
     }
 
     /// The WebKit search preference (provider and suggestions); nil on

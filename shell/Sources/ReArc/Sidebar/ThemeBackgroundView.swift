@@ -147,12 +147,17 @@ struct ThemeChromeColors: Equatable {
     /// The command bar's selected row: the accent lightened toward white
     /// (`#2731FF` → `#858AFF` on the default theme, ARC-RECORDING-ANALYSIS.md §8).
     var selection: Color
+    /// The command bar's selected row: `selection` darkened until white text
+    /// on it clears 4.5:1 (`CommandBarInk.selectionFill`).
+    var commandBarFill: SpaceColor
     /// The chrome's text roles are the dark ones (`ThemeGradient.usesDarkChrome`).
     var isDark: Bool
     /// The space is in dark appearance, whatever its chrome text uses.
     var isWindowDark: Bool
     /// The profile badge beside the space name and in the toolbar.
     var badge: SidebarBadgeInk
+    /// The update notice's pill, warning ink and card (`UpdateNoticeInk`).
+    var updateNotice: UpdateNoticeInk
 
     /// `dark` picks the chrome's roles; text and glyphs are then fitted to
     /// the sidebar's backdrop in the window's appearance (`backdrop`, by
@@ -160,8 +165,8 @@ struct ThemeChromeColors: Equatable {
     init(theme: SpaceTheme, dark: Bool, windowDark: Bool? = nil, backdrop: SidebarBackdrop? = nil) {
         let roles = SpaceThemeRoles(theme: theme)
         let semantic = roles.semantic(dark: dark)
-        let chrome = roles.chrome(dark: dark)
-            .legible(on: backdrop ?? SidebarBackdrop(theme: theme, dark: windowDark ?? dark), lightInk: dark)
+        let backdrop = backdrop ?? SidebarBackdrop(theme: theme, dark: windowDark ?? dark)
+        let chrome = roles.chrome(dark: dark).legible(on: backdrop, lightInk: dark)
         title = Color(chrome.title)
         secondaryText = Color(chrome.secondaryText)
         tertiaryText = Color(chrome.tertiaryText)
@@ -183,9 +188,11 @@ struct ThemeChromeColors: Equatable {
         panel = Color(dark ? semantic.background : semantic.backgroundExtra).opacity(dark ? 0.6 : 0.55)
         toast = Color(semantic.background)
         selection = Color(Self.selection(accent: semantic.foregroundPrimary))
+        commandBarFill = CommandBarInk.selectionFill(Self.selection(accent: semantic.foregroundPrimary))
         isDark = dark
         isWindowDark = windowDark ?? dark
         badge = SidebarBadgeInk(chrome: chrome, dark: dark)
+        updateNotice = UpdateNoticeInk(backdrop: backdrop, lightInk: dark, accent: chrome.accent)
     }
 
     static let fallback = ThemeChromeColors(theme: .arcDefault, dark: false)

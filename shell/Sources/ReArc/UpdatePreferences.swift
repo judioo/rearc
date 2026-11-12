@@ -7,9 +7,3 @@ struct UpdatePreferences {
         defaults.bool(forKey: betaKey) ? ["beta"] : []
     }
 }
-
-struct UpdateMenuState: Equatable {
-    var updateAvailable = false
-    var title: String { updateAvailable ? "Update Available…" : "Check for Updates…" }
-    var badgeCount: Int { updateAvailable ? 1 : 0 }
-}
