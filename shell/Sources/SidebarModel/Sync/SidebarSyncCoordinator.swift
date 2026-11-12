@@ -210,11 +210,7 @@ public final class SidebarSyncCoordinator {
         } else {
             switch account {
             case .available(let userID):
-                let records = sanitized(wires ?? [])
-                let summary = CloudSidebarSummary.of(records.mapValues(\.payload))
-                detection = summary.spaces > 0
-                    ? .found(CloudSidebarFound(accountID: userID, records: records.values.sorted { $0.recordName < $1.recordName }, summary: summary))
-                    : .empty(accountID: userID)
+                detection = .of(accountID: userID, records: sanitized(wires ?? []))
             case .noAccount:
                 detection = .signedOut("Sign in to iCloud in System Settings to sync your sidebar.")
             case .restricted:
@@ -300,6 +296,126 @@ public final class SidebarSyncCoordinator {
         stagedCloudSidebar = nil
         persist()
         update(.off)
+    }
+
+    // MARK: - One profile in iCloud
+
+    nonisolated static let profileBackupFailedMessage = "ReArc couldn't save a copy of what would be deleted, so nothing was deleted."
+
+    /// Deletes one profile from iCloud (`CloudProfileDeletion`): the person
+    /// confirmed `confirmed`, and the caller has just looked again (`found`).
+    /// The plan is worked out again from what iCloud holds now; when it
+    /// differs from `confirmed`, nothing happens and the new plan comes back
+    /// to be confirmed. `backup` gets the records as read before anything is
+    /// written, and if it throws nothing is.
+    ///
+    /// Sync off: targeted writes of at most `batchSize` records
+    /// (`SidebarCloudEditing`), each all or none and only while its records
+    /// are as read; rows first, the profile last. No zone is created, nothing
+    /// of this Mac's is uploaded and the sync state is not touched.
+    /// `deleteLocally` runs once iCloud's part is done. Sync on: a cycle
+    /// first, then `deleteLocally`, then the changes go in as this Mac's
+    /// edits and a cycle uploads them, so the sidebar, the queue and iCloud
+    /// agree.
+    public func deleteCloudProfile(
+        _ confirmed: CloudProfileDeletion,
+        in found: CloudSidebarFound,
+        backup: ([SyncWireRecord]) throws -> URL,
+        deleteLocally: (() -> Void)? = nil
+    ) async -> CloudProfileDeletionResult {
+        if state.isActive { return await deleteCloudProfileThroughSync(confirmed, found: found, backup: backup, deleteLocally: deleteLocally) }
+        guard let editor = transport as? SidebarCloudEditing else { return .failed("This build can't change iCloud.") }
+        var records = Dictionary(found.records.map { ($0.recordName, $0) }) { _, last in last }
+        guard let plan = CloudProfileDeletion(profileID: confirmed.profileID, in: records) else {
+            return .gone(.of(accountID: found.accountID, records: records))
+        }
+        guard plan.changes == confirmed.changes else { return .changed(plan) }
+        let saved: URL
+        do {
+            saved = try backup(plan.fetched.values.sorted { $0.recordName < $1.recordName })
+        } catch {
+            return .failed(Self.profileBackupFailedMessage)
+        }
+        // Newer than every stamp read, so each change wins; nothing is persisted.
+        var stamps = HybridLogicalClock(device: clock.device, last: clock.last)
+        for wire in found.records { if let latest = wire.payload.latestStamp { stamps.observe(latest) } }
+        let writes = plan.writes(clock: &stamps, now: now())
+        var written = 0
+        for start in stride(from: 0, to: writes.count, by: Self.batchSize) {
+            let batch = Array(writes[start ..< min(start + Self.batchSize, writes.count)])
+            let result: SyncModifyResult
+            do {
+                result = try await editor.saveExisting(batch)
+            } catch let error as SyncTransportError {
+                result = SyncModifyResult(failures: [batch[0].recordName: error])
+            } catch {
+                result = SyncModifyResult(failures: [batch[0].recordName: .other(error.localizedDescription)])
+            }
+            if !result.failures.isEmpty {
+                let zoneGone = result.failures.values.contains { $0 == .zoneNotFound || $0 == .userDeletedZone }
+                if zoneGone, written == 0 { return .gone(.empty(accountID: found.accountID)) }
+                let changed = zoneGone || result.failures.values.contains {
+                    if case .serverRecordChanged = $0 { return true } else { return $0 == .unknownItem }
+                }
+                return .failed(Self.cutShort(written, of: writes.count, changed: changed))
+            }
+            for wire in result.saved { records[wire.recordName] = wire }
+            written += result.saved.count
+        }
+        deleteLocally?()
+        let detection = CloudSidebarDetection.of(accountID: found.accountID, records: records)
+        stagedCloudSidebar = detection.found
+        return .deleted(backup: saved, detection: detection, queued: false)
+    }
+
+    private func deleteCloudProfileThroughSync(
+        _ confirmed: CloudProfileDeletion,
+        found: CloudSidebarFound,
+        backup: ([SyncWireRecord]) throws -> URL,
+        deleteLocally: (() -> Void)?
+    ) async -> CloudProfileDeletionResult {
+        let first = await sync()
+        if let error = first.error, !error.isSchemaError { return .failed(error.userMessage) }
+        guard let host else { return .failed("Sync isn't ready yet. Try again in a moment.") }
+        let account = state.accountID ?? found.accountID
+        guard let plan = CloudProfileDeletion(profileID: confirmed.profileID, in: syncedWires()) else {
+            return .gone(.of(accountID: account, records: syncedWires()))
+        }
+        guard plan.changes == confirmed.changes else { return .changed(plan) }
+        let saved: URL
+        do {
+            saved = try backup(plan.fetched.values.sorted { $0.recordName < $1.recordName })
+        } catch {
+            return .failed(Self.profileBackupFailedMessage)
+        }
+        deleteLocally?()
+        // The local delete is stamped first; the plan's changes come after it.
+        capture(host.syncSnapshot())
+        let at = now()
+        for (name, change) in plan.changes {
+            guard var record = state.records[name], change != .delete || record.payload.isAlive else { continue }
+            record.payload = CloudProfileDeletion.applying(change, to: record.payload) { clock.tick(now: at) }
+            record.pending = true
+            state.records[name] = record
+        }
+        state.clock = clock.last
+        var outcome = SyncCycleOutcome()
+        applyToHost(&outcome)
+        update(.waiting("Waiting to sync"))
+        let upload = await sync()
+        return .deleted(backup: saved, detection: .of(accountID: account, records: syncedWires()), queued: upload.error != nil || state.pendingCount > 0)
+    }
+
+    /// This Mac's merged records, as the server last confirmed them.
+    private func syncedWires() -> [String: SyncWireRecord] {
+        Dictionary(uniqueKeysWithValues: state.records.map { ($0.key, SyncWireRecord(recordName: $0.key, payload: $0.value.payload, serverTag: $0.value.serverTag)) })
+    }
+
+    /// `changed`: iCloud's copy was no longer the one read; otherwise iCloud failed.
+    private nonisolated static func cutShort(_ written: Int, of total: Int, changed: Bool) -> String {
+        let why = changed ? "iCloud changed while ReArc was deleting" : "ReArc lost touch with iCloud while deleting"
+        guard written > 0 else { return why + ", so nothing was deleted. Look at iCloud again and try again." }
+        return why + ": \(written.formatted()) of \(total.formatted()) changes were made. Look at iCloud again to see what is left."
     }
 
     /// Sync Now: offer schema-rejected kinds again (after a schema deployment).

@@ -16,6 +16,9 @@ public protocol SyncControlling: AnyObject {
     func apply(_ choice: CloudSidebarChoice, from found: CloudSidebarFound)
     /// Deletes ReArc's sidebar from iCloud; sync is off afterwards.
     func deleteCloudSidebar() async throws
+    /// Deletes one profile from iCloud (`SidebarSyncCoordinator.deleteCloudProfile`).
+    func deleteCloudProfile(_ confirmed: CloudProfileDeletion, in found: CloudSidebarFound,
+                            backup: ([SyncWireRecord]) throws -> URL, deleteLocally: (() -> Void)?) async -> CloudProfileDeletionResult
 }
 
 /// Runs `SidebarSyncCoordinator` cycles: soon after local edits (debounced),
@@ -80,6 +83,19 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
     public func deleteCloudSidebar() async throws {
         try await coordinator.deleteCloudSidebar()
         resumeOrPause()
+    }
+
+    /// With sync on its cycles run here, never beside another cycle.
+    @MainActor
+    public func deleteCloudProfile(_ confirmed: CloudProfileDeletion, in found: CloudSidebarFound,
+                                   backup: ([SyncWireRecord]) throws -> URL, deleteLocally: (() -> Void)?) async -> CloudProfileDeletionResult {
+        while running { try? await Task.sleep(nanoseconds: 50_000_000) }
+        running = true
+        defer {
+            running = false
+            if rerun { schedule(after: 0) }
+        }
+        return await coordinator.deleteCloudProfile(confirmed, in: found, backup: backup, deleteLocally: deleteLocally)
     }
 
     @MainActor
