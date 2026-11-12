@@ -59,10 +59,11 @@ extension View {
     /// A transient confirmation just inside the card's top-right corner,
     /// over the toolbar strip (ARC-RECORDING-ANALYSIS.md §6), or centred
     /// `toolbarHeight` down, under the strip, covering no control.
-    func shellToast(_ toast: ShellToast?, toolbarHeight: CGFloat = 0, choose: @escaping (Bool) -> Void = { _ in }) -> some View {
+    func shellToast(_ toast: ShellToast?, toolbarHeight: CGFloat = 0, openSettings: @escaping (SettingsPane) -> Void = { _ in },
+                    choose: @escaping (Bool) -> Void = { _ in }) -> some View {
         overlay(alignment: .topTrailing) {
             if let toast, toast.placement == .corner {
-                ShellToastView(toast: toast, choose: choose)
+                ShellToastView(toast: toast, choose: choose, openSettings: openSettings)
                     .padding(.top, 5)
                     .padding(.trailing, 6)
                     .transition(.scale(scale: 0.5, anchor: .topTrailing).combined(with: .opacity))
@@ -71,7 +72,7 @@ extension View {
         }
         .overlay(alignment: .top) {
             if let toast, toast.placement == .belowToolbar {
-                ShellToastView(toast: toast, choose: choose)
+                ShellToastView(toast: toast, choose: choose, openSettings: openSettings)
                     .padding(.top, toolbarHeight + 8)
                     .transition(.scale(scale: 0.5, anchor: .top).combined(with: .opacity))
                     .id(toast.id)
@@ -92,6 +93,8 @@ struct ShellToastView: View {
     let toast: ShellToast
     /// Opens import details (true) or dismisses the toast (false).
     var choose: (Bool) -> Void = { _ in }
+    /// A tip's "Settings…" button.
+    var openSettings: (SettingsPane) -> Void = { _ in }
     @Environment(\.themeChrome) private var chrome
     @State private var shareAnchor: NSView?
 
@@ -141,6 +144,9 @@ struct ShellToastView: View {
             }
             if toast.action == .reinstallExtensions {
                 toastButton("Details", prominent: true) { choose(true) }
+            }
+            if case .openSettings(let pane) = toast.action {
+                toastButton("Settings…", prominent: true) { openSettings(pane) }
             }
         }
         .padding(.leading, 10)

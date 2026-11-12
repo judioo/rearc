@@ -59,6 +59,10 @@ extension BrowserViewModel {
         let result = sidebarModes.toggle(in: target, sidebarVisible: isSidebarVisible || isSidebarPeeking)
         PerfSignposts.interaction(.sidebarToggle, result.mode == .mini ? "mini" : "full")
         onSidebarModeChange?()
+        if result.mode == .mini, MiniSidebarAddressBarTip.takeIfDue(in: externalLinkDefaults) {
+            showToast(MiniSidebarAddressBarTip.message, systemImage: "menubar.arrow.up.rectangle",
+                      action: .openSettings(.advanced), duration: ShellToast.choiceDuration / 2)
+        }
         if inlineRename != nil { _ = endInlineRename(.commit) }
         if result.showsSidebar {
             sidebarMorphs[target] = nil

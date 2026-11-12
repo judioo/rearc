@@ -506,7 +506,8 @@ struct BrowserView: View {
             CardToolbarView(model: model, trafficLightsClearance: cardToolbarTrafficLightsClearance)
         }
         .shellToast(model.isKeyBrowserWindow(windowID) ? model.toast : nil,
-                    toolbarHeight: showsCardToolbar ? CardToolbarView.height : 0) { start in
+                    toolbarHeight: showsCardToolbar ? CardToolbarView.height : 0,
+                    openSettings: { model.showSettings($0) }) { start in
             if start { model.startPendingExtensionReinstall() } else { model.postponePendingExtensionReinstall() }
         }
         // The whole card, its toolbar strip too, as in Arc.
