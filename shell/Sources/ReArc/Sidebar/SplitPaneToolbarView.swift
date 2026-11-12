@@ -60,8 +60,12 @@ struct SplitPaneToolbarView: View, Equatable {
 
             // The address takes its width first; the two sides share the rest,
             // so a short address is centred and a long one fills the row.
-            address(url, ink: ink)
-                .layoutPriority(1)
+            // The pane's own container, from its engine: panes of one split can differ.
+            HStack(spacing: 4) {
+                if let container = model.containerLabel(for: engine, tab: tab) { ContainerChip(label: container, ink: ink.ink) }
+                address(url, ink: ink)
+            }
+            .layoutPriority(1)
 
             HStack(spacing: 0) {
                 if row.isActive { paneControls(url, ink: ink) }

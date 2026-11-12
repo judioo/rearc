@@ -191,6 +191,8 @@ struct ProfilesSettingsPane: View {
     @State private var renaming: Profile.ID?
     @State private var renameDraft = ""
     @State private var deleting: Profile.ID?
+    /// A container whose Remove Container… is asking.
+    @State private var removingContainer: Profile.ID?
     @State private var showsLearnMore = false
 
     private static let listWidth: CGFloat = 205
@@ -203,6 +205,10 @@ struct ProfilesSettingsPane: View {
         cloudSelection.flatMap(model.cloudOnlyProfile)
     }
 
+    private var selectedIsContainer: Bool {
+        selectedCloud == nil && selected.map { model.store.isContainer($0.id) } == true
+    }
+
     var body: some View {
         SettingsPage {
             intro
@@ -211,9 +217,12 @@ struct ProfilesSettingsPane: View {
                 VStack(alignment: .leading, spacing: SettingsMetrics.boxSpacing) {
                     if let cloud = selectedCloud {
                         CloudProfileDetail(model: model, cloud: cloud)
+                    } else if let profile = selected, model.store.isContainer(profile.id) {
+                        ContainerSettingsDetail(model: model, container: profile, removing: $removingContainer)
                     } else if let profile = selected {
                         ProfileCloudStatusGroup(model: model, profileID: profile.id)
                         profileSettings(profile)
+                        ProfileContainerConversionGroup(model: model, profile: profile)
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -245,9 +254,11 @@ struct ProfilesSettingsPane: View {
                 deleting = nil
             }
         } message: {
-            Text(ProfileCloudText.localDeleteMessage(deleting.map(model.cloudPresence(of:)) ?? .onlyHere, syncOn: model.isSyncEnabled))
+            Text(ProfileCloudText.localDeleteMessage(deleting.map(model.cloudPresence(of:)) ?? .onlyHere, syncOn: model.isSyncEnabled)
+                 + (deleting.map { model.containersDeletedNote($0, reachesICloud: false) } ?? ""))
         }
         .cloudProfileDeleteAlert(model)
+        .containerRemovalAlert(model, removing: $removingContainer)
     }
 
     /// Arc's text; its "Learn more." opens the explanation here, not a web page.
@@ -261,7 +272,7 @@ struct ProfilesSettingsPane: View {
                 return .handled
             })
             .popover(isPresented: $showsLearnMore, arrowEdge: .bottom) {
-                Text("Each profile has its own history, cookies, logins, passwords and extensions, and its own search engine and Archive setting. A space belongs to one profile: switching to it switches the profile. Pick a profile when you make a space, or change it in Edit Space.")
+                Text("Each profile has its own history, cookies, logins, passwords and extensions, and its own search engine and Archive setting. A space belongs to one profile: switching to it switches the profile. Pick a profile when you make a space, or change it in Edit Space. A container gives one space its own sign-ins inside its profile; it is listed under the profile.")
                     .font(.callout)
                     .frame(width: 300, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
@@ -287,8 +298,15 @@ struct ProfilesSettingsPane: View {
             SettingsHairline()
             ScrollView {
                 VStack(spacing: 2) {
-                    ForEach(model.store.profiles) { profile in
+                    ForEach(model.store.listedProfiles) { profile in
                         profileRow(profile)
+                        ForEach(model.store.containers(of: profile.id)) { container in
+                            ContainerProfileRow(model: model, container: container,
+                                                isSelected: selectedCloud == nil && container.id == selected?.id) {
+                                selection = container.id
+                                cloudSelection = nil
+                            }
+                        }
                     }
                     CloudOnlyProfilesSection(model: model, selection: $cloudSelection)
                 }
@@ -299,10 +317,11 @@ struct ProfilesSettingsPane: View {
             HStack(spacing: 0) {
                 listButton("plus", help: "Add Profile") { editor = ProfileEditorRequest() }
                 Divider().frame(height: 18)
-                listButton("minus", help: model.store.profiles.count < 2 && selectedCloud == nil ? "The last profile can't be deleted." : "Delete Profile") {
+                listButton("minus", help: model.store.listedProfiles.count < 2 && selectedCloud == nil && !selectedIsContainer
+                           ? "The last profile can't be deleted." : selectedIsContainer ? "Remove Container" : "Delete Profile") {
                     deleteSelected()
                 }
-                .disabled(model.store.profiles.count < 2 && selectedCloud == nil)
+                .disabled(model.store.listedProfiles.count < 2 && selectedCloud == nil && !selectedIsContainer)
                 Divider().frame(height: 18)
                 listButton("pencil", help: "Rename Profile") {
                     renameDraft = selected?.name ?? ""
@@ -322,6 +341,7 @@ struct ProfilesSettingsPane: View {
     private func deleteSelected() {
         if let cloud = selectedCloud { return model.requestCloudProfileDeletion(cloud.id) }
         guard let id = selected?.id else { return }
+        if selectedIsContainer { return removingContainer = id }
         if model.cloudPresence(of: id) == .inICloud, model.canDeleteFromICloud {
             model.requestCloudProfileDeletion(id)
         } else {
@@ -372,7 +392,7 @@ struct ProfilesSettingsPane: View {
                 SettingsLabeledRow(label: "Search engine") {
                     SettingsPopUp(label: "Search engine", selection: Binding(
                         get: { search.defaultEngine(for: profile.id) ?? "" },
-                        set: { search.setDefaultEngine($0, for: profile.id) }
+                        set: { model.setDefaultSearchEngine($0, for: profile.id) }
                     ), options: search.engines(for: profile.id).map { ($0.id, $0.name) })
                     .disabled(!search.isEditable(for: profile.id))
                 }
@@ -427,10 +447,10 @@ struct ProfilesSettingsPane: View {
         }
     }
 
-    /// Chromium's page opens as a tab of that profile (its own storage and settings).
+    /// Chromium's page opens as a tab of that profile (its own storage and
+    /// settings), in one of its own spaces, never in one of its containers'.
     private func open(_ page: BrowserInternalPage, in profile: Profile) {
-        if model.store.activeProfileID != profile.id { model.selectProfile(profile.id) }
-        model.openBrowserPage(page)
+        model.openBrowserPage(page, inStorageOf: profile.id)
     }
 }
 

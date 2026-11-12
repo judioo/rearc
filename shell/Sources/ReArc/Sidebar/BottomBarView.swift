@@ -234,7 +234,7 @@ struct BottomBarView: View {
     /// A profile with spaces asks first, then goes with its spaces (Arc DeleteProfileDialog).
     private func attemptDelete(_ profile: Profile) {
         showingProfileList = false
-        if !model.store.spaces(in: profile.id).isEmpty, model.store.profiles.count > 1 {
+        if !model.store.spaces(listedIn: profile.id).isEmpty, model.store.listedProfiles.count > 1 {
             model.pendingDeletion = .profile(profile.id)
             return
         }
@@ -269,7 +269,8 @@ private struct SpaceDotRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let spaces = model.store.spaces(in: current.profileID)
+        // Its containers' spaces too, in their places.
+        let spaces = model.store.spaces(listedIn: current.profileID)
         let circles = model.spaceIconStyle == .colouredCircles
         let appearances = SpaceDots.appearances(spaces: spaces, current: current.id, hovered: hoveredSpaceID)
         let layout = SpaceDotLayout(appearances: appearances, hovered: spaces.firstIndex { $0.id == hoveredSpaceID })
@@ -400,13 +401,19 @@ private struct SpaceIconButton: View {
                         .transition(morph)
                 }
             }
+            // A container's space, where its icon (or the current space's dot) shows.
+            .overlay(alignment: .bottomTrailing) {
+                if isCircle || appearance != .dot, let container = model.containerLabel(forSpace: space.id) {
+                    ContainerChip(label: container, style: .badge).scaleEffect(0.8).offset(x: 5, y: 4)
+                }
+            }
             .frame(width: width, height: 24)
             .background(isTargeted ? Color.accentColor.opacity(0.35) : .clear, in: RoundedRectangle(cornerRadius: 5))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .anchorPreference(key: SpaceDotChipAnchor.self, value: .bounds) { isLabelled ? $0 : nil }
-        .accessibilityLabel(space.name)
+        .accessibilityLabel(model.store.container(ofSpace: space.id) == nil ? space.name : "\(space.name), container: own sign-ins")
         .accessibilityHint("Drop a tab here to move it to this space")
         .contextMenu { SpaceContextMenu(model: model, space: space) }
         .onDrag {
@@ -512,7 +519,7 @@ private struct SpaceListView: View {
     var body: some View {
         let current = model.space(in: window)
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(model.store.spaces(in: current.profileID)) { space in
+            ForEach(model.store.spaces(listedIn: current.profileID)) { space in
                 Button {
                     model.selectSpace(space.id)
                     isPresented = false
@@ -520,6 +527,7 @@ private struct SpaceListView: View {
                     HStack(spacing: 8) {
                         SpaceIconView(iconName: space.iconName)
                             .frame(width: 18)
+                            .containerBadge(model.containerLabel(forSpace: space.id), offset: 2)
                         Text(space.name)
                             .lineLimit(1)
                         Spacer()
@@ -560,7 +568,8 @@ private struct ProfileListView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(model.store.profiles) { profile in
+            // Containers are not profiles to the person: they show under their spaces.
+            ForEach(model.store.listedProfiles) { profile in
                 HStack(spacing: 0) {
                     Button {
                         model.selectProfile(profile.id)
@@ -571,7 +580,7 @@ private struct ProfileListView: View {
                             Text(profile.name)
                                 .lineLimit(1)
                             Spacer()
-                            if profile.id == model.store.activeProfileID {
+                            if profile.id == model.store.activeOwningProfileID {
                                 Image(systemName: "checkmark")
                                     .font(.system(size: 10, weight: .bold))
                             }
@@ -598,7 +607,7 @@ private struct ProfileListView: View {
                         }
                         Divider()
                         Button("Delete…", role: .destructive) { onDelete(profile) }
-                            .disabled(model.store.profiles.count < 2)
+                            .disabled(model.store.listedProfiles.count < 2)
                     } label: {
                         Image(systemName: "ellipsis")
                             .font(.system(size: 11, weight: .semibold))

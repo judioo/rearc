@@ -6,6 +6,10 @@ import Foundation
 /// avatar and the space count tell them apart.
 public struct ProfileMenuRow: Identifiable, Equatable, Sendable {
     public let profile: Profile
+    /// The profile's name; a container's row ("Container for Mail") names its space.
+    public let title: String
+    /// A container's row (only in a menu that lists them: Little ReArc's).
+    public let isContainer: Bool
     public let spaceCount: Int
     /// The profile of what the menu is for: the window's space, the space,
     /// or the Little ReArc window. Drawn as the menu item's checkmark.
@@ -25,10 +29,23 @@ public struct ProfileMenuRow: Identifiable, Equatable, Sendable {
 }
 
 extension SidebarStore {
-    /// Every profile, in the store's order, including those with no spaces.
-    public func profileMenuRows(active: Profile.ID?) -> [ProfileMenuRow] {
+    /// Every profile but containers, in the store's order, including those with
+    /// no spaces. A profile's count includes its containers' spaces, and an
+    /// `active` container checks its parent. With `includingContainers` (Little
+    /// ReArc, whose window can use a container's session) each container
+    /// follows its parent and only the exact `active` session is checked.
+    public func profileMenuRows(active: Profile.ID?, includingContainers: Bool = false) -> [ProfileMenuRow] {
         var counts: [Profile.ID: Int] = [:]
-        for space in spaces { counts[space.profileID, default: 0] += 1 }
-        return profiles.map { ProfileMenuRow(profile: $0, spaceCount: counts[$0.id] ?? 0, isActive: $0.id == active) }
+        for space in spaces { counts[owningProfileID(of: space.profileID), default: 0] += 1 }
+        let checked = includingContainers ? active : active.map(owningProfileID(of:))
+        return listedProfiles.flatMap { profile in
+            let row = ProfileMenuRow(profile: profile, title: profile.name, isContainer: false,
+                                     spaceCount: counts[profile.id] ?? 0, isActive: profile.id == checked)
+            guard includingContainers else { return [row] }
+            return [row] + containers(of: profile.id).map { container in
+                ProfileMenuRow(profile: container, title: containerTitle(container.id), isContainer: true,
+                               spaceCount: spaces(in: container.id).count, isActive: container.id == checked)
+            }
+        }
     }
 }

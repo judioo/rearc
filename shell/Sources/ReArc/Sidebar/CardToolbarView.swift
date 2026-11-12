@@ -29,22 +29,26 @@ struct CardToolbarView: View {
         let tint = matchesPageColor ? engine?.pageColor : nil
         let palette = CardToolbarInk(chrome: chrome, tint: tint)
         let ink = palette.ink, quietInk = palette.quiet
+        let container = model.containerLabel(for: engine, tab: tab)
         ZStack {
-            Button { model.focusLocation() } label: {
-                Text(url.flatMap(Self.displayURL) ?? "Search or Enter URL…")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(ink)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .padding(.horizontal, 10)
-                    .frame(height: 22)
-                    .background(palette.hover.opacity(isHoveringURL ? 1 : 0), in: RoundedRectangle(cornerRadius: 6))
-                    .contentShape(Rectangle())
+            HStack(spacing: 6) {
+                if let container { ContainerChip(label: container, ink: ink) }
+                Button { model.focusLocation() } label: {
+                    Text(url.flatMap(Self.displayURL) ?? "Search or Enter URL…")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(ink)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.horizontal, 10)
+                        .frame(height: 22)
+                        .background(palette.hover.opacity(isHoveringURL ? 1 : 0), in: RoundedRectangle(cornerRadius: 6))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .addressBarControlFocus()
+                .onHover { isHoveringURL = $0 }
+                .help(url?.absoluteString ?? "Open the command bar (⌘L)")
             }
-            .buttonStyle(.plain)
-            .addressBarControlFocus()
-            .onHover { isHoveringURL = $0 }
-            .help(url?.absoluteString ?? "Open the command bar (⌘L)")
             .padding(.horizontal, 140)
             .padding(.trailing, 20) // centred about 10 pt left of the card's centre
             .frame(maxWidth: .infinity)

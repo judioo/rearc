@@ -94,8 +94,8 @@ extension SidebarStore {
         } else {
             return nil
         }
-        if window.profileID != activeProfileID {
-            selectProfile(window.profileID)
+        if activeSpace.profileID != window.profileID {
+            selectSpace(usingStorageOf: window.profileID)
         }
         if let spaceID, space(withID: spaceID)?.profileID == window.profileID {
             selectSpace(spaceID)

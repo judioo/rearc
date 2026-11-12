@@ -172,17 +172,23 @@ struct SpaceCreationPage: View {
                 .foregroundStyle(chrome.secondaryText)
             Text("Profile").font(.system(size: 13, weight: .medium))
             Spacer(minLength: 4)
+            // The profile, and whether the space gets its own container inside it.
             Menu {
-                ForEach(model.store.profiles) { profile in
-                    Button(profile.name) {
-                        draft.wrappedValue.profileID = profile.id
-                        draft.wrappedValue.createsOwnContainer = false
-                    }
+                ForEach(model.store.listedProfiles) { profile in
+                    Toggle(profile.name, isOn: Binding(
+                        get: { current.profileID == profile.id },
+                        set: { if $0 { draft.wrappedValue.profileID = profile.id } }
+                    ))
                 }
                 Divider()
-                Button("New Container for This Space") { draft.wrappedValue.createsOwnContainer = true }
+                Toggle("Its Own Container", isOn: Binding(
+                    get: { current.createsOwnContainer },
+                    set: { draft.wrappedValue.createsOwnContainer = $0 }
+                ))
+                .help(ContainerChip.help)
             } label: {
-                Text(current.createsOwnContainer ? "New Container" : model.store.profile(withID: current.profileID)?.name ?? "Profile")
+                let name = model.store.profile(withID: current.profileID)?.name ?? "Profile"
+                Text(current.createsOwnContainer ? "\(name) · Container" : name)
                     .font(.system(size: 11, weight: .semibold))
                     .lineLimit(1)
             }
@@ -193,7 +199,9 @@ struct SpaceCreationPage: View {
             Image(systemName: "info.circle")
                 .font(.system(size: 11))
                 .foregroundStyle(chrome.secondaryText)
-                .help("The space's tabs use this profile's cookies, history and favorites")
+                .help(current.createsOwnContainer
+                      ? "The space is in this profile, with its own container: its own cookies, sign-ins and site data"
+                      : "The space's tabs use this profile's cookies, history and favorites")
         }
         .padding(.horizontal, 10)
         .frame(height: 34)

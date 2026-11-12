@@ -4,12 +4,13 @@ import Foundation
 /// Tabs; DATA-SCHEMA §3). Records are local; they are not journaled for sync.
 extension SidebarStore {
 
+    /// A container follows its parent's setting.
     public func autoArchiveThreshold(for profileID: Profile.ID? = nil) -> AutoArchiveThreshold {
-        autoArchiveThresholdByProfile[profileID ?? activeProfileID] ?? .default
+        autoArchiveThresholdByProfile[owningProfileID(of: profileID ?? activeProfileID)] ?? .default
     }
 
     public func setAutoArchiveThreshold(_ threshold: AutoArchiveThreshold, for profileID: Profile.ID? = nil) {
-        let id = profileID ?? activeProfileID
+        let id = owningProfileID(of: profileID ?? activeProfileID)
         guard profiles.contains(where: { $0.id == id }), autoArchiveThreshold(for: id) != threshold else { return }
         autoArchiveThresholdByProfile[id] = threshold
         notifyMutation()

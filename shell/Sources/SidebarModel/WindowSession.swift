@@ -235,8 +235,9 @@ extension SidebarStore {
     public func restoredSpaceID(saved spaceID: Space.ID?, profileID: Profile.ID?) -> Space.ID? {
         if let spaceID, space(withID: spaceID) != nil { return spaceID }
         guard let profileID, profile(withID: profileID) != nil else { return nil }
-        if let last = lastActiveSpaceByProfile[profileID], space(withID: last) != nil { return last }
-        return spaces(in: profileID).first?.id
+        let owner = owningProfileID(of: profileID)
+        if let last = lastActiveSpaceByProfile[owner], space(withID: last) != nil { return last }
+        return spaces(listedIn: owner).first?.id
     }
 }
 

@@ -36,7 +36,8 @@ extension BrowserViewModel: PageLinkRouting {
     }
 
     func searchWeb(for text: String, from prompts: PagePromptCenter) {
-        let provider = commandBarServices.searchProvider(for: prompts.profileID ?? store.activeProfileID)
+        // A container's page searches with its parent's engine, in its own tab's session.
+        let provider = commandBarServices.searchProvider(for: settingsProfileID(for: prompts.profileID ?? store.activeProfileID))
         guard let url = URLEntry.searchURL(for: text, provider: provider) else { return }
         openLinkTab(url, from: prompts, select: true)
     }
