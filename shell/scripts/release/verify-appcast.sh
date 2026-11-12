@@ -43,4 +43,7 @@ printf '%s' "$signature" | base64 -D >"$WORK/sig" 2>/dev/null || fail "edSignatu
 [[ "$(wc -c <"$WORK/key.der" | tr -d ' ')" == 44 ]] || fail "the public key is not an Ed25519 key"
 "$OPENSSL" pkeyutl -verify -pubin -inkey "$WORK/key.der" -keyform DER -rawin -in "$WORK/signed" -sigfile "$WORK/sig" >/dev/null 2>&1 \
   || fail "the signature does not verify against the public key"
+# ReArc's update levels in the signed bytes: every rearc: marker well formed.
+python3 -I "$(dirname "$0")/appcast-marker.py" check "$WORK/signed" >/dev/null \
+  || fail "the feed's ReArc markers are malformed"
 echo "verify-appcast: $FEED verifies ($length signed bytes)"
