@@ -22,6 +22,11 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDeleg
     private weak var menuItem: NSMenuItem?
     private var automaticObservation: NSKeyValueObservation?
     private var vetoObserver: NSObjectProtocol?
+    /// About ReArc's probe is running: what it finds is the notice's news.
+    private var probing = false
+    /// The scheduled check About's probe postponed, and the timer that runs it then.
+    private var scheduledCheckDue: Date?
+    private var postponedCheck: Timer?
 
     private override init() {
         // A preview of the notice never starts Sparkle (`UpdateNoticePreview`).
@@ -101,6 +106,45 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDeleg
         set { if updater?.automaticallyDownloadsUpdates != newValue { updater?.automaticallyDownloadsUpdates = newValue } }
     }
 
+    /// Sparkle's probe (`checkForUpdateInformation`): the feed only, with the
+    /// same request and User-Agent as a scheduled check; no window, no
+    /// download, no install, not a check the person made. Sparkle 2.10.1
+    /// counts it as the last check and moves the next scheduled one a full
+    /// interval on, so the check that was due runs at its time anyway
+    /// (`restoreScheduledCheck`).
+    func checkForUpdateInformation() -> Bool {
+        guard let updater, !updater.sessionInProgress else { return false }
+        if updater.automaticallyChecksForUpdates, let last = updater.lastUpdateCheckDate {
+            let due = last.addingTimeInterval(updater.updateCheckInterval)
+            scheduledCheckDue = min(scheduledCheckDue ?? due, due)
+        }
+        probing = true
+        UpdateLog.note("About: checking the feed")
+        updater.checkForUpdateInformation()
+        return true
+    }
+
+    var lastUpdateCheckDate: Date? { updater?.lastUpdateCheckDate }
+
+    private func restoreScheduledCheck() {
+        postponedCheck?.invalidate()
+        guard let due = scheduledCheckDue else { return }
+        let timer = Timer(fire: max(due, Date().addingTimeInterval(1)), interval: 0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let updater = self.updater else { return }
+                self.scheduledCheckDue = nil
+                self.postponedCheck = nil
+                // Busy: that session's end schedules the next check itself.
+                guard updater.automaticallyChecksForUpdates, !updater.sessionInProgress else { return }
+                UpdateLog.note("running the scheduled check About's probe postponed")
+                updater.checkForUpdatesInBackground()
+            }
+        }
+        timer.tolerance = 60
+        RunLoop.main.add(timer, forMode: .common)
+        postponedCheck = timer
+    }
+
     // MARK: SPUUpdaterDelegate
 
     func allowedChannels(for updater: SPUUpdater) -> Set<String> {
@@ -127,6 +171,34 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDeleg
 
     func updaterDidNotFindUpdate(_ updater: SPUUpdater, error: Error) {
         center.send(.notFound)
+    }
+
+    /// Every check calls it; only the probe's find is not already the user driver's.
+    func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+        guard probing, !item.isInformationOnlyUpdate else { return }
+        center.send(.found(Self.availableUpdate(item), downloaded: false))
+    }
+
+    func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: Error?) {
+        if updateCheck == .updateInformation, probing {
+            probing = false
+            restoreScheduledCheck()
+        } else if updateCheck != .updateInformation {
+            // A real check: Sparkle has scheduled the next one from it.
+            postponedCheck?.invalidate()
+            postponedCheck = nil
+            scheduledCheckDue = nil
+        }
+        let result: UpdateInformationCheck.Result
+        if let error = error as NSError? {
+            let quiet = error.domain == UpdateNoticeFailure.sparkleErrorDomain
+                && [UpdateNoticeFailure.noUpdateCode, UpdateNoticeFailure.canceledCode].contains(error.code)
+            result = !quiet ? .failed : error.code == UpdateNoticeFailure.noUpdateCode ? .notFound : .found
+            if !quiet, updateCheck == .updateInformation { UpdateLog.error("About's check failed", error) }
+        } else {
+            result = .found
+        }
+        center.updateInformationFinished(result)
     }
 
     // MARK: SPUStandardUserDriverDelegate

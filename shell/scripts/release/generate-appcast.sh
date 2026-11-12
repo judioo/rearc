@@ -2,6 +2,7 @@
 # Uses the tools from Sparkle's pinned 2.10.1 distribution. Private keys stay in Keychain.
 #
 # Usage: generate-appcast.sh ARCHIVES_DIR [CHANNEL] [--critical] [--required-below N --version BUILD]
+#                            [--display-version V]
 #   CHANNEL               beta, or empty for the default channel
 #   --critical            new items are Sparkle critical updates for every older build
 #                         (<sparkle:criticalUpdate/>; no skipping, ReArc's notice says why)
@@ -9,8 +10,10 @@
 #                         (<rearc:requiredBelow>N</rearc:requiredBelow>, appcast-marker.py);
 #                         N is at most BUILD. Display only for now (UPDATE-NOTICE.md §5).
 #   --version BUILD       the new item's sparkle:version (needed by --required-below)
+#   --display-version V   the new item must show V (sparkle:shortVersionString, the app's
+#                         CFBundleShortVersionString) and download ReArc-V.dmg; needs --version
 set -euo pipefail
-USAGE="usage: generate-appcast.sh ARCHIVES_DIR [CHANNEL] [--critical] [--required-below N --version BUILD]"
+USAGE="usage: generate-appcast.sh ARCHIVES_DIR [CHANNEL] [--critical] [--required-below N --version BUILD] [--display-version V]"
 DIR="${1:?$USAGE}"
 shift
 CHANNEL=""
@@ -18,11 +21,13 @@ if [[ $# -gt 0 && $1 != --* ]]; then CHANNEL="$1"; shift; fi
 CRITICAL=0
 REQUIRED_BELOW=""
 VERSION=""
+DISPLAY_VERSION=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --critical) CRITICAL=1 ;;
     --required-below) REQUIRED_BELOW="${2:?$USAGE}"; shift ;;
     --version) VERSION="${2:?$USAGE}"; shift ;;
+    --display-version) DISPLAY_VERSION="${2:?$USAGE}"; shift ;;
     *) echo "$USAGE" >&2; exit 64 ;;
   esac
   shift
@@ -34,6 +39,7 @@ if [[ -n $REQUIRED_BELOW ]]; then
   (( REQUIRED_BELOW <= VERSION )) || { echo "--required-below $REQUIRED_BELOW is above the new build $VERSION" >&2; exit 64; }
 fi
 [[ -z $VERSION ]] || build_number "$VERSION" || { echo "--version needs a build number, not '$VERSION'" >&2; exit 64; }
+[[ -z $DISPLAY_VERSION || -n $VERSION ]] || { echo "--display-version needs --version BUILD" >&2; exit 64; }
 MARKER="$(dirname "$0")/appcast-marker.py"
 # Default: the tools SwiftPM unpacked with the pinned Sparkle artifact during the release build.
 TOOLS="${REARC_SPARKLE_TOOLS:-$(cd "$(dirname "$0")/../.." && pwd)/.build-chromium/artifacts/sparkle/Sparkle/bin}"
@@ -93,6 +99,7 @@ if [[ -n $VERSION ]]; then
   CHECK=(--version "$VERSION")
   [[ $CRITICAL == 0 ]] || CHECK+=(--critical)
   [[ -z $REQUIRED_BELOW ]] || CHECK+=(--required-below "$REQUIRED_BELOW")
+  [[ -z $DISPLAY_VERSION ]] || CHECK+=(--display-version "$DISPLAY_VERSION")
   python3 -I "$MARKER" check "$NEW" "${CHECK[@]}" \
     || { echo "the item for build $VERSION does not carry the flags asked for; nothing was written" >&2; exit 1; }
 fi

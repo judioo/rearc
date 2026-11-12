@@ -185,6 +185,14 @@ fi
 plutil -replace CFBundleExecutable -string ReArc "$PLIST"
 plutil -replace CFBundleName -string ReArc "$PLIST"
 plutil -replace CFBundleDisplayName -string ReArc "$PLIST"
+# ReArc's version, not Chromium's (RELEASE.md, "Versioning"): YYYY.MMDD.<build> of the commit,
+# as for any build that is not a release; release.sh stamps a release's own afterwards.
+if shell_stamp="$(python3 -I "$SHELL_DIR/scripts/release/version.py" commit --repo "$REPO" 2>/dev/null)"; then
+  read -r shell_version shell_build <<<"$shell_stamp"
+  plutil -replace CFBundleShortVersionString -string "$shell_version" "$PLIST"
+  plutil -replace CFBundleVersion -string "$shell_build" "$PLIST"
+  plutil -replace ReArcEngineVersion -string "$VERSION" "$PLIST"
+fi
 # Match Package.swift so generated appcasts cannot offer this shell to older macOS.
 plutil -replace LSMinimumSystemVersion -string 14.0.0 "$PLIST"
 # The principal class stays Chromium's BrowserCrApplication, whose +initialize needs the

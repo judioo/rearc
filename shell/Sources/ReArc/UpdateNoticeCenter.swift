@@ -12,6 +12,12 @@ protocol UpdateNoticeDriving: AnyObject {
     /// Sparkle's `automaticallyDownloadsUpdates`, the one setting behind the
     /// card's checkbox and Settings' switch.
     var automaticallyDownloadsUpdates: Bool { get set }
+    /// About ReArc's quiet look at the feed: no window, no download, no
+    /// install. False when an update session is already running; its end
+    /// answers instead (`updateInformationFinished`).
+    func checkForUpdateInformation() -> Bool
+    /// When the feed was last read, by any check.
+    var lastUpdateCheckDate: Date? { get }
 }
 
 /// The update notice every browser window's sidebar draws, and the
@@ -27,6 +33,9 @@ final class UpdateNoticeCenter {
     @ObservationIgnored weak var driver: (any UpdateNoticeDriving)? {
         didSet { automaticUpdates = driver?.automaticallyDownloadsUpdates ?? false }
     }
+    /// About ReArc's look at the feed, and when the feed was last read.
+    private(set) var information = UpdateInformationCheck()
+    private(set) var lastUpdateCheckDate: Date?
     /// A preview state was asked for: Sparkle stays off (`AppUpdater`).
     let isPreviewing: Bool
     @ObservationIgnored private var preview: UpdateNoticePreview?
@@ -54,6 +63,42 @@ final class UpdateNoticeCenter {
     }
 
     func hide() { send(.hidden) }
+
+    // MARK: About ReArc
+
+    /// The notice holds an update (shown or hidden): About shows it and asks nothing.
+    var holdsUpdate: Bool { notice.update != nil && notice.phase != .idle }
+
+    /// The line under About's version; nil without an updater.
+    var aboutLine: AboutUpdateLine? {
+        guard driver != nil else { return nil }
+        return AboutUpdateLine.line(notice: notice, check: information.state, lastChecked: lastUpdateCheckDate)
+    }
+
+    /// About ReArc opened (`force`: its Try Again). Reuses the notice's
+    /// update and a check less than a minute old.
+    func checkUpdateInformation(now: Date = Date(), force: Bool = false) {
+        guard let driver else { return }
+        lastUpdateCheckDate = driver.lastUpdateCheckDate
+        guard information.shouldStart(at: now, noticeHoldsUpdate: holdsUpdate, force: force) else { return }
+        information.started(at: now)
+        // Refused while a session runs: that session's end answers.
+        _ = driver.checkForUpdateInformation()
+    }
+
+    /// Any update session ended (About's own, a scheduled one, or Check for Updates…).
+    func updateInformationFinished(_ result: UpdateInformationCheck.Result) {
+        information.finished(result)
+        lastUpdateCheckDate = driver?.lastUpdateCheckDate
+    }
+
+    /// About's Restart and Update or Try Again: the notice's install, also
+    /// for a normal update hidden from the sidebar.
+    func installFromAbout() {
+        guard holdsUpdate, !notice.isBusy else { return }
+        send(.installRequested)
+        driver?.installFromNotice()
+    }
 
     func pointerVisited() {
         if !notice.pointerVisited { send(.pointerVisited) }
@@ -103,6 +148,9 @@ final class UpdateNoticePreview: UpdateNoticeDriving {
     private weak var center: UpdateNoticeCenter?
     private var playback: Task<Void, Never>?
     var automaticallyDownloadsUpdates = false
+    /// The preview's update stands in for the feed.
+    func checkForUpdateInformation() -> Bool { false }
+    var lastUpdateCheckDate: Date? { nil }
 
     init(center: UpdateNoticeCenter) {
         self.center = center

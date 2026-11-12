@@ -23,7 +23,7 @@ distribution.
 | `notarize.sh` | `notarytool submit --keychain-profile rearc-notary --wait`, then `stapler staple`/`validate`. Refuses anything not Developer ID signed. **Not run yet.** |
 | `release/BRANDING` | Release BRANDING input: the overlay's BRANDING. `build-engine-release.sh` appends `MAC_TEAM_ID` from `REARC_TEAM_ID` (environment or `shell/signing.local.env`) into `shell/.build-release/BRANDING`. |
 | `release/entitlements/` | `app`, `helper-renderer`, `helper-gpu` entitlements, copied from `chrome/app/*-entitlements.plist` at the pin. |
-| `release/VERSION` | ReArc marketing version (see Versioning). |
+| `release/version.py` | ReArc's version, `YYYY.MMDD.<build>`, from a RELEASES.md heading or a commit; checks the heading, names the DMG and the tag (see Versioning). |
 | `release/signing-env.sh` | Shared loader for `shell/signing.local.env`. Environment wins, and it never prints a value. |
 | `release/dmg-background.swift` | Draws the DMG background (brand canvas and cobalt arrow). |
 
@@ -42,7 +42,7 @@ shell/scripts/release.sh --dmg
 # 3. With Developer ID only (never before):
 shell/scripts/notarize.sh shell/dist/release/ReArc.app      # notarize + staple the app
 shell/scripts/make-dmg.sh shell/dist/release/ReArc.app      # DMG from the stapled app
-shell/scripts/notarize.sh shell/dist/release/ReArc-<version>-<build>.dmg
+shell/scripts/notarize.sh shell/dist/release/ReArc-<version>.dmg   # ReArc-2026.1114.741.dmg
 ```
 
 `release.sh --worktree` builds the uncommitted working tree for local testing; its
@@ -229,20 +229,44 @@ shell, with `check-upgrade-data.py` passing against the release on the feed.
 
 ## Versioning
 
-- `CFBundleShortVersionString` = `shell/scripts/release/VERSION`, semantic
-  `MAJOR.MINOR.PATCH` (starts at 0.1.0). Bump it in a commit before each release.
-- `CFBundleVersion` = `git rev-list --count HEAD` of the outer repo. It increases with
-  every commit on the release branch, which is what LaunchServices and Sparkle compare.
-  Cut releases from one branch (main).
+- `CFBundleShortVersionString` = `YYYY.MMDD.<build>`, for example `2026.1114.741` for build
+  741 released on 14 November 2026. Display only: About, Sparkle's window, the feed's
+  `sparkle:shortVersionString`, the User-Agent of update checks. Nothing in ReArc or in
+  the release scripts decides anything from it.
+  - The date has one source. For a release (`release.sh --dmg` or `--appcast`) it is the
+    date in the build's `RELEASES.md` heading (Release notes, below). Any other build
+    (`--qa`, `--worktree`, a plain `release.sh`, `bundle-chromium.sh` and
+    `bundle-webkit-dev.sh` development bundles) takes the day of the commit it is built
+    from, in Asia/Dubai time.
+  - `<build>` is written as it is (741). `BUILD_DIGITS` in `release/version.py` pads it
+    (5 would give `2026.1114.00741`); the heading check and the DMG name follow it.
+  - Builds up to 726 were `0.1.0`; their feed items keep it.
+- `CFBundleVersion` = `git rev-list --count HEAD` of the outer repo, the plain number (741).
+  It increases with every commit on the release branch, which is what LaunchServices and
+  Sparkle compare: `sparkle:version`, `minimumAutoupdateVersion`,
+  `criticalUpdate sparkle:version` and ReArc's `rearc:requiredBelow` are all build numbers,
+  so an install of 677 or 608 is offered 741 whatever either display version says
+  (`release/tests/test_sparkle_feed_order.py`). Never put the date in it. Cut releases from
+  one branch (main).
 - `ReArcEngineVersion` = the Chromium version (156.0.8078.100), `ReArcEngineRevision` = the
   overlay commit, `ReArcSourceRevision` = the outer commit (`-dirty` for `--worktree`).
 - The framework keeps `Versions/156.0.8078.100` and its own plist. Never rename it.
-- Constraint: Chromium's upgrade detector (`updater::CurrentlyInstalledVersion`) compares
-  the outer `CFBundleShortVersionString` with the running Chromium version and reports an
-  update only when the outer one is **higher**. Keep the ReArc version below the Chromium
-  major (156) and this stays inert. Crash reports (crashpad `ver`) carry the ReArc version.
-- DMG name: `ReArc-<CFBundleShortVersionString>-<CFBundleVersion>.dmg`, for example
-  `ReArc-0.1.0-602.dmg` for 0.1.0 (602). The same name is used in `dist/` and in the update feed.
+- Chromium's upgrade detector would compare the outer `CFBundleShortVersionString` with
+  the running Chromium version (`updater::CurrentlyInstalledVersion` in
+  `browser_updater_client_util_mac.mm`) and report an update when the outer one is higher,
+  as 2026.1112 is. ReArc's engine is not Chrome-branded, so `enable_updater` is false and it
+  builds `updater_no_updater.cc`, whose `CurrentlyInstalledVersion` is the engine's own
+  version: the detector never sees the outer one. Keep it that way: an engine built with
+  `enable_updater` would report an update that is not there. Crashpad's `ver` annotation
+  is the framework's version (Chromium's), not ReArc's; macOS crash reports show both.
+- DMG name: `ReArc-<CFBundleShortVersionString>.dmg`, for example `ReArc-2026.1114.741.dmg`
+  (`version.py dmg-name`). Builds up to 726 were `ReArc-0.1.0-<build>.dmg`. The same name
+  is used in `dist/` and in the update feed; delta names (`ReArc741-677.delta`) are
+  Sparkle's.
+- Git tag: `v<CFBundleShortVersionString>`, `v2026.1114.741` (`version.py tag`); builds
+  up to 726 were tagged `v0.1.0-<build>`.
+- The User-Agent of Sparkle's requests is `ReArc/<CFBundleShortVersionString> Sparkle/2.10.1`,
+  `ReArc/2026.1114.741 Sparkle/2.10.1`. About ReArc's look at the feed sends the same.
 
 ## Upgrade check
 
@@ -289,10 +313,14 @@ changes it, or the Chromium pin without this check passing against the release o
 ## Release notes
 
 `RELEASES.md` at the repo root records every distributed build, newest first. Each entry is
-headed `## ReArc <VERSION> (<build>) — <YYYY-MM-DD>` and lists, for ReArc's users, all the
-features and fixes since the previous release. `release.sh --dmg` (and `--appcast`) stops
-before building when the committed `RELEASES.md` at HEAD lacks the heading for the build
-being made.
+headed `## ReArc <YYYY.MMDD>.<build> — <YYYY-MM-DD>`, for example
+`## ReArc 2026.1114.741 — 2026-11-14`, and lists, for ReArc's users, all the features and
+fixes since the previous release. The heading's date is the release's: it is the date in
+the build's version. `release.sh --dmg` (and `--appcast`) stops before building when the
+committed `RELEASES.md` at HEAD lacks that heading for the build being made, or when its
+version is not its own date and build (`version.py release`, which also refuses a heading
+it cannot read). Entries up to 726 keep the old heading, `## ReArc 0.1.0 (726) — 2026-11-12`;
+the check accepts it for them and only the new one for the build being made.
 
 The build number is the commit count, so the notes commit has to carry its own number. Add
 the entry as the last commit before the release, numbered
@@ -413,7 +441,10 @@ rearc.net). The download URL prefix for generated enclosures is `REARC_UPDATE_DO
 (default `https://rearc.imara.ae/updates/`); set both when using another host.
 
 Sparkle compares appcast `sparkle:version` against **CFBundleVersion**, the increasing
-commit count; `sparkle:shortVersionString` is display only. Keep release history linear
+commit count; `sparkle:shortVersionString` is display only. `release.sh --appcast` passes
+`generate-appcast.sh --display-version`, which refuses a new item that does not show the
+stamped version or does not download `ReArc-<version>.dmg`, and every item's
+`sparkle:shortVersionString` must be digits and dots (a dated one carrying its own build). Keep release history linear
 and never reuse a build number. Rollback means rebuilding the old code with a **higher
 build number**, then publishing it as a new release, never serving a downgrade.
 
@@ -464,18 +495,18 @@ Use the following XML within an RSS feed declaring
 must be replaced. Each example below is an independent item policy, not a combined policy.
 See Sparkle's [publishing guide](https://sparkle-project.org/documentation/publishing/).
 
-A normal item (build 500, display version 0.2.0):
+A normal item (build 500, display version 2026.1109.500):
 
 ```xml
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
   <channel>
     <title>ReArc</title>
     <item>
-      <title>ReArc 0.2.0</title>
+      <title>ReArc 2026.1109.500</title>
       <sparkle:version>500</sparkle:version>
-      <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+      <sparkle:shortVersionString>2026.1109.500</sparkle:shortVersionString>
       <pubDate>Mon, 09 Nov 2026 12:00:00 +0000</pubDate>
-      <enclosure url="https://rearc.net/updates/ReArc-0.2.0-500.dmg"
+      <enclosure url="https://rearc.net/updates/ReArc-2026.1109.500.dmg"
                  sparkle:edSignature="REPLACE_WITH_GENERATED_SIGNATURE"
                  length="REPLACE_WITH_BYTE_LENGTH" type="application/octet-stream"/>
     </item>

@@ -67,6 +67,11 @@ cp -R "$SHELL_DIR/Resources/AppIcons" "$APP/Contents/Resources/AppIcons"
 for res in "$(dirname "$BIN")"/*.bundle; do
   [[ -d $res ]] && cp -R "$res" "$APP/Contents/Resources/"
 done
+# The commit's version, as for any build that is not a release (RELEASE.md, "Versioning").
+SHELL_VERSION=0.0.1 SHELL_BUILD=1
+if shell_stamp="$(python3 -I "$SHELL_DIR/scripts/release/version.py" commit --repo "$SHELL_DIR/.." 2>/dev/null)"; then
+  read -r SHELL_VERSION SHELL_BUILD <<<"$shell_stamp"
+fi
 PLIST="$APP/Contents/Info.plist"
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -79,8 +84,8 @@ cat > "$PLIST" <<PLIST
   <key>CFBundleDisplayName</key><string>ReArc Dev</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleIconFile</key><string>ReArc</string>
-  <key>CFBundleShortVersionString</key><string>0.0.1</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>${SHELL_VERSION}</string>
+  <key>CFBundleVersion</key><string>${SHELL_BUILD}</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSCameraUsageDescription</key><string>A website you allowed wants to use your camera.</string>

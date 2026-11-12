@@ -14,7 +14,7 @@ final class AboutWindowLayoutTests: XCTestCase {
     func testTheStingKeepsItsBandWhateverTheGIFsSize() throws {
         // The sting falls back to NSApp's icon without its GIF (as under xctest).
         _ = NSApplication.shared
-        let controller = AboutWindowController { _ in }
+        let controller = AboutWindowController(center: nil) { _ in }
         let window = try XCTUnwrap(controller.window), content = try XCTUnwrap(window.contentView)
         let sting = try XCTUnwrap(stingView(in: content))
         // The GIF's own size, which used to set the view's.
