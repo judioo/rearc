@@ -346,12 +346,19 @@ public final class SidebarSyncCoordinator {
             let result: SyncModifyResult
             do {
                 result = try await editor.saveExisting(batch)
-            } catch SyncTransportError.zoneNotFound, SyncTransportError.userDeletedZone {
-                return written == 0 ? .gone(.empty(accountID: found.accountID)) : .failed(Self.cutShort(written, of: writes.count))
+            } catch let error as SyncTransportError {
+                result = SyncModifyResult(failures: [batch[0].recordName: error])
             } catch {
-                return .failed(Self.cutShort(written, of: writes.count, reachable: false))
+                result = SyncModifyResult(failures: [batch[0].recordName: .other(error.localizedDescription)])
             }
-            guard result.failures.isEmpty else { return .failed(Self.cutShort(written, of: writes.count)) }
+            if !result.failures.isEmpty {
+                let zoneGone = result.failures.values.contains { $0 == .zoneNotFound || $0 == .userDeletedZone }
+                if zoneGone, written == 0 { return .gone(.empty(accountID: found.accountID)) }
+                let changed = zoneGone || result.failures.values.contains {
+                    if case .serverRecordChanged = $0 { return true } else { return $0 == .unknownItem }
+                }
+                return .failed(Self.cutShort(written, of: writes.count, changed: changed))
+            }
             for wire in result.saved { records[wire.recordName] = wire }
             written += result.saved.count
         }
@@ -404,8 +411,9 @@ public final class SidebarSyncCoordinator {
         Dictionary(uniqueKeysWithValues: state.records.map { ($0.key, SyncWireRecord(recordName: $0.key, payload: $0.value.payload, serverTag: $0.value.serverTag)) })
     }
 
-    private nonisolated static func cutShort(_ written: Int, of total: Int, reachable: Bool = true) -> String {
-        let why = reachable ? "iCloud changed while ReArc was deleting" : "ReArc lost touch with iCloud while deleting"
+    /// `changed`: iCloud's copy was no longer the one read; otherwise iCloud failed.
+    private nonisolated static func cutShort(_ written: Int, of total: Int, changed: Bool) -> String {
+        let why = changed ? "iCloud changed while ReArc was deleting" : "ReArc lost touch with iCloud while deleting"
         guard written > 0 else { return why + ", so nothing was deleted. Look at iCloud again and try again." }
         return why + ": \(written.formatted()) of \(total.formatted()) changes were made. Look at iCloud again to see what is left."
     }

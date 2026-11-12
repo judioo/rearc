@@ -149,6 +149,17 @@ final class CloudProfileTests: XCTestCase {
                        .unknown("ReArc can't reach iCloud. Check your connection and try again."), "never “Only on this Mac” unread")
     }
 
+    func testWhatTheDeleteOfALocalProfileSays() {
+        let base = "Its spaces and their tabs are deleted too. This can't be undone."
+        XCTAssertEqual(ProfileCloudText.localDeleteMessage(.onlyHere, syncOn: false), base)
+        XCTAssertEqual(ProfileCloudText.localDeleteMessage(.looking(nil), syncOn: false), base + " iCloud is still being checked, so only this Mac changes.")
+        XCTAssertEqual(ProfileCloudText.localDeleteMessage(.unknown("Offline"), syncOn: false), base + " ReArc couldn't check iCloud, so only this Mac changes.")
+        XCTAssertTrue(ProfileCloudText.localDeleteMessage(.looking(nil), syncOn: true).hasSuffix("also deleted from iCloud and other Macs that sync."),
+                      "with sync on, never “only this Mac”")
+        XCTAssertEqual(ProfileCloudText.note(.inICloud, syncOn: false), ProfileCloudText.syncOffNote)
+        XCTAssertNil(ProfileCloudText.note(.looking(3), syncOn: false))
+    }
+
     // MARK: - Deleting, sync off
 
     func testDeleteWithSyncOffMarksExactlyTheProfilesRecords() async throws {
