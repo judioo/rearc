@@ -694,7 +694,9 @@ extension BrowserViewModel {
 
     /// Archives idle Today tabs and drops their engines.
     func runAutoArchive() {
-        let archived = store.autoArchiveIdleTodayTabs()
+        // A tab with a media session or a call is in use, however long ago it was shown.
+        let inUse = Set(mediaStateByTab.filter(\.value.hasSession).keys).union(captureStateByTab.keys)
+        let archived = store.autoArchiveIdleTodayTabs(sparing: inUse)
         guard !archived.isEmpty else { return }
         archived.forEach(releaseEngine(for:))
         loadSelectedIfNeeded()
