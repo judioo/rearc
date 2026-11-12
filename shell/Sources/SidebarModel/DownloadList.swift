@@ -114,10 +114,18 @@ public struct DownloadRecord: Codable, Equatable, Identifiable, Sendable {
     public var updatedAt: Date
     /// Session only: smoothed transfer rate for the "x/s" label.
     public var bytesPerSecond: Double?
+    /// Max › Tidy Downloads renamed the file: where the engine saved it.
+    /// The engine still reports that path, so it never replaces `targetPath`.
+    public var originalPath: String?
 
     enum CodingKeys: String, CodingKey {
         case id, source, url, targetPath, mimeType, receivedBytes, totalBytes, state
-        case dangerType, interruptReason, isPaused, canResume, startedAt, updatedAt
+        case dangerType, interruptReason, isPaused, canResume, startedAt, updatedAt, originalPath
+    }
+
+    /// The name the file had when it finished, before Tidy Downloads.
+    public var originalName: String? {
+        originalPath.map { ($0 as NSString).lastPathComponent }
     }
 
     public init(
@@ -416,7 +424,7 @@ public struct DownloadList: Codable, Equatable, Sendable {
                 record.bytesPerSecond = nil
             }
             record.url = event.url.isEmpty ? record.url : event.url
-            if !event.targetPath.isEmpty { record.targetPath = event.targetPath }
+            if !event.targetPath.isEmpty, event.targetPath != record.originalPath { record.targetPath = event.targetPath }
             if !event.mimeType.isEmpty { record.mimeType = event.mimeType }
             record.receivedBytes = event.receivedBytes
             record.totalBytes = event.totalBytes
@@ -485,6 +493,18 @@ public struct DownloadList: Codable, Equatable, Sendable {
     public mutating func remove(ids: Set<String>) {
         guard !ids.isEmpty else { return }
         replaceRecords(records.filter { !ids.contains($0.id) })
+    }
+
+    /// Tidy Downloads moved the file (`originalPath` set), or Use Original
+    /// Name moved it back (nil). False when there is no such finished row.
+    @discardableResult
+    public mutating func setRenamedPath(_ path: String, originalPath: String?, for id: String) -> Bool {
+        guard let index = index(of: id), records[index].state == .complete else { return false }
+        var record = records[index]
+        record.targetPath = path
+        record.originalPath = originalPath
+        replaceRecord(at: index, with: record)
+        return true
     }
 
     @discardableResult

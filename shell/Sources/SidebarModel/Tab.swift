@@ -21,6 +21,10 @@ public struct Tab: Identifiable, Hashable, Codable {
     public var title: String
     /// User rename (Arc "Rename Current Item"); survives page title changes.
     public var customTitle: String?
+    /// `customTitle` came from Max › Tidy Tab Titles, not the person: a
+    /// later tidy may replace it, and Reset Title clears it. Saved and
+    /// synced only when true.
+    public var customTitleIsAutomatic = false
     public var customIcon: SidebarItemIcon?
     public var url: URL
     /// Letter glyph drawn when the shell has no site icon for this tab yet.
@@ -98,7 +102,7 @@ public struct Tab: Identifiable, Hashable, Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, title, customTitle, customIcon, url, faviconToken, isUnread, sortRank, lastActiveAt, savedURL, savedTitle
+        case id, kind, title, customTitle, customTitleIsAutomatic = "customTitleAuto", customIcon, url, faviconToken, isUnread, sortRank, lastActiveAt, savedURL, savedTitle
     }
 
     public init(from decoder: Decoder) throws {
@@ -112,6 +116,8 @@ public struct Tab: Identifiable, Hashable, Codable {
         isUnread = try c.decodeIfPresent(Bool.self, forKey: .isUnread) ?? false
         sortRank = try c.decodeIfPresent(String.self, forKey: .sortRank) ?? ""
         customTitle = try c.decodeIfPresent(String.self, forKey: .customTitle)
+        let automatic = try c.decodeIfPresent(Bool.self, forKey: .customTitleIsAutomatic) ?? false
+        customTitleIsAutomatic = automatic && customTitle != nil
         customIcon = try c.decodeIfPresent(SidebarItemIcon.self, forKey: .customIcon)
         lastActiveAt = try c.decodeIfPresent(Date.self, forKey: .lastActiveAt)
         if kind == .pinned {
@@ -131,6 +137,7 @@ public struct Tab: Identifiable, Hashable, Codable {
         try c.encode(isUnread, forKey: .isUnread)
         try c.encode(sortRank, forKey: .sortRank)
         try c.encodeIfPresent(customTitle, forKey: .customTitle)
+        if customTitleIsAutomatic, customTitle != nil { try c.encode(true, forKey: .customTitleIsAutomatic) }
         try c.encodeIfPresent(customIcon, forKey: .customIcon)
         try c.encodeIfPresent(lastActiveAt, forKey: .lastActiveAt)
         try c.encodeIfPresent(savedURL, forKey: .savedURL)
