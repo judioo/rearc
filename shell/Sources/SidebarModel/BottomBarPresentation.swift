@@ -362,19 +362,6 @@ public enum RecentDownloads {
     }
 }
 
-/// An update the updater found. Nothing sets it yet: the bottom bar's update
-/// slot stays hidden until an updater (Sparkle) exists (§4 item 7).
-public struct AvailableUpdate: Equatable, Sendable {
-    public var version: String
-
-    public init(version: String) {
-        self.version = version
-    }
-
-    /// Arc's "New Arc Version Available" pill, in ReArc's words.
-    public static let title = "New Version Available"
-}
-
 /// ReArc's intentional alternative to Arc's morphing dots.
 public enum SpaceCircles {
     public static let diameter = 18.0
