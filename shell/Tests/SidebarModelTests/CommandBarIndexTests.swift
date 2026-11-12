@@ -192,24 +192,30 @@ final class CommandBarIndexTests: XCTestCase {
             ]
             for live in lives {
                 for inline in live == nil ? [nil, "github.com"] : [nil] {
-                    let legacy = LegacyCommandBarSearch.results(for: query, in: store, history: history, commandCatalog: catalog,
-                                                                menuCommands: Self.menus, live: live, inlineCompletion: inline, now: now)
+                    // The ranking itself changed on purpose (Arc's order,
+                    // COMMAND-BAR §10); the prepared indexes must still rank
+                    // exactly as the unprepared path, and hold the same rows
+                    // as the original ranking did, in its order within each kind.
+                    let unprepared = CommandBarSearch.results(for: query, in: store, history: history, commandCatalog: catalog,
+                                                              menuCommands: Self.menus, live: live, inlineCompletion: inline, now: now)
                     let prepared = CommandBarSearch.results(for: query, in: store, history: history,
                                                             liveHistory: live?.history.map { VisitHistory(records: $0) },
                                                             tabIndex: tabIndex, commandIndex: commandIndex, menuIndex: menuIndex,
                                                             live: live, inlineCompletion: inline, now: now)
-                    XCTAssertEqual(prepared, legacy, "'\(query)' live \(live?.query ?? "-") inline \(inline ?? "-")")
-                    guard live == nil else { continue }
-                    let unprepared = CommandBarSearch.results(for: query, in: store, history: history, commandCatalog: catalog,
-                                                              menuCommands: Self.menus, live: live, inlineCompletion: inline, now: now)
-                    XCTAssertEqual(unprepared, legacy, "'\(query)' without indexes")
+                    XCTAssertEqual(prepared, unprepared, "'\(query)' live \(live?.query ?? "-") inline \(inline ?? "-")")
+                    let legacy = LegacyCommandBarSearch.results(for: query, in: store, history: history, commandCatalog: catalog,
+                                                                menuCommands: Self.menus, live: live, inlineCompletion: inline, now: now)
+                    for kind in [CommandBarSearch.ResultKind.command, .suggestion] {
+                        XCTAssertEqual(prepared.filter { $0.kind == kind }.map(\.id), legacy.filter { $0.kind == kind }.map(\.id),
+                                       "'\(query)' \(kind)")
+                    }
                 }
             }
         }
         // The default catalog (built from the context) too.
         for query in ["d", ">tab", "github"] {
-            XCTAssertEqual(CommandBarSearch.results(for: query, in: store, history: history, now: now),
-                           LegacyCommandBarSearch.results(for: query, in: store, history: history, now: now))
+            XCTAssertEqual(CommandBarSearch.results(for: query, in: store, history: history, now: now).filter { $0.kind == .command }.map(\.id),
+                           LegacyCommandBarSearch.results(for: query, in: store, history: history, now: now).filter { $0.kind == .command }.map(\.id))
         }
     }
 

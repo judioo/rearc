@@ -327,7 +327,7 @@ final class Wave21ShellTests: XCTestCase {
         model.commandBarText = "lofi beats"
         XCTAssertFalse(model.exitCommandBarSiteSearch(), "Delete edits the query while it has text")
         XCTAssertEqual(model.commandBarResults.first?.destinationURL?.absoluteString,
-                       "https://www.youtube.com/results?search_query=lofi%20beats")
+                       "https://www.youtube.com/results?search_query=lofi+beats")
         let previousTabID = model.store.selectedTabID
         model.submitCommandBar()
         XCTAssertFalse(model.isCommandBarPresented)

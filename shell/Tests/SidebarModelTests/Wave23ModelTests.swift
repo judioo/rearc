@@ -102,7 +102,8 @@ final class Wave23ModelTests: XCTestCase {
         XCTAssertLessThan(kinds.firstIndex(of: .history)!, firstSuggestion ?? 0)
         XCTAssertEqual(results.filter { $0.kind == .suggestion }.map(\.title), ["red pandas", "red dwarf", "red fox", "red wine"],
                        "the typed text and duplicates are dropped; four at most")
-        XCTAssertEqual(results.last?.kind, .search, "the search fallback stays last")
+        XCTAssertLessThan(kinds.firstIndex(of: .search)!, kinds.firstIndex(of: .history)!,
+                          "the plain search for the typed text comes before pages (Arc)")
     }
 
     func testRowActionsFollowTheResultKind() {
