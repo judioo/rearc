@@ -1212,6 +1212,10 @@ Production needs:
     and the Chromium `NSMenu`.
   - `Engine/FaviconStore` — site icons by host, cached on disk next to
     `sidebar.json` (`Favicons/`).
+  - `Sidebar/ProfileAvatarView` — every profile avatar and the profile
+    menus' rows; pictures chosen in the profile editor are normalised and
+    kept in `ProfileAvatars/` next to `sidebar.json`
+    (`ProfileAvatarImageStore`, FEATURE-SPECS/PROFILES.md §9).
   - `CommandBar/` — centered floating URL/search panel (tabs, visit
     history, commands, search).
   - `FindBar/` — the find-in-page bar and its model.
