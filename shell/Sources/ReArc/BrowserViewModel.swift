@@ -1577,9 +1577,9 @@ final class BrowserViewModel {
     func peekOpenInFullTab() {
         guard let session = peekSession else { return }
         let originProfile = session.profileID
-        if store.activeProfileID != originProfile {
-            store.selectProfile(originProfile)
-        }
+        // The Peek's own session, never a container of its profile: a profile's remembered
+        // space can be a container's, and the page would reload there (RC-0.1.0-726 W-01).
+        store.selectSpace(usingStorageOf: originProfile)
         let sourceSpace = session.sourceTabID.flatMap(store.spaceContaining(tabID:))
             .flatMap { store.space(withID: $0)?.profileID == originProfile ? $0 : nil }
         let tab = adoptPeekAsTab(session, in: sourceSpace)

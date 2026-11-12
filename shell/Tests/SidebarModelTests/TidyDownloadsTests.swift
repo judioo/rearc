@@ -119,3 +119,18 @@ final class TidyDownloadsTests: XCTestCase {
         XCTAssertFalse(list.setRenamedPath("/d/b.pdf", originalPath: "/d/a.pdf", for: "g"))
     }
 }
+
+final class TidyDownloadsReviewTests: XCTestCase {
+    private let origin = TidyDownloads.Origin(pageTitle: "Quarterly Report - Acme", pageHost: "acme.com")
+
+    /// RC-0.1.0-726 W-02: the extension keeps its case, and a name that differs only by case is no rename.
+    func testAnUpperCaseExtensionIsKeptAndCaseAloneIsNoRename() {
+        XCTAssertNil(TidyDownloads.tidyName(for: "Report.PDF", origin: origin))
+        XCTAssertEqual(TidyDownloads.tidyName(for: "annual_report-2026.PDF", origin: origin), "annual report 2026.PDF")
+    }
+
+    func testADoubleExtensionIsLeftAlone() {
+        XCTAssertNil(TidyDownloads.tidyName(for: "archive.tar.gz", origin: origin))
+        XCTAssertNil(TidyDownloads.tidyName(for: "site_backup-2026.tar.bz2", origin: origin))
+    }
+}

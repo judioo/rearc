@@ -103,8 +103,13 @@ public enum TidyDownloads {
     /// → "annual report 2026.pdf"); an uninformative one takes the page's
     /// tidy title, else its site's name, keeping any number it had.
     public static func tidyName(for fileName: String, origin: Origin) -> String? {
-        guard !isUntouched(fileName), let ext = fileExtension(of: fileName) else { return nil }
+        guard !isUntouched(fileName), fileExtension(of: fileName) != nil else { return nil }
+        // The extension as the file has it: "Report.PDF" renamed to "Report.pdf" is the same
+        // file on a case-insensitive volume, and ended up as "Report 2.pdf" (RC-0.1.0-726 W-02).
+        let ext = (fileName as NSString).pathExtension
         let originalStem = (fileName as NSString).deletingPathExtension
+        // "archive.tar.gz" is one extension to the tools that open it.
+        guard !originalStem.lowercased().hasSuffix(".tar") else { return nil }
         var stem: String
         if !isUninformative(originalStem) {
             stem = safeStem(readableWords(originalStem).joined(separator: " "))
@@ -123,7 +128,7 @@ public enum TidyDownloads {
         }
         guard !stem.isEmpty else { return nil }
         let name = "\(stem).\(ext)"
-        return name == fileName ? nil : name
+        return name.lowercased() == fileName.lowercased() ? nil : name
     }
 
     /// "nytimes.com" → "Nytimes"; nil for no host or an address.
