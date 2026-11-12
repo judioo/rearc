@@ -294,11 +294,15 @@ struct MoveToProfileMenu: View {
         let destinations = model.store.profileMoveDestinations(from: spaceID)
         if !destinations.isEmpty {
             Menu("Move to Profile") {
+                // A submenu per profile, not a section: a section header drops the avatar.
                 ForEach(destinations, id: \.profile.id) { destination in
-                    Section(destination.profile.name) {
+                    Menu {
                         ForEach(destination.spaces) { space in
                             Button(space.name) { model.requestProfileMove(ids, toSpace: space.id) }
                         }
+                    } label: {
+                        Image(nsImage: ProfileAvatarPictures.menuImage(for: destination.profile))
+                        Text(destination.profile.name)
                     }
                 }
             }
@@ -357,18 +361,11 @@ struct SpaceProfileChoices: View {
     var onSelect: ((Profile.ID) -> Void)? = nil
 
     var body: some View {
-        ForEach(model.store.profileChoices(forSpace: space.id)) { profile in
-            Button {
-                if let onSelect { onSelect(profile.id) }
-                else { model.requestSpaceProfileChange(space.id, to: profile.id) }
-            } label: {
-                if profile.id == space.profileID {
-                    Label(profile.name, systemImage: "checkmark")
-                } else {
-                    Text(profile.name)
-                }
+        if model.store.space(withID: space.id) != nil {
+            ProfileMenuChoices(store: model.store, active: space.profileID, disablesActive: true) { profileID in
+                if let onSelect { onSelect(profileID) }
+                else { model.requestSpaceProfileChange(space.id, to: profileID) }
             }
-            .disabled(profile.id == space.profileID)
         }
         Divider()
         Button("New Profile…") { model.beginProfileCreation(forSpace: space.id) }
