@@ -138,3 +138,42 @@ struct MaxTidyTabTitlesShellTests {
         #expect(model.store.tab(withID: second.id)?.customTitle == nil)
     }
 }
+
+/// Max › Tidy Tabs in the shell: the switch, the threshold, the command and the toast's Undo.
+@MainActor
+struct MaxTidyTabsShellTests {
+    private func setUp(tabs: Int, on: Bool = true) -> BrowserViewModel {
+        let (model, _) = MaxShellTests.model()
+        model.setMaxFeature(.tidyTabs, on: on)
+        for index in 0 ..< tabs {
+            model.store.addTab(kind: .today, title: "Video \(index)", url: URL(string: "https://youtube.com/watch?v=\(index)")!)
+        }
+        return model
+    }
+
+    @Test func offOrSixTabsOffersNothing() {
+        #expect(!setUp(tabs: 7, on: false).canTidyTabs())
+        #expect(!setUp(tabs: 6).canTidyTabs())
+        #expect(setUp(tabs: 7).canTidyTabs())
+    }
+
+    @Test func tidyingSaysWhatItDidAndUndoPutsTheTabsBack() {
+        let model = setUp(tabs: 7)
+        let before = model.store.content(for: model.store.activeSpaceID).today.map(\.id)
+        #expect(model.tidyTabs())
+        #expect(model.toast?.message == "Tidied 7 tabs into 1 folder")
+        #expect(model.store.folderOutline().map(\.folder.title) == ["YouTube"])
+        model.runToastUndo()
+        #expect(model.store.content(for: model.store.activeSpaceID).today.map(\.id) == before)
+        #expect(model.store.folderOutline().isEmpty)
+    }
+
+    @Test func theCommandIsOfferedOnlyWhileItCanRun() {
+        let off = setUp(tabs: 7, on: false)
+        #expect(!off.commandBarCommandIndex.catalog.contains { $0.action == .tidyTabs })
+        let on = setUp(tabs: 7)
+        #expect(on.commandBarCommandIndex.catalog.contains { $0.action == .tidyTabs })
+        #expect(on.executeCommand(.tidyTabs, commandID: "tidy-tabs") == nil)
+        #expect(!on.store.folderOutline().isEmpty)
+    }
+}

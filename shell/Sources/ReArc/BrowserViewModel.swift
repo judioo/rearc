@@ -498,7 +498,7 @@ final class BrowserViewModel {
                     peekURL: peekSession?.url, focusedLittleArcID: focusedLittleArcID,
                     mediaByTab: mediaStateByTab, tabMuteModel: tabMuteModel,
                     navigationSchemes: engineHost.navigationSchemes, externalLinkDestination: externalLinkDestination,
-                    pendingExtensionReinstall: pendingExtensionReinstall?.title))
+                    pendingExtensionReinstall: pendingExtensionReinstall?.title, tidyTabs: isMaxFeatureOn(.tidyTabs)))
             })
         }
     }
@@ -2348,6 +2348,8 @@ final class BrowserViewModel {
             updateSavedURLToCurrent()
         case .clearUnpinnedTabs:
             clearTodayTabs()
+        case .tidyTabs:
+            guard tidyTabs() else { return "No tabs to tidy" }
         case .findInPage:
             guard findTargetEngine != nil else { return "No page to search" }
             dismissCommandBar()
