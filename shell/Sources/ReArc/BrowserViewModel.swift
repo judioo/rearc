@@ -154,6 +154,17 @@ final class BrowserViewModel {
     var restoresWindows = WindowRestorePreference.isEnabled(in: .standard) {
         didSet { externalLinkDefaults.set(restoresWindows, forKey: WindowRestorePreference.defaultsKey) }
     }
+    /// Settings › Max: which rule-based helpers are on (MaxFeatures.swift).
+    var maxPreferences: MaxPreferences = .load(from: .standard) {
+        didSet { if maxPreferences != oldValue { maxPreferences.save(to: externalLinkDefaults) } }
+    }
+    /// Bumped when an assistant is switched, added or removed: the registry
+    /// keeps them in defaults (`CommandBarAssistants`), so views re-read it.
+    var assistantsRevision = 0
+    /// The toast's Undo (Tidy Tabs, Tidy Downloads), for that toast only.
+    @ObservationIgnored var toastUndo: (toastID: UUID, run: () -> Void)?
+    /// Pinned tabs and favorites waiting for a page title to tidy.
+    @ObservationIgnored var pendingTitleTidies: Set<Tab.ID> = []
     /// The Settings window's pane; it opens on the one shown last.
     var settingsPane: SettingsPane = .load(from: .standard) {
         didSet { settingsPane.save(to: externalLinkDefaults) }
