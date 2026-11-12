@@ -156,6 +156,8 @@ struct ThemeChromeColors: Equatable {
     var isWindowDark: Bool
     /// The profile badge beside the space name and in the toolbar.
     var badge: SidebarBadgeInk
+    /// The update notice's pill, warning ink and card (`UpdateNoticeInk`).
+    var updateNotice: UpdateNoticeInk
 
     /// `dark` picks the chrome's roles; text and glyphs are then fitted to
     /// the sidebar's backdrop in the window's appearance (`backdrop`, by
@@ -163,8 +165,8 @@ struct ThemeChromeColors: Equatable {
     init(theme: SpaceTheme, dark: Bool, windowDark: Bool? = nil, backdrop: SidebarBackdrop? = nil) {
         let roles = SpaceThemeRoles(theme: theme)
         let semantic = roles.semantic(dark: dark)
-        let chrome = roles.chrome(dark: dark)
-            .legible(on: backdrop ?? SidebarBackdrop(theme: theme, dark: windowDark ?? dark), lightInk: dark)
+        let backdrop = backdrop ?? SidebarBackdrop(theme: theme, dark: windowDark ?? dark)
+        let chrome = roles.chrome(dark: dark).legible(on: backdrop, lightInk: dark)
         title = Color(chrome.title)
         secondaryText = Color(chrome.secondaryText)
         tertiaryText = Color(chrome.tertiaryText)
@@ -190,6 +192,7 @@ struct ThemeChromeColors: Equatable {
         isDark = dark
         isWindowDark = windowDark ?? dark
         badge = SidebarBadgeInk(chrome: chrome, dark: dark)
+        updateNotice = UpdateNoticeInk(backdrop: backdrop, lightInk: dark, accent: chrome.accent)
     }
 
     static let fallback = ThemeChromeColors(theme: .arcDefault, dark: false)

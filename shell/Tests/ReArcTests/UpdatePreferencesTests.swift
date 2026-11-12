@@ -1,4 +1,5 @@
 import XCTest
+import SidebarModel
 @testable import ReArc
 
 final class UpdatePreferencesTests: XCTestCase {

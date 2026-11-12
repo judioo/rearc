@@ -11,6 +11,24 @@ committed `RELEASES.md` has a heading for the build it is about to make:
 commit before the release, with `echo $(( $(git rev-list --count HEAD) + 1 ))` as the
 number. Details: engine/docs/RELEASE.md, "Release notes".
 
+## Unreleased
+
+Merged since the last release and not yet in a build. The next release's entry takes these
+lines and this section starts empty again.
+
+**New**
+- New app icons, all drawn from ReArc's own sunrise. Settings › Icon has two lists. Along the
+  Sun's Path shows the mark at five moments of the sunrise: ReArc, First Light, Daybreak,
+  Golden Hour and Moonrise. Treatments shows it in other finishes: Neon, Fluted Glass,
+  Sorbet, Sketchbook, Prism and Graphite. Each row says in a few words what it is, and the
+  one in use is marked Current icon. As before, the Dock shows your choice while ReArc is
+  running; Finder and Launchpad keep the standard icon.
+
+**Changed**
+- The old alternate icons (Sextant, Compass, Loupe, Arch, Aperture, Monogram and Electric
+  Arc) are gone. If you had chosen one, ReArc shows its standard icon after this update;
+  pick a new one in Settings › Icon.
+
 ## ReArc 0.1.0 (677) — 2026-11-12
 
 **New**
