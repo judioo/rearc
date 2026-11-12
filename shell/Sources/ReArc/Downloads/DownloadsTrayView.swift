@@ -208,6 +208,15 @@ struct DownloadRowView: View {
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(statusStyle)
                     .lineLimit(1)
+                if let original = record.originalName {
+                    // Max › Tidy Downloads renamed it: the name it came with.
+                    Text("Was “\(original)”")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(original)
+                }
                 if isWarned {
                     dangerActions
                 }
@@ -317,6 +326,14 @@ struct DownloadRowView: View {
         if record.hasFileOnDisk {
             Button("Open") { downloads.perform(.open, on: record.id) }
             Button("Show in Finder") { downloads.perform(.reveal, on: record.id) }
+            if let original = record.originalName {
+                Button("Use Original Name") {
+                    downloads.useOriginalName(record.id) { outcome in
+                        if case .skipped = outcome { NSSound.beep() }
+                    }
+                }
+                .help("Rename it back to “\(original)”")
+            }
             Divider()
         }
         if record.isActive {

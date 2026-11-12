@@ -35,6 +35,15 @@ extension DownloadBackend {
     var reportsHistorySize: Bool { false }
 }
 
+/// Where a download started, as its engine knew it (Max › Tidy Downloads).
+/// Session only: never saved.
+struct DownloadOrigin: Equatable {
+    var page: TidyDownloads.Origin
+    /// A private window's download, or one whose profile could not be told:
+    /// nothing is renamed or read from it.
+    var isPrivate: Bool
+}
+
 /// The downloads tray's model, shared by every window: the recent list
 /// (persisted with the default directory in `Downloads.json` next to the
 /// sidebar file), and routing of tray actions to the engine that owns each
@@ -79,6 +88,11 @@ final class DownloadsController {
     /// `archived_rows`) that the list does not hold yet: they page in a chunk
     /// at a time. Nil until the first profile's history loaded.
     private var historyOutstanding: [UInt64: Int]?
+
+    /// Each live download's page, by row, from its engine; dropped when it finishes.
+    @ObservationIgnored private var origins: [String: DownloadOrigin] = [:]
+    /// A download finished in this session (not one replayed from history), with its origin.
+    @ObservationIgnored var onCompleted: ((DownloadRecord, DownloadOrigin?) -> Void)?
 
     @ObservationIgnored let webKit = WebKitDownloadCenter()
     /// Chromium's backend when the engine has `downloads` (ABI 1.17).
@@ -249,7 +263,10 @@ final class DownloadsController {
     where Events.Element == (event: DownloadEvent, source: DownloadSource, now: Date) {
         let changes = list.apply(events)
         var immediately = false
+        var completed: [String] = []
         for (change, (event, _, _)) in zip(changes, events) {
+            if event.kind == .completed, event.state == .complete, case .updated = change { completed.append(event.guid) }
+            if event.kind == .removed || event.state == .cancelled || event.state == .interrupted { origins[event.guid] = nil }
             // Chromium replays its whole history at launch: only a row that has a warning writes the observed map.
             if event.kind == .removed || event.state != .inProgress, warnings[event.guid] != nil { warnings[event.guid] = nil }
             if case .inserted = change, event.state == .inProgress { startCount += 1 }
@@ -258,6 +275,42 @@ final class DownloadsController {
         refreshSummary()
         // Progress is saved lazily; state transitions right away.
         scheduleSave(immediately: immediately)
+        for id in completed {
+            let origin = origins.removeValue(forKey: id)
+            if let record = list.record(withID: id) { onCompleted?(record, origin) }
+        }
+    }
+
+    // MARK: Tidy Downloads
+
+    /// The engine says where a download started; the first report stands.
+    func noteOrigin(_ origin: DownloadOrigin, for id: String) {
+        guard !id.isEmpty, origins[id] == nil else { return }
+        origins[id] = origin
+    }
+
+    /// Use Original Name (the tray, the toast's Undo): the file goes back to
+    /// the name it finished with, or a free numbered variant, while it is
+    /// still where Tidy Downloads put it.
+    func useOriginalName(_ id: String, fileSystem: DownloadFileSystem = SystemDownloadFileSystem(),
+                         queue: DispatchQueue = DispatchQueue.global(qos: .utility),
+                         completion: ((DownloadRenamer.Outcome) -> Void)? = nil) {
+        guard let record = list.record(withID: id), let original = record.originalPath else { return }
+        let tidied = record.targetPath
+        queue.async { [weak self] in
+            let outcome = DownloadRenamer.restore(tidied, originalPath: original, fileSystem: fileSystem)
+            DispatchQueue.main.async {
+                if case .renamed(let path) = outcome { self?.noteRenamed(id, to: path, originalPath: nil) }
+                completion?(outcome)
+            }
+        }
+    }
+
+    /// Tidy Downloads renamed a finished file, or Use Original Name put it back.
+    func noteRenamed(_ id: String, to path: String, originalPath: String?) {
+        guard list.setRenamedPath(path, originalPath: originalPath, for: id) else { return }
+        refreshSummary()
+        scheduleSave(immediately: true)
     }
 
     /// True once this turn has applied events for longer than `budget`. A
@@ -333,7 +386,9 @@ final class DownloadsController {
     func perform(_ action: DownloadAction, on id: String) {
         flushPending()
         guard let record = list.record(withID: id) else { return }
-        let handled = backend(for: record)?.perform(action, id: id) ?? false
+        // The engine still holds the name it saved: a renamed file is opened here.
+        let renamed = record.originalPath != nil && (action == .open || action == .reveal)
+        let handled = renamed ? false : backend(for: record)?.perform(action, id: id) ?? false
         switch action {
         case .open:
             if !handled, record.hasFileOnDisk { workspace.open(URL(fileURLWithPath: record.targetPath)) }

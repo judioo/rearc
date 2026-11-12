@@ -91,6 +91,7 @@ final class ChromiumDownloadBackend: DownloadBackend {
             if download.event.kind == .created { archived[guid] = nil }
         }
         var event = download.event
+        if event.kind == .created, event.state == .inProgress { controller?.noteOrigin(origin(of: download), for: guid) }
         // An item restored from history (created, already finished) keeps its own dates (ABI 1.48).
         if event.kind == .created, event.state != .inProgress,
            let times = download.times ?? runtime.downloadTimes(profile: download.profileID, id: download.downloadID) {
@@ -98,6 +99,17 @@ final class ChromiumDownloadBackend: DownloadBackend {
             event.endedAt = times.ended
         }
         return event
+    }
+
+    /// The page a new download started on (Max › Tidy Downloads). An
+    /// off-the-record profile's, or one whose profile is not known (closing),
+    /// reports nothing and is never tidied.
+    private func origin(of download: ChromiumDownloadEvent) -> DownloadOrigin {
+        guard let key = runtime.profileKey(forEngineProfile: download.profileID), !key.isOffTheRecord else {
+            return DownloadOrigin(page: TidyDownloads.Origin(), isPrivate: true)
+        }
+        let engine = download.tabID == 0 ? nil : runtime.engine(forTab: download.tabID)
+        return DownloadOrigin(page: TidyDownloads.Origin(pageTitle: engine?.pageTitle, pageHost: engine?.currentURL?.host()), isPrivate: false)
     }
 
     /// ABI 1.24: the warning booleans, not the danger code, say whether Keep

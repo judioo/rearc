@@ -654,6 +654,7 @@ final class BrowserViewModel {
             self?.syncPipeline.handleJournalEntry(entry)
         }
         engineHost.linkRouter = self
+        installTidyDownloads()
         // A close or unload never hands the selection to a saved pin or
         // favorite without a live page: selecting it would load it.
         self.store.isTabOpen = { [weak self] id in self?.canUnloadTab(id) ?? false }

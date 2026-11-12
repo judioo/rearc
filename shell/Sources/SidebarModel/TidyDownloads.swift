@@ -27,6 +27,8 @@ public enum TidyDownloads {
     static let genericStems: Set<String> = [
         "download", "downloads", "file", "files", "document", "untitled", "export", "image", "img", "attachment",
         "output", "data", "content", "view", "get", "index", "blob", "temp", "tmp", "unknown", "noname", "default",
+        // Camera and scanner counters ("IMG_2041", "DSC0034", "PXL_2026…").
+        "dsc", "dscn", "dscf", "pxl", "vid", "mov", "scan",
     ]
 
     /// Where a download came from, as the shell knew it when it finished.
@@ -60,7 +62,7 @@ public enum TidyDownloads {
         if words.isEmpty || genericStems.contains(joined) { return true }
         let letters = joined.unicodeScalars.filter(CharacterSet.letters.contains).count
         let digits = joined.unicodeScalars.filter(CharacterSet.decimalDigits.contains).count
-        if letters < 3 || digits > letters { return true }
+        if letters < 3 || digits > letters * 2 { return true }
         // A UUID or a hash: long hex runs.
         if stem.range(of: #"[0-9a-fA-F]{12,}"#, options: .regularExpression) != nil, words.count <= 2 { return true }
         // "IMG_2041", "DSC0034", "Screenshot 2026…" keep their words; "file-3" does not.
@@ -83,8 +85,10 @@ public enum TidyDownloads {
     /// characters, no dots except between digits ("v1.2"), no leading or
     /// trailing dot or space, bounded. Empty when nothing is left.
     public static func safeStem(_ text: String) -> String {
-        var text = TidyText.singleLine(text)
-        text = text.replacingOccurrences(of: #"[/\\:<>"|?*\u{0}]"#, with: " ", options: .regularExpression)
+        // Path separators and the characters Finder, SMB or FAT refuse; control
+        // and invisible ones are already gone (`singleLine`).
+        let reserved = Set("/\\:<>\"|?*")
+        var text = String(TidyText.singleLine(text).map { reserved.contains($0) ? " " : $0 })
         text = text.replacingOccurrences(of: #"(?<!\d)\.|\.(?!\d)"#, with: " ", options: .regularExpression)
         text = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         text = text.trimmingCharacters(in: CharacterSet(charactersIn: ". -").union(.whitespaces))
@@ -103,20 +107,20 @@ public enum TidyDownloads {
         let originalStem = (fileName as NSString).deletingPathExtension
         var stem: String
         if !isUninformative(originalStem) {
-            stem = readableWords(originalStem).joined(separator: " ")
+            stem = safeStem(readableWords(originalStem).joined(separator: " "))
         } else {
             let host = origin.pageHost?.lowercased() ?? ""
-            let page = origin.pageTitle.flatMap { title in TidyTabTitles.tidyTitle(title, host: host) ?? TidyText.singleLine(title) }
+            let page = origin.pageTitle.map { title in TidyTabTitles.tidyTitle(title, host: host) ?? TidyText.singleLine(title) }
             let site = TidyTabTitles.brand(for: host) ?? siteLabel(host)
-            guard let base = page.flatMap({ $0.isEmpty ? nil : $0 }) ?? site else { return nil }
+            // The page's title, else the site's name: the first that is still something once made safe.
+            guard let base = [page, site].compactMap({ $0.map(safeStem) }).first(where: { !$0.isEmpty }) else { return nil }
             stem = base
-            // Keep what distinguished the file ("invoice-4471" → "Acme Billing 4471").
-            if let number = originalStem.range(of: #"\d{2,}"#, options: .regularExpression).map({ String(originalStem[$0]) }),
-               number.count <= 10, !stem.contains(number) {
-                stem += " \(number)"
+            // Keep the number that told files apart ("file-4471" → "Acme 4471"), not digits inside a hash.
+            if let number = readableWords(originalStem).first(where: { $0.allSatisfy(\.isNumber) && (2...10).contains($0.count) }),
+               !stem.contains(number) {
+                stem = safeStem("\(stem) \(number)")
             }
         }
-        stem = safeStem(stem)
         guard !stem.isEmpty else { return nil }
         let name = "\(stem).\(ext)"
         return name == fileName ? nil : name
