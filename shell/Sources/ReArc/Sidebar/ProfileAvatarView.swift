@@ -99,14 +99,18 @@ struct ProfileMenuChoices: View {
     let active: Profile.ID?
     /// A space's profile choices keep the current one checked but unavailable.
     var disablesActive = false
+    /// Containers too, under their parents (Little ReArc's session menu).
+    var includesContainers = false
     var images: ProfileAvatarImageStore = .shared
     let onSelect: (Profile.ID) -> Void
 
     var body: some View {
-        ForEach(store.profileMenuRows(active: active)) { row in
+        ForEach(store.profileMenuRows(active: active, includingContainers: includesContainers)) { row in
             Toggle(isOn: Binding(get: { row.isActive }, set: { if $0 { onSelect(row.id) } })) {
-                Image(nsImage: ProfileAvatarPictures.menuImage(for: row.profile, images: images))
-                Text(row.profile.name)
+                // A container shows its parent's avatar: it is not a profile of its own.
+                let avatar = row.isContainer ? store.parentProfile(ofContainer: row.id) ?? row.profile : row.profile
+                Image(nsImage: ProfileAvatarPictures.menuImage(for: avatar, images: images))
+                Text(row.title)
                 Text(row.spaceCountText)
             }
             .disabled(disablesActive && row.isActive)

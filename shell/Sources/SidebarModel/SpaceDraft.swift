@@ -25,8 +25,8 @@ public struct SpaceDraft: Equatable {
     /// theme and icon.
     public static func suggested(in store: SidebarStore, profileID: Profile.ID? = nil,
                                  containerPolicy: NewSpaceContainerPolicy = .sharedDefault) -> SpaceDraft {
-        let profile = profileID.flatMap { store.profile(withID: $0)?.id } ?? store.profiles[0].id
-        let index = store.spaces(in: profile).count
+        let profile = store.owningProfileID(of: profileID.flatMap { store.profile(withID: $0)?.id } ?? store.profiles[0].id)
+        let index = store.spaces(listedIn: profile).count
         var draft = SpaceDraft(
             name: "Space \(index + 1)",
             theme: SpaceTheme.presets[index % SpaceTheme.presets.count],
@@ -50,9 +50,10 @@ public struct SpaceDraft: Equatable {
 
     public var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-    /// A name is required, and an existing profile unless creating a container.
+    /// A name and an existing profile are required; with `createsOwnContainer`
+    /// the space gets a new container inside that profile.
     public func canCreate(in store: SidebarStore) -> Bool {
-        !trimmedName.isEmpty && (createsOwnContainer || store.profile(withID: profileID) != nil)
+        !trimmedName.isEmpty && store.profile(withID: profileID) != nil
     }
 }
 
@@ -62,7 +63,8 @@ extension SidebarStore {
     public func createSpace(from draft: SpaceDraft) -> Space? {
         guard draft.canCreate(in: self) else { return nil }
         let profileID = draft.createsOwnContainer
-            ? createContainerProfile(name: draft.trimmedName, theme: draft.theme).id : draft.profileID
+            ? createContainerProfile(name: draft.trimmedName, theme: draft.theme, of: draft.profileID).id
+            : owningProfileID(of: draft.profileID)
         let space = draft.iconName.isEmpty
             ? addSpace(name: draft.trimmedName, theme: draft.theme, profileID: profileID)
             : addSpace(name: draft.trimmedName, theme: draft.theme, iconName: draft.iconName, profileID: profileID)

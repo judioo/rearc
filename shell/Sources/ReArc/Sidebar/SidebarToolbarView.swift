@@ -52,13 +52,14 @@ struct SidebarToolbarView: View {
                     ExtensionToolbarView(model: model, engine: engine)
                 }
                 Spacer(minLength: 0)
-                if model.store.profiles.count > 1 {
+                if model.store.listedProfiles.count > 1 {
                     Menu {
                         Section("Switch to Profile") {
                             ProfileMenuChoices(store: model.store, active: profile.id) { model.selectProfile($0) }
                         }
                     } label: {
                         ProfileAvatarView(profile: profile, diameter: 18, sidebarBadge: chrome.badge)
+                            .containerBadge(model.containerLabel(forSpace: model.space(in: window).id))
                     }
                         // A plain button draws the badge as is (the borderless style dims it).
                         .menuStyle(.button)
@@ -134,6 +135,9 @@ struct SidebarURLField: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 0)
+            if let container = model.containerLabel(for: engine, tab: tab) {
+                ContainerChip(label: container)
+            }
             if let summary = model.sitePermissionSummary(for: engine), site != nil {
                 // The wave 22 indicator: answers recorded for this site.
                 Button { showsSiteControls.toggle() } label: {

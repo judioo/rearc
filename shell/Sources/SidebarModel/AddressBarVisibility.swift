@@ -10,6 +10,20 @@ public enum AutoHideAddressBarPreference {
     }
 }
 
+/// The mini sidebar (⇧⌘S) always puts the address in the page's toolbar. The first time
+/// someone switches to it with auto-hide off, a toast says the toolbar can hide itself.
+public enum MiniSidebarAddressBarTip {
+    public static let shownKey = "rearc.miniSidebarAutoHideTipShown"
+    public static let message = "The address bar can hide itself"
+
+    /// True once: when auto-hide is off and the tip was never shown. Records the showing.
+    public static func takeIfDue(in defaults: UserDefaults) -> Bool {
+        guard !AutoHideAddressBarPreference.isEnabled(in: defaults), !defaults.bool(forKey: shownKey) else { return false }
+        defaults.set(true, forKey: shownKey)
+        return true
+    }
+}
+
 /// One pane's transient toolbar state. The caller supplies time so deadline
 /// cancellation and focus/hover handoffs can be tested without real timers.
 public struct AddressBarVisibility: Equatable {

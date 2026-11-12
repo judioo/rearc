@@ -68,6 +68,8 @@ enum SidebarDeletionRequest: Equatable {
     case folderAndContents(UUID)
     /// A profile together with the spaces it owns.
     case profile(Profile.ID)
+    /// Remove Container…: the space stays, the container and its data go.
+    case container(Profile.ID)
 }
 
 /// Wave 17 sidebar actions: navigation controls, favorites, folders, archive,
@@ -254,6 +256,8 @@ extension BrowserViewModel {
     }
 
     func moveEntry(_ id: UUID, toSpace spaceID: Space.ID) {
+        // A container's space in the strip is another session: confirmed first.
+        if store.crossesProfile([id], toSpace: spaceID) { return requestProfileMove([id], toSpace: spaceID) }
         guard store.moveEntry(id, toSpace: spaceID) else { return }
         // A space in another profile means another engine profile: drop the old engine.
         reconcileEngineOwnership()
@@ -503,8 +507,12 @@ extension BrowserViewModel {
             let space = store.space(withID: id)
             let content = store.content(for: id)
             let count = SidebarTree.tabs(content.pinned + content.today).count
+            // A container's only space takes the container along (`deleteSpace`).
+            let container = containerDeletedWithSpace(id).map { profileKeepsDataOnDelete?($0) == true
+                ? " Its container goes too; the container's browsing data stays on this Mac, in the first profile's folder."
+                : " Its container's cookies, sign-ins and site data are deleted too." } ?? ""
             return ("Delete “\(space?.name ?? "Space")”?",
-                    "The space and its \(count) pinned and Today tab\(count == 1 ? "" : "s") are deleted. This cannot be undone.",
+                    "The space and its \(count) pinned and Today tab\(count == 1 ? "" : "s") are deleted.\(container) This cannot be undone.",
                     "Delete Space")
         case .folderAndContents(let id):
             let count = store.folder(withID: id).map { SidebarTree.tabs($0.children).count } ?? 0
@@ -513,13 +521,20 @@ extension BrowserViewModel {
                     "Delete Folder")
         case .profile(let id):
             let profile = store.profile(withID: id)
-            let count = store.spaces(in: id).count
+            let count = store.spaces(listedIn: id).count
             let spaces = "\(count) space\(count == 1 ? "" : "s")"
+            // Its containers go with it; the dialog names them by their spaces.
+            let containers = store.containers(of: id).map { "“\(store.spaces(in: $0.id).first?.name ?? $0.name)”" }
+            let alongside = containers.isEmpty ? "" : containers.count == 1
+                ? " Its container for \(containers[0]) and the container's sign-ins go too."
+                : " Its containers for \(ListFormatter.localizedString(byJoining: containers)) and their sign-ins go too."
             // The dialog says what happens: a container on the startup folder keeps its data (S-07).
             let message = profileKeepsDataOnDelete?(id) == true
-                ? "Its \(spaces) and favorites are deleted. Its browsing data stays on this Mac: it is in the first profile's folder, which ReArc never removes. This cannot be undone."
-                : "Its \(spaces), favorites and browsing data are deleted. This cannot be undone."
+                ? "Its \(spaces) and favorites are deleted.\(alongside) Its browsing data stays on this Mac: it is in the first profile's folder, which ReArc never removes. This cannot be undone."
+                : "Its \(spaces), favorites and browsing data are deleted.\(alongside) This cannot be undone."
             return ("Delete “\(profile?.name ?? "Profile")”?", message, "Delete Profile")
+        case .container(let id):
+            return containerRemovalMessage(id)
         case nil:
             return ("", "", "")
         }
@@ -531,6 +546,7 @@ extension BrowserViewModel {
         case .space(let id): deleteSpace(id)
         case .folderAndContents(let id): deleteFolder(id, keepingChildren: false)
         case .profile(let id): deleteProfile(id, deletingSpaces: true)
+        case .container(let id): removeContainer(id)
         case nil: break
         }
     }
@@ -545,6 +561,7 @@ extension BrowserViewModel {
     }
 
     func spaceProfileChangeMessage(_ change: SpaceProfileChange) -> (title: String, message: String, action: String) {
+        if store.profileChangeKeepsStorage(forSpace: change.spaceID) { return containerMoveMessage(change) }
         let space = store.space(withID: change.spaceID)
         let source = space.flatMap { store.profile(withID: $0.profileID) }
         let destination = store.profile(withID: change.profileID)
@@ -568,21 +585,24 @@ extension BrowserViewModel {
     @discardableResult
     func changeSpaceProfile(_ spaceID: Space.ID, to profileID: Profile.ID) -> SpaceProfileChangeError? {
         let live = Set(engineHost.allTabEngines().map(\.0))
+        let keepsStorage = store.profileChangeKeepsStorage(forSpace: spaceID)
         if let error = store.changeProfile(ofSpace: spaceID, to: profileID) { return error }
-        reloadSpaceAfterProfileChange(spaceID, live: live)
+        // A container's space took its container along: same storage, same pages.
+        if !keepsStorage { reloadSpaceAfterProfileChange(spaceID, live: live) }
         return nil
     }
 
     /// Explicitly creating a container also reloads this space's pages in its fresh session.
     func createContainerForSpace(_ spaceID: Space.ID) {
         let live = Set(engineHost.allTabEngines().map(\.0))
-        guard store.createContainer(forSpace: spaceID) != nil else { return }
+        guard let container = store.createContainer(forSpace: spaceID) else { return }
         reloadSpaceAfterProfileChange(spaceID, live: live)
+        alignContainerSearchEngine(container.id)
     }
 
     /// `live`: the tabs that had a page before the change. Those reload now
     /// in the new container; the rest load there when first shown.
-    private func reloadSpaceAfterProfileChange(_ spaceID: Space.ID, live: Set<Tab.ID>) {
+    func reloadSpaceAfterProfileChange(_ spaceID: Space.ID, live: Set<Tab.ID>) {
         reloadTabsInTheirProfile(SidebarTree.tabs(store.content(for: spaceID).pinned + store.content(for: spaceID).today), live: live)
     }
 
@@ -628,9 +648,12 @@ extension BrowserViewModel {
         store.moveSpace(store.activeSpaceID, toIndex: index + offset)
     }
 
-    /// Deletes a space and its tabs, then drops their engines.
+    /// Deletes a space and its tabs, then drops their engines. A container's
+    /// only space takes the container and its data with it: nothing would list it.
     func deleteSpace(_ id: Space.ID) {
+        let container = containerDeletedWithSpace(id)
         guard store.removeSpace(id) else { return }
+        if let container { deleteProfile(container) }
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
         // Arc: "Space deleted! Use ⌘Z to undo." ReArc has no undo for it yet.

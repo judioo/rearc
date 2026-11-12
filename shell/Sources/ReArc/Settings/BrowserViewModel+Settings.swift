@@ -48,30 +48,73 @@ final class WebKitSearchEngineSettings: SearchEngineSettings {
     }
 }
 
-/// Settings › Icon: ReArc's icon and the alternates from `brand/options/`,
-/// copied to `shell/Resources/AppIcons` and into the bundle by the bundle scripts.
+/// Settings › Icon: ReArc's icon and its variants, drawn from the mark in
+/// `brand/icons/` (generate.py) and exported to `shell/Resources/AppIcons`,
+/// which the bundle scripts copy into the app.
 ///
 /// `NSApp.applicationIconImage` changes the running app's Dock tile and
 /// window icons only. Finder, Launchpad and the Dock while ReArc is not
 /// running keep the bundle's ReArc.icns: changing those means rewriting the
 /// bundle, which breaks a signed app's seal.
+///
+/// A choice saved by an earlier build that no longer exists (Sextant,
+/// Compass…) loads as the standard icon.
 enum AppIconChoice: String, CaseIterable, Identifiable {
-    case standard, sextant, compass, loupe, arch, aperture, monogram, electricArc
+    case standard, firstLight, daybreak, goldenHour, moonrise
+    case neon, flutedGlass, sorbet, sketchbook, prism, graphite
+
+    /// The drawer's two lists.
+    enum Group: String, CaseIterable, Identifiable {
+        /// The mark at moments of the sunrise: only the sun and sky move.
+        case sunsPath
+        /// The same mark in other materials.
+        case treatments
+
+        var id: String { rawValue }
+        var title: String { self == .sunsPath ? "Along the Sun's Path" : "Treatments" }
+    }
 
     static let defaultsKey = "rearc.appIcon"
 
     var id: String { rawValue }
 
+    var group: Group {
+        switch self {
+        case .standard, .firstLight, .daybreak, .goldenHour, .moonrise: return .sunsPath
+        case .neon, .flutedGlass, .sorbet, .sketchbook, .prism, .graphite: return .treatments
+        }
+    }
+
     var title: String {
         switch self {
         case .standard: return "ReArc"
-        case .sextant: return "Sextant"
-        case .compass: return "Compass"
-        case .loupe: return "Loupe"
-        case .arch: return "Arch"
-        case .aperture: return "Aperture"
-        case .monogram: return "Monogram"
-        case .electricArc: return "Electric Arc"
+        case .firstLight: return "First Light"
+        case .daybreak: return "Daybreak"
+        case .goldenHour: return "Golden Hour"
+        case .moonrise: return "Moonrise"
+        case .neon: return "Neon"
+        case .flutedGlass: return "Fluted Glass"
+        case .sorbet: return "Sorbet"
+        case .sketchbook: return "Sketchbook"
+        case .prism: return "Prism"
+        case .graphite: return "Graphite"
+        }
+    }
+
+    /// One line under the name, except on the current icon.
+    var caption: String {
+        switch self {
+        case .standard: return "The sun risen"
+        case .firstLight: return "Before dawn"
+        case .daybreak: return "Sun at the horizon"
+        case .goldenHour: return "Evening light"
+        case .moonrise: return "Night"
+        case .neon: return "Glass tubes"
+        case .flutedGlass: return "Seen through reeded glass"
+        case .sorbet: return "Soft, glossy pastels"
+        case .sketchbook: return "Crayon on ruled paper"
+        case .prism: return "Light split across the arcs"
+        case .graphite: return "Quiet, for a calm Dock"
         }
     }
 
@@ -79,13 +122,16 @@ enum AppIconChoice: String, CaseIterable, Identifiable {
     var fileName: String? {
         switch self {
         case .standard: return nil
-        case .sextant: return "sextant"
-        case .compass: return "compass"
-        case .loupe: return "loupe"
-        case .arch: return "arch"
-        case .aperture: return "aperture"
-        case .monogram: return "monogram"
-        case .electricArc: return "electric-arc"
+        case .firstLight: return "first-light"
+        case .daybreak: return "daybreak"
+        case .goldenHour: return "golden-hour"
+        case .moonrise: return "moonrise"
+        case .neon: return "neon"
+        case .flutedGlass: return "fluted-glass"
+        case .sorbet: return "sorbet"
+        case .sketchbook: return "sketchbook"
+        case .prism: return "prism"
+        case .graphite: return "graphite"
         }
     }
 
@@ -151,9 +197,9 @@ extension BrowserViewModel {
         }
     }
 
-    /// Spaces a profile owns, for the Profiles list ("3 Spaces").
+    /// Spaces a profile owns, for the Profiles list ("3 Spaces"), its containers' included.
     func spaceCountText(for profileID: Profile.ID) -> String {
-        let count = store.spaces(in: profileID).count
+        let count = store.spaces(listedIn: profileID).count
         return count == 1 ? "1 Space" : "\(count) Spaces"
     }
 

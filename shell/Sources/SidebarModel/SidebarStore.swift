@@ -64,9 +64,9 @@ public final class SidebarStore {
         case folder(UUID)
     }
 
-    public private(set) var profiles: [Profile]
+    public internal(set) var profiles: [Profile]
     public private(set) var activeProfileID: Profile.ID
-    public private(set) var lastActiveSpaceByProfile: [Profile.ID: Space.ID]
+    public internal(set) var lastActiveSpaceByProfile: [Profile.ID: Space.ID]
     public internal(set) var spaces: [Space] {
         didSet { spacesDidChange(from: oldValue) }
     }
@@ -177,8 +177,9 @@ public final class SidebarStore {
         RankedSortable.sortedSpaces(spaces.filter { $0.profileID == profileID })
     }
 
+    /// The active profile's spaces as the strip lists them, its containers' included.
     public var spacesInActiveProfile: [Space] {
-        spaces(in: activeProfileID)
+        spaces(listedIn: activeProfileID)
     }
 
     @discardableResult
@@ -238,41 +239,50 @@ public final class SidebarStore {
 
     /// Deletes a profile. Without `deletingSpaces` it must own no spaces; with
     /// it, the profile's spaces (and their tabs) go too (Arc DeleteProfileDialog).
+    /// Its containers go with it, spaces and all (`profilesDeleted(with:)`).
     @discardableResult
     public func deleteProfile(_ id: Profile.ID, deletingSpaces: Bool = false) -> ProfileMutationError? {
         guard profiles.contains(where: { $0.id == id }) else { return .profileNotFound }
-        guard profiles.count > 1 else { return .cannotDeleteLastProfile }
-        let owned = spaces(in: id)
+        let doomed = profilesDeleted(with: id)
+        guard profiles.count > doomed.count else { return .cannotDeleteLastProfile }
+        let owned = spaces.filter { doomed.contains($0.profileID) }
         if !owned.isEmpty, !deletingSpaces { return .profileOwnsSpaces(count: owned.count) }
         for space in owned {
             spaces.removeAll { $0.id == space.id }
             dropSpaceState(space.id)
             mutationJournal.record(.deleteSpace(id: space.id))
         }
-        profiles.removeAll { $0.id == id }
-        // Its Little ReArc windows, archived ones included, go with it (S-07).
-        littleArcWindows.removeAll { $0.profileID == id }
-        archivedLittleArcWindows.removeAll { $0.window.profileID == id }
-        lastActiveSpaceByProfile[id] = nil
-        favoritesByProfile[id] = nil
-        topAppsContainerIDByProfile[id] = nil
-        autoArchiveThresholdByProfile[id] = nil
+        for id in doomed {
+            profiles.removeAll { $0.id == id }
+            // Its Little ReArc windows, archived ones included, go with it (S-07).
+            littleArcWindows.removeAll { $0.profileID == id }
+            archivedLittleArcWindows.removeAll { $0.window.profileID == id }
+            lastActiveSpaceByProfile[id] = nil
+            favoritesByProfile[id] = nil
+            topAppsContainerIDByProfile[id] = nil
+            autoArchiveThresholdByProfile[id] = nil
+        }
         if spaces.isEmpty {
             let fallback = Space(name: "Personal", profileID: profiles[0].id, sortRank: LexoRank.initial)
             spaces = [fallback]
             contentBySpace[fallback.id] = SpaceContent()
         }
-        if activeProfileID == id || !spaces.contains(where: { $0.id == activeSpaceID }) {
+        if doomed.contains(activeProfileID) || !spaces.contains(where: { $0.id == activeSpaceID }) {
             activeProfileID = spaces.contains(where: { $0.profileID == profiles[0].id })
                 ? profiles[0].id
                 : spaces[0].profileID
             activeSpaceID = spaces(in: activeProfileID).first?.id ?? spaces[0].id
             activateProfileSpaceMemory(for: activeProfileID)
-            lastActiveSpaceByProfile[activeProfileID] = activeSpaceID
+            lastActiveSpaceByProfile[activeOwningProfileID] = activeSpaceID
             selectedItemID = restoredSelection(for: activeSpaceID)
         }
         notifyMutation()
         return nil
+    }
+
+    /// The profiles `deleteProfile(id)` removes: `id` and its containers.
+    public func profilesDeleted(with id: Profile.ID) -> [Profile.ID] {
+        [id] + containers(of: id).map(\.id)
     }
 
     public func moveProfile(from source: Int, to destination: Int) {
@@ -285,15 +295,21 @@ public final class SidebarStore {
         notifyMutation()
     }
 
+    /// Selects a profile at its last active space, which may be one of its
+    /// containers'. Selecting a container selects its space.
     public func selectProfile(_ id: Profile.ID) {
         guard id != activeProfileID, profiles.contains(where: { $0.id == id }) else { return }
+        if isContainer(id) {
+            if let space = spaces(in: id).first { selectSpace(space.id) }
+            return
+        }
         if spaces.contains(where: { $0.id == activeSpaceID }) {
-            lastActiveSpaceByProfile[activeProfileID] = activeSpaceID
+            lastActiveSpaceByProfile[activeOwningProfileID] = activeSpaceID
         }
         activeProfileID = id
         // A profile may be empty after its last space chose another container.
         // Selecting it creates a landing space without repurposing another profile's space.
-        if spaces(in: id).isEmpty {
+        if spaces(listedIn: id).isEmpty {
             _ = addSpace(name: "Space 1", profileID: id)
         }
         activateProfileSpaceMemory(for: id)
@@ -301,10 +317,11 @@ public final class SidebarStore {
     }
 
     private func activateProfileSpaceMemory(for profileID: Profile.ID) {
-        let candidates = spaces(in: profileID)
+        let owner = owningProfileID(of: profileID)
+        let candidates = spaces(listedIn: owner)
         guard !candidates.isEmpty else { return }
         let target: Space.ID
-        if let remembered = lastActiveSpaceByProfile[profileID],
+        if let remembered = lastActiveSpaceByProfile[owner],
            candidates.contains(where: { $0.id == remembered }) {
             target = remembered
         } else {
@@ -313,15 +330,17 @@ public final class SidebarStore {
         selectSpaceWithinProfile(target)
     }
 
+    /// The active profile follows the space: a container's space makes its container active.
     private func selectSpaceWithinProfile(_ id: Space.ID) {
-        guard id != activeSpaceID,
-              spaces.contains(where: { $0.id == id }),
-              space(withID: id)?.profileID == activeProfileID else { return }
+        guard let target = space(withID: id),
+              owningProfileID(of: target.profileID) == activeOwningProfileID else { return }
+        activeProfileID = target.profileID
+        guard id != activeSpaceID else { return }
         if let selected = selectedItemID {
             selectionBySpace[activeSpaceID] = selected
         }
         activeSpaceID = id
-        lastActiveSpaceByProfile[activeProfileID] = id
+        lastActiveSpaceByProfile[activeOwningProfileID] = id
         selectedItemID = restoredSelection(for: id)
     }
 
@@ -364,12 +383,15 @@ public final class SidebarStore {
         profileID: Profile.ID? = nil,
         id: UUID? = nil
     ) -> Space {
+        var owner = profileID.flatMap { profile(withID: $0)?.id } ?? activeProfileID
+        // A container has exactly one space: another one goes to its parent's session.
+        if isContainer(owner), !spaces(in: owner).isEmpty { owner = owningProfileID(of: owner) }
         let space = Space(
             id: id.flatMap { id in spaces.contains { $0.id == id } ? nil : id } ?? UUID(),
             name: name,
             theme: theme,
             iconName: iconName,
-            profileID: profileID.flatMap { profile(withID: $0)?.id } ?? activeProfileID,
+            profileID: owner,
             sortRank: rankForNewSpace()
         )
         spaces.append(space)
@@ -382,15 +404,15 @@ public final class SidebarStore {
     public func removeSpace(_ id: Space.ID) -> Bool {
         guard spaces.count > 1, spaces.contains(where: { $0.id == id }) else { return false }
         let wasActive = activeSpaceID == id
-        let owner = space(withID: id)?.profileID
+        let owner = space(withID: id).map { owningProfileID(of: $0.profileID) }
         spaces.removeAll { $0.id == id }
         dropSpaceState(id)
         if wasActive {
             // Stay in the same profile when it still has a space.
-            let next = owner.flatMap { spaces(in: $0).first } ?? spaces[0]
+            let next = owner.flatMap { spaces(listedIn: $0).first } ?? spaces[0]
             activeSpaceID = next.id
             activeProfileID = next.profileID
-            lastActiveSpaceByProfile[activeProfileID] = activeSpaceID
+            lastActiveSpaceByProfile[activeOwningProfileID] = activeSpaceID
             selectedItemID = restoredSelection(for: activeSpaceID)
         }
         notifyMutation(.deleteSpace(id: id))
@@ -442,7 +464,7 @@ public final class SidebarStore {
         }
         activeSpaceID = id
         if let profileID = space(withID: id)?.profileID {
-            lastActiveSpaceByProfile[profileID] = id
+            lastActiveSpaceByProfile[owningProfileID(of: profileID)] = id
         }
         selectedItemID = restoredSelection(for: id)
         notifyMutation(.focusSpace(spaceID: id))
@@ -469,17 +491,20 @@ public final class SidebarStore {
     /// Moves `spaces[index]` to another profile (SidebarStore+SpaceProfile).
     /// The old profile's space memory must not point at a space it lost, and
     /// the space on screen stays on screen: the active profile follows it.
+    /// Memory is per owning profile, so a move into or out of one of the
+    /// profile's own containers keeps it.
     func reassignSpaceProfile(at index: Int, to profileID: Profile.ID, sortRank: String) {
         let id = spaces[index].id
-        let source = spaces[index].profileID
+        let source = owningProfileID(of: spaces[index].profileID)
         spaces[index].profileID = profileID
         spaces[index].sortRank = sortRank
-        if lastActiveSpaceByProfile[source] == id {
-            lastActiveSpaceByProfile[source] = spaces(in: source).first?.id
+        let destination = owningProfileID(of: profileID)
+        if source != destination, lastActiveSpaceByProfile[source] == id {
+            lastActiveSpaceByProfile[source] = spaces(listedIn: source).first?.id
         }
         if activeSpaceID == id {
             activeProfileID = profileID
-            lastActiveSpaceByProfile[profileID] = id
+            lastActiveSpaceByProfile[destination] = id
         }
     }
 

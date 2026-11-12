@@ -91,6 +91,7 @@ struct LittleArcWindowView: View {
                 engine.isLoading ? engine.stopLoading() : engine.reload()
             }
             address(for: record, engine: engine)
+            if let container = model.containerLabel(for: engine, tab: nil) { ContainerChip(label: container) }
             navButton("square.split.2x1", "Open in Split View", enabled: model.canSplitLittleArcWindow(windowID)) {
                 if model.splitLittleArcWindow(windowID) { dismiss() }
             }
@@ -136,6 +137,7 @@ struct LittleArcWindowView: View {
     @ViewBuilder
     private func openInButton(for record: LittleArcWindow) -> some View {
         let target = model.store.littleArcTargetSpace(for: windowID)
+        // Storage, not listing: a page opens only in a space of its own session (S-01).
         let others = model.store.spaces(in: record.profileID).filter { $0.id != target?.id }
         HStack(spacing: 0) {
             Button {
@@ -281,17 +283,20 @@ struct LittleArcWindowView: View {
     /// Arc's `littleBrowserProfileIndicator`: which profile this window uses, and a switch.
     @ViewBuilder
     private func profileMenu(for record: LittleArcWindow) -> some View {
-        if let profile = model.store.profile(withID: record.profileID) {
+        if let profile = model.store.profile(withID: model.store.owningProfileID(of: record.profileID)) {
+            // The window's session: a container's shows its parent's avatar with the badge.
+            let container = model.store.containerLabel(forEngineProfile: record.profileID)
             Menu {
-                ProfileMenuChoices(store: model.store, active: profile.id) { model.changeLittleArcProfile(windowID, to: $0) }
+                ProfileMenuChoices(store: model.store, active: record.profileID, includesContainers: true) { model.changeLittleArcProfile(windowID, to: $0) }
             } label: {
                 ProfileAvatarView(profile: profile, diameter: 20)
+                    .containerBadge(container)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .help("Profile: \(profile.name)")
-            .accessibilityLabel("Profile \(profile.name)")
+            .help(container.map { "Profile: \(profile.name) · Container: \($0.name), own sign-ins" } ?? "Profile: \(profile.name)")
+            .accessibilityLabel(container.map { "Profile \(profile.name), container \($0.name)" } ?? "Profile \(profile.name)")
         }
     }
 }

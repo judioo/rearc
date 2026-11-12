@@ -293,3 +293,27 @@ final class MiniSidebarTests: XCTestCase {
         XCTAssertEqual(command(mini: true)?.title, "Show Full Sidebar")
     }
 }
+
+final class MiniSidebarAddressBarTipTests: XCTestCase {
+    private func defaults() -> UserDefaults {
+        let name = "mini-tip-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        return defaults
+    }
+
+    func testTheTipIsDueOnceWhileAutoHideIsOff() {
+        let defaults = defaults()
+        XCTAssertTrue(MiniSidebarAddressBarTip.takeIfDue(in: defaults))
+        XCTAssertFalse(MiniSidebarAddressBarTip.takeIfDue(in: defaults))
+    }
+
+    func testNoTipWhenTheAddressBarAlreadyHides() {
+        let defaults = defaults()
+        defaults.set(true, forKey: AutoHideAddressBarPreference.key)
+        XCTAssertFalse(MiniSidebarAddressBarTip.takeIfDue(in: defaults))
+        // Turned off later, it has still never been shown, so it is due then.
+        defaults.set(false, forKey: AutoHideAddressBarPreference.key)
+        XCTAssertTrue(MiniSidebarAddressBarTip.takeIfDue(in: defaults))
+    }
+}

@@ -173,6 +173,13 @@ is gated on its feature flag (`profiles`, `profile_off_the_record`,
   BrowserContext when moved: the profile is fixed per engine. Deleting a shell
   profile (with its spaces, after confirmation, since wave 17) closes its
   private windows, then its engine profile.
+- **Containers** (`SidebarStore+Containers.swift`, docs/SPACE-CONTAINERS.md)
+  are a separate browsing session for one space inside a profile. Underneath
+  a container is a `Profile` whose `containerOf` names its parent, so it has
+  an engine profile of its own like any profile; `Space.profileID` stays the
+  storage key. Listings and settings go through the owning profile
+  (`spaces(listedIn:)`, `owningProfileID(of:)`, `listedProfiles`).
+  `ContainerChip` shows the container of the engine a page runs in, in chrome only.
 - **Private windows** (File > New Private Window, ⇧⌘N; both engines) are
   `PrivateWindowModel`s: one page, no sidebar, history or sync. On Chromium a
   private session is one off-the-record profile created with
@@ -1260,7 +1267,7 @@ Production needs:
   or an emoji) or delete it after confirmation (its tabs go, its engines are
   dropped). The last space cannot be deleted.
 - **Profiles.** Deleting a profile that owns spaces asks first, then deletes
-  it along with them.
+  it along with them, and with its containers, which the dialog names.
 - **Auto-hide.** With the sidebar hidden (⌘S), moving the pointer to the
   window's leading edge floats it over the page, and it hides again once the
   pointer moves away. A local mouse-moved monitor drives this, so it works

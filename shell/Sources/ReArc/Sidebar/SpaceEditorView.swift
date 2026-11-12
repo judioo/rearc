@@ -105,7 +105,7 @@ struct SpaceEditorView: View {
         return HStack {
             Text("Profile").font(.headline)
             Spacer()
-            Menu(model.store.profile(withID: space.profileID)?.name ?? "Profile") {
+            Menu(model.store.profile(withID: model.store.owningProfileID(of: space.profileID))?.name ?? "Profile") {
                 SpaceProfileChoices(model: model, space: space) { profileID in
                     profileChange = SpaceProfileChange(spaceID: space.id, profileID: profileID)
                 }

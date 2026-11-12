@@ -49,7 +49,8 @@ struct SidebarView: View {
     }
 
     private var spaces: some View {
-        let spaceIDs = model.store.spaces(in: focusedSpace.profileID).map(\.id)
+        // The profile's spaces, its containers' included, as the strip lists them.
+        let spaceIDs = model.store.spaces(listedIn: focusedSpace.profileID).map(\.id)
         let pages = PagerPages(
             ids: model.isCreatingSpace(in: window) ? SpaceCreationSession.pages(spaces: spaceIDs) : spaceIDs,
             focused: focusedPageID
@@ -60,7 +61,14 @@ struct SidebarView: View {
         return VStack(spacing: 0) {
             if mini {
                 // The traffic lights' row; they sit over it and the card's strip.
+                // Under them, the shown page's container, as the full toolbar's URL field has it.
                 Color.clear.frame(height: SidebarToolbarView.rowHeight)
+                    .overlay(alignment: .bottom) {
+                        if let container = model.containerLabel(for: model.focusedEngine(in: window), tab: model.selectedTab(in: window)) {
+                            ContainerChip(label: container, style: .compact, maxWidth: CGFloat(MiniSidebarLayout.highlight) + 8)
+                                .padding(.bottom, 1)
+                        }
+                    }
             } else {
                 SidebarToolbarView(model: model, urlInToolbar: urlInToolbar)
             }
@@ -310,6 +318,7 @@ struct SpaceHeaderView: View {
             SpaceIconView(iconName: space.iconName, size: 15)
                 .foregroundStyle(chrome.accent)
                 .frame(width: 18, height: 18)
+                .containerBadge(model.containerLabel(forSpace: space.id), offset: 2)
                 .padding(.leading, SidebarMetrics.iconLeading - 1)
                 .padding(.trailing, SidebarMetrics.iconToText - 1)
             Group {
@@ -320,6 +329,8 @@ struct SpaceHeaderView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(chrome.secondaryText)
                         .lineLimit(1)
+                        // The container state in words.
+                        .help(model.store.container(ofSpace: space.id) == nil ? "" : "\(space.name) · \(ContainerChip.help)")
                 }
             }
             .padding(.trailing, 4)
@@ -353,19 +364,23 @@ struct SpaceHeaderView: View {
                 .padding(.trailing, 8)
                 .help("Space options")
             }
-            if let profile = model.store.profile(withID: space.profileID) {
+            // The space's profile, its parent for a container's space; the badge is an
+            // overlay, so the avatar keeps its place.
+            if let profile = model.store.profile(withID: model.store.owningProfileID(of: space.profileID)) {
+                let container = model.containerLabel(forSpace: space.id)
                 Menu {
                     SpaceProfileChoices(model: model, space: space, heading: "Switch Space to Profile")
                 } label: {
                     ProfileAvatarView(profile: profile, diameter: 18, sidebarBadge: chrome.badge)
+                        .containerBadge(container)
                 }
                     // A plain button draws the badge as is (the borderless style dims it).
                     .menuStyle(.button)
                     .buttonStyle(.plain)
                     .menuIndicator(.hidden)
                     .fixedSize()
-                    .help("Profile: \(profile.name) — switch this space to another profile")
-                    .accessibilityLabel("Profile: \(profile.name)")
+                    .help("Profile: \(profile.name)\(container == nil ? "" : " · \(ContainerChip.help)") — switch this space to another profile")
+                    .accessibilityLabel("Profile: \(profile.name)\(container == nil ? "" : ", container: own sign-ins")")
                     .padding(.trailing, 6)
             }
         }

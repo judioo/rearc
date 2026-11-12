@@ -68,17 +68,18 @@ final class SpaceContainerTests: XCTestCase {
         XCTAssertEqual(store.spaces.count, 1)
         XCTAssertEqual(store.spaceContaining(tabID: tab.id), space)
         XCTAssertEqual(store.activeSpace.profileID, container.id)
-        let second = try XCTUnwrap(store.createContainer(forSpace: space))
-        XCTAssertNotEqual(second.id, container.id)
-        XCTAssertNotEqual(second.name, container.name)
+        XCTAssertEqual(container.containerOf, original, "inside the space's profile")
+        XCTAssertNil(store.createContainer(forSpace: space), "already in a container")
         XCTAssertNil(store.createContainer(forSpace: UUID()))
         let restored = SidebarStore()
         restored.applySnapshot(try JSONDecoder().decode(SidebarSnapshot.self, from: JSONEncoder().encode(store.makeSnapshot())))
-        XCTAssertEqual(restored.activeSpace.profileID, second.id)
+        XCTAssertEqual(restored.activeSpace.profileID, container.id)
+        XCTAssertEqual(restored.parentProfile(ofContainer: container.id)?.id, original)
         XCTAssertEqual(restored.tab(withID: tab.id)?.url, tab.url)
-        // An empty former profile stays available, and selecting it gets its own landing space.
+        // The parent lists the container's space, so selecting it makes no landing space.
         restored.selectProfile(original)
-        XCTAssertEqual(restored.activeSpace.profileID, original)
-        XCTAssertEqual(restored.spaces(in: original).count, 1)
+        XCTAssertEqual(restored.activeSpace.id, space)
+        XCTAssertEqual(restored.spaces(listedIn: original).count, 1)
+        XCTAssertTrue(restored.spaces(in: original).isEmpty)
     }
 }

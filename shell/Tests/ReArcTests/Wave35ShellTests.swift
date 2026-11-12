@@ -281,11 +281,27 @@ final class Wave35ShellTests: XCTestCase {
             choice.save(to: defaults)
             XCTAssertEqual(AppIconChoice.load(from: defaults), .standard, choice.rawValue)
         }
+        // Icons an earlier build offered load as the standard one.
+        for retired in ["sextant", "compass", "loupe", "arch", "aperture", "monogram", "electricArc"] {
+            defaults.set(retired, forKey: AppIconChoice.defaultsKey)
+            XCTAssertEqual(AppIconChoice.load(from: defaults), .standard, retired)
+        }
         let shipped = Set((try? FileManager.default.contentsOfDirectory(atPath: Self.appIconsDirectory)) ?? [])
         for choice in AppIconChoice.allCases {
             guard let file = choice.fileName else { continue }
             XCTAssertTrue(shipped.contains("\(file).png"), "shell/Resources/AppIcons has \(file).png")
         }
+        // Nothing shipped that no choice offers.
+        XCTAssertEqual(shipped.filter { $0.hasSuffix(".png") }, Set(AppIconChoice.allCases.compactMap(\.fileName).map { "\($0).png" }))
+    }
+
+    func testIconDrawerListsTheSunsPathThenTreatments() {
+        XCTAssertEqual(AppIconChoice.allCases.filter { $0.group == .sunsPath },
+                       [.standard, .firstLight, .daybreak, .goldenHour, .moonrise])
+        XCTAssertEqual(AppIconChoice.allCases.filter { $0.group == .treatments },
+                       [.neon, .flutedGlass, .sorbet, .sketchbook, .prism, .graphite])
+        XCTAssertEqual(Set(AppIconChoice.allCases.map(\.title)).count, AppIconChoice.allCases.count)
+        XCTAssertFalse(AppIconChoice.allCases.contains { $0.caption.isEmpty })
     }
 
     private static var appIconsDirectory: String {

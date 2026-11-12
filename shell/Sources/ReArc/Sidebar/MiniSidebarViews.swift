@@ -448,7 +448,7 @@ struct MiniSpaceHeaderView: View {
     }
 
     var body: some View {
-        let profile = model.store.profile(withID: space.profileID)
+        let profile = model.store.profile(withID: model.store.owningProfileID(of: space.profileID))
         Menu {
             menu
         } label: {
@@ -461,9 +461,15 @@ struct MiniSpaceHeaderView: View {
                     }
                 }
                 .overlay(alignment: .bottomTrailing) {
-                    if model.store.profiles.count > 1, let profile {
+                    if model.store.listedProfiles.count > 1, let profile {
                         ProfileAvatarView(profile: profile, diameter: 11, sidebarBadge: chrome.badge)
                             .offset(x: 6, y: 5)
+                    }
+                }
+                // A container's space: the badge at the icon's other corner.
+                .overlay(alignment: .bottomLeading) {
+                    if let container = model.containerLabel(forSpace: space.id) {
+                        ContainerChip(label: container, style: .badge).offset(x: -4, y: 5)
                     }
                 }
                 .frame(width: CGFloat(MiniSidebarLayout.highlight), height: SidebarMetrics.headerHeight)
@@ -478,7 +484,7 @@ struct MiniSpaceHeaderView: View {
         .onHover { isHovering = $0 }
         // A right-click opens the same menu, as on the full header.
         .contextMenu { menu }
-        .help(space.name)
+        .help(model.store.container(ofSpace: space.id) == nil ? space.name : "\(space.name) · \(ContainerChip.help)")
         .accessibilityLabel("Space: \(space.name)")
         .accessibilityHint("Opens the space menu")
     }
@@ -500,7 +506,7 @@ struct MiniSpaceHeaderView: View {
         if hasPinned {
             Button(isPinnedCollapsed ? "Expand Pinned Section" : "Collapse Pinned Section", action: onTogglePinned)
         }
-        if model.store.profiles.count > 1 {
+        if model.store.listedProfiles.count > 1 {
             Menu("Switch to Profile") {
                 ProfileMenuChoices(store: model.store, active: space.profileID) { model.selectProfile($0) }
             }
@@ -716,7 +722,7 @@ private struct MiniSpaceSwitcher: View {
     @Environment(\.themeChrome) private var chrome
 
     var body: some View {
-        let spaces = model.store.spaces(in: current.profileID)
+        let spaces = model.store.spaces(listedIn: current.profileID)
         Menu {
             ForEach(spaces) { space in
                 Button { model.selectSpace(space.id) } label: {

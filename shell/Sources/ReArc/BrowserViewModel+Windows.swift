@@ -50,8 +50,9 @@ extension BrowserViewModel {
         selectedItemID(in: window).flatMap { store.split(withID: $0) }
     }
 
+    /// The window's profile as the person sees it: a container's parent.
     func profile(in window: SidebarWindowID?) -> Profile {
-        store.profile(withID: space(in: window).profileID) ?? store.activeProfile
+        store.profile(withID: store.owningProfileID(of: space(in: window).profileID)) ?? store.activeProfile
     }
 
     /// The engine of the tab a window shows (nil until it was loaded).

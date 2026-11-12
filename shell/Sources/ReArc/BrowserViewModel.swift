@@ -497,10 +497,11 @@ final class BrowserViewModel {
     /// Bumped when a default search changes, so rows and menus re-read it.
     var searchProviderRevision = 0
 
-    /// The active profile's default search (Chromium's, or the WebKit preference).
+    /// The active profile's default search (Chromium's, or the WebKit preference);
+    /// a container's space uses its parent's.
     var searchProvider: SearchProvider {
         _ = searchProviderRevision
-        return commandBarServices.searchProvider(for: store.activeProfileID)
+        return commandBarServices.searchProvider(for: activeSearchProfileID)
     }
 
     var peekURL: URL? { peekSession?.url }
@@ -1020,16 +1021,18 @@ final class BrowserViewModel {
         loadSelectedIfNeeded()
     }
 
-    /// Deletes a profile and drops engines that used it. Without
-    /// `deletingSpaces` the profile must own no spaces.
+    /// Deletes a profile, with its containers, and drops engines that used
+    /// them. Without `deletingSpaces` they must own no spaces.
     @discardableResult
     func deleteProfile(_ id: Profile.ID, deletingSpaces: Bool = false) -> ProfileMutationError? {
-        let littleArcs = store.littleArcLiveWindows.filter { $0.profileID == id }.map(\.id)
+        let doomed = store.profilesDeleted(with: id)
+        let littleArcs = Dictionary(grouping: store.littleArcLiveWindows.filter { doomed.contains($0.profileID) }, by: \.profileID)
         if let error = store.deleteProfile(id, deletingSpaces: deletingSpaces) { return error }
-        engineHost.evictEngines(forProfileID: id)
+        doomed.forEach(engineHost.evictEngines(forProfileID:))
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
-        onProfileDeleted?(id, littleArcs)
+        // Each one's engine data goes as a deleted container's does (S-07).
+        for profileID in doomed { onProfileDeleted?(profileID, littleArcs[profileID]?.map(\.id) ?? []) }
         return nil
     }
 
@@ -1941,7 +1944,7 @@ final class BrowserViewModel {
         commandBarHighlightedIndex = 0
         commandBarError = nil
         isCommandBarPresented = true
-        commandBarServices.commandBarWillOpen(profileID: store.activeProfileID)
+        commandBarServices.commandBarWillOpen(profileID: activeSearchProfileID)
         // ⌘L's URL asks at once: its first frame already waits for the bar.
         refreshCommandBarLive(immediately: true)
         // The first keystroke then finds the menu read and the indexes built.
@@ -2093,9 +2096,13 @@ final class BrowserViewModel {
             guard let id = store.selectedTabID, store.unpinTab(id) else { return "Cannot unpin this tab" }
             loadSelectedIfNeeded()
         case .moveTabToSpace(let spaceID):
-            guard let id = store.selectedTabID, store.moveTab(id, toSpace: spaceID) else {
-                return "Cannot move this tab"
+            guard let id = store.selectedTabID else { return "Cannot move this tab" }
+            // Into or out of a container: another session, so it asks first.
+            if store.crossesProfile([id], toSpace: spaceID) {
+                requestProfileMove([id], toSpace: spaceID)
+                return nil
             }
+            guard store.moveTab(id, toSpace: spaceID) else { return "Cannot move this tab" }
             loadSelectedIfNeeded()
         case .switchToSpace(let spaceID):
             selectSpace(spaceID)

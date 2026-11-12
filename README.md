@@ -21,9 +21,9 @@ in the background, one copy of each. ReArc never reads your passwords or cookies
 ## What's in the repo
 
 - **`shell/`**: the browser UI in SwiftUI and AppKit. Sidebar with spaces,
-  folders and pinned tabs, command bar, split view, profiles, containers (a space can
-  have its own profile, so one site can be signed in to a different account in each
-  space), Peek and Little ReArc,
+  folders and pinned tabs, command bar, split view, profiles, containers (a separate
+  browsing session for one space inside its profile, so a site can be signed in to a
+  different account there than in the rest of the profile), Peek and Little ReArc,
   themes, media and picture in picture, boosts, easels and capture, onboarding and
   import, developer tools docking, Sparkle updates and the iCloud sync foundation.
   `cd shell && swift build && swift test`.

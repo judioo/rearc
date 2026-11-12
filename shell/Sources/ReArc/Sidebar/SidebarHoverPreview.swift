@@ -137,7 +137,9 @@ final class SidebarHoverPreview: NSObject, NSPopoverDelegate {
         switch model.store.entry(withID: id) {
         case .tab(let tab)?:
             let image = TabHoverSnapshots.shared.image(for: tab)
-            root = AnyView(TabHoverCard(tab: tab, image: image, onHover: { [weak self] in self?.previewHovered($0) }))
+            let engine = model.engineHost.allTabEngines().first { $0.0 == tab.id }?.2
+            root = AnyView(TabHoverCard(tab: tab, image: image, container: model.containerLabel(for: engine, tab: tab),
+                                        onHover: { [weak self] in self?.previewHovered($0) }))
         case .folder(let folder)?:
             root = AnyView(FolderHoverList(folder: folder, model: model, onHover: { [weak self] in self?.previewHovered($0) },
                                            onPick: { [weak self] in self?.cancel() }))
@@ -275,6 +277,8 @@ final class TabHoverSnapshots {
 private struct TabHoverCard: View {
     let tab: Tab
     let image: NSImage?
+    /// The container the tab's page runs in, if any.
+    var container: ContainerLabel?
     let onHover: (Bool) -> Void
 
     var body: some View {
@@ -290,11 +294,14 @@ private struct TabHoverCard: View {
                 Text(tab.displayTitle)
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(2)
-                if let host = tab.url.host() {
-                    Text(host)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                HStack(spacing: 6) {
+                    if let host = tab.url.host() {
+                        Text(host)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    if let container { ContainerChip(label: container, style: .compact) }
                 }
             }
         }

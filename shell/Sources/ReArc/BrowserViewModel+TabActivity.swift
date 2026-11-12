@@ -26,6 +26,8 @@ struct ShellToast: Equatable, Identifiable {
         case share(URL)
         /// Start and Later for the onboarding's extension reinstall queue.
         case reinstallExtensions
+        /// A tip's trailing "Settings…" button, opening that pane.
+        case openSettings(SettingsPane)
     }
 
     /// Arc's toasts stayed 4.6 s and 5.0 s.

@@ -391,10 +391,10 @@ public struct LibrarySpaceRow: Identifiable, Equatable {
 }
 
 public enum LibrarySpaces {
-    /// Profiles in order, each with its spaces in sidebar order.
+    /// Profiles in order, each with its spaces in sidebar order (its containers' too).
     public static func groups(in store: SidebarStore) -> [(profile: Profile, rows: [LibrarySpaceRow])] {
-        store.profiles.map { profile in
-            let rows = store.spaces(in: profile.id).map { space in
+        store.listedProfiles.map { profile in
+            let rows = store.spaces(listedIn: profile.id).map { space in
                 let content = store.content(for: space.id)
                 return LibrarySpaceRow(
                     space: space,

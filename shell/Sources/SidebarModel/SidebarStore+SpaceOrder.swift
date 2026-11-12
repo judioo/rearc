@@ -1,7 +1,8 @@
 import Foundation
 
 /// Reordering spaces within their profile (Arc Manage Spaces / `SortSpaces`,
-/// SIDEBAR-SPEC §4.6). Ctrl+1…9 and the switcher follow this order.
+/// SIDEBAR-SPEC §4.6). Ctrl+1…9 and the switcher follow this order; a
+/// container's space is among its parent's.
 extension SidebarStore {
 
     /// Moves a space to `destination` among its profile's spaces (index after
@@ -9,9 +10,9 @@ extension SidebarStore {
     @discardableResult
     public func moveSpace(_ id: Space.ID, toIndex destination: Int) -> Bool {
         guard let moving = space(withID: id) else { return false }
-        let peers = spaces(in: moving.profileID).filter { $0.id != id }
+        let peers = spaces(listedIn: moving.profileID).filter { $0.id != id }
         let clamped = max(0, min(destination, peers.count))
-        let current = spaces(in: moving.profileID).firstIndex(where: { $0.id == id })
+        let current = spaces(listedIn: moving.profileID).firstIndex(where: { $0.id == id })
         guard current != clamped else { return false }
         var ordered = spaces.filter { $0.id != id }
         let insertAt: Int
