@@ -290,6 +290,11 @@ private struct PeekAddressLine: View {
                 .padding(.leading, 4)
                 .padding(.trailing, 12)
             Spacer(minLength: 0)
+            // The Peek's own engine names its container, so the opener's is never assumed.
+            if let container = model.store.containerLabel(forEngineProfile: engine?.pagePrompts.profileID ?? model.peekSession?.profileID) {
+                ContainerChip(label: container)
+                    .padding(.trailing, 10)
+            }
         }
         .frame(height: PeekLayout.addressLineHeight)
         .frame(maxWidth: .infinity)

@@ -124,7 +124,8 @@ struct SplitContentView: View {
             holdsForAddressEditing: model.addressBarHasKeyboardFocus(for: tab.id, in: window),
             revealsAtWindowTop: split.orientation == .horizontal || row?.isAtLeadingCorner == true,
             revealOrigin: PageOrigin.of(tab.url),
-            holdsForPrompt: engine.pagePrompts.asksUser
+            holdsForPrompt: engine.pagePrompts.asksUser,
+            container: model.containerLabel(for: engine, tab: tab)
         ) {
             SplitPanePage(engine: engine, tabID: tab.id, findBar: model.findBar)
         } toolbar: {

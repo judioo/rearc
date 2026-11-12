@@ -13,6 +13,9 @@ struct AddressBarContainer<Page: View, Toolbar: View>: View {
     /// A permission, sign-in, certificate or dialog prompt is up: the bar stays shown so the
     /// asking site's real origin is on screen (S-02).
     var holdsForPrompt = false
+    /// The page's container: with the bar auto-hidden its chip stays on a thin
+    /// band of chrome above the page, never over the page itself.
+    var container: ContainerLabel? = nil
     @ViewBuilder var page: () -> Page
     @ViewBuilder var toolbar: () -> Toolbar
     @AppStorage(AutoHideAddressBarPreference.key) private var autoHide = AutoHideAddressBarPreference.defaultValue
@@ -25,12 +28,23 @@ struct AddressBarContainer<Page: View, Toolbar: View>: View {
     private var isVisible: Bool { showsToolbar && (!autoHide || visibility.isRevealed) }
     private var holdsFocus: Bool { holdsForAddressEditing || toolbarHasFocus || menuIsTracking || holdsForPrompt }
 
+    static var containerBandHeight: CGFloat { 18 }
+
+    private var showsContainerBand: Bool { autoHide && showsToolbar && container != nil }
+
     var body: some View {
         ZStack(alignment: .top) {
             page()
-                .padding(.top, showsToolbar && !autoHide ? CardToolbarView.height : 0)
-                .environment(\.addressBarOverlayInset, autoHide && isVisible ? CardToolbarView.height : 0)
+                .padding(.top, showsToolbar && !autoHide ? CardToolbarView.height : showsContainerBand ? Self.containerBandHeight : 0)
+                .environment(\.addressBarOverlayInset, autoHide && isVisible
+                             ? CardToolbarView.height - (showsContainerBand ? Self.containerBandHeight : 0) : 0)
                 .environment(\.addressBarAutoHides, autoHide && showsToolbar)
+            if showsContainerBand, let container {
+                ContainerChip(label: container, style: .compact)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: Self.containerBandHeight)
+                    .background(Rectangle().fill(.regularMaterial))
+            }
             if showsToolbar {
                 toolbar()
                     .background { if autoHide { Rectangle().fill(.regularMaterial) } }

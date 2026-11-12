@@ -132,6 +132,9 @@ struct SidebarURLField: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 0)
+            if let container = model.containerLabel(for: engine, tab: tab) {
+                ContainerChip(label: container)
+            }
             if let summary = model.sitePermissionSummary(for: engine), site != nil {
                 // The wave 22 indicator: answers recorded for this site.
                 Button { showsSiteControls.toggle() } label: {

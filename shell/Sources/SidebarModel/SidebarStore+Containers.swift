@@ -14,6 +14,20 @@ public enum ContainerChangeError: Error, Equatable {
     case firstProfile
 }
 
+/// What a container chip shows: the container a page runs in, named and
+/// coloured as its space was when the container was made.
+public struct ContainerLabel: Equatable, Sendable {
+    public let containerID: Profile.ID
+    public let name: String
+    public let theme: SpaceTheme
+
+    public init(containerID: Profile.ID, name: String, theme: SpaceTheme) {
+        self.containerID = containerID
+        self.name = name
+        self.theme = theme
+    }
+}
+
 /// Containers (SPACE-CONTAINERS.md): a separate browsing session for one space,
 /// inside a profile. Underneath, a container is a `Profile` whose `containerOf`
 /// names its parent; `Space.profileID` stays the storage key, so tabs, Peek,
@@ -71,6 +85,15 @@ extension SidebarStore {
     /// profile of its own to the person.
     public func containerTitle(_ id: Profile.ID) -> String {
         spaces(in: id).first.map { "Container for \($0.name)" } ?? "Container (no space)"
+    }
+
+    /// The chip for a page whose engine uses `profileID`'s storage: nil unless
+    /// that is a container. Callers pass the engine's own profile, not its
+    /// space's, so a space changing container never labels a page wrongly.
+    public func containerLabel(forEngineProfile profileID: Profile.ID?) -> ContainerLabel? {
+        guard let profileID, isContainer(profileID), let container = profile(withID: profileID) else { return nil }
+        return ContainerLabel(containerID: profileID, name: spaces(in: profileID).first?.name ?? container.name,
+                              theme: container.themeColor)
     }
 
     /// A profile's spaces as its strip, pager, Spaces menu and ⌃1…9 list them:

@@ -60,7 +60,14 @@ struct SidebarView: View {
         return VStack(spacing: 0) {
             if mini {
                 // The traffic lights' row; they sit over it and the card's strip.
+                // Under them, the shown page's container, as the full toolbar's URL field has it.
                 Color.clear.frame(height: SidebarToolbarView.rowHeight)
+                    .overlay(alignment: .bottom) {
+                        if let container = model.containerLabel(for: model.focusedEngine(in: window), tab: model.selectedTab(in: window)) {
+                            ContainerChip(label: container, style: .compact, maxWidth: CGFloat(MiniSidebarLayout.highlight) + 8)
+                                .padding(.bottom, 1)
+                        }
+                    }
             } else {
                 SidebarToolbarView(model: model, urlInToolbar: urlInToolbar)
             }
