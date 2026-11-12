@@ -54,9 +54,7 @@ struct SidebarToolbarView: View {
                 Spacer(minLength: 0)
                 if model.store.profiles.count > 1 {
                     Menu {
-                        ForEach(model.store.profiles) { candidate in
-                            Button(candidate.name) { model.selectProfile(candidate.id) }
-                        }
+                        ProfileMenuChoices(store: model.store, active: profile.id) { model.selectProfile($0) }
                     } label: {
                         ProfileAvatarView(profile: profile, diameter: 18, sidebarBadge: chrome.badge)
                     }

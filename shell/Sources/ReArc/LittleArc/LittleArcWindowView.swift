@@ -283,17 +283,7 @@ struct LittleArcWindowView: View {
     private func profileMenu(for record: LittleArcWindow) -> some View {
         if let profile = model.store.profile(withID: record.profileID) {
             Menu {
-                ForEach(model.store.profiles) { other in
-                    Button {
-                        model.changeLittleArcProfile(windowID, to: other.id)
-                    } label: {
-                        if other.id == profile.id {
-                            Label(other.name, systemImage: "checkmark")
-                        } else {
-                            Text(other.name)
-                        }
-                    }
-                }
+                ProfileMenuChoices(store: model.store, active: profile.id) { model.changeLittleArcProfile(windowID, to: $0) }
             } label: {
                 ProfileAvatarView(profile: profile, diameter: 20)
             }

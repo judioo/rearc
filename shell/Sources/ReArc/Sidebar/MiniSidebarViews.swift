@@ -502,9 +502,7 @@ struct MiniSpaceHeaderView: View {
         }
         if model.store.profiles.count > 1 {
             Menu("Switch Profile") {
-                ForEach(model.store.profiles) { candidate in
-                    Button(candidate.name) { model.selectProfile(candidate.id) }
-                }
+                ProfileMenuChoices(store: model.store, active: space.profileID) { model.selectProfile($0) }
             }
         }
         Divider()
