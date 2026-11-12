@@ -111,6 +111,7 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDeleg
     /// takes the immediate install, so Restart and Update needs no second
     /// download or check; Sparkle still installs at quit as before. Taking
     /// it stops further cycles until the relaunch.
+    @objc(updater:willInstallUpdateOnQuit:immediateInstallationBlock:)
     func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
                  immediateInstallationBlock immediateInstallHandler: @escaping () -> Void) -> Bool {
         guard let driver else { return false }
@@ -118,6 +119,7 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDeleg
         return true
     }
 
+    @objc(updater:userDidMakeChoice:forUpdate:state:)
     func updater(_ updater: SPUUpdater, userDidMake choice: SPUUserUpdateChoice, forUpdate updateItem: SUAppcastItem,
                  state: SPUUserUpdateState) {
         if choice == .skip { center.send(.skipped) }
@@ -138,6 +140,10 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDeleg
                                                                           andInImmediateFocus immediateFocus: Bool) -> Bool {
         MainActor.assumeIsolated { driver?.isHandingOver == true }
     }
+
+    /// Required with gentle reminders; the notice and the menu follow `UpdateNoticeCenter`.
+    nonisolated func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool, forUpdate update: SUAppcastItem,
+                                                               state: SPUUserUpdateState) {}
 
     // MARK: Feed items
 
