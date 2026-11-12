@@ -18,17 +18,18 @@ extension BrowserViewModel {
         return [id]
     }
 
-    /// The strips for a window, front first. A source whose video shows in
-    /// the floating panel has none while the panel is on screen, and one in
-    /// the engine's own Picture in Picture window has none while it is open
-    /// (Arc's pop-out, ARC-RECORDING-ANALYSIS.md §7). Any other source that
-    /// is off screen here has one, whatever space, folder or profile it is in.
+    /// The strips for a window, front first. A source in the engine's own
+    /// Picture in Picture window has none while it is open (Arc's pop-out,
+    /// ARC-RECORDING-ANALYSIS.md §7). Any other source that is off screen here
+    /// has one, whatever space, folder or profile it is in, and also while
+    /// ReArc's floating panel shows it: the shell cannot see a panel that
+    /// presents black (hardware-decoded video, build 677), and a strip beside
+    /// a working panel costs little, where no strip beside a black one loses the tab.
     func mediaStrips(in window: SidebarWindowID?) -> [Tab.ID] {
         var suppressed = MediaControlsModel.playersOnScreen(
             media: mediaStateByTab,
             placements: livePlacements.compactMapValues { $0.effective(sidebarVisible: showsLiveCardInSidebar) },
-            // A panel showing black is no player.
-            panelTabID: livePanelTabID.flatMap { blankLiveVideos.contains($0) ? nil : $0 },
+            panelTabID: nil,
             engineHasOwnPiPWindow: !engineHost.supportsLiveVideo
         )
         // A tab in a call shows its call card instead of a strip, as in Arc.

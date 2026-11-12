@@ -101,9 +101,9 @@ final class MediaStripElsewhereTests: XCTestCase {
         XCTAssertEqual(f.model.mediaStrips(in: nil), [f.video.id], "no panel on screen: the strip is the player")
 
         f.model.livePanelTabID = f.video.id
-        XCTAssertEqual(f.model.mediaStrips(in: nil), [], "the panel on screen is the player (Arc swaps them)")
+        XCTAssertEqual(f.model.mediaStrips(in: nil), [f.video.id], "the strip stays beside the panel: the panel may present black")
         f.model.livePanelTabID = nil
-        XCTAssertEqual(f.model.mediaStrips(in: nil), [f.video.id], "the panel went: the strip comes back")
+        XCTAssertEqual(f.model.mediaStrips(in: nil), [f.video.id], "the panel went: the strip is still there")
     }
 
     /// Cause 2. A PiP session reported before (or without) its embedded
@@ -347,7 +347,7 @@ final class MediaStripElsewhereTests: XCTestCase {
         XCTAssertFalse(LiveVideoDrawing.isBlank([0x000000FF, 0x000000FF, 0xF0F0F0FF, 0x000000FF]), "a fade from black")
     }
 
-    /// A panel on screen that shows black is no player: the strip comes back.
+    /// The strip shows beside the panel whether or not the panel has a picture.
     func testABlankPanelKeepsTheStrip() throws {
         let f = try makeFixture(collapsed: true)
         var live = youTube
@@ -357,7 +357,7 @@ final class MediaStripElsewhereTests: XCTestCase {
         f.model.selectSpace(f.playground.id)
         f.model.mediaStateByTab[f.video.id] = live
         f.model.livePanelTabID = f.video.id
-        XCTAssertEqual(f.model.mediaStrips(in: nil), [], "a panel with a picture is the player")
+        XCTAssertEqual(f.model.mediaStrips(in: nil), [f.video.id], "the strip stays beside a panel with a picture")
         f.model.blankLiveVideos.insert(f.video.id)
         XCTAssertEqual(f.model.mediaStrips(in: nil), [f.video.id], "black in the panel: the strip shows")
         f.model.mediaStateByTab[f.video.id]?.hasLiveVideo = false

@@ -3255,7 +3255,7 @@ extension ChromiumSelfTest {
         try await wait("popped out to the floating panel", timeout: 5) {
             model.livePanel.isShowing && video.view.window === model.livePanel.window
         }
-        try check(!model.mediaStrips(in: nil).contains(tab.id), "the strip showed beside the floating panel")
+        try check(model.mediaStrips(in: nil).contains(tab.id), "no strip beside the floating panel")
         let panelScreen = try await onScreenVideo(video.view, label: "the floating panel (\(path), \(decoding))")
         model.minimizeLiveVideo(tab.id)
         try await wait("minimized into the strip", timeout: 5) {
@@ -5028,7 +5028,8 @@ extension ChromiumSelfTest {
             log(systemInputNote("the toast's share click"))
         }
 
-        // (5) Picture in Picture hides the hidden tab's media strip; closing it brings the strip back.
+        // (5) The hidden tab's media strip stays through Picture in Picture: a floating panel that
+        // presents black must not be the only player (build 677, hardware-decoded video).
         let embeds = model.embedsVideoInSidebar, automatic = model.automaticPictureInPicture
         model.embedsVideoInSidebar = false
         model.automaticPictureInPicture = false
@@ -5042,14 +5043,14 @@ extension ChromiumSelfTest {
         model.selectTab(other.id)
         try await wait("strip for the hidden playing tab", timeout: 10) { model.mediaStrips(in: nil).contains(tab.id) }
         model.setPictureInPicture(true, tabID: tab.id)
-        try await wait("PiP open hides the strip", timeout: 10) {
-            model.isPictureInPicture(tab.id) && !model.mediaStrips(in: nil).contains(tab.id)
+        try await wait("PiP open keeps the strip", timeout: 10) {
+            model.isPictureInPicture(tab.id) && model.mediaStrips(in: nil).contains(tab.id)
         }
         model.setPictureInPicture(false, tabID: tab.id)
-        try await wait("PiP closed brings the strip back", timeout: 10) {
+        try await wait("PiP closed leaves the strip", timeout: 10) {
             !model.isPictureInPicture(tab.id) && model.mediaStrips(in: nil).contains(tab.id)
         }
-        results.append("(5) PiP open hides the hidden tab's strip and closing it brings the strip back "
+        results.append("(5) the hidden tab's strip stays through PiP open and close "
             + "(\(runtime.capabilities.pipEmbedded ? "the shell's floating panel" : "Chromium's window"))")
         model.selectTab(tab.id)
         loadShellTab(model, tab, engine, URL(string: "\(serverBase)/a")!)
