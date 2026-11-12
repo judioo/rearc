@@ -953,9 +953,11 @@ struct AdvancedSettingsPane: View {
                     SettingsSwitchRow(label: "Enable Picture in Picture when you leave a video tab",
                                       icon: icon("play.square", .purple), isOn: $model.automaticPictureInPicture)
                 }
-                SettingsSwitchRow(label: "Play video in the sidebar",
-                                  detail: "A video you leave plays above its sidebar strip instead of a floating window.",
-                                  icon: icon("play.rectangle.on.rectangle", .purple), isOn: $model.embedsVideoInSidebar)
+                if model.engineHost.supportsLiveVideo {
+                    SettingsSwitchRow(label: "Play video in the sidebar",
+                                      detail: "A video you leave plays above its sidebar strip instead of a floating window.",
+                                      icon: icon("play.rectangle.on.rectangle", .purple), isOn: $model.embedsVideoInSidebar)
+                }
                 SettingsSwitchRow(label: "Match toolbar to website colours",
                                   detail: "The toolbar takes the page's theme colour, or the colour along its top edge.",
                                   icon: icon("paintpalette.fill", .purple), isOn: $matchesPageColor)

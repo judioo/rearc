@@ -24,6 +24,10 @@ final class Wave32ShellTests: XCTestCase {
 
     func testCapabilitiesGateEmbeddedVideoOnABI143WithPictureInPicture() {
         let all: (String) -> Bool = { _ in true }
+        XCTAssertFalse(ChromiumCapabilities(abiMinorVersion: 43, hasFeature: all).pipEmbedded,
+                       "off until the engine presents the embedded video on screen")
+        ChromiumCapabilities.hostsLiveVideo = true
+        defer { ChromiumCapabilities.hostsLiveVideo = false }
         XCTAssertFalse(ChromiumCapabilities(abiMinorVersion: 42, hasFeature: all).pipEmbedded)
         let current = ChromiumCapabilities(abiMinorVersion: 43, hasFeature: all)
         XCTAssertTrue(current.pipEmbedded)

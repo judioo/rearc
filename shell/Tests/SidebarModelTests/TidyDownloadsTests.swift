@@ -29,7 +29,7 @@ final class TidyDownloadsTests: XCTestCase {
         let renamed = try XCTUnwrap(name("download.PDF", title: "Report.app", host: "example.com"))
         XCTAssertEqual(TidyDownloads.fileExtension(of: renamed), "pdf")
         XCTAssertFalse(renamed.contains(".app"))
-        XCTAssertEqual(renamed, "Report app.pdf")
+        XCTAssertEqual(renamed, "Report app.PDF", "the extension keeps the file's own case (RC-0.1.0-726 W-02)")
         XCTAssertNil(name("README", title: "Read me", host: "example.com"), "no extension, no rename")
     }
 

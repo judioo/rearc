@@ -54,6 +54,13 @@ struct ChromiumCapabilities: Equatable {
     static let clientCertificatesFeature = "client_certificates"
     static let keyEquivalentEventsFeature = "key_equivalent_events"
     static let pipEmbeddedFeature = "pip_embedded"
+    /// Off: the engine's embedded video (`HostVideoOverlay`) presents black on screen in every
+    /// release build from 500 on, whatever the codec, while its own read-back shows the video
+    /// (found on YouTube in 677). Until the engine presents it, Picture in Picture uses
+    /// Chromium's own floating window (tab/048), which shows the video. `defaults write
+    /// com.rearc.browser ReArcHostsLiveVideo -bool YES` turns the shell's panel and sidebar
+    /// video back on to work on the fix.
+    static var hostsLiveVideo = UserDefaults.standard.bool(forKey: "ReArcHostsLiveVideo")
     static let perfMetricsFeature = "perf_metrics"
     static let earlyWindowFeature = "early_window"
     static let mediaCaptureFeature = "media_capture"
@@ -306,7 +313,7 @@ struct ChromiumCapabilities: Equatable {
         devToolsDocking = devTools && adopted(Self.devToolsDockingFeature)
         clientCertificates = adopted(Self.clientCertificatesFeature)
         keyEquivalentEvents = adopted(Self.keyEquivalentEventsFeature)
-        pipEmbedded = pictureInPicture && adopted(Self.pipEmbeddedFeature)
+        pipEmbedded = pictureInPicture && adopted(Self.pipEmbeddedFeature) && Self.hostsLiveVideo
         perfMetrics = adopted(Self.perfMetricsFeature)
         earlyWindow = adopted(Self.earlyWindowFeature)
         mediaCapture = adopted(Self.mediaCaptureFeature)
