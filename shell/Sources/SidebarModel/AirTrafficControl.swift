@@ -171,10 +171,13 @@ extension ExternalLinkRouting {
         switch destination {
         case .space(let id):
             guard let space = store.space(withID: id) else { return "Deleted space" }
-            let profile = store.profiles.count > 1 ? store.profile(withID: space.profileID).map { " (\($0.name))" } ?? "" : ""
-            return space.name + profile
+            let owner = store.profile(withID: store.owningProfileID(of: space.profileID))
+            let profile = store.listedProfiles.count > 1 ? owner.map { " (\($0.name))" } ?? "" : ""
+            return space.name + profile + (store.isContainer(space.profileID) ? " · Container" : "")
         case .littleArc(let id):
-            return "Little ReArc (\(store.profile(withID: id)?.name ?? "deleted profile"))"
+            // A container's Little ReArc uses its session: named by its space.
+            let name = store.isContainer(id) ? store.containerTitle(id) : store.profile(withID: id)?.name
+            return "Little ReArc (\(name ?? "deleted profile"))"
         }
     }
 }

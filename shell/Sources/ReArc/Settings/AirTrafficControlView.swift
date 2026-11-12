@@ -79,8 +79,8 @@ struct AirTrafficControlView: View {
                 .help(value.isValid || value.pattern.isEmpty ? "" : "This pattern matches nothing")
             Image(systemName: "arrow.right").foregroundStyle(.secondary)
             Picker("", selection: rule.destination) {
-                ForEach(model.store.profiles) { profile in
-                    ForEach(model.store.spaces(in: profile.id)) { space in
+                ForEach(model.store.listedProfiles) { profile in
+                    ForEach(model.store.spaces(listedIn: profile.id)) { space in
                         Text(ExternalLinkRouting.describe(.space(space.id), in: model.store)).tag(LinkRoutingRule.Destination.space(space.id))
                     }
                 }

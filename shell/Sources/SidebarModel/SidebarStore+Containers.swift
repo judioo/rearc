@@ -233,3 +233,22 @@ extension SidebarStore {
         return nil
     }
 }
+
+/// Settings › Profiles' "In iCloud only": a profile only iCloud has that is a
+/// container of another profile only iCloud has lists under it, when the
+/// container's record names that parent; any other one lists as a plain
+/// profile, as builds before containers show it.
+public enum CloudContainerNesting {
+    public static func rows(_ profiles: [CloudProfile]) -> [(profile: CloudProfile, nested: Bool)] {
+        let parents = Set(profiles.filter { $0.profile.containerOf == nil }.map(\.id))
+        func parent(of cloud: CloudProfile) -> Profile.ID? {
+            cloud.profile.containerOf.flatMap { $0 != cloud.id && parents.contains($0) ? $0 : nil }
+        }
+        var rows: [(profile: CloudProfile, nested: Bool)] = []
+        for cloud in profiles where parent(of: cloud) == nil {
+            rows.append((cloud, false))
+            rows += profiles.filter { parent(of: $0) == cloud.id }.map { ($0, true) }
+        }
+        return rows
+    }
+}

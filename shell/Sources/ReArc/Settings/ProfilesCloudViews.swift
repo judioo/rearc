@@ -80,8 +80,9 @@ struct CloudOnlyProfilesSection: View {
                 .padding(.top, 14)
                 .padding(.bottom, 4)
                 status
-                ForEach(model.cloudOnlyProfiles) { profile in
-                    row(profile)
+                // An iCloud-only container sits under its iCloud-only parent when its record names one.
+                ForEach(CloudContainerNesting.rows(model.cloudOnlyProfiles), id: \.profile.id) { entry in
+                    row(entry.profile, nested: entry.nested)
                 }
                 if let notice = model.cloudProfileDeletes.notice {
                     note(notice.text, color: notice.isError ? .red : .secondary)
@@ -115,11 +116,17 @@ struct CloudOnlyProfilesSection: View {
             .padding(.vertical, 2)
     }
 
-    private func row(_ cloud: CloudProfile) -> some View {
+    private func row(_ cloud: CloudProfile, nested: Bool = false) -> some View {
         let isSelected = cloud.id == selection
         return Button { selection = cloud.id } label: {
             HStack(spacing: 6) {
-                ProfileAvatarView(profile: cloud.profile, diameter: 16)
+                if nested {
+                    ContainerChip(label: ContainerLabel(containerID: cloud.id, name: cloud.spaces.first?.name ?? cloud.profile.name,
+                                                        theme: cloud.profile.themeColor), style: .badge)
+                        .padding(.leading, 16)
+                } else {
+                    ProfileAvatarView(profile: cloud.profile, diameter: 16)
+                }
                 Text(cloud.profile.name).font(.system(size: 13)).lineLimit(1)
                 Spacer(minLength: 4)
                 Text(cloud.spaces.count == 1 ? "1 Space" : "\(cloud.spaces.count) Spaces")
@@ -239,9 +246,11 @@ private struct CloudProfileDeleteAlert: ViewModifier {
             return ProfileCloudText.deleteFromICloudMessage(request.plan, receiving: receiving, syncOn: syncOn, backupFolder: folder, changed: request.changed)
         }
         let both = ProfileCloudText.bothConsequence(request.plan, receiving: receiving, syncOn: syncOn, backupFolder: folder)
+            + model.containersDeletedNote(request.profile.id, reachesICloud: true)
         let changed = request.changed ? "It changed in iCloud since you looked.\n\n" : ""
         if syncOn { return changed + both + " This can't be undone." }
-        return changed + "\(ProfileCloudText.deleteFromThisMac): \(ProfileCloudText.thisMacConsequence)\n\n"
+        return changed + "\(ProfileCloudText.deleteFromThisMac): \(ProfileCloudText.thisMacConsequence)"
+            + model.containersDeletedNote(request.profile.id, reachesICloud: false) + "\n\n"
             + "\(ProfileCloudText.deleteFromBoth): \(both)\n\nThis can't be undone."
     }
 }

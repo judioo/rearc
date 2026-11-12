@@ -69,12 +69,12 @@ struct TabContextMenu: View {
                     }
                 }
             }
-            let owner = store.spaceContaining(tabID: tab.id).flatMap { store.space(withID: $0)?.profileID }
-            let otherSpaces = store.spaces(in: owner ?? store.activeProfileID).filter { $0.id != store.spaceContaining(tabID: tab.id) }
+            // The profile's spaces, its containers' too: a move into another session asks first (`moveEntry`).
+            let otherSpaces = store.spaceContaining(tabID: tab.id).map(store.spaceMoveDestinations(from:)) ?? []
             if !otherSpaces.isEmpty {
                 Menu("Move to Space") {
                     ForEach(otherSpaces) { space in
-                        Button(space.name) { model.moveTab(tab.id, toSpace: space.id) }
+                        Button(model.spaceMenuTitle(space)) { model.moveTab(tab.id, toSpace: space.id) }
                     }
                 }
             }
@@ -257,12 +257,11 @@ struct SelectionContextMenu: View {
                 if !outline.isEmpty { Divider() }
                 Button("New Folder with Selection") { model.newFolder(withSelection: ids) }
             }
-            let owner = store.space(withID: spaceID)?.profileID ?? store.activeProfileID
-            let otherSpaces = store.spaces(in: owner).filter { $0.id != spaceID }
+            let otherSpaces = store.spaceMoveDestinations(from: spaceID)
             if !otherSpaces.isEmpty {
                 Menu("Move to Space") {
                     ForEach(otherSpaces) { space in
-                        Button(space.name) { model.moveItems(ids, toSpace: space.id) }
+                        Button(model.spaceMenuTitle(space)) { model.moveItems(ids, toSpace: space.id) }
                     }
                 }
             }
@@ -298,7 +297,7 @@ struct MoveToProfileMenu: View {
                 ForEach(destinations, id: \.profile.id) { destination in
                     Menu {
                         ForEach(destination.spaces) { space in
-                            Button(space.name) { model.requestProfileMove(ids, toSpace: space.id) }
+                            Button(model.spaceMenuTitle(space)) { model.requestProfileMove(ids, toSpace: space.id) }
                         }
                     } label: {
                         Image(nsImage: ProfileAvatarPictures.menuImage(for: destination.profile))
@@ -324,6 +323,11 @@ struct SpaceContextMenu: View {
         }
         Button("Edit Theme and Icon…") { model.spaceEditorID = space.id }
         SpaceProfileMenu(model: model, space: space)
+        if model.store.container(ofSpace: space.id) != nil {
+            // The state, in words, where New Container for This Space was.
+            Text("Container: On")
+            Button("Remove Container…") { model.requestContainerRemoval(forSpace: space.id) }
+        }
         Divider()
         Button("New Space…") { model.beginSpaceCreation() }
         Button("Reset All Tabs in This Space") {
@@ -373,7 +377,10 @@ struct SpaceProfileChoices: View {
         }
         Divider()
         Button("New Profile…") { model.beginProfileCreation(forSpace: space.id) }
-        Button("New Container for This Space") { model.createContainerForSpace(space.id) }
+        // A container's space shows Container: On in the space menu instead.
+        if model.store.container(ofSpace: space.id) == nil {
+            Button("New Container for This Space") { model.createContainerForSpace(space.id) }
+        }
     }
 
     private var rows: some View {

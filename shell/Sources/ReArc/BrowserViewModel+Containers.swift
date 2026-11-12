@@ -76,6 +76,36 @@ extension BrowserViewModel {
         return store.spaces(in: profileID).first.map { "the “\($0.name)” container" } ?? "the container"
     }
 
+    /// A Chromium settings page in `profileID`'s own storage: in one of its own
+    /// spaces, never a container's space of that profile.
+    func openBrowserPage(_ page: BrowserInternalPage, inStorageOf profileID: Profile.ID) {
+        if store.activeSpace.profileID != profileID {
+            store.selectSpace(usingStorageOf: profileID)
+            loadSelectedIfNeeded()
+        }
+        openBrowserPage(page)
+    }
+
+    /// What a profile delete says of its containers on this Mac and in iCloud.
+    /// Deleting from iCloud takes the profile's own records only: with Sync
+    /// Sidebar on, the containers' deletion here reaches iCloud as any delete
+    /// does; with it off, iCloud keeps their records.
+    func containersDeletedNote(_ profileID: Profile.ID, reachesICloud: Bool) -> String {
+        let names = store.containers(of: profileID).map { "“\(store.spaces(in: $0.id).first?.name ?? $0.name)”" }
+        guard !names.isEmpty else { return "" }
+        let these = names.count == 1 ? "Its container for \(names[0]) goes" : "Its containers for \(ListFormatter.localizedString(byJoining: names)) go"
+        guard reachesICloud else { return " \(these) from this Mac too, with \(names.count == 1 ? "its" : "their") sign-ins." }
+        return isSyncEnabled
+            ? " \(these) too, from this Mac and, with the next sync, from iCloud."
+            : " \(these) from this Mac too. iCloud keeps \(names.count == 1 ? "the container's" : "the containers'") records, which then show under In iCloud only."
+    }
+
+    /// A space in Move to Space and Move to Profile: a container's says so, as
+    /// a move there changes the tabs' session.
+    func spaceMenuTitle(_ space: Space) -> String {
+        store.container(ofSpace: space.id) == nil ? space.name : "\(space.name) (Container)"
+    }
+
     /// The profile whose settings `id` follows: a container's parent.
     func settingsProfileID(for id: Profile.ID) -> Profile.ID {
         store.owningProfileID(of: id)

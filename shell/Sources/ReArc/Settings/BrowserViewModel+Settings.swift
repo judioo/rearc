@@ -151,9 +151,9 @@ extension BrowserViewModel {
         }
     }
 
-    /// Spaces a profile owns, for the Profiles list ("3 Spaces").
+    /// Spaces a profile owns, for the Profiles list ("3 Spaces"), its containers' included.
     func spaceCountText(for profileID: Profile.ID) -> String {
-        let count = store.spaces(in: profileID).count
+        let count = store.spaces(listedIn: profileID).count
         return count == 1 ? "1 Space" : "\(count) Spaces"
     }
 
