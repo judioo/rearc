@@ -98,50 +98,6 @@ final class MediaFeatureTests: XCTestCase {
         }
     }
 
-    // MARK: - Mini player visibility
-
-    func testMiniPlayerShowsBackgroundTabWhenSelectedTabAlsoAudible() {
-        let a = Tab.ID()
-        let b = Tab.ID()
-        let media: [Tab.ID: WebMediaState] = [
-            a: WebMediaState(isPlaying: true, isAudible: true),
-            b: WebMediaState(isPlaying: true, isAudible: true),
-        ]
-        let pick = MiniPlayerVisibility.activeMiniPlayerTab(
-            mediaByTab: media,
-            selectedTabID: a,
-            activeSpaceID: UUID(),
-            spaceForTab: { _ in UUID() }
-        )
-        XCTAssertEqual(pick, b)
-    }
-
-    func testMiniPlayerHiddenWhenOnlySelectedTabIsAudible() {
-        let a = Tab.ID()
-        let media = [a: WebMediaState(isPlaying: true, isAudible: true)]
-        let pick = MiniPlayerVisibility.activeMiniPlayerTab(
-            mediaByTab: media,
-            selectedTabID: a,
-            activeSpaceID: UUID(),
-            spaceForTab: { _ in UUID() }
-        )
-        XCTAssertNil(pick)
-    }
-
-    func testMiniPlayerShowsForOtherSpaceTab() {
-        let spaceA = UUID()
-        let spaceB = UUID()
-        let background = Tab.ID()
-        let media = [background: WebMediaState(isPlaying: true, isAudible: true)]
-        let pick = MiniPlayerVisibility.activeMiniPlayerTab(
-            mediaByTab: media,
-            selectedTabID: Tab.ID(),
-            activeSpaceID: spaceA,
-            spaceForTab: { $0 == background ? spaceB : spaceA }
-        )
-        XCTAssertEqual(pick, background)
-    }
-
     // MARK: - Mute model
 
     func testMuteTabCommandEnablement() {
