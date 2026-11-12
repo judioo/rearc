@@ -31,6 +31,8 @@ public enum CommandBarSearch {
         public var commandID: String?
         public var menuCommandID: String?
         public var keyEquivalent: String?
+        /// The site search (`SiteSearchEngine.id`) whose template made `destinationURL`.
+        public var siteSearchID: String?
 
         public init(
             id: String,
@@ -43,7 +45,8 @@ public enum CommandBarSearch {
             commandAction: AppCommandAction? = nil,
             commandID: String? = nil,
             menuCommandID: String? = nil,
-            keyEquivalent: String? = nil
+            keyEquivalent: String? = nil,
+            siteSearchID: String? = nil
         ) {
             self.id = id
             self.kind = kind
@@ -56,6 +59,7 @@ public enum CommandBarSearch {
             self.commandID = commandID
             self.menuCommandID = menuCommandID
             self.keyEquivalent = keyEquivalent
+            self.siteSearchID = siteSearchID
         }
     }
 
@@ -125,12 +129,33 @@ public enum CommandBarSearch {
             return commandResults(matching: needle, index: commands, store: store, allowEmpty: true) + menus
         case .blended:
             guard !needle.isEmpty else { return [] }
-            let matchedTabs = (tabIndex ?? TabIndex(store: store)).matching(needle)
-            let tabs = TabIndex.rows(matchedTabs)
+            let index = tabIndex ?? TabIndex(store: store)
+            let ranked = index.ranked(needle, activeSpaceID: store.activeSpaceID)
             var output: [Result] = []
-            // The inline-completed domain is the first row, so Return goes where the field shows.
+            // Rows already listed, by page and by title on a host (Arc
+            // `dedupByTitleAndHostList`, for every host here).
+            var shown: Set<String> = []
+            var titles: Set<String> = []
+            func isNew(_ url: URL?, title: String) -> Bool {
+                let key = url.flatMap(VisitHistory.key(for:))
+                if let key, shown.contains(key) { return false }
+                let named = Self.titleKey(title, url)
+                if let named, titles.contains(named) { return false }
+                if let key { shown.insert(key) }
+                if let named { titles.insert(named) }
+                return true
+            }
+            // The inline-completed domain is listed before any tab on another
+            // site, so Return goes where the field shows.
             let completed = inlineCompletion.flatMap { URL(string: "https://\($0)/") }
-            if let completed, let inlineCompletion {
+            let completedHost = completed.flatMap { Self.plainHost($0) }
+            let firstTabs = ranked.first.filter { completedHost == nil || Self.plainHost($0.tab.url) == completedHost }
+            let laterFirst = ranked.first.filter { completedHost != nil && Self.plainHost($0.tab.url) != completedHost }
+            for entry in firstTabs.prefix(tabLimit) where isNew(entry.tab.url, title: entry.tab.displayTitle) {
+                output.append(TabIndex.row(entry))
+            }
+            if let completed, let inlineCompletion, !firstTabs.contains(where: { Self.plainHost($0.tab.url) == completedHost }),
+               isNew(completed, title: inlineCompletion) {
                 output.append(Result(
                     id: "inline-\(inlineCompletion)",
                     kind: .openURL,
@@ -139,7 +164,9 @@ public enum CommandBarSearch {
                     destinationURL: completed
                 ))
             }
-            output.append(contentsOf: tabs)
+            for entry in laterFirst.prefix(tabLimit) where isNew(entry.tab.url, title: entry.tab.displayTitle) {
+                output.append(TabIndex.row(entry))
+            }
             let current = live.flatMap { $0.applies(to: query) ? $0 : nil }
             let resolved: URL?
             let direct: URL?
@@ -154,7 +181,7 @@ public enum CommandBarSearch {
                 resolved = URLEntry.resolve(query, engine: navigationSchemes, provider: searchProvider)
                 direct = resolved.flatMap { looksLikeDirectNavigation(query) ? $0 : nil }
             }
-            if let url = direct, url.host() != completed?.host() {
+            if let url = direct, url.host() != completed?.host(), isNew(url, title: url.host() ?? url.absoluteString) {
                 output.append(Result(
                     id: "url-\(url.absoluteString)",
                     kind: .openURL,
@@ -163,29 +190,71 @@ public enum CommandBarSearch {
                     destinationURL: url
                 ))
             }
-            // Pages already open as tabs (or typed exactly) are not repeated as history.
-            var shown = Set(matchedTabs.compactMap(\.historyKey))
-            if let completed, let key = VisitHistory.key(for: completed) { shown.insert(key) }
-            if let url = direct, let key = VisitHistory.key(for: url) { shown.insert(key) }
-            let historySource = current?.history.map { liveHistory ?? VisitHistory(records: $0) } ?? history
-            let historyRows = historyResults(for: needle, in: historySource,
-                                             index: current?.history == nil ? historyIndex : nil, now: now, excluding: shown)
-            output.append(contentsOf: historyRows)
-            historyRows.compactMap { $0.destinationURL.flatMap(VisitHistory.key(for:)) }.forEach { shown.insert($0) }
-            output.append(contentsOf: suggestionResults(current?.suggestions ?? [], query: query, excluding: shown, fallback: resolved))
-            output.append(contentsOf: commandResults(matching: needle, index: commands, store: store, allowEmpty: false))
-            output.append(contentsOf: menus)
+            // A plain search for the typed text comes before pages (Arc's second row).
             if direct == nil, let searchURL = resolved {
                 output.append(Result(
                     id: "search-\(searchURL.absoluteString)",
                     kind: .search,
-                    title: "Search for \"\(query.trimmingCharacters(in: .whitespacesAndNewlines))\"",
+                    title: query.trimmingCharacters(in: .whitespacesAndNewlines),
                     subtitle: searchURL.host(),
                     destinationURL: searchURL
                 ))
             }
+            // Pages already open as tabs (or typed exactly) are not repeated as history.
+            let allTabs = ranked.first + ranked.later
+            let historyExcluded = shown.union(allTabs.compactMap(\.historyKey))
+            let historySource = current?.history.map { liveHistory ?? VisitHistory(records: $0) } ?? history
+            let historyRows = historyResults(for: needle, in: historySource,
+                                             index: current?.history == nil ? historyIndex : nil, now: now,
+                                             excluding: historyExcluded, limit: historyLimit + 3)
+            var historyShown = 0
+            for row in historyRows where historyShown < historyLimit && isNew(row.destinationURL, title: row.title) {
+                output.append(row)
+                historyShown += 1
+            }
+            // Weaker tab matches (an address that merely contains the text,
+            // a bookmark-import space) only after history, and few.
+            var later = 0
+            for entry in ranked.first.dropFirst(tabLimit) + ranked.later where later < laterTabLimit {
+                guard isNew(entry.tab.url, title: entry.tab.displayTitle) else { continue }
+                output.append(TabIndex.row(entry))
+                later += 1
+            }
+            output.append(contentsOf: suggestionResults(current?.suggestions ?? [], query: query, excluding: shown, fallback: resolved))
+            output.append(contentsOf: commandResults(matching: needle, index: commands, store: store, allowEmpty: false))
+            output.append(contentsOf: menus)
             return output
         }
+    }
+
+    /// Most open tabs listed first; the rest of the strong matches wait until after history.
+    public static let tabLimit = 3
+    /// Most weaker tab matches listed.
+    public static let laterTabLimit = 2
+
+    /// A row's title on its host: two rows with both equal are one page to the reader.
+    static func titleKey(_ title: String, _ url: URL?) -> String? {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty, let host = url.flatMap(plainHost) else { return nil }
+        return trimmed + "\n" + host
+    }
+
+    static func plainHost(_ url: URL) -> String? {
+        guard let host = url.host()?.lowercased() else { return nil }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+
+    /// Up to `limit` recent tabs of the active profile for an empty ⌘T bar
+    /// (Arc lists about five, "Switch to Tab"), not the one on screen.
+    public static func recentTabResults(in store: SidebarStore, limit: Int = 5) -> [Result] {
+        let selected = store.selectedTabID
+        return store.recentTabSwitcherItems(limit: limit + 1)
+            .filter { $0.id != selected }
+            .prefix(limit)
+            .map { item in
+                Result(id: "tab-\(item.id.uuidString)", kind: .openTab, title: item.title, subtitle: item.spaceName,
+                       tabID: item.id, spaceID: store.spaceContaining(tabID: item.id), destinationURL: item.url)
+            }
     }
 
     // MARK: - History
@@ -195,9 +264,10 @@ public enum CommandBarSearch {
         in history: VisitHistory,
         index: VisitHistorySearchIndex?,
         now: Date,
-        excluding shown: Set<String>
+        excluding shown: Set<String>,
+        limit: Int = historyLimit
     ) -> [Result] {
-        let matches = (index ?? history.searchIndex).matches(for: needle, now: now, limit: historyLimit, excluding: shown)
+        let matches = (index ?? history.searchIndex).matches(for: needle, now: now, limit: limit, excluding: shown)
         return matches.map { match in
             let record = match.record
             return Result(

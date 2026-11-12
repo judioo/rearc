@@ -316,6 +316,13 @@ private struct ChromiumProfileImportPane: View {
                                       isOn: $session.includeSearchEngine)
                         .disabled(!isNew)
                 }
+                if !detail.siteSearches.isEmpty {
+                    let new = session.newSiteSearchCount(detail)
+                    SettingsToggleRow(label: "Site searches",
+                                      detail: new == 0 ? "Already in ReArc" : "\(new) shortcut\(new == 1 ? "" : "s") for the command bar (keyword, then Tab)",
+                                      isOn: $session.includeSiteSearches)
+                        .disabled(new == 0)
+                }
             }
             extensionsSection
             Section("Needs your approval") {

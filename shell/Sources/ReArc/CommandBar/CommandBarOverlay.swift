@@ -1,19 +1,24 @@
 import SwiftUI
 import SidebarModel
 
-/// The centered floating URL/search panel (Cmd+T / Cmd+L). Enter submits,
-/// Escape dismisses, arrow keys move through live results. Typing a site's
-/// name offers "Tab to search" it; Tab turns it into a pill and Delete on
-/// an empty query removes it again (Arc site search, COMMAND-BAR §4.2).
-/// Rows offer Copy URL and, for history, Remove from History on hover or
-/// highlight and in their context menu; Shift+Delete removes the
-/// highlighted history row (COMMAND-BAR §6.4). A typed domain completes
-/// inline in grey (Right Arrow takes it), and ⌘↩ / ⌥↩ / ⇧↩ open a page
-/// result in a new tab, a split or Little Arc (COMMAND-BAR §3, §6.3).
+/// The centered floating URL/search card (Cmd+T / Cmd+L), drawn to Arc's
+/// measurements (COMMAND-BAR §10): an opaque card in the window's own
+/// neutral surface over an undimmed page, the selected row a solid accent
+/// fill. Enter submits, Escape dismisses, arrow keys move through live
+/// results. A shortcut's keyword, or a site the field completes to, offers
+/// "Search cushwake" / "Ask ChatGPT" with a Tab keycap; Tab (or a click on
+/// the hint) puts its chip in the field, the list collapses to the field
+/// alone, and Delete on an empty query takes the chip off (§4.2). Rows offer
+/// Copy URL and, for history, Remove from History on hover or highlight and
+/// in their context menu; Shift+Delete removes the highlighted history row
+/// (§6.4). A typed domain or an earlier query completes inline (Right Arrow
+/// takes it), and ⌘↩ / ⌥↩ / ⇧↩ open a page result in a new tab, a split or
+/// Little Arc (§3, §6.3).
 struct CommandBarOverlay: View {
     @Environment(\.themeChrome) private var themeChrome
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var text: String
-    /// The inline completion's grey remainder after the typed text.
+    /// The inline completion's remainder after the typed text.
     var inlineSuffix: String?
     /// Right Arrow: returns true when it took the completion.
     var onAcceptCompletion: () -> Bool = { false }
@@ -24,9 +29,13 @@ struct CommandBarOverlay: View {
     var errorMessage: String?
     var siteSearch: SiteSearchEngine?
     var siteSearchSuggestion: SiteSearchEngine?
+    /// The chip's and its rows' fill (`BrowserViewModel.commandBarSiteFill`).
+    var siteSearchFill: SpaceColor?
+    /// Bumped as the list collapses to the field: the tint and pulse play.
+    var collapseCount = 0
     /// Tab: returns true when it entered a site search.
     var onTab: () -> Bool = { false }
-    /// Delete on an empty field: returns true when it removed the pill.
+    /// Delete on an empty field: returns true when it removed the chip.
     var onDeleteBackward: () -> Bool = { false }
     /// Shift+Delete: returns true when it removed the highlighted history row.
     var onDeleteHighlighted: () -> Bool = { false }
@@ -40,78 +49,75 @@ struct CommandBarOverlay: View {
     /// Bumped when the field must take focus again (after ⌘T swaps the page
     /// that had it out from under the bar).
     var focusRequest = 0
-    /// Arc's bar is ≈ 765 pt wide (ARC-RECORDING-ANALYSIS.md §8).
     var width: CGFloat = CommandBarOverlay.arcWidth
-    /// The space a switch-to-tab row's tab lives in.
+    /// The space a switch-to-tab row's tab lives in, when it is not the shown one.
     var spaceName: (Space.ID) -> String? = { _ in nil }
+    /// A row's site icon, when cached.
+    var favicon: (URL) -> NSImage? = { _ in nil }
 
+    // Arc's card, measured on the 2026-11-12 recordings (1 px = 1 pt):
+    // 765 × (64 + 13 + 50 per row), corners ≈ 10, a hairline edge.
     static let arcWidth: CGFloat = 765
-    static let rowHeight: CGFloat = 43
-    static let rowSpacing: CGFloat = 6
+    static let cornerRadius: CGFloat = 10
+    static let fieldHeight: CGFloat = 64
+    static let rowHeight: CGFloat = 45
+    static let rowSpacing: CGFloat = 5
+    static let listTopPadding: CGFloat = 7
+    static let listBottomPadding: CGFloat = 11
+    /// Rows inset from the card's sides; the selected fill's corners.
+    static let rowInset: CGFloat = 10
+    static let rowCornerRadius: CGFloat = 7
+    /// The magnifier's and the text column's x in the card.
+    static let glyphX: CGFloat = 25
+    static let textX: CGFloat = 51
+    static let fieldFontSize: CGFloat = 18
+    static let rowFontSize: CGFloat = 13
+    /// Rows shown before the list scrolls.
+    static let maxVisibleRows = 8
     /// The bar's top sits 38 % of the way down the window.
     static let topFraction: CGFloat = 0.38
+    /// The recoloured rows stay this long after Tab, then the list cuts to
+    /// the field (Arc: 1.1 s and 1.8 s, waiting on its own lookup; ReArc a fixed beat).
+    static let collapseHold: TimeInterval = 0.5
+    /// The collapse's tint fades over this long (Arc ≈ 0.25 s) …
+    static let collapseTintDuration: TimeInterval = 0.25
+    /// … while the card dips to this scale and springs back (Arc ≈ 0.17 s).
+    static let collapsePulseScale: CGFloat = 0.99
+
+    /// The list's height for `rows` rows: Arc's cut, no tween.
+    static func listHeight(rows: Int) -> CGFloat {
+        guard rows > 0 else { return 0 }
+        let shown = CGFloat(min(rows, maxVisibleRows))
+        return listTopPadding + shown * rowHeight + (shown - 1) * rowSpacing + listBottomPadding
+    }
 
     private var isCommandMode: Bool { text.hasPrefix(">") }
 
     @FocusState private var isFieldFocused: Bool
     @State private var earlyKeys = EarlyKeyCatcher()
+    @State private var collapseTint = 0.0
+    @State private var pulseScale: CGFloat = 1
 
     var body: some View {
+        let dark = themeChrome.isWindowDark
+        let surface = Color(CommandBarInk.surface(dark: dark))
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                if let siteSearch {
-                    SiteSearchPill(engine: siteSearch)
-                        .transition(.scale(scale: 0.8, anchor: .leading).combined(with: .opacity))
-                }
-                TextField(placeholder, text: $text)
-                    .textFieldStyle(.plain)
-                    .font(.title3)
-                    // Not a credential: AppKit then skips its password AutoFill
-                    // check as the field takes the keyboard (≈ 3 ms on ⌘T / ⌘L).
-                    .textContentType(.URL)
-                    .focused($isFieldFocused)
-                    .overlay(alignment: .leading) { inlineCompletion }
-                    .onSubmit(onSubmit)
-                    .onKeyPress(.return, phases: .down) { press in
-                        let route = CommandBarRoute(
-                            command: press.modifiers.contains(.command),
-                            option: press.modifiers.contains(.option),
-                            shift: press.modifiers.contains(.shift)
-                        )
-                        guard route != .current else { return .ignored }
-                        onSubmitRoute(route)
-                        return .handled
-                    }
-                    .onKeyPress(.rightArrow, phases: .down) { press in
-                        press.modifiers.isEmpty && onAcceptCompletion() ? .handled : .ignored
-                    }
-                    .onKeyPress(.tab) { onTab() ? .handled : .ignored }
-                    .onKeyPress(.delete) {
-                        if NSEvent.modifierFlags.contains(.shift), onDeleteHighlighted() { return .handled }
-                        return text.isEmpty && onDeleteBackward() ? .handled : .ignored
-                    }
-                if let siteSearchSuggestion {
-                    TabToSearchHint(engine: siteSearchSuggestion)
-                        .transition(.opacity)
-                }
-            }
-            .animation(.spring(response: 0.25, dampingFraction: 0.85), value: siteSearch)
-            .animation(.easeOut(duration: 0.12), value: siteSearchSuggestion)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            field(dark: dark)
+                .frame(height: Self.fieldHeight)
 
             if let errorMessage {
                 Text(errorMessage)
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .padding(.horizontal, 16)
+                    .padding(.leading, Self.textX)
                     .padding(.bottom, 8)
             }
 
             if !results.isEmpty {
-                Divider()
+                Rectangle()
+                    .fill(Color(CommandBarInk.separator(dark: dark)))
+                    .frame(height: 1)
+                    .padding(.horizontal, 11)
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: Self.rowSpacing) {
                         // Rows keep their slot, so a keystroke or an engine
@@ -119,51 +125,50 @@ struct CommandBarOverlay: View {
                         // building new ones (5.5 → 2.3 ms for 12 changed rows),
                         // and equal rows skip their body. Hover stays with the
                         // row under the pointer.
-                        let selection = selectionColor
+                        let selection = Color(selectionFill)
                         ForEach(results.indices, id: \.self) { index in
                             let result = results[index]
                             CommandBarResultRow(
                                 result: result,
                                 isHighlighted: index == highlightedIndex,
                                 selection: selection,
+                                dark: dark,
                                 spaceName: result.kind == .openTab ? result.spaceID.flatMap(spaceName) : nil,
+                                icon: result.destinationURL.flatMap { result.kind == .search ? nil : favicon($0) },
                                 onAction: { onRowAction($0, result) },
                                 onSelect: { onSelectResult(result.id) }
                             )
                             .equatable()
                         }
                     }
+                    .padding(.top, Self.listTopPadding)
+                    .padding(.bottom, Self.listBottomPadding)
                 }
-                .padding(.vertical, 6)
-                // As tall as its rows, up to about six (Arc's rows sit on a ≈ 49 pt pitch).
-                .frame(height: min(CGFloat(results.count) * (Self.rowHeight + Self.rowSpacing) + 12, 6 * (Self.rowHeight + Self.rowSpacing)))
-                if showsRouteHints {
-                    Divider()
-                    HStack(spacing: 14) {
-                        ForEach(CommandBarRoute.allCases, id: \.self) { route in
-                            Text(route.hint)
-                        }
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-                    .accessibilityElement(children: .combine)
-                }
+                .scrollDisabled(results.count <= Self.maxVisibleRows)
+                .frame(height: Self.listHeight(rows: results.count))
             }
         }
         .frame(width: width)
-        // A neutral frosted panel, not the space's palette: only the selected
-        // row takes the theme (ARC-RECORDING-ANALYSIS.md §8). A site search
-        // tints the whole panel with the site's colour (frame 3034).
-        .background(siteSearch.map { Color($0.color).opacity(0.22) } ?? Color.white.opacity(themeChrome.isWindowDark ? 0 : 0.3),
-                    in: RoundedRectangle(cornerRadius: 14))
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .background {
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                .fill(surface)
+                .overlay {
+                    // The collapse washes the card with the site's colour, then fades.
+                    if collapseTint > 0, let siteSearchFill {
+                        RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                            .fill(Color(siteSearchFill).opacity(collapseTint))
+                    }
+                }
+                // Arc's shadow, fitted to the measured falloff: 35 % darker 8 pt
+                // below the card, 12 % at 64 pt, gone by ≈ 110 pt; 25 % at the sides.
+                .shadow(color: .black.opacity(dark ? 0.7 : 0.6), radius: 40, y: 24)
+        }
         .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(Color.primary.opacity(0.12))
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                .strokeBorder(Color.black.opacity(dark ? 0.6 : 0.2), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.25), radius: 24, y: 8)
+        .scaleEffect(pulseScale)
+        .onChange(of: collapseCount) { _, _ in playCollapse() }
         .onAppear {
             focusFieldInFirstFrame()
             earlyKeys.start(text: $text)
@@ -182,6 +187,71 @@ struct CommandBarOverlay: View {
         .onKeyPress(.downArrow) {
             onMoveHighlight(1)
             return .handled
+        }
+    }
+
+    /// The magnifier, the chip, the text and, at the end, the Tab hint.
+    @ViewBuilder
+    private func field(dark: Bool) -> some View {
+        HStack(spacing: 0) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color(CommandBarInk.primaryText(dark: dark)))
+                .frame(width: Self.textX - Self.glyphX + 12, alignment: .leading)
+                .padding(.leading, Self.glyphX - 1)
+            if let siteSearch {
+                SiteSearchChip(engine: siteSearch, fill: Color(siteSearchFill ?? themeChrome.commandBarFill))
+                    .padding(.trailing, 8)
+            }
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: Self.fieldFontSize))
+                .foregroundStyle(Color(CommandBarInk.primaryText(dark: dark)))
+                // Not a credential: AppKit then skips its password AutoFill
+                // check as the field takes the keyboard (≈ 3 ms on ⌘T / ⌘L).
+                .textContentType(.URL)
+                .focused($isFieldFocused)
+                .overlay(alignment: .leading) { inlineCompletion(dark: dark) }
+                .onSubmit(onSubmit)
+                .onKeyPress(.return, phases: .down) { press in
+                    let route = CommandBarRoute(
+                        command: press.modifiers.contains(.command),
+                        option: press.modifiers.contains(.option),
+                        shift: press.modifiers.contains(.shift)
+                    )
+                    guard route != .current else { return .ignored }
+                    onSubmitRoute(route)
+                    return .handled
+                }
+                .onKeyPress(.rightArrow, phases: .down) { press in
+                    press.modifiers.isEmpty && onAcceptCompletion() ? .handled : .ignored
+                }
+                .onKeyPress(.tab) { onTab() ? .handled : .ignored }
+                .onKeyPress(.delete) {
+                    if NSEvent.modifierFlags.contains(.shift), onDeleteHighlighted() { return .handled }
+                    return text.isEmpty && onDeleteBackward() ? .handled : .ignored
+                }
+            if let siteSearchSuggestion {
+                Button { _ = onTab() } label: {
+                    TabToSearchHint(engine: siteSearchSuggestion, dark: dark)
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, 8)
+            }
+        }
+        .padding(.trailing, 22)
+    }
+
+    /// Plays the collapse once: the card washed with the site's colour
+    /// (17 %) fading out, and a slight dip and spring back. Reduce Motion
+    /// keeps the cut alone.
+    private func playCollapse() {
+        guard !reduceMotion, siteSearchFill != nil else { return }
+        collapseTint = CommandBarInk.collapseTint
+        withAnimation(.easeOut(duration: Self.collapseTintDuration)) { collapseTint = 0 }
+        withAnimation(.easeOut(duration: 0.07)) { pulseScale = Self.collapsePulseScale }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.07) {
+            withAnimation(.spring(response: 0.18, dampingFraction: 0.8)) { pulseScale = 1 }
         }
     }
 
@@ -269,108 +339,116 @@ struct CommandBarOverlay: View {
         }
     }
 
-    /// The selected row's fill: the theme accent lightened (`#858AFF` from
-    /// `#2731FF` on Imara), or the site's colour during a site search.
-    private var selectionColor: Color {
-        siteSearch.map { Color($0.color) } ?? themeChrome.selection
+    /// The selected row's fill: the space's accent, or the site's colour
+    /// with a chip, each fitted for white text (`CommandBarInk`).
+    private var selectionFill: SpaceColor {
+        siteSearch == nil ? themeChrome.commandBarFill : (siteSearchFill ?? themeChrome.commandBarFill)
     }
 
-    /// The typed text, invisible, then the completion's remainder in grey.
+    /// The typed text, invisible, then the completion's remainder as Arc
+    /// shows it: in the text colour on a pale wash of the selection, as if selected.
     @ViewBuilder
-    private var inlineCompletion: some View {
+    private func inlineCompletion(dark: Bool) -> some View {
         if let inlineSuffix, !inlineSuffix.isEmpty {
-            (Text(text).foregroundColor(.clear) + Text(inlineSuffix).foregroundColor(.secondary.opacity(0.7)))
-                .font(.title3)
-                .lineLimit(1)
-                .allowsHitTesting(false)
-                .accessibilityLabel("Completes to \(text + inlineSuffix)")
+            HStack(spacing: 0) {
+                Text(text).foregroundColor(.clear)
+                Text(inlineSuffix)
+                    .foregroundColor(Color(CommandBarInk.primaryText(dark: dark)))
+                    .background(Color(selectionFill).opacity(0.3))
+            }
+            .font(.system(size: Self.fieldFontSize))
+            .lineLimit(1)
+            .allowsHitTesting(false)
+            .accessibilityLabel("Completes to \(text + inlineSuffix)")
         }
     }
 
-    /// Routing applies to pages, not commands.
-    private var showsRouteHints: Bool {
-        guard results.indices.contains(highlightedIndex) else { return false }
-        return results[highlightedIndex].kind != .command
-    }
-
     private var placeholder: String {
-        if let siteSearch { return "Search \(siteSearch.name)" }
+        if let siteSearch { return siteSearch.placeholder }
         return isCommandMode ? "Type a command…" : "Search or Enter URL…"
     }
 }
 
-/// One result on one line: icon, title, then "— subtitle" in grey; a
-/// switch-to-tab row ends with its space's name and a → chip (§8). The
-/// selected row is a rounded fill in the theme accent with white text. Row
-/// actions show while hovered or selected. Equal rows skip their body: the
-/// closures route through the model with this row's result, so a kept
-/// closure acts the same.
+/// One result on one line: icon, title, then "— subtitle" in grey; at the
+/// right, the row's action hint ("Switch to Tab" and an → keycap, a
+/// command's keys). The selected row is a rounded solid fill with white
+/// text. Row actions show while hovered or selected. Equal rows skip their
+/// body: the closures route through the model with this row's result, so a
+/// kept closure acts the same.
 struct CommandBarResultRow: View, Equatable {
     let result: CommandBarSearch.Result
     let isHighlighted: Bool
     let selection: Color
+    var dark = false
     var spaceName: String?
+    var icon: NSImage?
     let onAction: (CommandBarRowAction) -> Void
     let onSelect: () -> Void
     @State private var isHovering = false
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.result == rhs.result && lhs.isHighlighted == rhs.isHighlighted
-            && lhs.selection == rhs.selection && lhs.spaceName == rhs.spaceName
+        lhs.result == rhs.result && lhs.isHighlighted == rhs.isHighlighted && lhs.dark == rhs.dark
+            && lhs.selection == rhs.selection && lhs.spaceName == rhs.spaceName && lhs.icon === rhs.icon
     }
 
     var body: some View {
         let actions = CommandBarSearch.rowActions(for: result)
-        let secondary = isHighlighted ? Color.white.opacity(0.8) : Color.secondary
-        HStack(spacing: 10) {
-            Image(systemName: Self.icon(for: result.kind))
-                .foregroundStyle(secondary)
-                .frame(width: 18)
-            (Text(result.title).foregroundColor(isHighlighted ? .white : .primary)
-                + Text(result.subtitle.map { " — \($0)" } ?? "").foregroundColor(secondary))
+        let primary = isHighlighted ? Color(CommandBarInk.selectedText) : Color(CommandBarInk.primaryText(dark: dark))
+        let secondary = isHighlighted ? Color(CommandBarInk.selectedText).opacity(0.85) : Color(CommandBarInk.secondaryText(dark: dark))
+        HStack(spacing: 0) {
+            rowIcon(secondary: secondary)
+                .frame(width: 24, height: 24)
+                .padding(.trailing, CommandBarOverlay.textX - CommandBarOverlay.rowInset - 10 - 24)
+            (Text(result.title).foregroundColor(primary)
+                + Text(subtitle.map { " — \($0)" } ?? "").foregroundColor(secondary).fontWeight(.regular))
+                .font(.system(size: CommandBarOverlay.rowFontSize, weight: .medium))
                 .lineLimit(1)
                 .truncationMode(.tail)
-            Spacer(minLength: 0)
+            Spacer(minLength: 8)
             if isHovering || isHighlighted {
                 ForEach(actions, id: \.title) { action in
                     Button { onAction(action) } label: {
                         Image(systemName: action.systemImage)
                             .font(.system(size: 11, weight: .semibold))
-                            .frame(width: 22, height: 22)
-                            .background(Circle().fill((isHighlighted ? Color.white : Color.primary).opacity(0.12)))
+                            .frame(width: 24, height: 24)
+                            .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(isHighlighted ? Color.white.opacity(0.2) : Color(CommandBarInk.keycap(dark: dark))))
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(secondary)
                     .help(action == .deleteFromHistory ? "\(action.title) (⇧⌫)" : action.title)
+                    .padding(.leading, 6)
                 }
             }
             if let key = result.keyEquivalent, !key.isEmpty {
                 Text(key)
-                    .font(.system(size: 12))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(secondary)
             }
-            if let spaceName {
-                Text(spaceName)
-                    .font(.system(size: 12, weight: isHighlighted ? .semibold : .regular))
+            if result.kind == .openTab {
+                Text("Switch to Tab")
+                    .font(.system(size: CommandBarOverlay.rowFontSize, weight: .semibold))
                     .foregroundStyle(secondary)
-                    .lineLimit(1)
+                    .padding(.leading, 8)
                 Image(systemName: "arrow.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isHighlighted ? selection : Color.secondary)
-                    .frame(width: 22, height: 20)
-                    .background(isHighlighted ? Color.white : Color.clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .strokeBorder(Color.secondary.opacity(isHighlighted ? 0 : 0.35)))
-                    .accessibilityLabel("Switch to Tab")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(isHighlighted ? selection : Color(CommandBarInk.secondaryText(dark: dark)))
+                    .frame(width: 24, height: 24)
+                    .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(isHighlighted ? Color.white : Color(CommandBarInk.keycap(dark: dark))))
+                    .padding(.leading, 8)
+                    .accessibilityHidden(true)
             }
         }
-        .padding(.horizontal, 10)
+        .padding(.leading, 10)
+        .padding(.trailing, 13)
         .frame(height: CommandBarOverlay.rowHeight)
-        .background(isHighlighted ? selection : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .padding(.horizontal, 8)
+        .background(isHighlighted ? selection : Color.clear, in: RoundedRectangle(cornerRadius: CommandBarOverlay.rowCornerRadius, style: .continuous))
+        .padding(.horizontal, CommandBarOverlay.rowInset)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }
+        .help(result.kind == .command ? "" : "↩ Open · ⌘↩ New Tab · ⌥↩ Split View · ⇧↩ Little ReArc")
         .contextMenu {
             ForEach(actions, id: \.title) { action in
                 Button(action.title) { onAction(action) }
@@ -378,10 +456,43 @@ struct CommandBarResultRow: View, Equatable {
         }
     }
 
+    /// A tab shows its space only when it is not the one on screen; a site
+    /// search row shows the host its query goes to while it is selected.
+    private var subtitle: String? {
+        switch result.kind {
+        case .openTab: return spaceName
+        default: return result.siteSearchID != nil && !isHighlighted ? nil : result.subtitle.map(Self.shortened)
+        }
+    }
+
+    /// Addresses as Arc writes them: no scheme, no trailing slash.
+    static func shortened(_ subtitle: String) -> String {
+        var text = subtitle
+        for scheme in ["https://", "http://"] where text.hasPrefix(scheme) { text.removeFirst(scheme.count) }
+        if text.hasSuffix("/") { text.removeLast() }
+        return text
+    }
+
+    @ViewBuilder
+    private func rowIcon(secondary: Color) -> some View {
+        if let icon {
+            Image(nsImage: icon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 16, height: 16)
+                .padding(4)
+                .background(isHighlighted ? Color.white : Color.clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+        } else {
+            Image(systemName: Self.icon(for: result.kind))
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(secondary)
+        }
+    }
+
     static func icon(for kind: CommandBarSearch.ResultKind) -> String {
         switch kind {
         case .openTab: return "square.stack"
-        case .openURL: return "link"
+        case .openURL: return "globe"
         case .history: return "clock.arrow.circlepath"
         case .suggestion: return "magnifyingglass"
         case .search: return "magnifyingglass"
@@ -390,39 +501,45 @@ struct CommandBarResultRow: View, Equatable {
     }
 }
 
-/// The scoped-search pill before the query (Arc `CommandBarInputScopedSearchPillView`).
-private struct SiteSearchPill: View {
+/// The site search chip before the query (Arc `CommandBarInputScopedSearchPillView`):
+/// the entry's own name on its colour, 24 pt tall.
+private struct SiteSearchChip: View {
     let engine: SiteSearchEngine
+    let fill: Color
 
     var body: some View {
-        let color = Color(engine.color)
         Text(engine.name)
-            .font(.callout.weight(.semibold))
-            .foregroundStyle(engine.color.relativeLuminance > 0.5 ? Color.black : Color.white)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 3)
-            .background(color, in: Capsule())
-            .accessibilityLabel("Searching \(engine.name)")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(Color(CommandBarInk.selectedText))
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background(fill, in: Capsule())
+            .fixedSize()
+            .accessibilityLabel("\(engine.hint)")
     }
 }
 
-/// "Search YouTube ⇥" at the end of the field while a site name is typed.
+/// "Search cushwake  Tab" at the end of the field while a shortcut is offered.
 private struct TabToSearchHint: View {
     let engine: SiteSearchEngine
+    let dark: Bool
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text("Search \(engine.name)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            Text(engine.hint)
+                .font(.system(size: CommandBarOverlay.rowFontSize))
+                .foregroundStyle(Color(CommandBarInk.secondaryText(dark: dark)))
+                .lineLimit(1)
             Text("Tab")
-                .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1)
-                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.secondary.opacity(0.6)))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color(CommandBarInk.primaryText(dark: dark)).opacity(0.75))
+                .frame(width: 31, height: 24)
+                .background(Color(CommandBarInk.keycap(dark: dark)), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
         }
         .fixedSize()
-        .help("Press Tab to search \(engine.name)")
+        .contentShape(Rectangle())
+        .help("Press Tab to \(engine.verb.lowercased()) \(engine.name)")
+        .accessibilityLabel("\(engine.hint), press Tab")
     }
 }

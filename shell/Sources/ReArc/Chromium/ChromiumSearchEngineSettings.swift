@@ -29,6 +29,13 @@ final class ChromiumSearchEngineSettings: SearchEngineSettings {
         list(for: profileID)?.isEditable ?? false
     }
 
+    /// Chromium's default-list engines (`ShowInDefaultList`). Site searches
+    /// the person adds in chrome://settings/searchEngines are not in that
+    /// list (ABI 1.46 has no call for them).
+    func siteSearchEngines(for profileID: Profile.ID) -> [SiteSearchEngine] {
+        list(for: profileID)?.siteSearchEngines() ?? []
+    }
+
     func setDefaultEngine(_ id: SearchEngineChoice.ID, for profileID: Profile.ID) {
         guard let engineID = Int64(id) else { return }
         runtime.setDefaultSearchEngine(engineID, for: profileID) { [weak self] accepted in

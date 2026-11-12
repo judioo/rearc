@@ -338,6 +338,20 @@ final class ChromiumCommandBarServices: CommandBarServices {
         }
     }
 
+    /// HistoryService's text query on the host (`ReArcHistoryQuery`, persistent profiles only).
+    func siteSearchHistory(host: String, profileID: Profile.ID, completion: @escaping ([VisitRecord]) -> Void) {
+        guard capabilities.historyQuery else { return }
+        runtime.withEngineProfile(.persistent(profileID)) { [weak self] engineID in
+            guard let self, let engineID else { return }
+            self.runtime.queryHistory(profile: engineID, text: host, limit: Self.siteSearchHistoryLimit) { status, rows in
+                guard status == .rearcOK else { return }
+                completion(rows.compactMap(\.record))
+            }
+        }
+    }
+
+    static let siteSearchHistoryLimit: UInt32 = 200
+
     func deleteFromHistory(_ url: URL, profileID: Profile.ID, completion: @escaping (Bool) -> Void) -> Bool {
         guard capabilities.historyQuery, let engineID = runtime.engineProfileID(for: .persistent(profileID)) else { return false }
         let status = runtime.deleteHistoryURL(profile: engineID, url: url.absoluteString) { status in
