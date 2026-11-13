@@ -65,7 +65,23 @@ struct ProfileCloudStatusGroup: View {
     private var presenceRow: some View {
         let presence = model.cloudPresence(of: profileID)
         let syncOn = model.isSyncEnabled
-        return SettingsLabeledRow(label: "iCloud", detail: ProfileCloudText.note(presence, syncOn: syncOn)) {
+        // The note runs the box's full width under the row: beside the status and its button it wraps to a column.
+        return VStack(alignment: .leading, spacing: 0) {
+            presenceLine(presence, syncOn: syncOn)
+            if let note = ProfileCloudText.note(presence, syncOn: syncOn) {
+                Text(note)
+                    .font(.system(size: 11)).foregroundStyle(SettingsColors.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, SettingsMetrics.rowInset)
+                    .padding(.top, -4)
+                    .padding(.bottom, 8)
+            }
+        }
+    }
+
+    private func presenceLine(_ presence: ProfileCloudPresence, syncOn: Bool) -> some View {
+        SettingsLabeledRow(label: "iCloud") {
             HStack(spacing: 6) {
                 if case .looking = presence { ProgressView().controlSize(.mini) }
                 CloudPresenceMark(presence: presence)
@@ -73,11 +89,13 @@ struct ProfileCloudStatusGroup: View {
                 Text(model.isCheckingCloud ? model.cloudStatusText : ProfileCloudText.status(presence, syncOn: syncOn))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.trailing)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(1)
+                    .fixedSize()
                 if presence == .onlyHere {
+                    // Whole, never clipped: the note on the left wraps instead.
                     Button(ProfileCloudText.putInICloud(syncOn: syncOn)) { model.putInICloud(profileID) }
                         .disabled(!model.canPutInICloud(profileID))
+                        .fixedSize()
                 }
             }
         }
