@@ -9,6 +9,9 @@ public protocol SyncControlling: AnyObject {
     func attach(host: SidebarSyncHost)
     /// Off, or on when iCloud holds no sidebar (`detectCloudSidebar` said so).
     func setUserEnabled(_ enabled: Bool)
+    /// Profiles the person put in iCloud: they go up at the next join
+    /// (`SidebarSyncCoordinator.putInICloud`).
+    func putInICloud(_ profiles: Set<Profile.ID>)
     func syncNow()
     /// A read-only look at iCloud (Settings, and before turning sync on).
     func detectCloudSidebar(progress: @escaping @MainActor (CloudLookProgress) -> Void) async -> CloudSidebarDetection
@@ -66,6 +69,11 @@ public final class SidebarSyncScheduler: SyncEngine, SyncControlling, @unchecked
     public func setUserEnabled(_ enabled: Bool) {
         coordinator.setEnabled(enabled)
         resumeOrPause()
+    }
+
+    @MainActor
+    public func putInICloud(_ profiles: Set<Profile.ID>) {
+        coordinator.putInICloud(profiles)
     }
 
     @MainActor

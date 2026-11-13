@@ -49,6 +49,12 @@ public struct SidebarSyncState: Equatable, Codable, Sendable {
     public var clock: SyncStamp?
     public var lastSyncedAt: Date?
     public var lastError: String?
+    /// Profiles the person put in iCloud (Settings › Profiles, Put in
+    /// iCloud…) before this Mac joined: the join stamps their records as
+    /// this Mac's, over iCloud's deleted copies of them. Kept across
+    /// `resetServerState` (a choice resets it before the join), dropped
+    /// once joined and when sync is switched off.
+    public var putInICloud: Set<Profile.ID>?
 
     public init() {}
 
@@ -78,6 +84,7 @@ public struct SidebarSyncState: Equatable, Codable, Sendable {
     mutating func normalize() {
         guard !isActive else { return }
         if enabled || decision == .newInstall || decision == .isolated { resetServerState() }
+        putInICloud = nil
         enabled = false
         if decision != .user { decision = nil }
     }

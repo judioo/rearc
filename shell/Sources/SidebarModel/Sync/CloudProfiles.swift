@@ -9,11 +9,14 @@ public struct CloudSpace: Identifiable, Equatable, Sendable {
     public var id: Space.ID
     public var name: String
     public var pinnedTabs: Int
+    /// The Arc space it was imported from, as `Space.arcSourceID`.
+    public var arcSourceID: String?
 
-    public init(id: Space.ID, name: String, pinnedTabs: Int) {
+    public init(id: Space.ID, name: String, pinnedTabs: Int, arcSourceID: String? = nil) {
         self.id = id
         self.name = name
         self.pinnedTabs = pinnedTabs
+        self.arcSourceID = arcSourceID
     }
 }
 
@@ -39,10 +42,11 @@ public struct CloudProfile: Identifiable, Equatable, Sendable {
 
 /// Where one of this Mac's profiles is, by the session's look at iCloud.
 public enum ProfileCloudPresence: Equatable, Sendable {
-    /// iCloud has a live profile with the same id.
+    /// iCloud has a live profile with the same id, or one holding the same
+    /// Arc spaces (another install's import: `CloudSidebarFound.profiles(matching:spaces:)`).
     case inICloud
-    /// The look finished and iCloud has no profile with this id (one with
-    /// the same name from another install is a different profile).
+    /// The look finished and iCloud has no such profile (one with only the
+    /// same name from another install is a different profile).
     case onlyHere
     /// A look is running, with the items read so far, or none finished yet.
     case looking(Int?)
@@ -50,22 +54,44 @@ public enum ProfileCloudPresence: Equatable, Sendable {
     case unknown(String)
 
     /// Never `.onlyHere` before a look has finished, nor while one runs.
-    public static func of(_ id: Profile.ID, detection: CloudSidebarDetection?, looking: Bool, itemsRead: Int? = nil) -> ProfileCloudPresence {
+    /// `spaces`: this Mac's spaces (any profile's), to know iCloud's copy of
+    /// an import by its spaces.
+    public static func of(_ id: Profile.ID, spaces: [Space] = [], detection: CloudSidebarDetection?, looking: Bool, itemsRead: Int? = nil) -> ProfileCloudPresence {
         if looking { return .looking(itemsRead) }
         switch detection {
         case nil: return .looking(nil)
         case .empty?: return .onlyHere
-        case .found(let found)?: return found.profiles.contains { $0.id == id } ? .inICloud : .onlyHere
+        case .found(let found)?: return found.profiles(matching: id, spaces: spaces).isEmpty ? .onlyHere : .inICloud
         case .signedOut(let message)?, .unreachable(let message)?, .unavailable(let message)?: return .unknown(message)
         }
     }
 }
 
 extension CloudSidebarFound {
-    /// iCloud's profiles that this Mac doesn't have (by id), by name.
-    public func profiles(notIn local: [Profile]) -> [CloudProfile] {
-        let ids = Set(local.map(\.id))
-        return profiles.filter { !ids.contains($0.id) }
+    /// iCloud's profiles that are none of this Mac's, by name: not the same
+    /// id, and holding none of `spaces` (`profiles(matching:spaces:)`).
+    public func profiles(notIn local: [Profile], spaces: [Space] = []) -> [CloudProfile] {
+        let matched = Set(local.flatMap { profiles(matching: $0.id, spaces: spaces, among: local) }.map(\.id))
+        return profiles.filter { !matched.contains($0.id) }
+    }
+
+    /// iCloud's copies of this Mac's profile `id`: the one with its id, and
+    /// any other that none of this Mac's profiles has the id of and that
+    /// holds one of its spaces, by space id or Arc source. Profile ids are
+    /// made per install while an Arc space's id follows from the Arc space,
+    /// so a fresh install's import and an earlier install's in iCloud are
+    /// one profile with two ids. The same id first.
+    public func profiles(matching id: Profile.ID, spaces: [Space], among local: [Profile]? = nil) -> [CloudProfile] {
+        let own = spaces.filter { $0.profileID == id }
+        let ids = Set(own.map(\.id))
+        let sources = Set(own.compactMap(\.arcSourceID))
+        let localIDs = Set((local ?? []).map(\.id) + spaces.map(\.profileID))
+        return profiles.filter { cloud in
+            cloud.id == id || (!localIDs.contains(cloud.id) && cloud.spaces.contains {
+                ids.contains($0.id) || $0.arcSourceID.map(sources.contains) == true
+            })
+        }
+        .sorted { ($0.id != id ? 1 : 0, $0.id.uuidString) < ($1.id != id ? 1 : 0, $1.id.uuidString) }
     }
 
     public func profile(_ id: Profile.ID) -> CloudProfile? {
@@ -124,7 +150,8 @@ struct CloudProjection {
         return ids.map { id in
             let profile = store.profile(withID: id) ?? Profile.recovered(id, from: [])
             let own = spaces.filter { $0.profileID == id }.map {
-                CloudSpace(id: $0.id, name: $0.name, pinnedTabs: SidebarTree.leaves(store.content(for: $0.id).pinned).count)
+                CloudSpace(id: $0.id, name: $0.name, pinnedTabs: SidebarTree.leaves(store.content(for: $0.id).pinned).count,
+                           arcSourceID: $0.arcSourceID)
             }
             return CloudProfile(profile: profile, spaces: own, lastEdited: CloudProfileDeletion.lastEdited(of: id, in: wires))
         }
@@ -358,6 +385,7 @@ public struct CloudProfileDeletion: Equatable, Sendable {
 /// kept out of the views so tests can read it.
 public enum ProfileCloudText {
     public static let inICloud = "On this Mac and in iCloud"
+    public static let synced = "Synced with iCloud"
     public static let onlyHere = "Only on this Mac"
     public static let cloudOnlySection = "In iCloud only"
     public static let syncOffNote = "Sync Sidebar is off, so changes here don't reach iCloud and iCloud's don't reach this Mac."
@@ -368,9 +396,9 @@ public enum ProfileCloudText {
     public static let deleteFromThisMac = "Delete from This Mac"
     public static let deleteFromBoth = "Delete from This Mac and iCloud"
 
-    public static func status(_ presence: ProfileCloudPresence) -> String {
+    public static func status(_ presence: ProfileCloudPresence, syncOn: Bool = false) -> String {
         switch presence {
-        case .inICloud: return inICloud
+        case .inICloud: return syncOn ? synced : inICloud
         case .onlyHere: return onlyHere
         case .looking(nil): return "Looking at iCloud…"
         case .looking(let count?): return "Looking at iCloud… \(count.formatted()) items"
@@ -459,9 +487,27 @@ public enum ProfileCloudText {
     public static func note(_ presence: ProfileCloudPresence, syncOn: Bool) -> String? {
         switch presence {
         case .inICloud: return syncOn ? syncOnNote : syncOffNote
-        case .onlyHere: return syncOn ? "Sync Sidebar is on, so it goes to iCloud with the next sync." : nil
+        case .onlyHere: return syncOn ? "Sync Sidebar is on, so it goes to iCloud with the next sync." : putInICloudNote
         case .looking, .unknown: return nil
         }
+    }
+
+    /// Put in iCloud: sync off, it turns the switch on (the look and its sheet).
+    public static func putInICloud(syncOn: Bool) -> String {
+        syncOn ? "Put in iCloud" : "Put in iCloud…"
+    }
+
+    public static let putInICloudNote = "Put in iCloud turns Sync Sidebar on. ReArc looks at iCloud first and asks before changing anything there."
+
+    /// The Profiles pane's Sync Sidebar row, under the switch.
+    public static func syncSwitchNote(on: Bool) -> String {
+        on ? "On for every profile. Turning it off stops syncing and changes nothing in iCloud."
+            : "Off for every profile: nothing on this Mac goes to iCloud. Turning it on looks at iCloud first."
+    }
+
+    /// The line pointing at the account tab, named after the person.
+    public static func accountTabNote(_ tab: String) -> String {
+        "Use, replace or delete the sidebar in iCloud in the “\(tab)” tab."
     }
 
     public static let deleteFromICloudDetail = "Removes it, its spaces and what is in them from iCloud. This Mac is not changed."

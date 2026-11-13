@@ -156,8 +156,19 @@ public final class SidebarSyncCoordinator {
         guard state.enabled != enabled || state.decision != .user else { return }
         state.enabled = enabled
         state.decision = .user
+        if !enabled { state.putInICloud = nil }
         persist()
         update(state.isActive ? .waiting("Waiting to sync") : .off)
+    }
+
+    /// Put in iCloud…: these profiles go up whole at the next join, even
+    /// where iCloud holds them deleted (one deleted from iCloud while this
+    /// Mac kept its copy, which is told apart from iCloud's own only by the
+    /// person). Joined already, a cycle uploads them anyway: nothing to keep.
+    public func putInICloud(_ profiles: Set<Profile.ID>) {
+        guard !state.joined, !profiles.isEmpty else { return }
+        state.putInICloud = (state.putInICloud ?? []).union(profiles)
+        persist()
     }
 
     // MARK: - iCloud's sidebar
@@ -271,6 +282,7 @@ public final class SidebarSyncCoordinator {
             // The zone is there (it was just read), and every record is known.
             state.zoneReady = true
             state.joined = true
+            state.putInICloud = nil
             if choice == .useCloud {
                 var outcome = SyncCycleOutcome()
                 applyToHost(&outcome)
@@ -495,10 +507,16 @@ public final class SidebarSyncCoordinator {
                     host.applySyncedSnapshot(matched)
                     remoteChanged = true
                 }
-                capture(matched, joining: true)
+                // iCloud holding no live space has no sidebar to keep: the
+                // switch said this Mac's goes up, so what iCloud deleted of
+                // it doesn't take it from this Mac. Otherwise only profiles
+                // put in iCloud win over iCloud's deletes.
+                let profiles = hasRemoteSidebar ? state.putInICloud ?? [] : Set(matched.profiles.map(\.id))
+                capture(matched, joining: true, overDeleted: Self.records(of: profiles, in: matched))
             }
             if adopt { remoteChanged = true }
             state.joined = true
+            state.putInICloud = nil
         } else {
             capture(host.syncSnapshot())
             remoteChanged = try await pullAll(&outcome)
@@ -562,13 +580,14 @@ public final class SidebarSyncCoordinator {
     /// as likely stale (the same Arc import, months older) as new. Stamping
     /// it now would beat another Mac's later edit and bring back what it
     /// deleted (RC-0.1.0-602 T-02), so only rows the server lacks are
-    /// stamped; nothing is tombstoned.
-    func capture(_ snapshot: SidebarSnapshot, joining: Bool = false) {
+    /// stamped; nothing is tombstoned. `overDeleted`: rows whose deleted
+    /// copy on the server this Mac's copy replaces (put in iCloud).
+    func capture(_ snapshot: SidebarSnapshot, joining: Bool = false, overDeleted: Set<String> = []) {
         let bodies = SidebarSyncProjection.extract(snapshot)
         let at = now()
         for (name, body) in bodies {
             let known = state.records[name]
-            if joining, known != nil { continue }
+            if joining, let known, known.payload.isAlive || !overDeleted.contains(name) { continue }
             var record = known ?? SyncShadowRecord(payload: SyncRecordPayload(kind: body.kind))
             let alive = known != nil && record.payload.isAlive
             var changed = false
@@ -596,6 +615,29 @@ public final class SidebarSyncCoordinator {
         }
         state.clock = clock.last
         persist()
+    }
+
+    /// The record names of `profiles` in `snapshot`: each profile, its
+    /// favorites and Boosts, its spaces with their styles and pinned rows.
+    static func records(of profiles: Set<Profile.ID>, in snapshot: SidebarSnapshot) -> Set<String> {
+        guard !profiles.isEmpty else { return [] }
+        let spaces = Set(snapshot.spaces.filter { profiles.contains($0.profileID) }.map { $0.id.uuidString.lowercased() })
+        func owned(_ value: SyncValue?) -> Bool {
+            value?.stringValue.flatMap(UUID.init(uuidString:)).map(profiles.contains) == true
+        }
+        return Set(SidebarSyncProjection.extract(snapshot).compactMap { name, body -> String? in
+            guard let (kind, id) = SyncRecordKind.parse(recordName: name) else { return nil }
+            switch kind {
+            case .profile: return profiles.contains(id) ? name : nil
+            case .space: return owned(body.values["profileID"]) ? name : nil
+            case .spaceStyle: return spaces.contains(id.uuidString.lowercased()) ? name : nil
+            case .boost: return owned(body.values["profileID"]) ? name : nil
+            case .item:
+                if let space = body.values["space"]?.stringValue, spaces.contains(space.lowercased()) { return name }
+                guard case .favorites(let profile)? = body.values["parent"]?.stringValue.flatMap(SidebarSyncProjection.Parent.init(key:)) else { return nil }
+                return profiles.contains(profile) ? name : nil
+            }
+        })
     }
 
     // MARK: - Fetch
