@@ -9,10 +9,17 @@ private final class FakeRouter: PageLinkRouting {
     var revealed = 0
     var navigationSchemes: NavigationURLPolicy.EngineSchemes = .chromium
 
+    var imageSearch: SearchProvider?
+    var windows = 0
+
     func openLinkInNewTab(_ url: URL, from prompts: PagePromptCenter) { opened.append(("tab", url)) }
+    func openLinkInNewWindow(_ url: URL, from prompts: PagePromptCenter) { opened.append(("window", url)) }
+    func openBrowserWindow(from prompts: PagePromptCenter) { windows += 1 }
     func openLinkInLittleArc(_ url: URL, from prompts: PagePromptCenter) { opened.append(("littleArc", url)) }
     func openLinkInNewSplit(_ url: URL, from prompts: PagePromptCenter) { opened.append(("split", url)) }
+    func openLinkInPrivateWindow(_ url: URL, from prompts: PagePromptCenter) { opened.append(("private", url)) }
     func searchWeb(for text: String, from prompts: PagePromptCenter) { opened.append(("search", URL(string: "search:\(text.count)")!)) }
+    func imageSearchProvider(for prompts: PagePromptCenter) -> SearchProvider? { imageSearch }
     func revealPage(of prompts: PagePromptCenter) { revealed += 1 }
     func openSiteSettings(origin: String, from prompts: PagePromptCenter) { opened.append(("settings", URL(string: origin)!)) }
 }
@@ -116,6 +123,13 @@ final class Wave22ShellTests: XCTestCase {
         XCTAssertEqual(ChromiumContextCommand(.openLinkInLittleArc)?.rawValue, 15)
         XCTAssertEqual(ChromiumContextCommand(.openLinkInNewSplit)?.rawValue, 16)
         XCTAssertEqual(ChromiumContextCommand(.openImageInNewTab)?.rawValue, 17)
+        // New Window opens the link in front (14); the shell then opens the window.
+        XCTAssertEqual(ChromiumContextCommand(.openLinkInNewWindow)?.rawValue, 14)
+        // Engine ABI 1.64 (context_menu_save_link).
+        XCTAssertEqual(ChromiumContextCommand(.saveLinkAs)?.rawValue, 21)
+        for shellItem: PageContextMenuItem in [.openLinkInPrivateWindow, .searchImage("Google")] {
+            XCTAssertNil(ChromiumContextCommand(shellItem), "\(shellItem) is the shell's")
+        }
     }
 
     // MARK: Dialogs
@@ -358,7 +372,8 @@ final class Wave22ShellTests: XCTestCase {
         )
         let menu = presenter.makeMenu(plan)
         XCTAssertEqual(menu.items.filter { !$0.isSeparatorItem }.map(\.title),
-                       ["Open Link in New Tab", "Open Link in Little ReArc", "Open Link in New Split", "Copy Link", "Inspect"])
+                       ["Open Link in New Tab", "Open Link in New Window", "Open Link in Split View", "Open Link in Little ReArc",
+                        "Open Link in Private Window", "Copy Link Address", "Inspect"])
         XCTAssertEqual(menu.items.filter(\.isSeparatorItem).count, 2)
         XCTAssertFalse(menu.items.last?.isEnabled ?? true, "Inspect is disabled")
     }
@@ -379,7 +394,7 @@ final class Wave22ShellTests: XCTestCase {
             NSMenuItem(title: item.title, action: nil, keyEquivalent: "")
         }
         XCTAssertEqual(menu.items.map(\.title), [
-            "Open Link in New Tab", "Open Link in Little ReArc", "Open Link in New Split",
+            "Open Link in New Tab", "Open Link in Split View", "Open Link in Little ReArc", "Open Link in Private Window",
             "Download Linked File", "Copy Link", "Search for “red pandas”",
         ])
     }
@@ -425,6 +440,85 @@ final class Wave22ShellTests: XCTestCase {
 
         model.openLinkInLittleArc(URL(string: "https://a.test/little")!, from: prompts)
         XCTAssertEqual(model.store.littleArcLiveWindows.last?.url.path, "/little")
+    }
+
+    private final class WindowPresenter: BrowserWindowPresenting {
+        var browserWindows = 0
+        var privateWindows: [PrivateWindowModel] = []
+        func presentLittleArcWindow(_ id: LittleArcWindow.ID) {}
+        func dismissLittleArcWindow(_ id: LittleArcWindow.ID) {}
+        func presentPrivateWindow(_ window: PrivateWindowModel) { privateWindows.append(window) }
+        func presentBrowserWindow() { browserWindows += 1 }
+    }
+
+    /// Arc's other link destinations: a new window showing the link in front, a
+    /// private window of the page's profile, and the default engine's image search.
+    func testNewWindowPrivateWindowAndImageSearch() throws {
+        let (model, _) = makeModel()
+        let presenter = WindowPresenter()
+        model.windowPresenter = presenter
+        let tab = model.store.addTab(kind: .today, title: "A", url: URL(string: "https://a.test/")!)
+        model.selectTab(tab.id)
+        let prompts = model.engineHost.engine(for: tab, profileID: model.profileID(for: tab)).pagePrompts
+
+        model.openLinkInNewWindow(URL(string: "https://a.test/front")!, from: prompts)
+        XCTAssertEqual(model.store.selectedTab?.url.path, "/front", "the link's tab is in front for the new window to show")
+        XCTAssertEqual(presenter.browserWindows, 1)
+        model.openBrowserWindow(from: prompts)
+        XCTAssertEqual(presenter.browserWindows, 2, "the engine opened the link; the shell adds the window")
+
+        model.openLinkInPrivateWindow(URL(string: "https://a.test/secret")!, from: prompts)
+        let secret = try XCTUnwrap(presenter.privateWindows.last)
+        XCTAssertEqual(secret.parentProfileID, prompts.profileID ?? model.store.activeProfileID)
+        XCTAssertEqual(secret.engine.pagePrompts.privateSession, secret.session)
+        XCTAssertNil(model.store.displayTabs().first { $0.url.path == "/secret" }, "never a sidebar tab")
+
+        // WebKit's default engine is DuckDuckGo, which has no search by image.
+        XCTAssertNil(model.imageSearchProvider(for: prompts))
+    }
+
+    func testContextMenuArcItemsRunInTheShell() {
+        let prompts = PagePromptCenter()
+        let router = FakeRouter()
+        prompts.router = router
+        prompts.ownerTabID = UUID()
+        let image = "https://c.tenor.com/HR3YZjYlr_UAAAAC/tenor.gif"
+        let params = PageContextMenuParams(linkURL: "https://itunes.apple.com/app", srcURL: image, mediaType: .image, hasImageContents: true)
+
+        XCTAssertNil(prompts.contextMenuOptions(canGoBack: false, canGoForward: false, canViewSource: false, canInspect: false).imageSearchName)
+        router.imageSearch = .google
+        let options = prompts.contextMenuOptions(canGoBack: false, canGoForward: false, canViewSource: false, canInspect: false, canSaveLink: true)
+        XCTAssertEqual(options.imageSearchName, "Google")
+        XCTAssertTrue(options.canOpenWindow && options.canOpenPrivateWindow && options.canSaveLink)
+
+        XCTAssertTrue(prompts.performShellItem(.searchImage("Google"), params: params))
+        XCTAssertEqual(router.opened.last?.0, "tab")
+        XCTAssertEqual(router.opened.last?.1.host(), "lens.google.com")
+        XCTAssertTrue(router.opened.last?.1.absoluteString.hasSuffix("url=https%3A%2F%2Fc.tenor.com%2FHR3YZjYlr_UAAAAC%2Ftenor.gif") ?? false)
+        XCTAssertTrue(prompts.performShellItem(.openLinkInPrivateWindow, params: params))
+        XCTAssertEqual(router.opened.last?.0, "private")
+        XCTAssertEqual(router.opened.last?.1.absoluteString, "https://itunes.apple.com/app")
+        XCTAssertTrue(prompts.performShellItem(.openLinkInNewWindow, params: params))
+        XCTAssertEqual(router.opened.last?.0, "window")
+        // Engine commands: the shell does nothing itself.
+        let count = router.opened.count
+        for engineItem: PageContextMenuItem in [.saveLinkAs, .saveImage, .copyImage, .copyLink] {
+            XCTAssertFalse(prompts.performShellItem(engineItem, params: params), "\(engineItem)")
+        }
+        XCTAssertEqual(router.opened.count, count)
+        // With the engine opening links (ABI 1.58), New Window goes to the engine first; a private window never does.
+        prompts.engineOpensLinks = true
+        XCTAssertFalse(prompts.performShellItem(.openLinkInNewWindow, params: params))
+        XCTAssertTrue(prompts.performShellItem(.openLinkInNewWindow, params: params, engineDeclined: true))
+        XCTAssertTrue(prompts.performShellItem(.openLinkInPrivateWindow, params: params))
+        // No search without an engine that searches by image; no private or new window from a private window.
+        router.imageSearch = nil
+        let opened = router.opened.count
+        XCTAssertTrue(prompts.performShellItem(.searchImage("Google"), params: params))
+        XCTAssertEqual(router.opened.count, opened)
+        prompts.privateSession = UUID()
+        let privateOptions = prompts.contextMenuOptions(canGoBack: false, canGoForward: false, canViewSource: false, canInspect: false)
+        XCTAssertFalse(privateOptions.canOpenWindow || privateOptions.canOpenPrivateWindow)
     }
 
     func testWebKitClosesTabsAtOnce() {

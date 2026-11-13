@@ -159,12 +159,15 @@ protocol BrowserWindowPresenting: AnyObject {
     /// Brings a browser window forward and makes it key (Little Arc's Open in
     /// <Space> lands in the last focused browser window, not whichever comes next).
     func focusBrowserWindow(_ id: SidebarWindowID)
+    /// File › New Window: another browser window, key, on the key window's space.
+    func presentBrowserWindow()
 }
 
 extension BrowserWindowPresenting {
     func presentDevToolsWindow(for tabID: Tab.ID) {}
     func dismissDevToolsWindow(for tabID: Tab.ID) {}
     func focusBrowserWindow(_ id: SidebarWindowID) {}
+    func presentBrowserWindow() {}
 }
 
 /// What an unload request did.

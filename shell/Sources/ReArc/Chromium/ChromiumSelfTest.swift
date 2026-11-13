@@ -2664,8 +2664,9 @@ extension ChromiumSelfTest {
         }
         let linkPlan = menus.plans[0]
         // Split needs a sidebar tab; this engine is not one.
-        try check(linkPlan.items.prefix(2) == [.openLinkInNewTab, .openLinkInLittleArc] && linkPlan.items.contains(.copyLink)
-                  && linkPlan.items.contains(.openLinkInNewSplit) == (prompts.ownerTabID != nil),
+        try check(linkPlan.items.prefix(2) == [.openLinkInNewTab, .openLinkInNewWindow] && linkPlan.items.contains(.openLinkInLittleArc)
+                  && linkPlan.items.contains(.copyLink) && linkPlan.items.contains(.openLinkInNewSplit) == (prompts.ownerTabID != nil)
+                  && linkPlan.items.contains(.saveLinkAs) == ReArcEngineHasFeature("context_menu_save_link"),
                   "link menu \(linkPlan.items.map(\.title))")
         try check(linkPlan.entry(.inspect)?.isEnabled == runtime.capabilities.canInspect,
                   "Inspect enabled=\(String(describing: linkPlan.entry(.inspect)?.isEnabled)) with devtools=\(runtime.capabilities.devTools)")
@@ -2705,6 +2706,52 @@ extension ChromiumSelfTest {
         try check(again == ReArcStatus(REARC_NOT_FOUND), "the dismissed menu still accepted a command (\(again.rearcName))")
         log("PASS page context menu (ABI 1.21): link menu \(linkPlan.items.map(\.title)) dismissed; page menu Reload ran in the engine; "
             + "Inspect -> \(inspect.rearcName) then dismissed (repeat -> \(again.rearcName)); unknown request -> \(unknown.rearcName)")
+        try await saveLinkedImageChecks(engine: engine, base: base, window: window, menus: menus)
+    }
+
+    /// tenor's page (2026-11-13): Save Image As on a GIF from another origin
+    /// inside a link. The engine's SaveFrameWithHeaders asks for the path
+    /// through the file chooser channel (a fake panel answers with a temp
+    /// path) and the GIF's bytes land there.
+    @MainActor
+    private func saveLinkedImageChecks(engine: ChromiumEngine, base: String, window: NSWindow, menus: SelfTestMenus) async throws {
+        let prompts = engine.pagePrompts
+        let panels = SelfTestFilePanels()
+        prompts.filePanels = panels
+        defer { prompts.filePanels = SystemFilePanelPresenter() }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-selftest-save-image-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let target = folder.appendingPathComponent("saved-tenor.gif")
+        panels.reply = [target]
+
+        engine.load(URL(string: "\(base)/linked-image")!)
+        try await wait("linked image fixture") { engine.pageTitle == "linked-image" && !engine.isLoading }
+        let loaded = "(function(){ var g = document.getElementById('gif'); return g.complete && g.naturalWidth > 0 ? g.src : ''; })()"
+        var source = ""
+        try await waitAsync("the linked GIF loaded") {
+            source = (try? await engine.evaluate(loaded, in: .page)) as? String ?? ""
+            return !source.isEmpty
+        }
+        menus.hold = false
+        menus.choice = .saveImage
+        let gif = try await cssCenter(of: "#gif", in: engine)
+        let before = menus.plans.count
+        try await rightClickUntil(window, engine: engine, at: gif, "linked image menu") { menus.plans.count > before }
+        let plan = menus.plans[before]
+        try check(plan.items.first == .openLinkInNewTab && plan.entry(.saveImage)?.isEnabled == true && plan.items.contains(.copyImageAddress),
+                  "linked image menu \(plan.items.map(\.title))")
+        try await wait("Save Image As asked for a path", timeout: 20) { !panels.requests.isEmpty }
+        let request = panels.requests[0]
+        try check(request.mode == .save && (request.defaultPath as NSString).lastPathComponent == "tenor.gif",
+                  "save request \(request.mode) '\(request.defaultPath)'")
+        try await wait("the GIF saved at the chosen path", timeout: 20) {
+            (try? Data(contentsOf: target)) == LoopbackFixtureServer.linkedGIF
+        }
+        menus.choice = nil
+        log("PASS Save Image As (linked GIF from \(URL(string: source)?.host() ?? "?")): menu \(plan.items.map(\.title)); save request "
+            + "'\((request.defaultPath as NSString).lastPathComponent)' answered with \(target.lastPathComponent); "
+            + "\(LoopbackFixtureServer.linkedGIF.count) B, the GIF's bytes")
     }
 
     // MARK: Password offers (ABI 1.22)

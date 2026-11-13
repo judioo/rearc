@@ -4,9 +4,17 @@ import SidebarModel
 /// Where the page menu's Arc items and the prompts' links go (the browser view model).
 protocol PageLinkRouting: AnyObject {
     func openLinkInNewTab(_ url: URL, from prompts: PagePromptCenter)
+    /// The link in front, in a new browser window.
+    func openLinkInNewWindow(_ url: URL, from prompts: PagePromptCenter)
+    /// A new browser window showing what the key window shows (the engine
+    /// opened the menu's link in front, Chromium ABI 1.58).
+    func openBrowserWindow(from prompts: PagePromptCenter)
     func openLinkInLittleArc(_ url: URL, from prompts: PagePromptCenter)
     func openLinkInNewSplit(_ url: URL, from prompts: PagePromptCenter)
+    func openLinkInPrivateWindow(_ url: URL, from prompts: PagePromptCenter)
     func searchWeb(for text: String, from prompts: PagePromptCenter)
+    /// The page's default search engine when it can search by image (nil otherwise).
+    func imageSearchProvider(for prompts: PagePromptCenter) -> SearchProvider?
     /// Shows the tab a prompt belongs to (a leave-site prompt on a tab being closed).
     func revealPage(of prompts: PagePromptCenter)
     /// Chromium's site details page for `origin`.
@@ -548,13 +556,22 @@ final class PagePromptCenter {
     /// Runs the items the shell owns. True when `item` was one of them.
     @discardableResult
     func performShellItem(_ item: PageContextMenuItem, params: PageContextMenuParams, engineDeclined: Bool = false) -> Bool {
-        let opensPage = ([.openLinkInNewTab, .openLinkInLittleArc, .openLinkInNewSplit, .openImageInNewTab] as [PageContextMenuItem]).contains(item)
+        let opensPage = ([.openLinkInNewTab, .openLinkInNewWindow, .openLinkInLittleArc, .openLinkInNewSplit, .openImageInNewTab]
+            as [PageContextMenuItem]).contains(item)
         // The engine opens links with the page as initiator (Sec-Fetch-Site, SameSite cookies);
         // a private window's link becomes another window of its session (F-06).
         if opensPage, engineOpensLinks, !engineDeclined { return false }
         switch item {
         case .openLinkInNewTab:
             if let url = params.openableLink { router?.openLinkInNewTab(url, from: self) }
+        case .openLinkInNewWindow:
+            if let url = params.openableLink { router?.openLinkInNewWindow(url, from: self) }
+        case .openLinkInPrivateWindow:
+            if let url = params.openableLink { router?.openLinkInPrivateWindow(url, from: self) }
+        case .searchImage:
+            if let image = params.openableImage, let url = router?.imageSearchProvider(for: self)?.imageSearchURL(for: image) {
+                router?.openLinkInNewTab(url, from: self)
+            }
         case .openLinkInLittleArc:
             if let url = params.openableLink { router?.openLinkInLittleArc(url, from: self) }
         case .openLinkInNewSplit:
@@ -570,19 +587,26 @@ final class PagePromptCenter {
                let source = NavigationURLPolicy.viewSourceURL(for: page, engine: router?.navigationSchemes ?? []) {
                 router?.openLinkInNewTab(source, from: self)
             }
-        case .copyLink, .saveImage, .copyImage, .cut, .copy, .paste, .selectAll, .back, .forward, .reload, .inspect:
+        case .copyLink, .saveLinkAs, .saveImage, .copyImage, .cut, .copy, .paste, .selectAll, .back, .forward, .reload, .inspect:
             return false
         }
         return true
     }
 
-    /// Arc page options for this page: Little Arc and split only for sidebar tabs.
-    func contextMenuOptions(canGoBack: Bool, canGoForward: Bool, canViewSource: Bool, canInspect: Bool) -> PageContextMenuPlan.Options {
+    /// Arc page options for this page: Little Arc and split only for sidebar tabs; new and
+    /// private windows not from a private window (its links open in its session already).
+    func contextMenuOptions(
+        canGoBack: Bool, canGoForward: Bool, canViewSource: Bool, canInspect: Bool, canSaveLink: Bool = false
+    ) -> PageContextMenuPlan.Options {
         PageContextMenuPlan.Options(
             canGoBack: canGoBack,
             canGoForward: canGoForward,
             canOpenLittleArc: privateSession == nil,
             canOpenSplit: ownerTabID != nil && role == .tab,
+            canOpenWindow: privateSession == nil,
+            canOpenPrivateWindow: privateSession == nil,
+            canSaveLink: canSaveLink,
+            imageSearchName: router?.imageSearchProvider(for: self)?.name,
             canViewSource: canViewSource,
             canInspect: canInspect,
             showsDisabledInspect: true

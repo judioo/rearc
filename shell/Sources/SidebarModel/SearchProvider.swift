@@ -40,6 +40,32 @@ public struct SearchProvider: Codable, Hashable, Sendable {
         return url
     }
 
+    /// Whether the engine searches by an image's address (Google Lens, Bing Visual Search).
+    public var searchesByImage: Bool { imageSearchTemplate != nil }
+
+    /// The engine's search by image for a page's http(s) image; nil for engines without one.
+    public func imageSearchURL(for image: URL) -> URL? {
+        guard let template = imageSearchTemplate, let scheme = image.scheme?.lowercased(),
+              scheme == "http" || scheme == "https", image.host() != nil else { return nil }
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&+=?#/;:%")
+        guard let encoded = image.absoluteString.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+        return URL(string: template.replacingOccurrences(of: "%s", with: encoded))
+    }
+
+    /// Known by the search template's host: Chromium's engines carry their own ids.
+    private var imageSearchTemplate: String? {
+        guard let host = URL(string: searchTemplate.replacingOccurrences(of: "%s", with: "q"))?.host()?.lowercased() else { return nil }
+        let labels = host.split(separator: ".")
+        if labels.contains("google"), labels.first == "www" || labels.first == "google" {
+            return "https://lens.google.com/uploadbyurl?url=%s"
+        }
+        if host == "www.bing.com" || host == "bing.com" {
+            return "https://www.bing.com/images/search?view=detailv2&iss=sbi&q=imgurl:%s"
+        }
+        return nil
+    }
+
     /// Replaces `%s` with the percent-encoded terms.
     static func fill(_ template: String, with terms: String) -> URL? {
         let trimmed = terms.trimmingCharacters(in: .whitespacesAndNewlines)

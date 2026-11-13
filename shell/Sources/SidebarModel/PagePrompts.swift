@@ -579,13 +579,18 @@ public struct PageContextMenuParams: Equatable, Sendable {
 /// `ReArcContextMenuCommand`; the Arc ones are the shell's.
 public enum PageContextMenuItem: Equatable, Sendable {
     case openLinkInNewTab
-    case openLinkInLittleArc
+    case openLinkInNewWindow
     case openLinkInNewSplit
+    case openLinkInLittleArc
+    case openLinkInPrivateWindow
+    case saveLinkAs
     case copyLink
     case openImageInNewTab
     case saveImage
     case copyImage
     case copyImageAddress
+    /// "Search <engine> for Image": the engine's name.
+    case searchImage(String)
     case searchFor(String)
     case cut
     case copy
@@ -600,13 +605,17 @@ public enum PageContextMenuItem: Equatable, Sendable {
     public var title: String {
         switch self {
         case .openLinkInNewTab: return "Open Link in New Tab"
+        case .openLinkInNewWindow: return "Open Link in New Window"
+        case .openLinkInNewSplit: return "Open Link in Split View"
         case .openLinkInLittleArc: return "Open Link in Little ReArc"
-        case .openLinkInNewSplit: return "Open Link in New Split"
-        case .copyLink: return "Copy Link"
+        case .openLinkInPrivateWindow: return "Open Link in Private Window"
+        case .saveLinkAs: return "Save Link As…"
+        case .copyLink: return "Copy Link Address"
         case .openImageInNewTab: return "Open Image in New Tab"
         case .saveImage: return "Save Image As…"
         case .copyImage: return "Copy Image"
         case .copyImageAddress: return "Copy Image Address"
+        case .searchImage(let engine): return "Search \(engine) for Image"
         case .searchFor(let text): return "Search for “\(PageContextMenuPlan.truncated(text))”"
         case .cut: return "Cut"
         case .copy: return "Copy"
@@ -642,6 +651,13 @@ public struct PageContextMenuPlan: Equatable, Sendable {
         public var canGoForward = false
         public var canOpenLittleArc = true
         public var canOpenSplit = true
+        /// A new browser window, and a private window: not from a private window's page.
+        public var canOpenWindow = true
+        public var canOpenPrivateWindow = true
+        /// Engine Save Link As (Chromium ABI 1.64 `context_menu_save_link`).
+        public var canSaveLink = false
+        /// The default search engine's name when it can search by image.
+        public var imageSearchName: String?
         public var canViewSource = false
         /// Engine inspection (ABI 1.21 `inspect` is unsupported until a DevTools frontend lands).
         public var canInspect = false
@@ -650,19 +666,24 @@ public struct PageContextMenuPlan: Equatable, Sendable {
 
         public init(
             canGoBack: Bool = false, canGoForward: Bool = false, canOpenLittleArc: Bool = true, canOpenSplit: Bool = true,
+            canOpenWindow: Bool = true, canOpenPrivateWindow: Bool = true, canSaveLink: Bool = false, imageSearchName: String? = nil,
             canViewSource: Bool = false, canInspect: Bool = false, showsDisabledInspect: Bool = true
         ) {
             self.canGoBack = canGoBack
             self.canGoForward = canGoForward
             self.canOpenLittleArc = canOpenLittleArc
             self.canOpenSplit = canOpenSplit
+            self.canOpenWindow = canOpenWindow
+            self.canOpenPrivateWindow = canOpenPrivateWindow
+            self.canSaveLink = canSaveLink
+            self.imageSearchName = imageSearchName
             self.canViewSource = canViewSource
             self.canInspect = canInspect
             self.showsDisabledInspect = showsDisabledInspect
         }
     }
 
-    /// Chrome's variants, in its order: link, image, selection / editable,
+    /// Arc's variants, in its order: link, image, selection / editable,
     /// else the page itself; Inspect last.
     public static func plan(for params: PageContextMenuParams, options: Options) -> PageContextMenuPlan {
         var sections: [[Entry]] = []
@@ -671,10 +692,12 @@ public struct PageContextMenuPlan: Equatable, Sendable {
         let link = params.openableLink
         if link != nil {
             var section = [on(.openLinkInNewTab)]
-            if options.canOpenLittleArc { section.append(on(.openLinkInLittleArc)) }
+            if options.canOpenWindow { section.append(on(.openLinkInNewWindow)) }
             if options.canOpenSplit { section.append(on(.openLinkInNewSplit)) }
+            if options.canOpenLittleArc { section.append(on(.openLinkInLittleArc)) }
+            if options.canOpenPrivateWindow { section.append(on(.openLinkInPrivateWindow)) }
             sections.append(section)
-            sections.append([on(.copyLink)])
+            sections.append(options.canSaveLink ? [on(.saveLinkAs), on(.copyLink)] : [on(.copyLink)])
         }
         let isImage = params.mediaType == .image || params.mediaType == .canvas
         if isImage {
@@ -682,7 +705,10 @@ public struct PageContextMenuPlan: Equatable, Sendable {
             if params.openableImage != nil { section.append(on(.openImageInNewTab)) }
             section.append(on(.saveImage, params.hasImageContents))
             section.append(on(.copyImage, params.hasImageContents))
-            if params.openableImage != nil { section.append(on(.copyImageAddress)) }
+            if params.openableImage != nil {
+                section.append(on(.copyImageAddress))
+                if let engine = options.imageSearchName { section.append(on(.searchImage(engine))) }
+            }
             sections.append(section)
         }
         let selection = params.trimmedSelection

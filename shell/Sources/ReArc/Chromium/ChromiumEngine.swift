@@ -1492,7 +1492,8 @@ extension ChromiumEngine: PageClosing {
             canGoBack: canGoBack,
             canGoForward: canGoForward,
             canViewSource: capabilities.navigationExtended,
-            canInspect: capabilities.canInspect
+            canInspect: capabilities.canInspect,
+            canSaveLink: ReArcEngineHasFeature("context_menu_save_link")
         )
         let plan = PageContextMenuPlan.plan(for: event.params, options: options)
         pagePrompts.engineOpensLinks = capabilities.linkOpenRequests && ReArcEngineHasFeature("context_menu_link_open")
@@ -1507,6 +1508,9 @@ extension ChromiumEngine: PageClosing {
             let status = finishContextMenu(id, item: item)
             if status == ReArcStatus(REARC_UNSUPPORTED), let item, ChromiumContextCommand(item)?.rawValue ?? 0 >= 13 {
                 pagePrompts.performShellItem(item, params: event.params, engineDeclined: true)
+            } else if status == .rearcOK, item == .openLinkInNewWindow {
+                // The engine opens the link in front (a link-open request); the new window shows it.
+                pagePrompts.router?.openBrowserWindow(from: pagePrompts)
             }
         }
     }

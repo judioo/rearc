@@ -204,6 +204,17 @@ final class LoopbackFixtureServer {
         <a id="link" href="/a" style="display:block;padding:40px">context menu link</a>
         <p id="plain" style="padding:40px;height:300px">plain page text</p></body></html>
         """,
+        // tenor's page (2026-11-13): a GIF from another origin inside a link to another site.
+        // localhost is another origin than 127.0.0.1; if it does not load, the same origin's copy does.
+        "/linked-image": """
+        <!doctype html><html><head><title>linked-image</title></head><body style="margin:0">
+        <a id="linked" href="/a" style="display:block;padding:40px"><img id="gif" width="200" height="200" alt="gif"></a>
+        <script>
+        var gif = document.getElementById('gif');
+        gif.onerror = function () { gif.onerror = null; gif.src = '/image/tenor.gif'; };
+        gif.src = location.protocol + '//localhost:' + location.port + '/image/tenor.gif';
+        </script></body></html>
+        """,
         // Wave 30: records every keydown; ?block=1 calls preventDefault on each (a page that takes every shortcut).
         "/keys": """
         <!doctype html><html><head><title>keys</title><script>
@@ -291,6 +302,8 @@ final class LoopbackFixtureServer {
     static let faviconPNG = Data(base64Encoded:
         "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGMQVDImCTGMahjVMHw1AAAaNGYB4V8qqwAAAABJRU5ErkJggg=="
     )!
+    /// 1x1 GIF89a served at /image/tenor.gif (the page image Save Image As saves).
+    static let linkedGIF = Data(base64Encoded: "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")!
     static let slowResponseDelay: TimeInterval = 6
     static let smallDownloadSize = 64 * 1024
     /// 1 MiB, 16 KiB every 100 ms: long enough to pause, resume and cancel mid-transfer.
@@ -403,7 +416,7 @@ final class LoopbackFixtureServer {
         if route == "/suggest" {
             return suggest(connection, path: path)
         }
-        let extra = settings.routes(route)
+        let extra = route == "/image/tenor.gif" ? (body: linkedGIF, type: "image/gif") : settings.routes(route)
         let body = isIcon || extra != nil ? nil : pages[route]
         let found = isIcon || body != nil || extra != nil
         log("[fixture] GET \(path) -> \(found ? 200 : 404)")

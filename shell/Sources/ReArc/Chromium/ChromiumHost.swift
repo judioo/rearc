@@ -770,6 +770,10 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         window(forLittleArc: id).map(closeWindow)
     }
 
+    func presentBrowserWindow() {
+        MainActor.assumeIsolated { _ = openBrowserWindow() }
+    }
+
     func focusBrowserWindow(_ id: SidebarWindowID) {
         let match = windows.values.first { if case .browser(id) = $0.role { return true } else { return false } }
         guard let window = match?.window else { return }

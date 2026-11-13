@@ -126,7 +126,8 @@ final class ContextMenuMessageHandler: NSObject, WKScriptMessageHandler {
 /// WKWebView with Arc's page menu: WebKit's own menu (it already has the
 /// link, image, selection, editable and page variants, and runs their
 /// commands), with "Open … in New Window" opening a tab instead, the web
-/// search item replaced by "Search for …", and Little Arc and split added.
+/// search item replaced by "Search for …", and split, Little Arc and a
+/// private window added.
 final class ReArcWebView: WKWebView {
     weak var prompts: PagePromptCenter?
     var contextInfo: ContextMenuMessageHandler?
@@ -179,12 +180,16 @@ final class ReArcWebView: WKWebView {
         if params.openableLink != nil, let open = index(openLinkInNewWindow) {
             if let item = makeItem(.openLinkInNewTab) { menu.items[open] = item }
             var insert = open + 1
-            if options.canOpenLittleArc, let item = makeItem(.openLinkInLittleArc) {
+            // Arc's order after New Tab: Split View, Little Arc, private window.
+            let added: [(Bool, PageContextMenuItem)] = [
+                (options.canOpenSplit, .openLinkInNewSplit),
+                (options.canOpenLittleArc, .openLinkInLittleArc),
+                (options.canOpenPrivateWindow, .openLinkInPrivateWindow),
+            ]
+            for (allowed, entry) in added where allowed {
+                guard let item = makeItem(entry) else { continue }
                 menu.insertItem(item, at: insert)
                 insert += 1
-            }
-            if options.canOpenSplit, let item = makeItem(.openLinkInNewSplit) {
-                menu.insertItem(item, at: insert)
             }
         }
         if params.openableImage != nil, let open = index(openImageInNewWindow), let item = makeItem(.openImageInNewTab) {

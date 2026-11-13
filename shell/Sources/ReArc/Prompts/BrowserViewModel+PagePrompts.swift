@@ -11,6 +11,22 @@ extension BrowserViewModel: PageLinkRouting {
         openLinkTab(url, from: prompts, select: false)
     }
 
+    /// Arc's Open Link in New Window: the link in front, then a new browser
+    /// window, which shows its space's selection (the link's tab).
+    func openLinkInNewWindow(_ url: URL, from prompts: PagePromptCenter) {
+        openLinkTab(url, from: prompts, select: true)
+        if prompts.privateSession == nil { windowPresenter?.presentBrowserWindow() }
+    }
+
+    func openBrowserWindow(from prompts: PagePromptCenter) {
+        windowPresenter?.presentBrowserWindow()
+    }
+
+    /// A new private session for the page's profile; the link loads with no referrer, as Chrome's incognito open does.
+    func openLinkInPrivateWindow(_ url: URL, from prompts: PagePromptCenter) {
+        openPrivateWindow(session: prompts.privateSession, parentProfileID: prompts.profileID, url: url)
+    }
+
     func openLinkInLittleArc(_ url: URL, from prompts: PagePromptCenter) {
         guard prompts.privateSession == nil else { return openLinkInNewTab(url, from: prompts) }
         openLittleArc(url: url, profileID: prompts.profileID, pageLink: true)
@@ -40,6 +56,11 @@ extension BrowserViewModel: PageLinkRouting {
         let provider = commandBarServices.searchProvider(for: settingsProfileID(for: prompts.profileID ?? store.activeProfileID))
         guard let url = URLEntry.searchURL(for: text, provider: provider) else { return }
         openLinkTab(url, from: prompts, select: true)
+    }
+
+    func imageSearchProvider(for prompts: PagePromptCenter) -> SearchProvider? {
+        let provider = commandBarServices.searchProvider(for: settingsProfileID(for: prompts.profileID ?? store.activeProfileID))
+        return provider.searchesByImage ? provider : nil
     }
 
     func revealPage(of prompts: PagePromptCenter) {

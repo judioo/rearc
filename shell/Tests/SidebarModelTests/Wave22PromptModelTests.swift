@@ -185,13 +185,16 @@ final class Wave22PromptModelTests: XCTestCase {
 
     func testLinkMenuHasArcDestinationsAndCopyLink() {
         let plan = PageContextMenuPlan.plan(for: PageContextMenuParams(linkURL: "https://a.test/x", pageURL: "https://a.test/"), options: options)
-        XCTAssertEqual(plan.items, [.openLinkInNewTab, .openLinkInLittleArc, .openLinkInNewSplit, .copyLink, .inspect])
+        XCTAssertEqual(plan.items, [.openLinkInNewTab, .openLinkInNewWindow, .openLinkInNewSplit, .openLinkInLittleArc,
+                                    .openLinkInPrivateWindow, .copyLink, .inspect])
         XCTAssertEqual(plan.entry(.inspect)?.isEnabled, false, "inspect is unsupported until an engine offers it")
         XCTAssertEqual(plan.sections.count, 3)
 
         var noExtras = options
         noExtras.canOpenLittleArc = false
         noExtras.canOpenSplit = false
+        noExtras.canOpenWindow = false
+        noExtras.canOpenPrivateWindow = false
         noExtras.showsDisabledInspect = false
         XCTAssertEqual(PageContextMenuPlan.plan(for: PageContextMenuParams(linkURL: "https://a.test/x"), options: noExtras).items,
                        [.openLinkInNewTab, .copyLink])
@@ -211,9 +214,85 @@ final class Wave22PromptModelTests: XCTestCase {
         let params = PageContextMenuParams(srcURL: "https://a.test/cat.png", mediaType: .image, hasImageContents: true)
         let plan = PageContextMenuPlan.plan(for: params, options: options)
         XCTAssertEqual(plan.items, [.openImageInNewTab, .saveImage, .copyImage, .copyImageAddress, .inspect])
+        XCTAssertEqual(plan.entry(.saveImage)?.isEnabled, true)
         let canvas = PageContextMenuPlan.plan(for: PageContextMenuParams(mediaType: .canvas, hasImageContents: false), options: options)
         XCTAssertEqual(canvas.items, [.saveImage, .copyImage, .inspect])
         XCTAssertEqual(canvas.entry(.saveImage)?.isEnabled, false)
+        let drawn = PageContextMenuPlan.plan(for: PageContextMenuParams(mediaType: .canvas, hasImageContents: true),
+                                             options: PageContextMenuPlan.Options(imageSearchName: "Google"))
+        XCTAssertEqual(drawn.items, [.saveImage, .copyImage, .inspect], "a canvas has no address to open, copy or search")
+        XCTAssertEqual(drawn.entry(.saveImage)?.isEnabled, true)
+    }
+
+    /// The owner's case: tenor's GIF inside an `<a>` to another site. Arc's
+    /// link section, then its image section, each item enabled.
+    func testLinkedImageMenuFollowsArc() {
+        let params = PageContextMenuParams(
+            linkURL: "https://itunes.apple.com/app/tenor", srcURL: "https://c.tenor.com/HR3YZjYlr_UAAAAC/tenor.gif",
+            pageURL: "https://media1.tenor.com/m/HR3YZjYlr_UAAAAC/nervous.gif", mediaType: .image, hasImageContents: true
+        )
+        var arc = options
+        arc.canSaveLink = true
+        arc.imageSearchName = "Google"
+        let plan = PageContextMenuPlan.plan(for: params, options: arc)
+        XCTAssertEqual(plan.sections.map { $0.map(\.item) }, [
+            [.openLinkInNewTab, .openLinkInNewWindow, .openLinkInNewSplit, .openLinkInLittleArc, .openLinkInPrivateWindow],
+            [.saveLinkAs, .copyLink],
+            [.openImageInNewTab, .saveImage, .copyImage, .copyImageAddress, .searchImage("Google")],
+            [.inspect],
+        ])
+        XCTAssertTrue(plan.sections.dropLast().joined().allSatisfy(\.isEnabled))
+        XCTAssertEqual(plan.items.map(\.title), [
+            "Open Link in New Tab", "Open Link in New Window", "Open Link in Split View", "Open Link in Little ReArc",
+            "Open Link in Private Window", "Save Link As…", "Copy Link Address", "Open Image in New Tab", "Save Image As…",
+            "Copy Image", "Copy Image Address", "Search Google for Image", "Inspect",
+        ])
+        // Without the engine's Save Link As (before ABI 1.64) the item is left out, not shown dead.
+        XCTAssertEqual(PageContextMenuPlan.plan(for: params, options: options).sections[1].map(\.item), [.copyLink])
+        // An image still loading (no contents yet) cannot be saved or copied; its address can.
+        var loading = params
+        loading.hasImageContents = false
+        let pending = PageContextMenuPlan.plan(for: loading, options: arc)
+        XCTAssertEqual(pending.entry(.saveImage)?.isEnabled, false)
+        XCTAssertEqual(pending.entry(.copyImage)?.isEnabled, false)
+        XCTAssertEqual(pending.entry(.copyImageAddress)?.isEnabled, true)
+    }
+
+    func testImageWithoutAnOpenableAddress() {
+        var arc = options
+        arc.imageSearchName = "Google"
+        // No src (a large data: image Blink leaves out): save and copy run on the pixels.
+        let noSource = PageContextMenuPlan.plan(for: PageContextMenuParams(mediaType: .image, hasImageContents: true), options: arc)
+        XCTAssertEqual(noSource.items, [.saveImage, .copyImage, .inspect])
+        // data: and blob: images are not opened, copied as addresses or searched.
+        for src in ["data:image/gif;base64,R0lGODlhAQABAAAAACw=", "blob:https://a.test/1234", "file:///tmp/a.gif"] {
+            let plan = PageContextMenuPlan.plan(for: PageContextMenuParams(srcURL: src, mediaType: .image, hasImageContents: true), options: arc)
+            XCTAssertEqual(plan.items, [.saveImage, .copyImage, .inspect], src)
+        }
+    }
+
+    func testImageSearchFollowsTheDefaultEngine() {
+        let image = URL(string: "https://c.tenor.com/HR3YZjYlr_UAAAAC/tenor.gif?a=1&b=2")!
+        XCTAssertEqual(SearchProvider.google.imageSearchURL(for: image)?.absoluteString,
+                       "https://lens.google.com/uploadbyurl?url=https%3A%2F%2Fc.tenor.com%2FHR3YZjYlr_UAAAAC%2Ftenor.gif%3Fa%3D1%26b%3D2")
+        XCTAssertEqual(SearchProvider.bing.imageSearchURL(for: image)?.host(), "www.bing.com")
+        XCTAssertTrue(SearchProvider.google.searchesByImage && SearchProvider.bing.searchesByImage)
+        for provider in [SearchProvider.duckDuckGo, .ecosia, .brave] {
+            XCTAssertFalse(provider.searchesByImage, provider.name)
+            XCTAssertNil(provider.imageSearchURL(for: image), provider.name)
+        }
+        // Chromium's engines come with their own ids; the template's host decides.
+        let chromiumGoogle = SearchProvider(id: "7", name: "Google", keyword: "google.com",
+                                            searchTemplate: "https://www.google.co.uk/search?q=%s&ie=UTF-8")
+        XCTAssertTrue(chromiumGoogle.searchesByImage)
+        let lookalike = SearchProvider(id: "8", name: "Google", keyword: "x", searchTemplate: "https://google.evil.test/?q=%s")
+        XCTAssertEqual(lookalike.imageSearchURL(for: image)?.host(), "lens.google.com", "the image goes to Google's own host, never the template's")
+        XCTAssertNil(SearchProvider.google.imageSearchURL(for: URL(string: "data:image/png;base64,AA==")!))
+        XCTAssertNil(SearchProvider.google.imageSearchURL(for: URL(string: "file:///tmp/a.gif")!))
+
+        let params = PageContextMenuParams(srcURL: image.absoluteString, mediaType: .image, hasImageContents: true)
+        XCTAssertFalse(PageContextMenuPlan.plan(for: params, options: options).items.contains { if case .searchImage = $0 { true } else { false } },
+                       "no item when the engine cannot search by image")
     }
 
     func testSelectionAndEditableMenus() {
