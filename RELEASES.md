@@ -19,6 +19,32 @@ that adds the entry, so write it as the last commit before the release, with
 Merged since the last release and not yet in a build. The next release's entry takes these
 lines and this section starts empty again.
 
+## ReArc 2026.1113.755 — 2026-11-13
+
+**Fixes**
+- Quitting always ends. A quit that stalled left ReArc running half-stopped: ⌘Q and an
+  update's restart did nothing, the update never installed, and every tab opened after it
+  ran on the system's WebKit instead of ReArc's engine, with its own sign-ins and a menu
+  whose Download Image saved nothing. Now a quit that has not started after 10 seconds is
+  forced, and one where no tab has closed for 45 seconds saves your sidebar and windows and
+  ends ReArc, so an update always installs. Choosing Stay on a "Leave site?" puts ReArc
+  back exactly as it was, and the next ⌘Q quits at once.
+- No page runs on WebKit any more: a tab asked for while ReArc starts or quits waits for
+  the engine.
+
+**New**
+- Right-click an image or a link and the menu follows Arc's: Open Link in New Tab, New
+  Window, Split View, Little ReArc and Private Window; Copy Link Address; Open Image in New
+  Tab, Save Image As…, Copy Image, Copy Image Address, and Search Google (or Bing) for Image
+  when that is your search engine.
+- Downloads have one menu in the downloads tray, the download stack at the bottom of the
+  sidebar and the Library: Open, Show in Finder, Pause or Resume, Cancel, Copy (the file
+  itself, to paste into Finder or Mail), Copy Download Link, Move to Trash and Remove from
+  List. Tray rows show the image's thumbnail, open with one click and drag out to Finder.
+
+**Known**
+- Save Link As… and Capture Image… are not there yet.
+
 ## ReArc 2026.1112.749 — 2026-11-12
 
 **New**
