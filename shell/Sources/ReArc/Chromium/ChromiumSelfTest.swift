@@ -422,6 +422,12 @@ final class ChromiumSelfTest {
         log("PASS every evaluation, profile request and command-bar call context released exactly once "
             + "(live script contexts: \(runtime.liveScriptContexts), profile contexts: \(runtime.liveProfileContexts), "
             + "command-bar contexts: \(runtime.liveCommandBarContexts))")
+
+        // 18. A quit a page vetoes leaves the runtime active; a page asked for during it waits for Chromium.
+        //     Last: the quit closes every tab ahead of the vetoing one.
+        if capabilities.javascriptDialogs {
+            try await vetoedQuitChecks(engine: engine, base: base, window: window)
+        }
     }
 
     // MARK: Script evaluation
@@ -2440,6 +2446,47 @@ extension ChromiumSelfTest {
         try await wait("left the page") { engine.pageTitle == Self.titleA && !engine.isLoading }
         log("PASS beforeunload (ABI 1.18): 'Leave site?' on navigation -> Stay kept /leave; on a normal close -> Stay vetoed "
             + "(tab \(engine.tabID) kept); Leave continued to /a")
+    }
+
+    /// A non-forced quit with "Leave site?" up, answered Stay: the quit undoes
+    /// itself (`ChromiumQuit`), and a page made meanwhile is Chromium and gets
+    /// its tab once the runtime is active again.
+    @MainActor
+    private func vetoedQuitChecks(engine: ChromiumEngine, base: String, window: NSWindow) async throws {
+        let prompts = engine.pagePrompts
+        engine.load(URL(string: "\(base)/leave")!)
+        try await wait("leave fixture for the vetoed quit") { engine.pageTitle == "leave" && !engine.isLoading }
+        var activated = false
+        for _ in 0..<3 where !activated {
+            focus(window)
+            click(window, engine: engine, at: CGPoint(x: 200, y: 200))
+            activated = await waitActivation(engine)
+        }
+        // Without the page's activation there is no Leave site?, and the quit would end the self-test.
+        guard activated else {
+            log("NOTE vetoed quit: synthesized input did not activate the page; the quit is not exercised in this run")
+            return
+        }
+        var undone = 0
+        let shellCancel = runtime.onTerminateCancelled
+        runtime.onTerminateCancelled = { undone += 1; shellCancel?() }
+        defer { runtime.onTerminateCancelled = shellCancel }
+        var outcome: (status: ReArcStatus, cancelled: Bool)?
+        let status = runtime.requestShutdown(force: false) { outcome = ($0, $1) }
+        try check(status == .rearcOK, "the non-forced quit was rejected: \(status.rearcName)")
+        try check(runtime.stage == .quitting, "a quit in progress is \(runtime.stage)")
+        let during = ChromiumEngine(runtime: runtime, context: EngineProfileContext(profileID: UUID()), role: .tab, shellID: UUID())
+        try check(during.tabID == 0, "a tab was created during the quit")
+        _ = try await waitDialog(prompts, .beforeUnload, "beforeunload during the quit")
+        prompts.answerDialog(accept: false)
+        try await wait("quit vetoed") { outcome != nil }
+        try check(outcome?.cancelled == true, "the quit was not vetoed: \(outcome?.status.rearcName ?? "nil")")
+        try check(!runtime.isStopping && ChromiumRuntime.active != nil && undone == 1,
+                  "after the veto: stopping \(runtime.isStopping), stage \(runtime.stage), undone \(undone)")
+        try check(engine.tabID != 0, "the vetoed quit closed the vetoing tab")
+        try check(await during.waitForTab(), "the page made during the quit got no tab (\(during.lastError ?? "no error"))")
+        log("PASS vetoed quit: Stay kept tab \(engine.tabID), the runtime is active again, "
+            + "and the page made during the quit got Chromium tab \(during.tabID)")
     }
 
     @MainActor
