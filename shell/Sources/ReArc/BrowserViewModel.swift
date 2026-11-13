@@ -1781,6 +1781,13 @@ final class BrowserViewModel {
         downloads.save()
     }
 
+    /// A quit that did not happen (a page's beforeunload kept it, or the
+    /// engine refused it): what `prepareForQuit` stopped runs again.
+    func resumeAfterCancelledQuit() {
+        guard !startupDeferred else { return }
+        startAutoArchiveTimer()
+    }
+
     // MARK: - Command bar
 
     /// Cmd+T: the field takes focus without mutating or replacing the page.

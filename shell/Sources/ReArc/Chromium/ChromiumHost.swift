@@ -251,7 +251,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private var aboutWindow: AboutWindowController?
     /// One never-shown window, with no page or user state. Consumed once.
     private var preparedLittleArcWindow: NSWindow?
-    private var terminating = false
+    /// Set while a quit is in progress; a quit that undoes itself clears it.
+    private var termination = ShellTermination()
+    private var terminating: Bool { termination.isTerminating }
     /// The cached window is up (`presentCachedWindow`) and `ready` has not run.
     private var awaitingReady = false
     private var onboarding: FirstRunOnboarding?
@@ -450,8 +452,17 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
         }
         runtime.onTerminateRequested = { [weak self, weak model] in
             // Saved before any window closes, so quitting keeps them all.
-            MainActor.assumeIsolated { self?.finishWindowSession() }
-            self?.terminating = true
+            if self?.termination.begin() == true { MainActor.assumeIsolated { self?.finishWindowSession() } }
+            model?.prepareForQuit()
+        }
+        runtime.onTerminateCancelled = { [weak self, weak model] in
+            // ReArc keeps running: windows open, the session records and the timers run again.
+            self?.termination.cancel()
+            MainActor.assumeIsolated { self?.resumeWindowSession() }
+            model?.resumeAfterCancelledQuit()
+        }
+        runtime.onShutdownAbandoned = { [weak model] in
+            // The process ends without the engine's completion; what changed during the wait is kept.
             model?.prepareForQuit()
         }
         let mainMenu = makeMainMenu(model: model)
@@ -950,9 +961,15 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
 
     @MainActor
     private func finishWindowSession() {
-        guard !terminating else { return }
         sessionRecorder?.finish()
         sessionRecorder = nil
+    }
+
+    /// After a quit undid itself: a new recorder observes the open browser windows.
+    @MainActor
+    private func resumeWindowSession() {
+        guard let recorder = sessionRecorderIfNeeded() else { return }
+        browserWindows.forEach(recorder.observe)
     }
 
     /// The self-test's restore path: opens every window of the saved session as

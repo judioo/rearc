@@ -538,20 +538,35 @@ private let downloadBatchCallback: ReArcDownloadBatchCallback = { context, event
 final class ChromiumRuntime {
     static let shared = ChromiumRuntime()
 
-    /// Non-nil once the engine is running with a ready profile; `EngineHost` uses it to pick Chromium.
+    /// Non-nil once the engine is running with a ready profile and no quit in progress.
     static var active: ChromiumRuntime? {
         shared.isReady && !shared.isStopping ? shared : nil
     }
 
+    /// Non-nil from ready until `ReArcEngineRun` returns, through a quit in progress.
+    static var running: ChromiumRuntime? {
+        shared.isReady ? shared : nil
+    }
+
     private(set) var isConfigured = false
     private(set) var isReady = false
-    private(set) var isStopping = false
+    private(set) var runEnded = false
+    /// The quit in progress, if any (`ChromiumQuit`).
+    private(set) var quit = ChromiumQuit()
+    var isStopping: Bool { quit.isStopping }
+    /// `EngineHost` makes Chromium pages in every stage but `unavailable`.
+    var stage: ChromiumRuntimeStage {
+        if !isConfigured { return .unavailable }
+        if runEnded { return .ended }
+        if !isReady { return .starting }
+        return isStopping ? .quitting : .ready
+    }
     private(set) var defaultProfileID: UInt64 = 0
     private(set) var shutdownCompleted = false
     /// Optional ABI features in use; probed when the engine is ready.
     private(set) var capabilities = ChromiumCapabilities.none
     private(set) var keychainMode = ChromiumLaunchArguments.KeychainMode.system
-    /// After a beforeunload veto, the next quit request forces shutdown.
+    /// After a quit undid itself (a beforeunload veto, a refusal), the next quit request forces shutdown.
     private var shutdownVetoed = false
 
     var onReady: (() -> Void)?
@@ -566,8 +581,14 @@ final class ChromiumRuntime {
     private(set) var readyAt: TimeInterval?
     /// Runs before shutdown starts for an AppKit quit request (persist shell state here).
     var onTerminateRequested: (() -> Void)?
-    /// Posted when a page's beforeunload kept a quit from finishing (the
-    /// update notice's Restart and Update offers Try Again).
+    /// A quit undid itself (beforeunload veto, refused shutdown): restore
+    /// what `onTerminateRequested` stopped. The runtime is active again.
+    var onTerminateCancelled: (() -> Void)?
+    /// A quit that stalled past its bound: save again, the process ends next.
+    var onShutdownAbandoned: (() -> Void)?
+    /// Posted when a quit did not finish and ReArc keeps running: a page's
+    /// beforeunload, or a refused shutdown (the update notice's Restart and
+    /// Update offers Try Again).
     static let shutdownVetoedNotification = Notification.Name("ReArcShutdownVetoed")
     /// A leak check found a breached credential for this origin (ABI 1.60).
     var onCredentialLeak: ((String) -> Void)?
@@ -712,7 +733,12 @@ final class ChromiumRuntime {
     private var opensInFlight = 0
     private var closeInFlight = false
     private var tabClosesInFlight = 0
-    private var deferredShutdown: (force: Bool, completion: (ReArcStatus, Bool) -> Void)?
+    /// The completion of the quit in progress (`requestShutdown`).
+    private var shutdownCompletion: ((ReArcStatus, Bool) -> Void)?
+    /// Ends the current `quit.bound`; tab closes during a shutdown restart it.
+    private var quitDeadline: DispatchWorkItem?
+    /// Tab creations asked for before ready or during a quit (`ChromiumTabAdmission.wait`).
+    private var tabsAwaitingActive: [(engine: WeakRef<ChromiumEngine>, completion: (UInt64?) -> Void)] = []
     private static let busyRetryLimit = 50
 
     private var context: UnsafeMutableRawPointer { Unmanaged.passUnretained(self).toOpaque() }
@@ -765,6 +791,9 @@ final class ChromiumRuntime {
         PerfSignposts.launchEvent("EngineRunCalled")
         let code = argv.withUnsafeBufferPointer { ReArcEngineRun(Int32(arguments.count), $0.baseAddress) }
         isReady = false
+        runEnded = true
+        quitDeadline?.cancel()
+        failTabsAwaitingActive()
         ChromiumLog.info("ReArcEngineRun returned \(code)")
         return code
     }
@@ -847,6 +876,8 @@ final class ChromiumRuntime {
             applyDownloadPolicy(profile: defaultProfileID)
         }
         onReady?()
+        // Pages made in the early window waited for their tabs.
+        createTabsAwaitingActive()
     }
 
     /// The wave-11 engine (ABI 1.0) has no `ReArcEngineABIMinorVersion` export,
@@ -1216,9 +1247,26 @@ final class ChromiumRuntime {
 
     /// Creates the engine tab once its profile is open. `completion` gets the
     /// new tab ID (already registered), or nil.
+    /// Before ready, and while a quit is in progress, the request waits: it is
+    /// created once the runtime is active, and fails when the engine stops.
     func createTab(for engine: ChromiumEngine, completion: @escaping (UInt64?) -> Void) {
+        switch ChromiumTabAdmission(stage) {
+        case .create:
+            break
+        case .wait:
+            ChromiumLog.info("tab for \(engine.profileKey) waits: the engine is \(stage)")
+            tabsAwaitingActive.append((WeakRef(engine), completion))
+            return
+        case .refuse:
+            return completion(nil)
+        }
         withEngineProfile(engine.profileKey) { [weak self, weak engine] profileID in
-            guard let self, let engine, let profileID, self.isReady, !self.isStopping else { return completion(nil) }
+            guard let self, let engine else { return completion(nil) }
+            guard let profileID, self.isReady, !self.isStopping else {
+                // A quit began while the profile opened (its open was cancelled).
+                if ChromiumTabAdmission(self.stage) == .wait { return self.createTab(for: engine, completion: completion) }
+                return completion(nil)
+            }
             var tabID: UInt64 = 0
             let status = PerfSignposts.engineCall("TabCreate") { ReArcTabCreate(profileID, engine.role.rawValue, nil, &tabID) }
             guard status == .rearcOK, tabID != 0 else {
@@ -1228,6 +1276,22 @@ final class ChromiumRuntime {
             self.register(engine, tabID: tabID)
             completion(tabID)
         }
+    }
+
+    private func createTabsAwaitingActive() {
+        guard !tabsAwaitingActive.isEmpty, ChromiumTabAdmission(stage) == .create else { return }
+        let waiting = tabsAwaitingActive
+        tabsAwaitingActive = []
+        ChromiumLog.info("creating \(waiting.count) tab(s) that waited for the engine")
+        for (engine, completion) in waiting {
+            if let engine = engine.value { createTab(for: engine, completion: completion) } else { completion(nil) }
+        }
+    }
+
+    private func failTabsAwaitingActive() {
+        let waiting = tabsAwaitingActive
+        tabsAwaitingActive = []
+        waiting.forEach { $0.completion(nil) }
     }
 
     /// The live shell engine of an engine tab.
@@ -1360,6 +1424,7 @@ final class ChromiumRuntime {
             }
             return
         }
+        if event.kind == .closed { noteShutdownProgress() }
         if event.kind == .closed, devToolsFrontends.remove(event.tabID) != nil {
             onDevToolsFrontendClosed?(event.tabID)
         }
@@ -1614,6 +1679,11 @@ final class ChromiumRuntime {
     // MARK: Shutdown
 
     fileprivate func handleTerminateRequested() {
+        guard !isStopping else {
+            // The quit in progress finishes, undoes itself, or ends at its bound.
+            ChromiumLog.info("quit requested again during \(quit.phase)")
+            return
+        }
         onTerminateRequested?()
         requestShutdown(force: shutdownVetoed) { _, _ in }
     }
@@ -1621,25 +1691,32 @@ final class ChromiumRuntime {
     /// Orderly engine shutdown; `ReArcEngineRun` returns after the final
     /// completion. The engine closes every profile's tabs and destroys private
     /// profiles before their parents. A profile close in flight makes shutdown
-    /// busy, so shutdown waits for it. With `shutdown_pending_closes` (ABI 1.12)
-    /// the engine joins tab closes still in flight, whose callbacks still
-    /// arrive once before shutdown completes; older engines are busy then too.
-    /// A rejection after waiting is reported through `completion`.
+    /// busy, so shutdown waits for it, at most `ChromiumQuit.deferBound`, then
+    /// forces it. With `shutdown_pending_closes` (ABI 1.12) the engine joins
+    /// tab closes still in flight, whose callbacks still arrive once before
+    /// shutdown completes; older engines are busy then too. A started shutdown
+    /// with no tab closing for `ChromiumQuit.stallBound` ends the process.
+    /// A veto, or a rejection after waiting, is reported through `completion`;
+    /// either leaves the runtime active again (`onTerminateCancelled`).
     @discardableResult
     func requestShutdown(force: Bool, completion: @escaping (ReArcStatus, Bool) -> Void) -> ReArcStatus {
         guard isReady, !isStopping else { return ReArcStatus(REARC_BUSY) }
-        isStopping = true
+        let step = quit.request(force: force, mustDefer: mustDeferShutdown)
+        shutdownCompletion = completion
         cancelQueuedLifecycle()
         // Pending opens are the engine's to cancel; closes in flight make shutdown busy.
-        if mustDeferShutdown {
-            ChromiumLog.info("shutdown waits for closes in flight (profile \(closeInFlight), tabs \(tabClosesInFlight))")
-            deferredShutdown = (force, completion)
+        if case .deferred = quit.phase {
+            ChromiumLog.info("shutdown waits for closes in flight (profile \(closeInFlight), tabs \(tabClosesInFlight)), "
+                + "at most \(Int(ChromiumQuit.deferBound)) s")
+            armQuitDeadline()
             return .rearcOK
         }
         if tabClosesInFlight > 0 {
             ChromiumLog.info("shutdown joins \(tabClosesInFlight) tab close(s) in flight (shutdown_pending_closes)")
         }
-        return startShutdown(force: force, completion: completion)
+        guard case .start(let startForce) = step else { return .rearcOK }
+        // A rejection here is the caller's to see; no completion follows.
+        return startShutdown(force: startForce, reportsRejection: false)
     }
 
     private func cancelQueuedLifecycle() {
@@ -1659,12 +1736,9 @@ final class ChromiumRuntime {
     }
 
     private func startDeferredShutdownIfIdle() {
-        guard let deferred = deferredShutdown, !mustDeferShutdown else { return }
-        deferredShutdown = nil
-        let status = startShutdown(force: deferred.force, completion: deferred.completion)
-        if status != .rearcOK {
-            deferred.completion(status, false)
-        }
+        guard case .deferred = quit.phase, !mustDeferShutdown else { return }
+        guard case .start(let force) = quit.becameIdle() else { return }
+        startShutdown(force: force, reportsRejection: true)
     }
 
     private var mustDeferShutdown: Bool {
@@ -1675,24 +1749,89 @@ final class ChromiumRuntime {
         )
     }
 
-    private func startShutdown(force: Bool, completion: @escaping (ReArcStatus, Bool) -> Void) -> ReArcStatus {
+    @discardableResult
+    private func startShutdown(force: Bool, reportsRejection: Bool) -> ReArcStatus {
         let status = callAsync({ [self] status, cancelled in
-            if cancelled {
-                isStopping = false
-                shutdownVetoed = true
-                ChromiumLog.info("shutdown vetoed by beforeunload; the next quit forces it")
-                NotificationCenter.default.post(name: ChromiumRuntime.shutdownVetoedNotification, object: nil)
-            } else {
-                shutdownCompleted = status == .rearcOK
-                ChromiumLog.info("shutdown completion: \(status.rearcName)")
-            }
-            completion(status, cancelled)
+            finishShutdown(status: status, cancelled: cancelled)
         }) { ReArcEngineShutdown(force, $1, $0) }
-        if status != .rearcOK {
-            isStopping = false
-            ChromiumLog.info("ReArcEngineShutdown rejected: \(status.rearcName)")
+        guard status != .rearcOK else {
+            armQuitDeadline()
+            return status
+        }
+        ChromiumLog.info("ReArcEngineShutdown(force \(force)) rejected: \(status.rearcName)")
+        switch quit.startRejected() {
+        case .abandon:
+            abandonShutdown("the forced shutdown was rejected")
+        case .undo:
+            let completion = shutdownCompletion
+            undoQuit("the shutdown was rejected")
+            if reportsRejection { completion?(status, false) }
+        case .none, .start:
+            break
         }
         return status
+    }
+
+    private func finishShutdown(status: ReArcStatus, cancelled: Bool) {
+        let completion = shutdownCompletion
+        if quit.completed(cancelled: cancelled) == .undo {
+            undoQuit("vetoed by beforeunload")
+        } else {
+            quitDeadline?.cancel()
+            shutdownCompleted = status == .rearcOK
+            ChromiumLog.info("shutdown completion: \(status.rearcName)")
+        }
+        completion?(status, cancelled)
+    }
+
+    /// The quit is over and ReArc keeps running: active again, and the next quit forces.
+    private func undoQuit(_ reason: String) {
+        quitDeadline?.cancel()
+        shutdownCompletion = nil
+        shutdownVetoed = true
+        ChromiumLog.info("quit undone (\(reason)); ReArc keeps running and the next quit forces shutdown")
+        onTerminateCancelled?()
+        NotificationCenter.default.post(name: ChromiumRuntime.shutdownVetoedNotification, object: nil)
+        createTabsAwaitingActive()
+    }
+
+    /// Runs `quit.bound` from now; a later call (a tab closed) starts it again.
+    private func armQuitDeadline() {
+        quitDeadline?.cancel()
+        guard let bound = quit.bound else { return }
+        let deadline = DispatchWorkItem { [weak self] in self?.quitBoundPassed() }
+        quitDeadline = deadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + bound, execute: deadline)
+    }
+
+    /// A tab closed while the engine shuts down: the shutdown is moving.
+    private func noteShutdownProgress() {
+        if case .started = quit.phase { armQuitDeadline() }
+    }
+
+    private func quitBoundPassed() {
+        let phase = quit.phase
+        switch quit.boundPassed() {
+        case .start(let force):
+            ChromiumLog.info("closes in flight did not finish in \(Int(ChromiumQuit.deferBound)) s "
+                + "(profile \(closeInFlight), tabs \(tabClosesInFlight)); forcing shutdown")
+            startShutdown(force: force, reportsRejection: true)
+        case .abandon:
+            abandonShutdown("no shutdown progress in \(Int(ChromiumQuit.stallBound)) s (\(phase))")
+        case .none, .undo:
+            break
+        }
+    }
+
+    /// Chromium ends a hung shutdown by terminating the process; the shell
+    /// does the same once its state is saved (`onShutdownAbandoned`). Sparkle
+    /// installs a pending update once the process is gone.
+    private func abandonShutdown(_ reason: String) {
+        quitDeadline?.cancel()
+        ChromiumLog.info("shutdown abandoned: \(reason); saving and exiting \(ChromiumQuit.abandonedExitCode)")
+        onShutdownAbandoned?()
+        fflush(stdout)
+        _exit(ChromiumQuit.abandonedExitCode)
     }
 }
 #endif

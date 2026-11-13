@@ -51,7 +51,8 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDeleg
                 self?.center.automaticUpdatesChanged(value)
             }
         }
-        // A page's beforeunload kept ReArc open after Sparkle asked it to quit.
+        // A page's beforeunload, or a refused shutdown, kept ReArc open after Sparkle asked it to quit;
+        // a quit that stalls ends the process instead (`ChromiumQuit`), and Sparkle installs.
         vetoObserver = NotificationCenter.default.addObserver(forName: ChromiumRuntime.shutdownVetoedNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.driver?.quitWasRefused() }
         }

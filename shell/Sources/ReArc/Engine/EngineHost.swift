@@ -97,7 +97,10 @@ final class EngineHost {
         }
     }
 
-    /// The single place that picks the concrete engine type.
+    /// The single place that picks the concrete engine type (`EngineChoice`).
+    /// In a Chromium build a page is Chromium whenever the engine runs in the
+    /// process, before ready and during a quit included (its tab waits);
+    /// WebKit only where Chromium does not run, and that is logged.
     ///
     /// Storage follows `EngineProfileContext` on both engines: WKEngine keeps
     /// one `WKWebsiteDataStore` per profile (non-persistent when ephemeral), and
@@ -130,9 +133,11 @@ final class EngineHost {
         privateSession: UUID?
     ) -> any WebEngine {
         #if REARC_CHROMIUM
-        if let runtime = ChromiumRuntime.active {
+        let runtime = ChromiumRuntime.shared
+        if EngineChoice(chromiumBuild: true, stage: runtime.stage) == .chromium {
             return ChromiumEngine(runtime: runtime, context: context, role: role, shellID: shellID, privateSession: privateSession)
         }
+        ChromiumLog.info("WebKit engine made for a \(role) page in a Chromium build: the engine is \(runtime.stage)")
         #endif
         let engine = WKEngine(context: context)
         engine.downloadCenter = downloadCenter
@@ -150,7 +155,7 @@ final class EngineHost {
     /// view-source need ABI 1.5 with `navigation_extended`.
     var navigationSchemes: NavigationURLPolicy.EngineSchemes {
         #if REARC_CHROMIUM
-        if let runtime = ChromiumRuntime.active {
+        if let runtime = ChromiumRuntime.running {
             return runtime.capabilities.navigationSchemes
         }
         #endif
@@ -160,7 +165,7 @@ final class EngineHost {
     /// PiP video plays in shell views (Chromium `pip_embedded`, ABI 1.43).
     var supportsLiveVideo: Bool {
         #if REARC_CHROMIUM
-        return ChromiumRuntime.active?.capabilities.pipEmbedded ?? false
+        return ChromiumRuntime.running?.capabilities.pipEmbedded ?? false
         #else
         return false
         #endif
