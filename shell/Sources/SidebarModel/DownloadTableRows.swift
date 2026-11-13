@@ -84,3 +84,66 @@ public struct DownloadTableRows: Sendable {
         return selected.contains(clicked) ? selected.filteredIndexSet { $0 < count } : IndexSet(integer: clicked)
     }
 }
+
+/// One action of a download's menu: the tray row, the bottom bar's recent
+/// downloads and Library › Downloads show the same one.
+public enum DownloadMenuItem: Hashable, Sendable {
+    case open, showInFinder, useOriginalName
+    case pause, resume, cancel
+    /// The file itself, to paste into Finder or another app.
+    case copyFile
+    case copyLink
+    case moveToTrash, removeFromList
+
+    public func title(count: Int) -> String {
+        switch self {
+        case .open: return "Open"
+        case .showInFinder: return "Show in Finder"
+        case .useOriginalName: return "Use Original Name"
+        case .pause: return "Pause"
+        case .resume: return "Resume"
+        case .cancel: return "Cancel"
+        case .copyFile: return "Copy"
+        case .copyLink: return count == 1 ? "Copy Download Link" : "Copy Download Links"
+        case .moveToTrash: return "Move to Trash"
+        case .removeFromList: return "Remove from List"
+        }
+    }
+}
+
+public enum DownloadMenu {
+    public struct Entry: Equatable, Sendable {
+        public var item: DownloadMenuItem
+        public var isEnabled: Bool
+    }
+
+    /// Arc's order: the file, the transfer, copying, then deleting; sections
+    /// are separated in the menu. Several rows get what applies to each:
+    /// file actions for the finished files among them, the transfer and the
+    /// original name for a single row. `isWarned` rows wait for Keep or Discard.
+    public static func sections(for records: [DownloadRecord], isWarned: (DownloadRecord) -> Bool = { _ in false }) -> [[Entry]] {
+        guard !records.isEmpty else { return [] }
+        func on(_ item: DownloadMenuItem, _ enabled: Bool = true) -> Entry { Entry(item: item, isEnabled: enabled) }
+        let withFiles = records.filter(\.hasFileOnDisk)
+        let single = records.count == 1 ? records[0] : nil
+        var sections: [[Entry]] = []
+        if !withFiles.isEmpty {
+            var file = [on(.open), on(.showInFinder)]
+            if let single, single.hasFileOnDisk, single.originalName != nil { file.append(on(.useOriginalName)) }
+            sections.append(file)
+        }
+        if let single, single.isActive {
+            var transfer: [Entry] = []
+            if single.isPaused {
+                transfer.append(on(.resume, single.canResume))
+            } else if !isWarned(single) {
+                transfer.append(on(.pause))
+            }
+            transfer.append(on(.cancel))
+            sections.append(transfer)
+        }
+        sections.append(withFiles.isEmpty ? [on(.copyLink)] : [on(.copyFile), on(.copyLink)])
+        sections.append(withFiles.isEmpty ? [on(.removeFromList)] : [on(.moveToTrash), on(.removeFromList)])
+        return sections
+    }
+}

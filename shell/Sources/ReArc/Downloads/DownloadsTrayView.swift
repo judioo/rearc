@@ -1,6 +1,7 @@
 import AppKit
 import SidebarModel
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The sidebar's downloads button: an arrow that fills a progress ring while
 /// files transfer, pulses when one starts, and shows an orange dot when a
@@ -232,14 +233,17 @@ struct DownloadRowView: View {
         )
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onTapGesture(count: 2) { if record.hasFileOnDisk { downloads.perform(.open, on: record.id) } }
-        .contextMenu { contextMenu }
+        // Arc: a click opens the file; drag it out to Finder or another app.
+        .onTapGesture { if record.hasFileOnDisk { downloads.perform(.open, on: record.id) } }
+        .onDrag { record.hasFileOnDisk ? DownloadDrag.provider(for: record.targetPath) : NSItemProvider() }
+        .contextMenu { DownloadContextMenu(records: [record], downloads: downloads) }
         .help(record.url)
     }
 
     private var icon: some View {
         ZStack(alignment: .bottomTrailing) {
-            DownloadFileIcon(fileName: record.fileName, path: record.hasFileOnDisk ? record.targetPath : "", size: 30)
+            // An image shows itself, as Arc's indicator does; other files their QuickLook preview or icon.
+            DownloadFileIcon(fileName: record.fileName, path: record.hasFileOnDisk ? record.targetPath : "", size: 30, kind: .thumbnail)
                 .opacity(record.state == .complete || record.isActive ? 1 : 0.5)
             if isWarned {
                 badge("exclamationmark.triangle.fill", .orange)
@@ -320,36 +324,47 @@ struct DownloadRowView: View {
         .disabled(!enabled)
         .help(help)
     }
+}
 
-    @ViewBuilder
-    private var contextMenu: some View {
-        if record.hasFileOnDisk {
-            Button("Open") { downloads.perform(.open, on: record.id) }
-            Button("Show in Finder") { downloads.perform(.reveal, on: record.id) }
-            if let original = record.originalName {
-                Button("Use Original Name") {
-                    downloads.useOriginalName(record.id) { outcome in
-                        if case .skipped = outcome { NSSound.beep() }
+/// A download's menu (`DownloadMenu`) for SwiftUI rows: the tray and the
+/// bottom bar's recent downloads. Library › Downloads builds the same one
+/// as an NSMenu.
+struct DownloadContextMenu: View {
+    let records: [DownloadRecord]
+    let downloads: DownloadsController
+
+    var body: some View {
+        let ids = records.map(\.id)
+        let sections = DownloadMenu.sections(for: records, isWarned: downloads.needsDecision)
+        ForEach(Array(sections.enumerated()), id: \.offset) { index, section in
+            if index > 0 { Divider() }
+            ForEach(section, id: \.item) { entry in
+                Button(entry.item.title(count: records.count)) {
+                    downloads.perform(entry.item, on: ids) { moved in
+                        if moved == 0 { NSSound.beep() }
                     }
                 }
-                .help("Rename it back to “\(original)”")
+                .disabled(!entry.isEnabled)
             }
-            Divider()
         }
-        if record.isActive {
-            if record.isPaused {
-                Button("Resume") { downloads.perform(.resume, on: record.id) }.disabled(!record.canResume)
-            } else if !isWarned {
-                Button("Pause") { downloads.perform(.pause, on: record.id) }
+    }
+}
+
+/// A finished file for a drag, from its path and extension alone:
+/// `NSItemProvider(contentsOf:)` reads its type from disk on the main
+/// thread, which blocks on a slow or protected volume.
+enum DownloadDrag {
+    static func provider(for path: String) -> NSItemProvider {
+        let url = URL(fileURLWithPath: path)
+        let provider = NSItemProvider(object: url as NSURL)
+        if let type = UTType(filenameExtension: url.pathExtension) {
+            provider.registerFileRepresentation(forTypeIdentifier: type.identifier, fileOptions: [], visibility: .all) { done in
+                done(url, false, nil)
+                return nil
             }
-            Button("Cancel") { downloads.perform(.cancel, on: record.id) }
-            Divider()
         }
-        Button("Copy Download Link") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(record.url, forType: .string)
-        }
-        Button("Remove from List") { downloads.perform(.remove, on: record.id) }
+        provider.suggestedName = url.lastPathComponent
+        return provider
     }
 }
 

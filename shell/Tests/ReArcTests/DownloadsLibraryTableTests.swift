@@ -189,7 +189,7 @@ final class DownloadsLibraryTableTests: XCTestCase {
         done.isHovered = false
         XCTAssertNil(done.toolTip)
         let actions = try XCTUnwrap(done.accessibilityCustomActions()).map(\.name)
-        XCTAssertEqual(actions, ["Open", "Show in Finder", "Copy Download Link", "Remove from List"])
+        XCTAssertEqual(actions, ["Open", "Show in Finder", "Copy", "Copy Download Link", "Move to Trash", "Remove from List"])
 
         let busy = try row("busy")
         XCTAssertEqual(busy.subviews.compactMap { $0 as? DownloadsRowButton }.filter { !$0.isHidden }.map(\.help), ["Pause", "Cancel"])
@@ -213,7 +213,7 @@ final class DownloadsLibraryTableTests: XCTestCase {
         downloads.apply([finished("a"), finished("b"), finished("c")], source: .chromium)
         let (controller, _, table) = makeTable(downloads)
         XCTAssertEqual(controller.menuItems(for: [try XCTUnwrap(controller.record(at: 0))]).map(\.title),
-                       ["Open", "Show in Finder", "", "Copy Download Link", "Remove from List"])
+                       ["Open", "Show in Finder", "", "Copy", "Copy Download Link", "", "Move to Trash", "Remove from List"])
 
         table.selectRowIndexes([0, 2], byExtendingSelection: false)
         controller.copySelection()

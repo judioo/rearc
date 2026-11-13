@@ -19,7 +19,8 @@ struct UpdateBannerSlot: View {
 
 /// The Library button's downloads quick view (§5.1): the latest downloads
 /// rising out of the button, newest at the bottom, straight on the sidebar
-/// with no card. Click a row to open the file, drag it out to drag the file.
+/// with no card. Click a row to open the file, drag it out to drag the file,
+/// right-click it for the download's menu.
 struct RecentDownloadsStack: View {
     let records: [DownloadRecord]
     let downloads: DownloadsController
@@ -37,6 +38,7 @@ struct RecentDownloadsStack: View {
                 RecentDownloadRow(record: record, time: RecentDownloads.relativeTime(record.updatedAt, now: now)) {
                     downloads.perform(.open, on: record.id)
                 }
+                .contextMenu { DownloadContextMenu(records: [record], downloads: downloads) }
                 .modifier(QuickViewRowPose(fromBottom: index))
             }
         }
@@ -142,26 +144,10 @@ private struct RecentDownloadRow: View {
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .onTapGesture(perform: open)
-        .onDrag { Self.dragProvider(for: record.targetPath) }
+        .onDrag { DownloadDrag.provider(for: record.targetPath) }
         .help(record.targetPath)
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel("\(record.fileName), \(time)")
-    }
-
-    /// The file for a drag, from its path and extension alone:
-    /// `NSItemProvider(contentsOf:)` reads its type from disk on the main
-    /// thread, which blocks on a slow or protected volume.
-    static func dragProvider(for path: String) -> NSItemProvider {
-        let url = URL(fileURLWithPath: path)
-        let provider = NSItemProvider(object: url as NSURL)
-        if let type = UTType(filenameExtension: url.pathExtension) {
-            provider.registerFileRepresentation(forTypeIdentifier: type.identifier, fileOptions: [], visibility: .all) { done in
-                done(url, false, nil)
-                return nil
-            }
-        }
-        provider.suggestedName = url.lastPathComponent
-        return provider
     }
 }
 

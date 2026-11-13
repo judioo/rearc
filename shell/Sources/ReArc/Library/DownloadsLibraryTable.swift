@@ -306,13 +306,7 @@ final class DownloadsTableController: NSObject, NSTableViewDataSource, NSTableVi
 
     /// ⌘C: the selected rows' download links, one a line.
     func copySelection() {
-        copyLinks(targets(clicked: -1))
-    }
-
-    private func copyLinks(_ records: [DownloadRecord]) {
-        guard !records.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(records.map(\.url).joined(separator: "\n"), forType: .string)
+        downloads.perform(.copyLink, on: targets(clicked: -1).map(\.id))
     }
 
     var hasSelection: Bool { !(tableView?.selectedRowIndexes.isEmpty ?? true) }
@@ -356,31 +350,22 @@ final class DownloadsTableController: NSObject, NSTableViewDataSource, NSTableVi
         for item in menuItems(for: records) { menu.addItem(item) }
     }
 
-    /// The row's menu, as `DownloadRowView`'s; several rows get the actions that apply to each.
+    /// The row's menu (`DownloadMenu`), as the tray's; several rows get the actions that apply to each.
     func menuItems(for records: [DownloadRecord]) -> [NSMenuItem] {
         var items: [NSMenuItem] = []
-        func add(_ title: String, enabled: Bool = true, _ action: @escaping () -> Void) {
-            let item = DownloadsMenuItem(title: title, action: action)
-            item.isEnabled = enabled
-            items.append(item)
-        }
-        let withFiles = records.filter(\.hasFileOnDisk)
-        if !withFiles.isEmpty {
-            add("Open") { [weak self] in self?.perform(.open, on: withFiles.map(\.id)) }
-            add("Show in Finder") { [weak self] in self?.perform(.reveal, on: withFiles.map(\.id)) }
-            items.append(.separator())
-        }
-        if records.count == 1, let record = records.first, record.isActive {
-            if record.isPaused {
-                add("Resume", enabled: record.canResume) { [weak self] in self?.perform(.resume, on: [record.id]) }
-            } else if !isWarned(record) {
-                add("Pause") { [weak self] in self?.perform(.pause, on: [record.id]) }
+        let ids = records.map(\.id)
+        for (index, section) in DownloadMenu.sections(for: records, isWarned: isWarned).enumerated() {
+            if index > 0 { items.append(.separator()) }
+            for entry in section {
+                let item = DownloadsMenuItem(title: entry.item.title(count: records.count)) { [weak self] in
+                    self?.downloads.perform(entry.item, on: ids) { moved in
+                        if moved == 0 { NSSound.beep() }
+                    }
+                }
+                item.isEnabled = entry.isEnabled
+                items.append(item)
             }
-            add("Cancel") { [weak self] in self?.perform(.cancel, on: [record.id]) }
-            items.append(.separator())
         }
-        add(records.count == 1 ? "Copy Download Link" : "Copy Download Links") { [weak self] in self?.copyLinks(records) }
-        add("Remove from List") { [weak self] in self?.perform(.remove, on: records.map(\.id)) }
         return items
     }
 

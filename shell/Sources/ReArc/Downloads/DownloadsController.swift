@@ -115,6 +115,10 @@ final class DownloadsController {
     /// When the pending save runs; a change due no sooner rides on it.
     @ObservationIgnored private(set) var saveDeadline: DispatchTime?
     @ObservationIgnored private let workspace: NSWorkspace
+    /// Copy and Copy Download Link write here (a private pasteboard in tests).
+    @ObservationIgnored var pasteboard: NSPasteboard = .general
+    /// Move to Trash, off the main thread (a slow volume can block it).
+    @ObservationIgnored var trashItem: @Sendable (URL) throws -> Void = { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
     /// Main-thread time a turn may spend applying events before the rest
     /// wait for later turns (nil: every event applies at once).
     @ObservationIgnored private let turnBudget: TimeInterval?
@@ -403,6 +407,58 @@ final class DownloadsController {
             scheduleSave(immediately: true)
         case .pause, .resume, .cancel:
             break
+        }
+    }
+
+    /// A download menu's action (`DownloadMenu`) on its rows: the tray row,
+    /// the bottom bar's recent downloads and Library › Downloads.
+    func perform(_ item: DownloadMenuItem, on ids: [String], trashed: ((Int) -> Void)? = nil) {
+        flushPending()
+        let records = ids.compactMap { list.record(withID: $0) }
+        let files = records.filter(\.hasFileOnDisk)
+        switch item {
+        case .open: files.forEach { perform(.open, on: $0.id) }
+        case .showInFinder: files.forEach { perform(.reveal, on: $0.id) }
+        case .useOriginalName:
+            if let record = records.first {
+                useOriginalName(record.id) { outcome in
+                    if case .skipped = outcome { NSSound.beep() }
+                }
+            }
+        case .pause: records.forEach { perform(.pause, on: $0.id) }
+        case .resume: records.forEach { perform(.resume, on: $0.id) }
+        case .cancel: records.forEach { perform(.cancel, on: $0.id) }
+        case .copyFile: copyFiles(files)
+        case .copyLink:
+            guard !records.isEmpty else { return }
+            pasteboard.clearContents()
+            pasteboard.setString(records.map(\.url).joined(separator: "\n"), forType: .string)
+        case .moveToTrash: moveToTrash(files, done: trashed)
+        case .removeFromList: records.forEach { perform(.remove, on: $0.id) }
+        }
+    }
+
+    /// The files themselves, as Finder's Copy puts them: they paste into
+    /// Finder, Mail or Messages as files, and into a text field as their names.
+    private func copyFiles(_ records: [DownloadRecord]) {
+        guard !records.isEmpty else { return }
+        pasteboard.clearContents()
+        pasteboard.writeObjects(records.map { URL(fileURLWithPath: $0.targetPath) as NSURL })
+    }
+
+    /// Moves the files to the Trash (Put Back in Finder restores them, so
+    /// there is no confirmation, as in Finder) and drops their rows. A file
+    /// that could not be moved keeps its row. `done` gets how many moved.
+    private func moveToTrash(_ records: [DownloadRecord], done: ((Int) -> Void)?) {
+        guard !records.isEmpty else { done?(0); return }
+        let trash = trashItem
+        let files = records.map { ($0.id, URL(fileURLWithPath: $0.targetPath)) }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let moved = files.filter { (try? trash($0.1)) != nil }.map(\.0)
+            DispatchQueue.main.async { [weak self] in
+                moved.forEach { self?.perform(.remove, on: $0) }
+                done?(moved.count)
+            }
         }
     }
 
