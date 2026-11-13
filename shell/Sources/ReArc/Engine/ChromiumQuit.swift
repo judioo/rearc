@@ -171,3 +171,31 @@ struct ShellTermination: Equatable {
         isTerminating = false
     }
 }
+
+/// The windows a quit hides. They all go when the quit starts, with the Dock
+/// icon and the menu bar, so ReArc is gone at once while the engine closes
+/// its pages; they come back for a page's "Leave site?" and when the quit
+/// undoes itself.
+struct QuitWindows<ID: Hashable>: Equatable {
+    /// Hidden by the quit in progress, front to back.
+    private(set) var hidden: [ID] = []
+    private(set) var isHiding = false
+
+    /// The quit starts: `visible` (front to back) is what to hide. A second
+    /// call in the same quit hides nothing.
+    mutating func hide(_ visible: [ID]) -> [ID] {
+        guard !isHiding else { return [] }
+        isHiding = true
+        hidden = visible
+        return visible
+    }
+
+    /// The windows to show again, back to front, so the front one ends up in
+    /// front; nil when this quit hid nothing or showed them already.
+    mutating func reveal() -> [ID]? {
+        guard isHiding else { return nil }
+        isHiding = false
+        defer { hidden = [] }
+        return hidden.reversed()
+    }
+}

@@ -254,6 +254,9 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     /// Set while a quit is in progress; a quit that undoes itself clears it.
     private var termination = ShellTermination()
     private var terminating: Bool { termination.isTerminating }
+    /// The windows the quit in progress hid (`QuitWindows`).
+    private var quitWindows = QuitWindows<ObjectIdentifier>()
+    private var windowsHiddenByQuit: [ObjectIdentifier: NSWindow] = [:]
     /// The cached window is up (`presentCachedWindow`) and `ready` has not run.
     private var awaitingReady = false
     private var onboarding: FirstRunOnboarding?
@@ -451,14 +454,23 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             }
         }
         runtime.onTerminateRequested = { [weak self, weak model] in
-            // Saved before any window closes, so quitting keeps them all.
-            if self?.termination.begin() == true { MainActor.assumeIsolated { self?.finishWindowSession() } }
+            // Saved before any window closes, so quitting keeps them all; then
+            // the windows go at once and the engine closes the pages behind them.
+            if self?.termination.begin() == true {
+                MainActor.assumeIsolated {
+                    self?.finishWindowSession()
+                    self?.hideWindowsForQuit()
+                }
+            }
             model?.prepareForQuit()
         }
         runtime.onTerminateCancelled = { [weak self, weak model] in
             // ReArc keeps running: windows open, the session records and the timers run again.
             self?.termination.cancel()
-            MainActor.assumeIsolated { self?.resumeWindowSession() }
+            MainActor.assumeIsolated {
+                self?.revealWindowsHiddenByQuit()
+                self?.resumeWindowSession()
+            }
             model?.resumeAfterCancelledQuit()
         }
         runtime.onShutdownAbandoned = { [weak model] in
@@ -963,6 +975,36 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
     private func finishWindowSession() {
         sessionRecorder?.finish()
         sessionRecorder = nil
+    }
+
+    /// The quit starts: every window goes, and the Dock icon and the menu bar
+    /// with them (an accessory app), as Chrome and Arc do, while the engine
+    /// closes its pages. Status items and menus stay.
+    @MainActor
+    private func hideWindowsForQuit() {
+        let visible = NSApp.windows
+            .filter { $0.isVisible && $0.level.rawValue < NSWindow.Level.statusBar.rawValue }
+            .sorted { $0.orderedIndex < $1.orderedIndex }
+        for window in visible { windowsHiddenByQuit[ObjectIdentifier(window)] = window }
+        for id in quitWindows.hide(visible.map(ObjectIdentifier.init)) { windowsHiddenByQuit[id]?.orderOut(nil) }
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    /// A page asks "Leave site?" during the quit, or the quit undid itself:
+    /// ReArc is back, its windows where they were.
+    @MainActor
+    private func revealWindowsHiddenByQuit() {
+        guard let ids = quitWindows.reveal() else { return }
+        let shown = ids.compactMap { windowsHiddenByQuit[$0] }
+        windowsHiddenByQuit = [:]
+        NSApp.setActivationPolicy(.regular)
+        shown.forEach { $0.orderFront(nil) }
+        shown.last?.makeKey()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func revealForPagePrompt() {
+        MainActor.assumeIsolated { revealWindowsHiddenByQuit() }
     }
 
     /// After a quit undid itself: a new recorder observes the open browser windows.

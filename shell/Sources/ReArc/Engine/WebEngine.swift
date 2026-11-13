@@ -161,6 +161,8 @@ protocol BrowserWindowPresenting: AnyObject {
     func focusBrowserWindow(_ id: SidebarWindowID)
     /// File › New Window: another browser window, key, on the key window's space.
     func presentBrowserWindow()
+    /// A page asks "Leave site?": windows a quit hid come back to show it.
+    func revealForPagePrompt()
 }
 
 extension BrowserWindowPresenting {
@@ -168,6 +170,7 @@ extension BrowserWindowPresenting {
     func dismissDevToolsWindow(for tabID: Tab.ID) {}
     func focusBrowserWindow(_ id: SidebarWindowID) {}
     func presentBrowserWindow() {}
+    func revealForPagePrompt() {}
 }
 
 /// What an unload request did.

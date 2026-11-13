@@ -136,4 +136,26 @@ final class ChromiumQuitTests: XCTestCase {
         XCTAssertFalse(termination.isTerminating)
         XCTAssertTrue(termination.begin(), "the next quit saves the session again")
     }
+
+    // MARK: Windows during a quit
+
+    func testAQuitHidesEveryWindowOnceAndShowsThemBackInTheirOrder() {
+        var windows = QuitWindows<String>()
+        XCTAssertNil(windows.reveal(), "nothing to show before a quit")
+        XCTAssertEqual(windows.hide(["front", "middle", "back"]), ["front", "middle", "back"])
+        XCTAssertTrue(windows.isHiding)
+        XCTAssertEqual(windows.hide(["late"]), [], "a second request in the same quit hides nothing more")
+        // Back to front: each one ordered in goes in front of the last, so "front" ends up in front.
+        XCTAssertEqual(windows.reveal(), ["back", "middle", "front"])
+        XCTAssertFalse(windows.isHiding)
+        XCTAssertNil(windows.reveal(), "a Leave site? that showed them leaves nothing for the undo")
+    }
+
+    func testAQuitWithNoWindowStillComesBack() {
+        var windows = QuitWindows<String>()
+        XCTAssertEqual(windows.hide([]), [])
+        // The Dock icon and menu bar come back even though no window does.
+        XCTAssertEqual(windows.reveal(), [])
+        XCTAssertEqual(windows.hide(["next"]), ["next"], "the next quit hides again")
+    }
 }

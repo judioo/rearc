@@ -64,6 +64,7 @@ extension BrowserViewModel: PageLinkRouting {
     }
 
     func revealPage(of prompts: PagePromptCenter) {
+        windowPresenter?.revealForPagePrompt()
         guard let id = prompts.ownerTabID, store.tab(withID: id) != nil else { return }
         if store.focusTab(id) { loadSelectedIfNeeded() }
     }
