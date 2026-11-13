@@ -95,6 +95,7 @@ tab/086-evaluation-origin-gate.patch            # P-TAB-001 bridge 0.67.0: shell
 tab/087-download-warning-actions.patch          # P-TAB-001 ABI 1.62: dangerous download keep/discard report; scan action (audit F-18)
 tab/088-remove-unpacked-extension-loading.patch # P-TAB-001 ABI 1.63: remove ReArcProfileLoadUnpackedExtension (audit F-05)
 tab/089-histogram-completion-delivery.patch     # P-TAB-001 bridge 0.70.0: histogram completions through ABIPost
+tab/090-shutdown-closes-together.patch          # P-TAB-001 bridge 0.71.0: shutdown closes pages that cannot ask "Leave site?" together
 #
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:

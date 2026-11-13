@@ -1,0 +1,253 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 shutdown closes pages that cannot ask together
+
+Bridge 0.71.0. ReArcEngineShutdown closed every tab one at a time through
+close_controller: beforeunload, then ClosePage (a renderer round trip that
+runs unload and pagehide, up to content's 500 ms timeout), then a posted
+finalize and the contents destructor, before the next tab began. A quit
+took the sum over all live tabs, ~35 ms each even when forced, far more
+for busy background renderers. Chrome instead fast-shuts-down renderers
+with no unload-time handler and closes its tabs together.
+
+A non-forced shutdown now closes alone, in order, only the tabs whose page
+may ask "Leave site?" (a beforeunload handler in a live frame) or whose
+close is in flight, so Stay still keeps the engine running before any other
+page unloads, and earlier closed tabs stay closed as before. Once none is
+left, every other tab closes in one task, as Chrome's browser shutdown does
+(browser_shutdown::OnShutdownStarting, TabStripModel::CloseWebContentses):
+a renderer whose pages are all closing and have no unload, pagehide or
+visibilitychange handler ends at once (FastShutdownIfPossible, reported as a
+normal termination, so no tab shows crashed), and those pages are destroyed
+without a round trip. Pages with such a handler still run it, in parallel.
+A page that gained a beforeunload handler meanwhile is closed alone first.
+A forced shutdown closes every tab in that one task and skips unload
+handlers. Close replies of a vetoed shutdown carry its generation and do
+not act on the next one. Nothing in the C ABI changes.
+
+Last rebased: 2026-11-13 onto Chromium 156.0.8078.100 (46876a0c2d).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 2ba98dd..f2b396e 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -16,9 +16,11 @@
+ #include <map>
+ #include <set>
+ #include <string>
++#include <utility>
+ #include <vector>
+ 
+ #include "base/check.h"
++#include "base/containers/flat_map.h"
+ #include "chrome/browser/extensions/webstore_standalone_installer.h"
+ #include "extensions/browser/extension_registry.h"
+ #include "extensions/browser/install_prompt_data.h"
+@@ -67,7 +69,10 @@
+ #include "components/version_info/version_info.h"
+ #include "google_apis/google_api_keys.h"
+ #include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_process_host.h"
+ #include "content/public/browser/web_contents.h"
++#include "third_party/blink/public/mojom/frame/sudden_termination_disabler_type.mojom.h"
+ #include "ui/base/page_transition_types.h"
+ #include "url/gurl.h"
+ 
+@@ -96,6 +101,25 @@
+   bool intent = false;
+ };
+ 
++// A tab a non-forced shutdown closes on its own, before the rest: its page
++// may ask "Leave site?" (a beforeunload handler in any live frame), or a
++// close of it is already in flight and the shutdown joins it. Stay then
++// keeps the engine running before any other page has unloaded.
++bool ShutdownClosesAlone(TabSession& session) {
++  if (session.close_state() != TabSession::CloseState::kOpen) {
++    return true;
++  }
++  bool asks = false;
++  session.web_contents()->GetPrimaryMainFrame()->ForEachRenderFrameHost(
++      [&asks](content::RenderFrameHost* frame) {
++        asks |= frame->IsRenderFrameLive() &&
++                frame->GetSuddenTerminationDisablerState(
++                    blink::mojom::SuddenTerminationDisablerType::
++                        kBeforeUnloadHandler);
++      });
++  return asks;
++}
++
+ // NoDestructor keeps callback/ObjC storage alive through ChromeMain teardown.
+ class ABI final : public EngineReadinessSink,
+                   public TabEventSink,
+@@ -125,6 +149,10 @@
+   size_t live_tabs = 0;
+   std::vector<uint64_t> shutdown_tabs;
+   size_t shutdown_index = 0;
++  // Tabs that close together once no page can keep the engine running.
++  std::vector<uint64_t> shutdown_batch;
++  // Close replies of an earlier, vetoed shutdown do not act on this one.
++  uint64_t shutdown_generation = 0;
+   bool shutdown_force = false;
+   ReArcCompletion shutdown_completion = nullptr;
+   raw_ptr<void> shutdown_context = nullptr;
+@@ -332,27 +360,51 @@ void ContinueProfileClose() {
+   }
+ 
+   void ContinueShutdown() {
+-    // Sequential close allows cancellation without starting later unloads.
+-    while (shutdown_index < shutdown_tabs.size()) {
+-      uint64_t id = shutdown_tabs[shutdown_index++];
+-      if (!TabRegistry::Get().FindSession(id)) {
+-        continue;
++    for (;;) {
++      // Sequential close allows cancellation without starting later unloads.
++      // Only pages that can veto close this way; a forced shutdown has none.
++      while (shutdown_index < shutdown_tabs.size()) {
++        uint64_t id = shutdown_tabs[shutdown_index++];
++        TabSession* session = TabRegistry::Get().FindSession(id);
++        if (!session) {
++          continue;
++        }
++        if (shutdown_force || !ShutdownClosesAlone(*session)) {
++          shutdown_batch.push_back(id);
++          continue;
++        }
++        auto result = RequestTabCloseForShutdown(
++            id, shutdown_force,
++            base::BindOnce(
++                [](uint64_t generation, CloseOutcome outcome) {
++                  auto& a = Get();
++                  if (outcome == CloseOutcome::kCancelled) {
++                    a.CancelShutdown(generation);
++                  } else if (a.stopping &&
++                             generation == a.shutdown_generation) {
++                    a.ContinueShutdown();
++                  }
++                },
++                shutdown_generation));
++        if (result == CloseRequestResult::kStarted) return;
++      }
++      // A page that added a beforeunload handler meanwhile closes alone too.
++      std::erase_if(shutdown_batch, [this](uint64_t id) {
++        TabSession* session = TabRegistry::Get().FindSession(id);
++        if (!session) {
++          return true;
++        }
++        if (shutdown_force || !ShutdownClosesAlone(*session)) {
++          return false;
++        }
++        shutdown_tabs.push_back(id);
++        return true;
++      });
++      if (shutdown_index == shutdown_tabs.size()) {
++        break;
+       }
+-      auto result = RequestTabCloseForShutdown(
+-          id, shutdown_force, base::BindOnce([](CloseOutcome outcome) {
+-            auto& a = Get();
+-            if (outcome == CloseOutcome::kCancelled) {
+-              a.stopping = false;
+-              auto completion = a.shutdown_completion;
+-              a.shutdown_completion = nullptr;
+-              ABIPost(base::BindOnce(completion, a.shutdown_context.get(),
+-                                     REARC_OK, true));
+-            } else {
+-              a.ContinueShutdown();
+-            }
+-          }));
+-      if (result == CloseRequestResult::kStarted) return;
+     }
++    CloseShutdownBatch();
+     // DidDestroyTab runs after the contents destructor and posts tab.closed.
+     // It calls FinishShutdown when the final live contents has gone away.
+     if (!live_tabs) {
+@@ -360,6 +412,65 @@ void ContinueShutdown() {
+     }
+   }
+ 
++  // No page can keep the engine running now, so every other tab closes in
++  // this one task, as Chrome's browser shutdown closes its windows
++  // (browser_shutdown::OnShutdownStarting, TabStripModel::CloseWebContentses):
++  // a renderer whose pages are all closing and have no unload, pagehide or
++  // visibilitychange handler ends at once, and those pages are destroyed
++  // without a renderer round trip. Pages with such a handler run it, all in
++  // parallel, within content's unload timeout. A forced shutdown runs none.
++  void CloseShutdownBatch() {
++    std::vector<uint64_t> batch = std::exchange(shutdown_batch, {});
++    base::flat_map<content::RenderProcessHost*, size_t> processes;
++    for (uint64_t id : batch) {
++      TabSession* session = TabRegistry::Get().FindSession(id);
++      if (!session) {
++        continue;
++      }
++      content::WebContents* contents = session->web_contents();
++      if (shutdown_force || !contents->NeedToFireBeforeUnloadOrUnloadEvents()) {
++        ++processes[contents->GetPrimaryMainFrame()->GetProcess()];
++      }
++    }
++    for (const auto& [process, pages] : processes) {
++      process->FastShutdownIfPossible(pages,
++                                      /*skip_unload_handlers=*/shutdown_force);
++    }
++    for (uint64_t id : batch) {
++      TabSession* session = TabRegistry::Get().FindSession(id);
++      if (!session) {
++        continue;
++      }
++      content::WebContents* contents = session->web_contents();
++      bool unloads =
++          !shutdown_force && contents->NeedToFireBeforeUnloadOrUnloadEvents();
++      // A page the renderer gave a beforeunload handler after the browser
++      // last heard of it can still say Stay; that ends this shutdown.
++      RequestTabCloseForShutdown(
++          id, !unloads,
++          base::BindOnce(
++              [](uint64_t generation, CloseOutcome outcome) {
++                if (outcome == CloseOutcome::kCancelled) {
++                  Get().CancelShutdown(generation);
++                }
++              },
++              shutdown_generation));
++    }
++  }
++
++  // A page said Stay: the engine runs on and the host's quit is undone.
++  // Tabs that had already closed stay closed.
++  void CancelShutdown(uint64_t generation) {
++    if (!stopping || generation != shutdown_generation) {
++      return;  // An earlier Stay already ended this shutdown.
++    }
++    stopping = false;
++    shutdown_batch.clear();
++    auto completion = shutdown_completion;
++    shutdown_completion = nullptr;
++    ABIPost(base::BindOnce(completion, shutdown_context.get(), REARC_OK, true));
++  }
++
+   void FinishShutdown() {
+     if (!ready) {
+       return;
+@@ -1077,6 +1188,8 @@ ReArcStatus ReArcEngineShutdown(bool force,
+     }
+   }
+   a.shutdown_index = 0;
++  a.shutdown_batch.clear();
++  ++a.shutdown_generation;
+   a.shutdown_force = force;
+   a.shutdown_completion = completion;
+   a.shutdown_context = context;
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index deb4343..ced10e1 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.70.0";
++  return "0.71.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(

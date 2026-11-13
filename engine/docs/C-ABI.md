@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.63** (major remains 1 for existing hosts), bridge **0.70.0**, compiled Chromium **156.0.8078.100**. Public header:
+ABI **1.63** (major remains 1 for existing hosts), bridge **0.71.0**, compiled Chromium **156.0.8078.100**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -79,7 +79,7 @@ before ownership changes. The header is authoritative for C signatures.
 | `ReArcEngineConfigure(version, callbacks, context)` | Copies callback table; one registration, before NSApplication. Requires ready callback. |
 | `ReArcEngineRun(argc, argv)` | Blocking single browser invocation; returns upstream exit code. Preflight failures return negative ReArcStatus. |
 | `ReArcEngineDefaultProfile()` | Current startup profile ID, or 0 before ready/after stopping. |
-| `ReArcEngineShutdown(force, completion, context)` | Stops new work, closes live tabs sequentially through close_controller, releases profiles only after actual contents destruction, then shell keepalive and upstream quit. A veto completes with cancelled=true and resumes service; earlier closed tabs stay closed. Existing standalone tab closes are joined (and promoted by force); concurrent shutdown or an accepted ProfileClose still fails busy. |
+| `ReArcEngineShutdown(force, completion, context)` | Stops new work, closes the tabs whose page may ask "Leave site?" one at a time through close_controller and then every other tab together (bridge 0.71.0), releases profiles only after actual contents destruction, then shell keepalive and upstream quit. A veto completes with cancelled=true and resumes service; earlier closed tabs stay closed. Existing standalone tab closes are joined (and promoted by force); concurrent shutdown or an accepted ProfileClose still fails busy. |
 | `ReArcEngineSetLifecycleCallbacks(request, cancel, context)` | Legacy low-level bootstrap; Configure installs its own adapter. Do not replace it while using the ABI. |
 | `ReArcTabCreate(profile, space, url, out_tab)` | Any live initialized profile, nonzero shell space label; null URL keeps the initial empty about:blank document without synthetic navigation. Explicit URLs queue their initial load; an immediate Navigate supersedes it. Returns ID before tab.created; tab starts hidden. |
 | `ReArcTabClose(tab, force, completion, context)` | Normal close honors beforeunload; conservative dialog policy vetoes confirmation. Force skips veto, retains cleanup. Unique pending close; closed completion follows tab.closed. |
@@ -2547,3 +2547,22 @@ and 0.65.0. A store manifest asking for more than the source raises the install
 prompt, which the test cancels: result 3. Equal permissions install with no
 prompt. A batch started just before shutdown answers every ID with result 3
 before the shutdown completion.
+
+### Shutdown closes pages that cannot ask together (bridge 0.71.0)
+
+Patch `tab/090-shutdown-closes-together`. A non-forced `ReArcEngineShutdown`
+closes alone, in order, only the tabs whose page has a beforeunload handler in
+a live frame or whose close is already in flight; a Stay still completes with
+`cancelled` before any other page unloads. Then every other tab closes in one
+task, as Chrome's browser shutdown does: a renderer whose pages are all closing
+and have no unload, pagehide or visibilitychange handler is fast-shut-down
+(reported as a normal termination: `is_crashed` stays false), and those pages
+are destroyed without a renderer round trip; pages with such a handler run it,
+in parallel, within content's unload timeout. A forced shutdown closes every
+tab in that one task. Every tab still gets exactly one `tab.closed` before the
+completion. No signature or struct changes.
+
+**Tests:** `engine/tests/c_abi_fast_quit_host.mm` (run_c_abi.py `fast_quit`).
+Mode 0: 60 pages with no handler and 3 with a pagehide handler close in a
+non-forced shutdown in under a second. Mode 1: a beforeunload page's Stay
+leaves every other page open; the forced retry closes them all.
