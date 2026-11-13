@@ -1776,9 +1776,12 @@ final class BrowserViewModel {
         }
         boostEditorDraftByTab.removeAll()
         easelStore.flushAllCachedDocuments()
+        // History.json encodes on its own queue while the sidebar and the
+        // downloads save here; all three are on disk when this returns.
+        startVisitHistorySave()
         persistence.flush()
-        saveVisitHistory()
         downloads.save()
+        historySaveQueue.sync {}
     }
 
     /// A quit that did not happen (a page's beforeunload kept it, or the

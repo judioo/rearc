@@ -93,13 +93,18 @@ extension BrowserViewModel {
     }
 
     func saveVisitHistory() {
-        historySaveWorkItem?.cancel()
-        historySaveWorkItem = nil
-        enqueueVisitHistorySave()
+        startVisitHistorySave()
         // Explicit flush is used at shutdown (and by persistence tests).
         // Ordinary visits never wait for encoding or disk. All writes share
         // one serial queue, so an older snapshot cannot overwrite a new one.
         historySaveQueue.sync {}
+    }
+
+    /// Starts writing History.json now; `historySaveQueue` finishes it.
+    func startVisitHistorySave() {
+        historySaveWorkItem?.cancel()
+        historySaveWorkItem = nil
+        enqueueVisitHistorySave()
     }
 
     private func enqueueVisitHistorySave() {
