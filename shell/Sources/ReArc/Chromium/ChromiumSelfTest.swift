@@ -424,7 +424,7 @@ final class ChromiumSelfTest {
             + "command-bar contexts: \(runtime.liveCommandBarContexts))")
 
         // 18. A quit a page vetoes leaves the runtime active; a page asked for during it waits for Chromium.
-        //     Last: the quit closes every tab ahead of the vetoing one.
+        //     Last: the quit closes tabs ahead of the vetoing one (every one before bridge 0.71.0).
         if capabilities.javascriptDialogs {
             try await vetoedQuitChecks(engine: engine, base: base, window: window)
         }
