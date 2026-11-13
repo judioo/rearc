@@ -1,0 +1,166 @@
+From: ReArc Authors
+Subject: [PATCH] P-TAB-001 context menu Save Link As (ABI 1.64)
+
+The page menu had no Save Link As: Arc and Chrome offer it on every link,
+and the shell had no way to start a download of link_url with the page's
+context. New action 21 runs RenderViewContextMenu::ExecSaveLinkAs: a
+prompted DownloadUrl from the clicked frame (CreateDownloadUrlParameters,
+so its origin is the initiator), the frame's sanitized referrer and
+charset, Chromium's suggested name, download source CONTEXT_MENU. The save
+path comes through the host's file chooser (tab/037), as Save Image As
+does; target, safety checks and history stay Chromium's. Needs a link
+(else invalid_state). The traffic annotation is new
+(rearc_context_menu_save_link).
+
+Bridge 0.72.0, ABI 1.64, feature context_menu_save_link. No struct or
+existing action changes.
+
+Last rebased: 2026-11-13 onto Chromium 156.0.8078.100 (overlay ec25ecb2bd).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/rearc_bridge/rearc_context_menu.cc b/chrome/browser/rearc_bridge/rearc_context_menu.cc
+index 699f09c..6866600 100644
+--- a/chrome/browser/rearc_bridge/rearc_context_menu.cc
++++ b/chrome/browser/rearc_bridge/rearc_context_menu.cc
+@@ -17,7 +17,10 @@
+ #include "chrome/browser/rearc_bridge/rearc_abi_internal.h"
+ #include "chrome/browser/rearc_bridge/rearc_extension_windows.h"
+ #include "chrome/browser/rearc_bridge/tab_registry.h"
++#include "components/download/public/common/download_url_parameters.h"
++#include "content/public/browser/browser_context.h"
+ #include "content/public/browser/context_menu_params.h"
++#include "content/public/browser/download_manager.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
+ #include "content/public/browser/page_navigator.h"
+@@ -28,6 +31,7 @@
+ #include "content/public/browser/web_contents_observer.h"
+ #include "content/public/browser/web_contents_user_data.h"
+ #include "content/public/common/referrer.h"
++#include "net/traffic_annotation/network_traffic_annotation.h"
+ #include "third_party/blink/public/common/context_menu_data/edit_flags.h"
+ #include "third_party/blink/public/common/loader/network_utils.h"
+ #include "third_party/blink/public/mojom/context_menu/context_menu.mojom.h"
+@@ -100,7 +104,7 @@ class Menu : public content::WebContentsObserver,
+     const auto p = *params_;
+     auto* c = web_contents();
+     uint64_t tab = event_.tab_id;
+-    if (action > 20) {
++    if (action > 21) {
+       return REARC_INVALID_ARGUMENT;
+     }
+     if (action == 8) {
+@@ -119,7 +123,7 @@ class Menu : public content::WebContentsObserver,
+     // background tab, foreground tab, window or split view.
+     const bool opens_link = action == 0 || (action >= 13 && action <= 16);
+     const bool opens_media = action >= 17 && action <= 20;
+-    if (((action < 2 || opens_link) && p.link_url.is_empty()) ||
++    if (((action < 2 || opens_link || action == 21) && p.link_url.is_empty()) ||
+         (opens_media && p.src_url.is_empty()) ||
+         ((action == 6 || action == 7) && !p.has_image_contents)) {
+       return REARC_INVALID_STATE;
+@@ -204,6 +208,9 @@ class Menu : public content::WebContentsObserver,
+       case 7:
+         frame->CopyImageAt(p.x, p.y);
+         break;
++      case 21:
++        SaveLinkAs(*frame, p);
++        break;
+       case 9:
+         return ReArcTabGoBack(tab);
+       case 10:
+@@ -217,6 +224,43 @@ class Menu : public content::WebContentsObserver,
+     }
+     return REARC_OK;
+   }
++  // ABI 1.64: RenderViewContextMenu::ExecSaveLinkAs. A prompted download of
++  // link_url from the clicked frame: its origin as initiator, its sanitized
++  // referrer. The save panel is the host's file chooser (SAVE_AS).
++  static void SaveLinkAs(content::RenderFrameHost& frame,
++                         const content::ContextMenuParams& p) {
++    net::NetworkTrafficAnnotationTag traffic_annotation =
++        net::DefineNetworkTrafficAnnotation("rearc_context_menu_save_link", R"(
++          semantics {
++            sender: "ReArc page context menu"
++            description: "Saves a link's target to a local file."
++            trigger: "The user chooses Save Link As in the page context menu."
++            data: "None."
++            destination: WEBSITE
++          }
++          policy {
++            cookies_allowed: YES
++            cookies_store: "user"
++            setting:
++              "This feature cannot be disabled by settings. The request is "
++              "made only if the user chooses Save Link As."
++            policy_exception_justification: "Not implemented."
++          })");
++    auto params =
++        frame.CreateDownloadUrlParameters(p.link_url, traffic_annotation);
++    const auto referrer = content::Referrer::SanitizeForRequest(
++        p.link_url,
++        content::Referrer(p.frame_url.GetAsReferrer(), p.referrer_policy));
++    params->set_referrer(referrer.url);
++    params->set_referrer_policy(
++        content::Referrer::ReferrerPolicyForUrlRequest(referrer.policy));
++    params->set_referrer_encoding(p.frame_charset);
++    params->set_suggested_name(p.suggested_filename);
++    params->set_prompt(true);
++    params->set_download_source(download::DownloadSource::CONTEXT_MENU);
++    frame.GetBrowserContext()->GetDownloadManager()->DownloadUrl(
++        std::move(params));
++  }
+   void DidStartNavigation(content::NavigationHandle* h) override {
+     if (h->IsInPrimaryMainFrame() && !h->IsSameDocument()) {
+       End(true);
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.h b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+index d478080..9e3f242 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.h
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.h
+@@ -42,7 +42,7 @@ enum {
+   REARC_SCRIPT_ERROR = 17,
+   REARC_TIMEOUT = 18
+ };
+-enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 63, REARC_MAX_BLOB_BYTES = 16777216 };
++enum { REARC_ABI_VERSION = 1, REARC_ABI_MINOR_VERSION = 64, REARC_MAX_BLOB_BYTES = 16777216 };
+ 
+ // kind: 0 created, 1 updated, 2 closed, 3 navigation committed, 4 failed.
+ // ABI 1.25 adds kind 5 discarded, 6 discard cleared (also on state refresh).
+@@ -1045,6 +1045,11 @@ REARC_ENGINE_EXPORT void ReArcEngineSetContextMenuCallback(
+ // 2, 1, 4 and 5, answered with ReArcLinkOpenRespond; they need a link-open
+ // callback (else unsupported). Do not open these URLs with ReArcTabNavigate
+ // or ReArcTabCreate: that loads them with no initiator.
++// ABI 1.64 (context_menu_save_link): 21 saves link_url as Chrome's Save Link
++// As does: a prompted download from the clicked frame (its origin as
++// initiator, its sanitized referrer), whose save path comes through the file
++// chooser channel (1.19) when one is registered. Any URL the download system
++// accepts; invalid_state without a link.
+ REARC_ENGINE_EXPORT ReArcStatus ReArcContextMenuCommand(
+     uint64_t request_id, uint32_t action);
+ 
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_abi.mm b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+index 2ba98dd..a8684cb 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_abi.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_abi.mm
+@@ -840,6 +840,7 @@ bool ReArcEngineHasFeature(const char* feature) {
+          std::string(feature) == "launch_switch_filter" ||
+          std::string(feature) == "safe_browsing_tab_helpers" ||
+          std::string(feature) == "context_menu_link_open" ||
++         std::string(feature) == "context_menu_save_link" ||
+          std::string(feature) == "fullscreen_origin" ||
+          std::string(feature) == "credential_leak_events" ||
+          std::string(feature) == "extension_install_sources" ||
+diff --git a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+index deb4343..ced10e1 100644
+--- a/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
++++ b/chrome/browser/rearc_bridge/rearc_engine_entry_mac.mm
+@@ -45,7 +45,7 @@ bool HandleTerminateCancel() override {
+ 
+ const char* ReArcEngineBridgeVersion(void) {
+   CHECK([NSThread isMainThread]);
+-  return "0.71.0";
++  return "0.72.0";
+ }
+ 
+ void ReArcEngineSetLifecycleCallbacks(

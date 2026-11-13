@@ -1,6 +1,6 @@
 # ReArc engine C ABI
 
-ABI **1.63** (major remains 1 for existing hosts), bridge **0.71.0**, compiled Chromium **156.0.8078.100**. Public header:
+ABI **1.64** (major remains 1 for existing hosts), bridge **0.72.0**, compiled Chromium **156.0.8078.100**. Public header:
 `chrome/browser/rearc_bridge/rearc_engine_abi.h`; adjacent `module.modulemap`
 imports it as `ReArcEngine`. This is an in-process typed adapter for
 [IPC-CONTRACT](IPC-CONTRACT.md), not a JSON connection. Synchronous return
@@ -2566,3 +2566,14 @@ completion. No signature or struct changes.
 Mode 0: 60 pages with no handler and 3 with a pagehide handler close in a
 non-forced shutdown in under a second. Mode 1: a beforeunload page's Stay
 leaves every other page open; the forced retry closes them all.
+
+## Context menu Save Link As (ABI 1.64, bridge 0.72.0)
+
+Patch `tab/091-context-menu-save-link`, feature `context_menu_save_link`.
+`ReArcContextMenuCommand` action 21 saves `link_url` as Chrome's Save Link As
+does (`RenderViewContextMenu::ExecSaveLinkAs`): a prompted download from the
+clicked frame, its origin as initiator, its sanitized referrer and charset,
+download source CONTEXT_MENU. The save path comes through the file chooser
+channel (1.19) as a save request, as Save Image As (action 6) does. Without a
+link it returns `invalid_state`. No struct or earlier action changed. Hosts
+gate the menu item on the feature.
