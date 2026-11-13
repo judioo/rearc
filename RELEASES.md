@@ -19,6 +19,28 @@ that adds the entry, so write it as the last commit before the release, with
 Merged since the last release and not yet in a build. The next release's entry takes these
 lines and this section starts empty again.
 
+## ReArc 2026.1113.765 — 2026-11-13
+
+**Fixes**
+- Turning Sync Sidebar on can no longer empty your sidebar. If you had deleted a profile's
+  copy from iCloud, the first sync after turning sync on treated this Mac's spaces as deleted
+  too and removed them. Now, when iCloud holds no space, the first sync uploads this Mac's
+  whole sidebar, and a profile you put back in iCloud wins over iCloud's old deletions.
+- A fresh install no longer lists your imported profile under "In iCloud only". Each install
+  gives the profile a new ID, so iCloud's copy of the same spaces looked like a different
+  profile; ReArc now recognises it as yours.
+- The Sync Sidebar switch can be switched off while ReArc is still looking at iCloud, and that
+  cancels the look. Before, it showed off during the look and could turn itself on afterwards.
+
+**New**
+- Settings › Profiles has Sync Sidebar itself: the iCloud row says where the profile is
+  ("Synced with iCloud", "On this Mac and in iCloud" or "Only on this Mac"), and the same
+  switch as the account tab turns sync on or off for every profile. Turning it off changes
+  nothing in iCloud.
+- Put in iCloud… puts a profile that is only on this Mac back in iCloud, from the iCloud row
+  or the profile's right-click menu. With sync off it turns sync on, looks at iCloud first and
+  asks before changing anything there.
+
 ## ReArc 2026.1113.761 — 2026-11-13
 
 **Fixes**
