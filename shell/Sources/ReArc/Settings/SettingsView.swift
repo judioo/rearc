@@ -260,6 +260,7 @@ struct ProfilesSettingsPane: View {
         }
         .cloudProfileDeleteAlert(model)
         .containerRemovalAlert(model, removing: $removingContainer)
+        .cloudSidebarChoiceSheet(model)
     }
 
     /// Arc's text; its "Learn more." opens the explanation here, not a web page.
@@ -340,14 +341,12 @@ struct ProfilesSettingsPane: View {
     /// A profile iCloud has too asks where to delete it from; one only here
     /// (or not known yet) deletes as it always did; one only in iCloud is deleted there.
     private func deleteSelected() {
-        if let cloud = selectedCloud { return model.requestCloudProfileDeletion(cloud.id) }
+        if let cloud = selectedCloud { return _ = model.requestCloudProfileDeletion(cloud.id) }
         guard let id = selected?.id else { return }
         if selectedIsContainer { return removingContainer = id }
-        if model.cloudPresence(of: id) == .inICloud, model.canDeleteFromICloud {
-            model.requestCloudProfileDeletion(id)
-        } else {
-            deleting = id
-        }
+        // Sync on and up to date counts as in iCloud before a look lists it: the plain delete reaches iCloud then.
+        if model.cloudPresence(of: id) == .inICloud, model.canDeleteFromICloud, model.requestCloudProfileDeletion(id) { return }
+        deleting = id
     }
 
     private func profileRow(_ profile: Profile) -> some View {
@@ -370,6 +369,12 @@ struct ProfilesSettingsPane: View {
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .contextMenu {
+            if model.cloudPresence(of: profile.id) == .onlyHere {
+                Button(ProfileCloudText.putInICloud(syncOn: model.isSyncEnabled)) { model.putInICloud(profile.id) }
+                    .disabled(!model.canPutInICloud(profile.id))
+            }
+        }
     }
 
     private func listButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {

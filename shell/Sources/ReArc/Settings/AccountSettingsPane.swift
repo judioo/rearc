@@ -56,13 +56,7 @@ struct AccountSettingsPane: View {
         } message: {
             Text("The name on your card and your profile.")
         }
-        .sheet(isPresented: Binding(get: { model.syncCloudChoice != nil }, set: { if !$0 { model.syncCloudChoice = nil } })) {
-            if let found = model.syncCloudChoice {
-                CloudSidebarChoiceSheet(found: found, backupFolder: model.sidebarBackupFolderName,
-                                        choose: { model.chooseCloudSidebar($0, from: found) },
-                                        cancel: { model.syncCloudChoice = nil })
-            }
-        }
+        .cloudSidebarChoiceSheet(model)
         .alert(confirming?.title ?? "", isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
                presenting: confirming) { action in
             Button(action.button, role: .destructive) { perform(action) }
@@ -212,7 +206,8 @@ struct AccountSettingsPane: View {
                     HStack {
                         Text("Sync Sidebar").font(.system(size: 13))
                         Spacer()
-                        Toggle("Sync Sidebar", isOn: Binding(get: { model.isSyncEnabled }, set: { model.setSyncEnabled($0) }))
+                        // On while it waits for the look: switching it off then stops the wait.
+                        Toggle("Sync Sidebar", isOn: Binding(get: { model.syncSwitchIsOn }, set: { model.setSyncEnabled($0) }))
                             .toggleStyle(.switch).controlSize(.large).labelsHidden()
                     }
                     HStack(spacing: 8) {
@@ -367,6 +362,20 @@ enum CloudAction: Identifiable {
         case .delete:
             return holds + "It is deleted from iCloud. This Mac's sidebar stays as it is, and Sync Sidebar turns off here. "
                 + "Another Mac that still syncs uploads its own sidebar again."
+        }
+    }
+}
+
+extension View {
+    /// The sheet switching Sync Sidebar on shows when iCloud holds a
+    /// sidebar, wherever the switch is (Account, Profiles).
+    func cloudSidebarChoiceSheet(_ model: BrowserViewModel) -> some View {
+        sheet(isPresented: Binding(get: { model.syncCloudChoice != nil }, set: { if !$0 { model.syncCloudChoice = nil } })) {
+            if let found = model.syncCloudChoice {
+                CloudSidebarChoiceSheet(found: found, backupFolder: model.sidebarBackupFolderName,
+                                        choose: { model.chooseCloudSidebar($0, from: found) },
+                                        cancel: { model.syncCloudChoice = nil })
+            }
         }
     }
 }

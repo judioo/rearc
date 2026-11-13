@@ -6,16 +6,26 @@ import SidebarModel
 /// iCloud has, and deleting one profile from iCloud. Everything reads the
 /// session's look (`cloudDetection`); a delete looks again first.
 extension BrowserViewModel {
+    /// Where the profile is: by the session's look, and once sync is on and
+    /// up to date, in iCloud, whatever an older look said.
     func cloudPresence(of id: Profile.ID) -> ProfileCloudPresence {
         guard syncControl != nil else { return .unknown(CloudKitSyncAvailability.unavailableMessage) }
         var itemsRead: Int?
         if case .looking(let count) = cloudLook { itemsRead = count }
-        return .of(id, detection: cloudDetection, looking: isCheckingCloud, itemsRead: itemsRead)
+        if !isCheckingCloud, isSyncEnabled, syncDetails?.phase == .upToDate { return .inICloud }
+        return .of(id, spaces: store.spaces, detection: cloudDetection, looking: isCheckingCloud, itemsRead: itemsRead)
     }
 
-    /// The Profiles list's "In iCloud only": the last look's, also while one runs again.
+    /// The Profiles list's "In iCloud only": the last look's, also while one
+    /// runs again. iCloud's copy of a profile of this Mac (another install's
+    /// import of the same Arc spaces) is that profile, not listed here.
     var cloudOnlyProfiles: [CloudProfile] {
-        cloudDetection?.found?.profiles(notIn: store.profiles) ?? []
+        cloudDetection?.found?.profiles(notIn: store.profiles, spaces: store.spaces) ?? []
+    }
+
+    /// Put in iCloud… can start: the look says only this Mac has it, and the switch isn't waiting.
+    func canPutInICloud(_ id: Profile.ID) -> Bool {
+        cloudPresence(of: id) == .onlyHere && !syncSwitchWaiting && syncCloudChoice == nil
     }
 
     func cloudOnlyProfile(_ id: Profile.ID) -> CloudProfile? {
@@ -32,13 +42,19 @@ extension BrowserViewModel {
     }
 
     /// Delete from iCloud…, or the delete of a profile of this Mac that iCloud
-    /// has too: asks, with what the session's look says would go.
-    func requestCloudProfileDeletion(_ id: Profile.ID) {
+    /// has too (iCloud's copy by its id, or another install's of the same
+    /// spaces): asks, with what the session's look says would go. False
+    /// when the look has no such profile.
+    @discardableResult
+    func requestCloudProfileDeletion(_ id: Profile.ID) -> Bool {
+        let local = store.profile(withID: id)
         guard canDeleteFromICloud, let found = cloudDetection?.found,
-              let plan = CloudProfileDeletion(profileID: id, in: Dictionary(found.records.map { ($0.recordName, $0) }) { _, last in last }),
-              let profile = store.profile(withID: id) ?? found.profile(id)?.profile else { return }
+              let cloudID = local == nil ? id : found.profiles(matching: id, spaces: store.spaces, among: store.profiles).first?.id,
+              let plan = CloudProfileDeletion(profileID: cloudID, in: Dictionary(found.records.map { ($0.recordName, $0) }) { _, last in last }),
+              let profile = local ?? found.profile(id)?.profile else { return false }
         cloudProfileDeletes.notice = nil
-        cloudProfileDeletes.request = CloudProfileDeleteRequest(profile: profile, plan: plan, onThisMac: store.profile(withID: id) != nil)
+        cloudProfileDeletes.request = CloudProfileDeleteRequest(profile: profile, plan: plan, onThisMac: local != nil)
+        return true
     }
 
     /// The person confirmed: look at iCloud again and delete what is there

@@ -54,6 +54,8 @@ final class BrowserViewModel {
     var cloudLook: CloudLookState = .idle
     /// The switch was pressed and waits for the look before it does anything.
     var syncSwitchWaiting = false
+    /// The profiles Put in iCloud… turns the switch on for (`putInICloud`).
+    @ObservationIgnored var syncPuttingInICloud: Set<Profile.ID> = []
     @ObservationIgnored var cloudCheckWaiters: [(CloudSidebarDetection) -> Void] = []
     @ObservationIgnored var cloudLooksStarted = 0
     @ObservationIgnored var cloudLooksRunning = 0

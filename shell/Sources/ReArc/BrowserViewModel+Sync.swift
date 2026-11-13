@@ -22,31 +22,57 @@ extension BrowserViewModel {
         MainActor.assumeIsolated { syncControl?.isUserEnabled ?? false }
     }
 
-    /// The switch in Settings › Account. Off is immediate. On uses this
-    /// session's look at iCloud, or waits for one (read-only): empty, it
-    /// starts syncing; holding a sidebar, it asks what to do with it
-    /// (`syncCloudChoice`); out of reach, it says so and the switch stays off.
-    func setSyncEnabled(_ enabled: Bool) {
+    /// The switch as Settings shows it: on while it waits for the look, so
+    /// switching it off then stops the wait and nothing turns on later.
+    var syncSwitchIsOn: Bool { isSyncEnabled || syncSwitchWaiting }
+
+    /// The switch in Settings › Account and › Profiles. Off is immediate and
+    /// changes nothing in iCloud. On uses this session's look at iCloud, or
+    /// waits for one (read-only): empty, it starts syncing; holding a
+    /// sidebar, it asks what to do with it (`syncCloudChoice`); out of
+    /// reach, it says so and the switch stays off. `puttingInICloud`: the
+    /// profiles Put in iCloud… asked for, which go up over what iCloud
+    /// deleted of them (an empty iCloud's join, or a merge).
+    func setSyncEnabled(_ enabled: Bool, puttingInICloud profiles: Set<Profile.ID> = []) {
         syncCloudMessage = nil
         guard enabled else {
             syncSwitchWaiting = false
+            syncPuttingInICloud = []
             MainActor.assumeIsolated { syncControl?.setUserEnabled(false) }
             return
         }
         guard syncControl != nil else { return }
+        syncPuttingInICloud = profiles
         syncSwitchWaiting = true
         checkCloudSidebar(force: false) { [weak self] detection in
             guard let self, self.syncSwitchWaiting else { return }
             self.syncSwitchWaiting = false
             switch detection {
             case .empty:
-                MainActor.assumeIsolated { self.syncControl?.setUserEnabled(true) }
+                let putting = self.syncPuttingInICloud
+                self.syncPuttingInICloud = []
+                MainActor.assumeIsolated {
+                    self.syncControl?.putInICloud(putting)
+                    self.syncControl?.setUserEnabled(true)
+                }
             case .found(let found):
                 self.syncCloudChoice = found
             case .signedOut(let message), .unreachable(let message), .unavailable(let message):
+                self.syncPuttingInICloud = []
                 self.syncCloudMessage = message
             }
         }
+    }
+
+    /// Settings › Profiles' Put in iCloud…: sync off, the switch turns on
+    /// for this profile, looking at iCloud first and asking when it holds a
+    /// sidebar; on, a sync now uploads it (over what iCloud deleted of it,
+    /// when this Mac hasn't joined yet).
+    func putInICloud(_ id: Profile.ID) {
+        guard let control = syncControl else { return }
+        guard isSyncEnabled else { return setSyncEnabled(true, puttingInICloud: [id]) }
+        MainActor.assumeIsolated { control.putInICloud([id]) }
+        syncNow()
     }
 
     var isCheckingCloud: Bool { cloudLook != .idle }
@@ -131,13 +157,20 @@ extension BrowserViewModel {
     func chooseCloudSidebar(_ choice: CloudSidebarChoice, from found: CloudSidebarFound) {
         syncCloudChoice = nil
         syncCloudMessage = nil
+        // Use takes iCloud's; Replace uploads all of this Mac's anyway. After
+        // `apply`, which makes a merge a join; its cycle starts later.
+        let putting = choice == .merge ? syncPuttingInICloud : []
+        syncPuttingInICloud = []
         do {
             _ = try SidebarBackup.write(store.makeSnapshot(), besides: persistence.fileURL, reason: "before-icloud")
         } catch {
             syncCloudMessage = "ReArc couldn't save a copy of this Mac's sidebar, so nothing was changed."
             return
         }
-        MainActor.assumeIsolated { syncControl?.apply(choice, from: found) }
+        MainActor.assumeIsolated {
+            syncControl?.apply(choice, from: found)
+            syncControl?.putInICloud(putting)
+        }
         reconcileEngineOwnership()
         loadSelectedIfNeeded()
         checkCloudSidebar()

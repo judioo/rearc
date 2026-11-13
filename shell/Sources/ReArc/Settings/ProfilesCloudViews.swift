@@ -27,26 +27,57 @@ struct CloudPresenceMark: View {
     }
 }
 
-/// The detail pane's first box for a profile of this Mac.
+/// The detail pane's first box for a profile of this Mac: where it is,
+/// Put in iCloud… when only this Mac has it, and Sync Sidebar itself, the
+/// same switch as the account tab's, which holds the rest.
 struct ProfileCloudStatusGroup: View {
     @Bindable var model: BrowserViewModel
     let profileID: Profile.ID
 
     var body: some View {
-        if model.syncControl != nil {
-            let presence = model.cloudPresence(of: profileID)
-            SettingsGroup {
-                SettingsLabeledRow(label: "iCloud", detail: ProfileCloudText.note(presence, syncOn: model.isSyncEnabled)) {
-                    HStack(spacing: 6) {
-                        if case .looking = presence { ProgressView().controlSize(.mini) }
-                        CloudPresenceMark(presence: presence)
-                        // While a look runs, the Account pane's words.
-                        Text(model.isCheckingCloud ? model.cloudStatusText : ProfileCloudText.status(presence))
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.trailing)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+        SettingsGroup {
+            if model.syncControl == nil {
+                SettingsLabeledRow(label: "iCloud", detail: "Sidebar changes stay on this Mac.") {
+                    Text(CloudKitSyncAvailability.unavailableMessage)
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+            } else {
+                presenceRow
+                SettingsLabeledRow(label: "Sync Sidebar", detail: ProfileCloudText.syncSwitchNote(on: model.isSyncEnabled)) {
+                    Toggle("Sync Sidebar", isOn: Binding(get: { model.syncSwitchIsOn }, set: { model.setSyncEnabled($0) }))
+                        .toggleStyle(.switch).controlSize(.small).labelsHidden()
+                }
+                if let message = model.syncCloudMessage {
+                    Text(message)
+                        .font(.system(size: 11)).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, SettingsMetrics.rowInset)
+                        .padding(.bottom, 6)
+                }
+                SettingsLabeledRow(label: ProfileCloudText.accountTabNote(SettingsPane.account.title(accountName: model.accountName))) {
+                    Button("iCloud Settings…") { model.settingsPane = .account }
+                }
+            }
+        }
+    }
+
+    private var presenceRow: some View {
+        let presence = model.cloudPresence(of: profileID)
+        let syncOn = model.isSyncEnabled
+        return SettingsLabeledRow(label: "iCloud", detail: ProfileCloudText.note(presence, syncOn: syncOn)) {
+            HStack(spacing: 6) {
+                if case .looking = presence { ProgressView().controlSize(.mini) }
+                CloudPresenceMark(presence: presence)
+                // While a look runs, the Account pane's words.
+                Text(model.isCheckingCloud ? model.cloudStatusText : ProfileCloudText.status(presence, syncOn: syncOn))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+                    .fixedSize(horizontal: false, vertical: true)
+                if presence == .onlyHere {
+                    Button(ProfileCloudText.putInICloud(syncOn: syncOn)) { model.putInICloud(profileID) }
+                        .disabled(!model.canPutInICloud(profileID))
                 }
             }
         }
