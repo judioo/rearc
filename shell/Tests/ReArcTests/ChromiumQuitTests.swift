@@ -57,7 +57,7 @@ final class ChromiumQuitTests: XCTestCase {
         XCTAssertFalse(quit.isStopping)
         XCTAssertNil(quit.bound)
         XCTAssertEqual(ChromiumTabAdmission(.ready), .create)
-        // The next quit starts again (the runtime forces it).
+        // The next quit starts again (right after, the runtime forces it: `QuitRetry`).
         XCTAssertEqual(quit.request(force: true, mustDefer: false), .start(force: true))
     }
 
@@ -72,6 +72,80 @@ final class ChromiumQuitTests: XCTestCase {
         _ = quit.becameIdle()
         XCTAssertEqual(quit.startRejected(), .undo)
         XCTAssertEqual(quit.phase, .idle)
+    }
+
+    // MARK: The quit after one that undid itself (RC-2026.1113.765 Y-03)
+
+    private let start = ContinuousClock.now
+
+    func testAQuitIsNotForcedBeforeAnyUndidItself() {
+        var retry = QuitRetry()
+        XCTAssertFalse(retry.takeForce(at: start))
+        XCTAssertNil(retry.undoneAt)
+    }
+
+    func testAQuitRightAfterAVetoIsForced() {
+        var retry = QuitRetry()
+        retry.quitUndone(at: start)
+        XCTAssertTrue(retry.takeForce(at: start + .seconds(2)), "a page can't keep ReArc open twice in a row")
+        // The whole chain: Stay, then ⌘Q again.
+        var quit = ChromiumQuit()
+        _ = quit.request(force: false, mustDefer: false)
+        XCTAssertEqual(quit.completed(cancelled: true), .undo)
+        retry.quitUndone(at: start)
+        XCTAssertEqual(quit.request(force: retry.takeForce(at: start + QuitRetry.window), mustDefer: false), .start(force: true),
+                       "the window's last moment still forces")
+    }
+
+    func testAQuitLongAfterAVetoAsksAgain() {
+        var retry = QuitRetry()
+        retry.quitUndone(at: start)
+        XCTAssertFalse(retry.takeForce(at: start + QuitRetry.window + .milliseconds(1)), "past the window: Leave site? and unload handlers run")
+        XCTAssertNil(retry.undoneAt, "and the old veto is forgotten")
+
+        // The morning's veto, the afternoon's quit.
+        retry.quitUndone(at: start)
+        XCTAssertFalse(retry.takeForce(at: start + .seconds(6 * 3600)))
+    }
+
+    func testOneVetoForcesOnlyOneQuit() {
+        var retry = QuitRetry()
+        retry.quitUndone(at: start)
+        XCTAssertTrue(retry.takeForce(at: start + .seconds(1)))
+        XCTAssertFalse(retry.takeForce(at: start + .seconds(2)), "used up by the forced quit that started")
+    }
+
+    func testARefusedForcedQuitCountsFromItsOwnUndo() {
+        var retry = QuitRetry()
+        var quit = ChromiumQuit()
+        retry.quitUndone(at: start)
+        _ = quit.request(force: retry.takeForce(at: start + .seconds(5)), mustDefer: false)
+        // The engine refuses the forced shutdown: the quit undoes itself again.
+        XCTAssertEqual(quit.startRejected(), .undo)
+        retry.quitUndone(at: start + .seconds(5))
+        XCTAssertTrue(retry.takeForce(at: start + .seconds(33)), "28 s after the second undo")
+        retry.quitUndone(at: start + .seconds(33))
+        XCTAssertFalse(retry.takeForce(at: start + .seconds(64)), "31 s after the third")
+    }
+
+    func testAVetoAfterTheWindowArmsAgain() {
+        var retry = QuitRetry()
+        retry.quitUndone(at: start)
+        XCTAssertFalse(retry.takeForce(at: start + .seconds(600)), "an ordinary quit, which a page may veto again")
+        retry.quitUndone(at: start + .seconds(601))
+        XCTAssertTrue(retry.takeForce(at: start + .seconds(603)), "and the quit right after that veto is forced")
+    }
+
+    func testAClockBehindTheVetoForcesNothing() {
+        var retry = QuitRetry()
+        retry.quitUndone(at: start)
+        XCTAssertFalse(retry.takeForce(at: start - .seconds(1)))
+    }
+
+    func testTheWindowIsShortAndTheQuitBoundsAreUnchanged() {
+        XCTAssertEqual(QuitRetry.window, .seconds(30))
+        XCTAssertEqual(ChromiumQuit.deferBound, 10)
+        XCTAssertEqual(ChromiumQuit.stallBound, 45)
     }
 
     func testAnotherQuitDuringOneChangesNothing() {

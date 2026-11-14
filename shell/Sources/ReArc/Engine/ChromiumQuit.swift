@@ -112,6 +112,39 @@ struct ChromiumQuit: Equatable {
     }
 }
 
+/// What a quit that undid itself leaves for the next quit request. A page can
+/// keep ReArc open once ("Leave site?" answered Stay, or a refused shutdown);
+/// a quit asked again right after is forced, so no page keeps ReArc open
+/// twice in a row. Only that one request, and only within `window`: any later
+/// quit asks "Leave site?" and runs unload handlers again (security
+/// RC-2026.1113.765 Y-03).
+struct QuitRetry: Equatable {
+    /// How long after a quit undid itself a quit request is still "again".
+    /// It runs from when ReArc is back, not from the first ⌘Q: 30 s is ample
+    /// for a second ⌘Q or the update notice's Try Again after reading why
+    /// ReArc is still open, and too short to fill in a form that the forced
+    /// quit would then drop without asking.
+    static let window: Duration = .seconds(30)
+
+    /// When the last quit undid itself, until a quit request uses it. On the
+    /// continuous clock, which runs while the Mac sleeps: a lid closed after
+    /// Stay doesn't keep the window open.
+    private(set) var undoneAt: ContinuousClock.Instant?
+
+    mutating func quitUndone(at now: ContinuousClock.Instant) {
+        undoneAt = now
+    }
+
+    /// A quit request that starts a quit: whether to force it. Used up either
+    /// way: a forced quit ends the process or, refused, undoes itself and
+    /// counts from then.
+    mutating func takeForce(at now: ContinuousClock.Instant) -> Bool {
+        defer { undoneAt = nil }
+        guard let undoneAt else { return false }
+        return now >= undoneAt && now - undoneAt <= Self.window
+    }
+}
+
 /// Where the Chromium runtime is, for the engine a new page gets and for
 /// when its engine tab is created.
 enum ChromiumRuntimeStage: Equatable {

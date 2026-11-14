@@ -566,8 +566,9 @@ final class ChromiumRuntime {
     /// Optional ABI features in use; probed when the engine is ready.
     private(set) var capabilities = ChromiumCapabilities.none
     private(set) var keychainMode = ChromiumLaunchArguments.KeychainMode.system
-    /// After a quit undid itself (a beforeunload veto, a refusal), the next quit request forces shutdown.
-    private var shutdownVetoed = false
+    /// After a quit undid itself (a beforeunload veto, a refusal), a quit asked again within
+    /// `QuitRetry.window` forces shutdown; any later one is an ordinary quit.
+    private var quitRetry = QuitRetry()
 
     var onReady: (() -> Void)?
     /// early_window (ABI 1.45): runs once inside `ReArcEngineRun`, when the
@@ -1685,7 +1686,9 @@ final class ChromiumRuntime {
             return
         }
         onTerminateRequested?()
-        requestShutdown(force: shutdownVetoed) { _, _ in }
+        let force = quitRetry.takeForce(at: .now)
+        if force { ChromiumLog.info("quit requested again right after one that undid itself: forcing shutdown") }
+        requestShutdown(force: force) { _, _ in }
     }
 
     /// Orderly engine shutdown; `ReArcEngineRun` returns after the final
@@ -1784,12 +1787,14 @@ final class ChromiumRuntime {
         completion?(status, cancelled)
     }
 
-    /// The quit is over and ReArc keeps running: active again, and the next quit forces.
+    /// The quit is over and ReArc keeps running: active again, and a quit asked again
+    /// within `QuitRetry.window` forces.
     private func undoQuit(_ reason: String) {
         quitDeadline?.cancel()
         shutdownCompletion = nil
-        shutdownVetoed = true
-        ChromiumLog.info("quit undone (\(reason)); ReArc keeps running and the next quit forces shutdown")
+        quitRetry.quitUndone(at: .now)
+        ChromiumLog.info("quit undone (\(reason)); ReArc keeps running and a quit in the next "
+            + "\(QuitRetry.window.components.seconds) s forces shutdown")
         onTerminateCancelled?()
         NotificationCenter.default.post(name: ChromiumRuntime.shutdownVetoedNotification, object: nil)
         createTabsAwaitingActive()
