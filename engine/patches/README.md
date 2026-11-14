@@ -36,6 +36,12 @@ engine/patches/
 - `<slug>` is lowercase kebab-case describing the change, not the feature
   (`host-runloop`, not `rearc-shell`).
 
+**Security backports** are the exception to the area rule: they live in `security/`, named
+`<nnn>-cve-<id>-<slug>.patch`, whatever directory they touch. Each is an upstream fix that
+the pinned Chromium line does not have, taken unchanged where it applies. Its header names
+the upstream commit and the first Chrome build with the fix. Drop it when the pin moves to a
+build that contains the fix.
+
 **`series` file:** one patch path per line, in apply order. Lines starting
 with `#` are comments. Order matters only where patches touch the same file;
 keep cross-file dependencies to a minimum and note them in a comment.

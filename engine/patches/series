@@ -98,6 +98,10 @@ tab/089-histogram-completion-delivery.patch     # P-TAB-001 bridge 0.70.0: histo
 tab/090-shutdown-closes-together.patch          # P-TAB-001 bridge 0.71.0: shutdown closes pages that cannot ask "Leave site?" together
 tab/091-context-menu-save-link.patch           # P-TAB-001 ABI 1.64, bridge 0.72.0: context menu Save Link As (action 21)
 #
+# Security backports: upstream fixes the pinned Chromium line does not have.
+# Drop each one when the pin moves to a build that contains the fix.
+security/001-cve-2026-121203-resize-observer.patch # upstream 70bfe6689 (Chrome 157.0.8103.38): ResizeObserver gathers by pointer
+#
 # Planned inventory (see README.md and engine/docs/ENGINE.md §4);
 # uncomment as patches land:
 #
