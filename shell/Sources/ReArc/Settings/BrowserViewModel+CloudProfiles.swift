@@ -18,7 +18,8 @@ extension BrowserViewModel {
 
     /// The Profiles list's "In iCloud only": the last look's, also while one
     /// runs again. iCloud's copy of a profile of this Mac (another install's
-    /// import of the same Arc spaces) is that profile, not listed here.
+    /// import of the same Arc spaces) is that profile, not listed here; one
+    /// that only shares a space with a profile of this Mac is listed.
     var cloudOnlyProfiles: [CloudProfile] {
         cloudDetection?.found?.profiles(notIn: store.profiles, spaces: store.spaces) ?? []
     }
@@ -43,18 +44,42 @@ extension BrowserViewModel {
 
     /// Delete from iCloud…, or the delete of a profile of this Mac that iCloud
     /// has too (iCloud's copy by its id, or another install's of the same
-    /// spaces): asks, with what the session's look says would go. False
-    /// when the look has no such profile.
+    /// spaces, which the question then names): asks, with what the session's
+    /// look says would go. False when the look has no such profile.
     @discardableResult
     func requestCloudProfileDeletion(_ id: Profile.ID) -> Bool {
         let local = store.profile(withID: id)
         guard canDeleteFromICloud, let found = cloudDetection?.found,
-              let cloudID = local == nil ? id : found.profiles(matching: id, spaces: store.spaces, among: store.profiles).first?.id,
-              let plan = CloudProfileDeletion(profileID: cloudID, in: Dictionary(found.records.map { ($0.recordName, $0) }) { _, last in last }),
-              let profile = local ?? found.profile(id)?.profile else { return false }
+              let cloud = local == nil ? found.profile(id) : found.profiles(matching: id, spaces: store.spaces, among: store.profiles).first,
+              let plan = CloudProfileDeletion(profileID: cloud.id, in: Dictionary(found.records.map { ($0.recordName, $0) }) { _, last in last })
+        else { return false }
         cloudProfileDeletes.notice = nil
-        cloudProfileDeletes.request = CloudProfileDeleteRequest(profile: profile, plan: plan, onThisMac: local != nil)
+        cloudProfileDeletes.request = CloudProfileDeleteRequest(profile: local ?? cloud.profile, plan: plan, onThisMac: local != nil,
+                                                                cloudCopy: cloud.id == id ? nil : cloud)
         return true
+    }
+
+    func cloudProfileDeleteTitle(_ request: CloudProfileDeleteRequest) -> String {
+        request.onThisMac ? ProfileCloudText.deleteTitle(request.profile.name) : ProfileCloudText.deleteFromICloudTitle(request.profile.name)
+    }
+
+    /// The question's text: each button's consequence in a line, and first,
+    /// when iCloud's copy has another id, that profile by name with its spaces.
+    func cloudProfileDeleteMessage(_ request: CloudProfileDeleteRequest) -> String {
+        let receiving = cloudProfileNames(request.plan.receivingProfiles)
+        let folder = sidebarBackupFolderName
+        let syncOn = isSyncEnabled
+        guard request.onThisMac else {
+            return ProfileCloudText.deleteFromICloudMessage(request.plan, receiving: receiving, syncOn: syncOn, backupFolder: folder, changed: request.changed)
+        }
+        let both = ProfileCloudText.bothConsequence(request.plan, receiving: receiving, syncOn: syncOn, backupFolder: folder)
+            + containersDeletedNote(request.profile.id, reachesICloud: true)
+        let changed = request.changed ? "It changed in iCloud since you looked.\n\n" : ""
+        let copy = request.cloudCopy.map { ProfileCloudText.cloudCopy($0) + "\n\n" } ?? ""
+        if syncOn { return changed + copy + both + " This can't be undone." }
+        return changed + copy + "\(ProfileCloudText.deleteFromThisMac): \(ProfileCloudText.thisMacConsequence)"
+            + containersDeletedNote(request.profile.id, reachesICloud: false) + "\n\n"
+            + "\(ProfileCloudText.deleteFromBoth): \(both)\n\nThis can't be undone."
     }
 
     /// The person confirmed: look at iCloud again and delete what is there
@@ -78,6 +103,16 @@ extension BrowserViewModel {
                 }
                 return
             }
+            // iCloud's copy under another id is this profile's only while every space of it is: by this look, too.
+            var cloudCopy: CloudProfile?
+            if request.cloudCopy != nil, let current = found.profile(request.plan.profileID) {
+                guard found.profiles(matching: profile.id, spaces: self.store.spaces, among: self.store.profiles).contains(where: { $0.id == current.id }) else {
+                    deletes.working = nil
+                    deletes.notice = CloudProfileNotice(text: ProfileCloudText.noLongerACopy(current.profile.name, of: profile.name), isError: true)
+                    return
+                }
+                cloudCopy = current
+            }
             let sidebarFile = self.persistence.fileURL
             Task { @MainActor [weak self] in
                 let result = await control.deleteCloudProfile(
@@ -93,7 +128,7 @@ extension BrowserViewModel {
                     deletes.notice = CloudProfileNotice(text: ProfileCloudText.deleted(profile.name, fromThisMacToo: alsoThisMac, queued: queued,
                                                                                        backupFolder: self.sidebarBackupFolderName))
                 case .changed(let plan):
-                    deletes.request = CloudProfileDeleteRequest(profile: profile, plan: plan, onThisMac: request.onThisMac, changed: true)
+                    deletes.request = CloudProfileDeleteRequest(profile: profile, plan: plan, onThisMac: request.onThisMac, changed: true, cloudCopy: cloudCopy)
                 case .gone(let detection):
                     self.cloudDetection = detection
                     deletes.notice = CloudProfileNotice(text: ProfileCloudText.gone(profile.name))
@@ -115,6 +150,9 @@ struct CloudProfileDeleteRequest: Identifiable, Equatable {
     var onThisMac: Bool
     /// iCloud changed since the last answer: asked again with the new counts.
     var changed = false
+    /// iCloud's copy when it has another id than `profile` (another install's
+    /// import of the same spaces): the question names it and its spaces.
+    var cloudCopy: CloudProfile?
 
     var id: Profile.ID { profile.id }
 }

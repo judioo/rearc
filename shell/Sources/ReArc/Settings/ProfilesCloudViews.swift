@@ -262,7 +262,7 @@ private struct CloudProfileDeleteAlert: ViewModifier {
     func body(content: Content) -> some View {
         let deletes = model.cloudProfileDeletes
         let request = deletes.request
-        content.alert(title(request), isPresented: Binding(get: { deletes.request != nil }, set: { if !$0 { deletes.request = nil } }),
+        content.alert(request.map(model.cloudProfileDeleteTitle) ?? "", isPresented: Binding(get: { deletes.request != nil }, set: { if !$0 { deletes.request = nil } }),
                       presenting: request) { request in
             if request.onThisMac {
                 if !model.isSyncEnabled {
@@ -278,28 +278,7 @@ private struct CloudProfileDeleteAlert: ViewModifier {
             Button("Cancel", role: .cancel) { deletes.request = nil }
                 .keyboardShortcut(.defaultAction)
         } message: { request in
-            Text(message(request))
+            Text(model.cloudProfileDeleteMessage(request))
         }
-    }
-
-    private func title(_ request: CloudProfileDeleteRequest?) -> String {
-        guard let request else { return "" }
-        return request.onThisMac ? ProfileCloudText.deleteTitle(request.profile.name) : ProfileCloudText.deleteFromICloudTitle(request.profile.name)
-    }
-
-    private func message(_ request: CloudProfileDeleteRequest) -> String {
-        let receiving = model.cloudProfileNames(request.plan.receivingProfiles)
-        let folder = model.sidebarBackupFolderName
-        let syncOn = model.isSyncEnabled
-        guard request.onThisMac else {
-            return ProfileCloudText.deleteFromICloudMessage(request.plan, receiving: receiving, syncOn: syncOn, backupFolder: folder, changed: request.changed)
-        }
-        let both = ProfileCloudText.bothConsequence(request.plan, receiving: receiving, syncOn: syncOn, backupFolder: folder)
-            + model.containersDeletedNote(request.profile.id, reachesICloud: true)
-        let changed = request.changed ? "It changed in iCloud since you looked.\n\n" : ""
-        if syncOn { return changed + both + " This can't be undone." }
-        return changed + "\(ProfileCloudText.deleteFromThisMac): \(ProfileCloudText.thisMacConsequence)"
-            + model.containersDeletedNote(request.profile.id, reachesICloud: false) + "\n\n"
-            + "\(ProfileCloudText.deleteFromBoth): \(both)\n\nThis can't be undone."
     }
 }

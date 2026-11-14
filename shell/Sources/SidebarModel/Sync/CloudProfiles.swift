@@ -42,8 +42,9 @@ public struct CloudProfile: Identifiable, Equatable, Sendable {
 
 /// Where one of this Mac's profiles is, by the session's look at iCloud.
 public enum ProfileCloudPresence: Equatable, Sendable {
-    /// iCloud has a live profile with the same id, or one holding the same
-    /// Arc spaces (another install's import: `CloudSidebarFound.profiles(matching:spaces:)`).
+    /// iCloud has a live profile with the same id, or one whose every space
+    /// is a space of this profile (another install's import of the same Arc
+    /// spaces: `CloudSidebarFound.profiles(matching:spaces:)`).
     case inICloud
     /// The look finished and iCloud has no such profile (one with only the
     /// same name from another install is a different profile).
@@ -69,25 +70,29 @@ public enum ProfileCloudPresence: Equatable, Sendable {
 
 extension CloudSidebarFound {
     /// iCloud's profiles that are none of this Mac's, by name: not the same
-    /// id, and holding none of `spaces` (`profiles(matching:spaces:)`).
+    /// id, and not a copy of one by its spaces (`profiles(matching:spaces:)`).
+    /// One that only shares a space with a profile of this Mac is listed.
     public func profiles(notIn local: [Profile], spaces: [Space] = []) -> [CloudProfile] {
         let matched = Set(local.flatMap { profiles(matching: $0.id, spaces: spaces, among: local) }.map(\.id))
         return profiles.filter { !matched.contains($0.id) }
     }
 
     /// iCloud's copies of this Mac's profile `id`: the one with its id, and
-    /// any other that none of this Mac's profiles has the id of and that
-    /// holds one of its spaces, by space id or Arc source. Profile ids are
-    /// made per install while an Arc space's id follows from the Arc space,
-    /// so a fresh install's import and an earlier install's in iCloud are
-    /// one profile with two ids. The same id first.
+    /// any other that none of this Mac's profiles has the id of and whose
+    /// every space is one of its spaces, by space id or Arc source. Profile
+    /// ids are made per install while an Arc space's id follows from the Arc
+    /// space, so a fresh install's import and an earlier install's in iCloud
+    /// are one profile with two ids. One that also holds a space of another
+    /// profile, or one with no spaces, is a profile of its own: a delete of
+    /// this Mac's would take that space too (RC-2026.1113.765 Y-01). The
+    /// same id first.
     public func profiles(matching id: Profile.ID, spaces: [Space], among local: [Profile]? = nil) -> [CloudProfile] {
         let own = spaces.filter { $0.profileID == id }
         let ids = Set(own.map(\.id))
         let sources = Set(own.compactMap(\.arcSourceID))
         let localIDs = Set((local ?? []).map(\.id) + spaces.map(\.profileID))
         return profiles.filter { cloud in
-            cloud.id == id || (!localIDs.contains(cloud.id) && cloud.spaces.contains {
+            cloud.id == id || (!localIDs.contains(cloud.id) && !cloud.spaces.isEmpty && cloud.spaces.allSatisfy {
                 ids.contains($0.id) || $0.arcSourceID.map(sources.contains) == true
             })
         }
@@ -436,6 +441,28 @@ public enum ProfileCloudText {
 
     private static func list(_ parts: [String]) -> String {
         parts.count > 1 ? parts.dropLast().joined(separator: ", ") + " and " + parts.last! : parts.first ?? ""
+    }
+
+    /// How many of its spaces `cloudCopy` names.
+    static let spacesNamed = 10
+
+    /// iCloud's copy of a profile of this Mac that has another id (another
+    /// install's import), for the delete's confirmation: its own name and
+    /// its spaces, as the "In iCloud only" detail lists them. "In iCloud it
+    /// is “Personal”, from another Mac or an earlier install, with 2 spaces:
+    /// Home (12 pinned tabs) and Work (1 pinned tab)."
+    public static func cloudCopy(_ cloud: CloudProfile) -> String {
+        var names = cloud.spaces.prefix(spacesNamed).map { "\($0.name) (\(part($0.pinnedTabs, "pinned tab", "pinned tabs")))" }
+        if cloud.spaces.count > names.count { names.append("\((cloud.spaces.count - names.count).formatted()) more") }
+        return "In iCloud it is “\(cloud.profile.name)”, from another Mac or an earlier install, with "
+            + part(cloud.spaces.count, "space", "spaces") + ": " + list(names) + "."
+    }
+
+    /// The delete was confirmed for iCloud's copy under another id, and by
+    /// the look made then that profile is no longer a copy of this Mac's.
+    public static func noLongerACopy(_ name: String, of local: String) -> String {
+        "“\(name)” in iCloud now holds spaces that are not in this Mac’s “\(local)”, so it is a profile of its own. "
+            + "Nothing was deleted. It is listed under \(cloudOnlySection)."
     }
 
     /// "Its 13 spaces and 2,104 pinned tabs are removed from iCloud.", and

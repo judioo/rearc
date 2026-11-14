@@ -42,8 +42,8 @@ struct ProfilesICloudSyncTests {
     /// An import of Arc's "Akilu" as ReArc makes it: a profile with an id of
     /// this install's, spaces and rows with ids that follow from Arc's.
     @discardableResult
-    private func importArc(into store: SidebarStore, spaces: [String] = ["Work", "Notes", "Travel"]) -> Profile.ID {
-        let profile = store.addProfile(name: "Akilu", createInitialSpace: false).id
+    private func importArc(into store: SidebarStore, name: String = "Akilu", spaces: [String] = ["Work", "Notes", "Travel"]) -> Profile.ID {
+        let profile = store.addProfile(name: name, createInitialSpace: false).id
         for name in spaces {
             let source = "Default:\(name)"
             let space = store.addSpace(name: name, profileID: profile, id: SidebarStore.arcSpaceID(source))
@@ -58,15 +58,22 @@ struct ProfilesICloudSyncTests {
 
     /// An earlier install that imported the same Arc profile and synced.
     private func earlierInstallInICloud(spaces: [String] = ["Work", "Notes", "Travel"]) async -> (SidebarStore, Profile.ID) {
+        let earlier = await earlierInstall(spaces: spaces)
+        return (earlier.store, earlier.profile)
+    }
+
+    /// The same, with its sync, for what it changes in iCloud later.
+    private func earlierInstall(name: String = "Akilu", spaces: [String] = ["Work", "Notes", "Travel"]) async
+        -> (store: SidebarStore, profile: Profile.ID, sync: SidebarSyncCoordinator) {
         let store = SidebarStore()
         let starter = store.activeProfileID
-        let profile = importArc(into: store, spaces: spaces)
+        let profile = importArc(into: store, name: name, spaces: spaces)
         // Its only profile: the import, as on the owner's Mac.
         _ = store.deleteProfile(starter, deletingSpaces: true)
         let sync = coordinator("Earlier", on: true)
         sync.host = store
         await sync.sync()
-        return (store, profile)
+        return (store, profile, sync)
     }
 
     private func pinned(_ store: SidebarStore, _ profile: Profile.ID) -> [Space.ID: [UUID]] {
@@ -182,7 +189,140 @@ struct ProfilesICloudSyncTests {
         #expect(request.profile.id == akilu && request.onThisMac)
         #expect(request.plan.profileID == earlier)
         #expect(request.plan.spaces == 3)
+        #expect(request.cloudCopy?.id == earlier)
         model.cloudProfileDeletes.request = nil
+    }
+
+    // MARK: - The delete of a profile whose copy in iCloud has another id (RC-2026.1113.765 Y-01)
+
+    /// The question names iCloud's profile and its spaces, as the "In iCloud
+    /// only" detail does, before what each button does.
+    @Test func theDeleteNamesICloudsCopyAndItsSpaces() async throws {
+        let earlier = await earlierInstall(name: "Akilu at home", spaces: ["Work", "Notes"])
+        let (model, scheduler) = model(coordinator("Fresh"))
+        defer { close(model, scheduler) }
+        let akilu = importArc(into: model.store)
+        model.checkCloudSidebar()
+        await settle { model.cloudDetection != nil && !model.isCheckingCloud }
+        #expect(model.cloudPresence(of: akilu) == .inICloud, "every space of iCloud's is this profile's; Travel is only here")
+        #expect(model.cloudOnlyProfiles.isEmpty)
+
+        #expect(model.requestCloudProfileDeletion(akilu))
+        let request = try #require(model.cloudProfileDeletes.request)
+        #expect(request.plan.profileID == earlier.profile)
+        #expect(model.cloudProfileDeleteTitle(request) == "Delete “Akilu”?")
+        let message = model.cloudProfileDeleteMessage(request)
+        #expect(message.hasPrefix("In iCloud it is “Akilu at home”, from another Mac or an earlier install, "
+                + "with 2 spaces: Work (2 pinned tabs) and Notes (2 pinned tabs).\n\nDelete from This Mac: "), "\(message)")
+        #expect(message.contains("Delete from This Mac and iCloud: It also goes from iCloud"))
+        model.cloudProfileDeletes.request = nil
+
+        // iCloud's own copy (the same id) needs no second name.
+        let own = CloudProfileDeleteRequest(profile: request.profile, plan: request.plan, onThisMac: true)
+        #expect(model.cloudProfileDeleteMessage(own).hasPrefix("Delete from This Mac: "))
+    }
+
+    /// An earlier install synced one "Personal" with Arc's Home and Work;
+    /// this install made "Personal" (Home) and "Work" (Work). iCloud's
+    /// "Personal" is neither of them: it is listed "In iCloud only" with its
+    /// own Delete from iCloud…, this Mac's two are only here with Put in
+    /// iCloud…, and deleting this Mac's "Personal" asks nothing of iCloud.
+    @Test func aProfileThatSharesOneSpaceIsNotThisMacsProfile() async throws {
+        let earlier = await earlierInstall(name: "Personal", spaces: ["Home", "Work"])
+        let (model, scheduler) = model(coordinator("Fresh"))
+        defer { close(model, scheduler) }
+        let personal = importArc(into: model.store, name: "Personal", spaces: ["Home"])
+        let work = importArc(into: model.store, name: "Work", spaces: ["Work"])
+        let before = server.records(account: "fixture")
+        model.checkCloudSidebar()
+        await settle { model.cloudDetection != nil && !model.isCheckingCloud }
+
+        #expect(model.cloudOnlyProfiles.map(\.id) == [earlier.profile], "“In iCloud only” lists iCloud's Personal")
+        #expect(model.cloudOnlyProfiles.first?.spaces.map(\.name) == ["Home", "Work"])
+        for id in [personal, work] {
+            #expect(model.cloudPresence(of: id) == .onlyHere)
+            #expect(ProfileCloudText.status(model.cloudPresence(of: id)) == "Only on this Mac")
+            #expect(model.canPutInICloud(id), "Put in iCloud… is offered")
+            #expect(!model.requestCloudProfileDeletion(id), "its delete is this Mac's alone")
+            #expect(model.cloudProfileDeletes.request == nil)
+        }
+
+        // iCloud's Personal has its own delete, under its own name.
+        #expect(model.requestCloudProfileDeletion(earlier.profile))
+        let request = try #require(model.cloudProfileDeletes.request)
+        #expect(!request.onThisMac && request.cloudCopy == nil)
+        #expect(request.plan.profileID == earlier.profile && request.plan.spaces == 2)
+        #expect(model.cloudProfileDeleteTitle(request) == "Delete “Personal” from iCloud?")
+        #expect(model.cloudProfileDeleteMessage(request).contains("This Mac is not changed."))
+        model.cloudProfileDeletes.request = nil
+        #expect(server.records(account: "fixture") == before, "asking changes nothing in iCloud")
+    }
+
+    /// Between the question and the answer another Mac put a space into
+    /// iCloud's copy that this profile doesn't have: the look made on
+    /// confirming sees it, and nothing is deleted here or there.
+    @Test func aCopyThatGainedAnotherSpaceIsNotDeleted() async throws {
+        let earlier = await earlierInstall(name: "Akilu at home")
+        let (model, scheduler) = model(coordinator("Fresh"))
+        defer { close(model, scheduler) }
+        let akilu = importArc(into: model.store)
+        model.checkCloudSidebar()
+        await settle { model.cloudDetection != nil && !model.isCheckingCloud }
+        #expect(model.requestCloudProfileDeletion(akilu))
+        let request = try #require(model.cloudProfileDeletes.request)
+
+        let extra = earlier.store.addSpace(name: "Taxes", profileID: earlier.profile)
+        _ = earlier.store.addTab(kind: .pinned, title: "Return", url: URL(string: "https://taxes.test")!, in: extra.id)
+        await earlier.sync.sync()
+        let before = server.records(account: "fixture")
+
+        model.deleteCloudProfile(request, alsoThisMac: true)
+        await settle { model.cloudProfileDeletes.working == nil && model.cloudProfileDeletes.notice != nil }
+        #expect(model.cloudProfileDeletes.notice == CloudProfileNotice(text: ProfileCloudText.noLongerACopy("Akilu at home", of: "Akilu"), isError: true))
+        #expect(model.cloudProfileDeletes.request == nil)
+        #expect(server.records(account: "fixture") == before, "nothing changed in iCloud")
+        #expect(model.store.profile(withID: akilu) != nil, "nor on this Mac")
+        #expect(!FileManager.default.fileExists(atPath: model.sidebarBackupFolder.path), "nothing to back up")
+        #expect(model.cloudOnlyProfiles.map(\.id) == [earlier.profile], "now a profile of its own")
+        #expect(model.cloudPresence(of: akilu) == .onlyHere)
+    }
+
+    /// It changed but is still this profile's copy (a pinned tab more): the
+    /// question comes back with the new counts and still names it; the
+    /// second answer deletes it, backed up first.
+    @Test func aCopyThatChangedIsAskedAgainByName() async throws {
+        let earlier = await earlierInstall(name: "Akilu at home")
+        let (model, scheduler) = model(coordinator("Fresh"))
+        defer { close(model, scheduler) }
+        let akilu = importArc(into: model.store)
+        model.checkCloudSidebar()
+        await settle { model.cloudDetection != nil && !model.isCheckingCloud }
+        #expect(model.requestCloudProfileDeletion(akilu))
+        let request = try #require(model.cloudProfileDeletes.request)
+
+        let space = try #require(earlier.store.spaces(in: earlier.profile).first)
+        _ = earlier.store.addTab(kind: .pinned, title: "New", url: URL(string: "https://new.test")!, in: space.id)
+        await earlier.sync.sync()
+        let before = server.records(account: "fixture")
+
+        model.deleteCloudProfile(request, alsoThisMac: true)
+        await settle { model.cloudProfileDeletes.working == nil && model.cloudProfileDeletes.request != nil }
+        let again = try #require(model.cloudProfileDeletes.request)
+        #expect(again.changed && again.onThisMac)
+        #expect(again.plan.profileID == earlier.profile && again.plan.deletedTabs == request.plan.deletedTabs + 1)
+        #expect(again.cloudCopy?.pinnedTabs == 7)
+        let message = model.cloudProfileDeleteMessage(again)
+        #expect(message.hasPrefix("It changed in iCloud since you looked.\n\nIn iCloud it is “Akilu at home”, "), "\(message)")
+        #expect(message.contains("Work (3 pinned tabs)"))
+        #expect(server.records(account: "fixture") == before, "nothing written before the second answer")
+        #expect(model.store.profile(withID: akilu) != nil)
+
+        model.deleteCloudProfile(again, alsoThisMac: true)
+        await settle { model.cloudProfileDeletes.working == nil && model.cloudProfileDeletes.notice != nil }
+        #expect(model.cloudProfileDeletes.notice?.isError == false)
+        #expect(FileManager.default.fileExists(atPath: model.sidebarBackupFolder.path), "backed up first")
+        #expect(server.records(account: "fixture")[SyncRecordKind.profile.recordName(for: earlier.profile)]?.payload.isAlive == false)
+        #expect(model.store.profile(withID: akilu) == nil, "gone from this Mac too")
     }
 
     // MARK: - Put in iCloud…
