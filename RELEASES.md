@@ -19,6 +19,11 @@ that adds the entry, so write it as the last commit before the release, with
 Merged since the last release and not yet in a build. The next release's entry takes these
 lines and this section starts empty again.
 
+- A space in a container is now easy to spot: its icon sits in a ring of the container's
+  colour, and its profile picture has the same ring with a larger container badge. The ring
+  and badge stay visible on every space colour, in light and dark; before, the badge took the
+  space's own colour and disappeared into the sidebar.
+
 ## ReArc 2026.1114.767 — 2026-11-14
 
 **Fixes**
