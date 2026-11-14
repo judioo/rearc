@@ -65,12 +65,15 @@ struct ArchivedSpaceRow: View {
     var body: some View {
         HStack(spacing: 10) {
             ArchivedSpaceTile(space: space)
+            // Two short notes: the column beside two buttons is narrow.
             VStack(alignment: .leading, spacing: 1) {
                 Text(space.name).font(.system(size: 13)).lineLimit(1)
-                Text(Self.detail(archivedAt: space.archivedAt, pinnedTabs: pinnedTabs))
-                    .font(.system(size: 11))
-                    .foregroundStyle(SettingsColors.tertiary)
-                    .lineLimit(1)
+                ForEach(Self.notes(archivedAt: space.archivedAt, pinnedTabs: pinnedTabs), id: \.self) { note in
+                    Text(note)
+                        .font(.system(size: 11))
+                        .foregroundStyle(SettingsColors.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer(minLength: 12)
             Button("Restore", action: restore)
@@ -83,14 +86,17 @@ struct ArchivedSpaceRow: View {
         .padding(.vertical, 6)
         .frame(minHeight: SettingsMetrics.iconRowHeight)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(space.name), \(Self.detail(archivedAt: space.archivedAt, pinnedTabs: pinnedTabs))")
+        .accessibilityLabel(([space.name] + Self.notes(archivedAt: space.archivedAt, pinnedTabs: pinnedTabs)).joined(separator: ", "))
     }
 
-    /// "Archived 14 Nov 2026 · 3 pinned tabs".
-    static func detail(archivedAt: Date?, pinnedTabs: Int) -> String {
+    /// "Archived 14 Nov" (the year only when it is not this one), then "3 pinned tabs".
+    static func notes(archivedAt: Date?, pinnedTabs: Int, now: Date = Date()) -> [String] {
         let tabs = pinnedTabs == 1 ? "1 pinned tab" : "\(pinnedTabs.formatted()) pinned tabs"
-        guard let archivedAt else { return tabs }
-        return "Archived \(archivedAt.formatted(date: .abbreviated, time: .omitted)) · \(tabs)"
+        guard let archivedAt else { return [tabs] }
+        let sameYear = Calendar.current.isDate(archivedAt, equalTo: now, toGranularity: .year)
+        let date = sameYear ? archivedAt.formatted(.dateTime.day().month(.abbreviated))
+            : archivedAt.formatted(date: .abbreviated, time: .omitted)
+        return ["Archived \(date)", tabs]
     }
 }
 
