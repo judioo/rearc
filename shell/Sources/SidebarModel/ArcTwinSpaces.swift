@@ -274,6 +274,7 @@ extension Space {
         copy.arcImportedItemIDs = arcImportedItemIDs
         copy.arcItemMapping = arcItemMapping
         copy.bookmarkSourceID = bookmarkSourceID
+        copy.archivedAt = archivedAt
         return copy
     }
 }

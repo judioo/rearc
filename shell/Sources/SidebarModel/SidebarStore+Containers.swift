@@ -98,12 +98,12 @@ extension SidebarStore {
 
     /// A profile's spaces as its strip, pager, Spaces menu and ⌃1…9 list them:
     /// its own and its containers', in space order. `spaces(in:)` stays the
-    /// spaces whose pages use one profile's storage.
+    /// spaces whose pages use one profile's storage. Archived spaces are in neither.
     public func spaces(listedIn profileID: Profile.ID) -> [Space] {
         let owner = owningProfileID(of: profileID)
         var owners: [Profile.ID: Profile.ID] = [:]
         for profile in profiles { owners[profile.id] = owningProfileID(of: profile.id) }
-        return RankedSortable.sortedSpaces(spaces.filter { (owners[$0.profileID] ?? $0.profileID) == owner })
+        return RankedSortable.sortedSpaces(spaces.filter { !$0.isArchived && (owners[$0.profileID] ?? $0.profileID) == owner })
     }
 
     /// Makes active a space whose pages use `profileID`'s storage: the profile's
@@ -175,7 +175,8 @@ extension SidebarStore {
         guard profiles.first?.id != id else { return .firstProfile }
         guard containers(of: id).isEmpty else { return .hasContainers }
         guard profile(withID: parentID)?.containerOf == nil else { return .parentIsContainer }
-        let count = spaces(in: id).count
+        // Archived spaces count: a container has exactly one space, listed or not.
+        let count = spaces.filter { $0.profileID == id }.count
         guard count == 1 else { return .needsExactlyOneSpace(count: count) }
         return nil
     }

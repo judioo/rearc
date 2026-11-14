@@ -174,6 +174,10 @@ public enum SyncRecordKind: String, Codable, CaseIterable, Sendable {
     /// A space's gradient, grain and appearance (wave 28). Older builds fail
     /// to decode its kind and drop it, so they never overwrite it.
     case spaceStyle = "SidebarSpaceStyleRecord"
+    /// An archived space's archive date (Archive Space), alive only while it
+    /// is archived. Its own record for the same reason as `spaceStyle`: older
+    /// builds drop it instead of writing the space back unarchived.
+    case spaceArchive = "SidebarSpaceArchiveRecord"
 
     var namePrefix: String {
         switch self {
@@ -182,6 +186,7 @@ public enum SyncRecordKind: String, Codable, CaseIterable, Sendable {
         case .item: return "item_"
         case .boost: return "boost_"
         case .spaceStyle: return "spacestyle_"
+        case .spaceArchive: return "spacearchive_"
         }
     }
 

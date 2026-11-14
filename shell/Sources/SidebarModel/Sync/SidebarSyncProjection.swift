@@ -13,7 +13,7 @@ public struct SyncRecordBody: Equatable, Sendable {
 
 /// Maps the sidebar to sync records and back (docs/SYNC-RECORDS.md).
 ///
-/// Synced: profiles, spaces (with their themes), favorites, pinned tabs,
+/// Synced: profiles, spaces (with their themes and archived state), favorites, pinned tabs,
 /// folders, splits in Favorites or Pinned, and Boosts. Not synced: Today
 /// (unpinned) tabs, easels, selection, archive, closed-tab stack, Little Arc
 /// windows and other per-Mac state; `apply` leaves those where they are.
@@ -83,7 +83,8 @@ public enum SidebarSyncProjection {
 
         let spaceRanks = SyncRanks.normalized(snapshot.spaces.map(\.sortRank))
         for (space, rank) in zip(snapshot.spaces, spaceRanks) {
-            var values = objectFields(space, dropping: ["id"])
+            // Archived state has its own record, which older builds never see or overwrite.
+            var values = objectFields(space, dropping: ["id", "archivedAt"])
             values["sortRank"] = .string(rank)
             // A Set and a UUID-keyed map encode in hash order, which changes every
             // launch: sorted, an unchanged space no longer uploads again (T-10).
@@ -102,6 +103,12 @@ public enum SidebarSyncProjection {
                 var style = objectFields(space.theme.style, dropping: [])
                 style["space"] = .string(space.id.uuidString.lowercased())
                 records[SyncRecordKind.spaceStyle.recordName(for: space.id)] = SyncRecordBody(kind: .spaceStyle, values: style)
+            }
+            if let archivedAt = space.archivedAt {
+                records[SyncRecordKind.spaceArchive.recordName(for: space.id)] = SyncRecordBody(kind: .spaceArchive, values: [
+                    "space": .string(space.id.uuidString.lowercased()),
+                    "archivedAt": .number(archivedAt.timeIntervalSince1970),
+                ])
             }
             var visited = Set<UUID>()
             let pinned = (snapshot.spaceContainers[space.id]?.pinned.childIDs ?? [])
@@ -207,6 +214,7 @@ public enum SidebarSyncProjection {
         var items: [UUID: ItemRecord] = [:]
         var boosts: [UUID: [String: SyncValue]] = [:]
         var styles: [UUID: SpaceThemeStyle] = [:]
+        var archives: [UUID: Date] = [:]
         for (name, payload) in records where payload.isAlive {
             guard let (kind, id) = SyncRecordKind.parse(recordName: name) else { continue }
             switch kind {
@@ -214,6 +222,7 @@ public enum SidebarSyncProjection {
             case .space: spaceValues[id] = payload.values
             case .boost: boosts[id] = payload.values
             case .spaceStyle: styles[id] = spaceStyle(payload.values)
+            case .spaceArchive: archives[id] = archiveDate(payload.values)
             case .item:
                 guard let parentKey = payload.values["parent"]?.stringValue, let parent = Parent(key: parentKey) else { continue }
                 items[id] = ItemRecord(
@@ -256,6 +265,7 @@ public enum SidebarSyncProjection {
                     profileIDs.insert(space.profileID)
                 }
                 space.theme.style = styles[id] ?? SpaceThemeStyle()
+                space.archivedAt = archives[id]
                 spaces.append(space)
             }
         }
@@ -505,6 +515,8 @@ public enum SidebarSyncProjection {
             return (try? values["package"]?.decoded(as: BoostPackage.self)) != nil
         case .spaceStyle:
             return spaceStyle(values) != nil
+        case .spaceArchive:
+            return archiveDate(values) != nil
         case .item:
             guard values["parent"]?.stringValue.flatMap(Parent.init(key:)) != nil else { return false }
             switch values["type"]?.stringValue {
@@ -815,6 +827,12 @@ public enum SidebarSyncProjection {
         fields["space"] = nil
         let defaults = objectFields(SpaceThemeStyle(), dropping: [])
         return try? SyncValue.object(defaults.merging(fields.filter { $0.value != .null }) { $1 }).decoded(as: SpaceThemeStyle.self)
+    }
+
+    /// An archive record's date; nil when it holds no usable one.
+    static func archiveDate(_ values: [String: SyncValue]) -> Date? {
+        guard case .number(let seconds)? = values["archivedAt"], seconds.isFinite else { return nil }
+        return Date(timeIntervalSince1970: seconds)
     }
 
     static func objectFields<T: Encodable>(_ value: T, dropping keys: Set<String>) -> [String: SyncValue] {

@@ -121,7 +121,7 @@ public final class SidebarStore {
     /// empty state rather than load a saved pin (ARC-RECORDING-2026-11-06).
     /// The shell answers from its engines; on its own the model counts all.
     @ObservationIgnored public var isTabOpen: (Tab.ID) -> Bool = { _ in true }
-    private var selectionBySpace: [Space.ID: UUID] {
+    var selectionBySpace: [Space.ID: UUID] {
         didSet { refreshSelectionObservers() }
     }
     /// Each window's ⇧/⌘-click selection (`SidebarMultiSelection`); not persisted.
@@ -173,8 +173,9 @@ public final class SidebarStore {
         profiles.first(where: { $0.id == id })
     }
 
+    /// The profile's listed spaces, archived ones left out (`archivedSpaces(in:)`).
     public func spaces(in profileID: Profile.ID) -> [Space] {
-        RankedSortable.sortedSpaces(spaces.filter { $0.profileID == profileID })
+        RankedSortable.sortedSpaces(spaces.filter { $0.profileID == profileID && !$0.isArchived })
     }
 
     /// The active profile's spaces as the strip lists them, its containers' included.
@@ -262,16 +263,18 @@ public final class SidebarStore {
             topAppsContainerIDByProfile[id] = nil
             autoArchiveThresholdByProfile[id] = nil
         }
-        if spaces.isEmpty {
-            let fallback = Space(name: "Personal", profileID: profiles[0].id, sortRank: LexoRank.initial)
-            spaces = [fallback]
+        // Archived spaces of other profiles stay archived; one listed space is needed.
+        if visibleSpaces.isEmpty {
+            let fallback = Space(name: "Personal", profileID: profiles[0].id,
+                                 sortRank: spaces.isEmpty ? LexoRank.initial : rankForNewSpace())
+            spaces.append(fallback)
             contentBySpace[fallback.id] = SpaceContent()
         }
         if doomed.contains(activeProfileID) || !spaces.contains(where: { $0.id == activeSpaceID }) {
-            activeProfileID = spaces.contains(where: { $0.profileID == profiles[0].id })
+            activeProfileID = visibleSpaces.contains(where: { $0.profileID == profiles[0].id })
                 ? profiles[0].id
-                : spaces[0].profileID
-            activeSpaceID = spaces(in: activeProfileID).first?.id ?? spaces[0].id
+                : visibleSpaces[0].profileID
+            activeSpaceID = spaces(in: activeProfileID).first?.id ?? visibleSpaces[0].id
             activateProfileSpaceMemory(for: activeProfileID)
             lastActiveSpaceByProfile[activeOwningProfileID] = activeSpaceID
             selectedItemID = restoredSelection(for: activeSpaceID)
@@ -368,11 +371,22 @@ public final class SidebarStore {
     // MARK: - Spaces
 
     public var activeSpace: Space {
-        spaces.first(where: { $0.id == activeSpaceID }) ?? spaces[0]
+        spaces.first(where: { $0.id == activeSpaceID }) ?? visibleSpaces.first ?? spaces[0]
     }
 
+    /// Any space, archived ones included.
     public func space(withID id: Space.ID) -> Space? {
         spaces.first(where: { $0.id == id })
+    }
+
+    /// Every space but archived ones, in storage order.
+    public var visibleSpaces: [Space] {
+        spaces.filter { !$0.isArchived }
+    }
+
+    /// The space when it can be shown: it exists and is not archived.
+    public func listedSpace(withID id: Space.ID) -> Space? {
+        space(withID: id).flatMap { $0.isArchived ? nil : $0 }
     }
 
     @discardableResult
@@ -399,24 +413,27 @@ public final class SidebarStore {
         return space
     }
 
-    /// Deletes a space and its tabs; the last remaining space cannot be deleted.
+    /// Deletes a space and its tabs; the last listed space cannot be deleted.
+    /// An archived space can always be deleted (Settings › Profiles).
     @discardableResult
     public func removeSpace(_ id: Space.ID) -> Bool {
-        guard spaces.count > 1, spaces.contains(where: { $0.id == id }) else { return false }
+        guard let target = space(withID: id), target.isArchived || visibleSpaces.count > 1 else { return false }
         let wasActive = activeSpaceID == id
-        let owner = space(withID: id).map { owningProfileID(of: $0.profileID) }
         spaces.removeAll { $0.id == id }
         dropSpaceState(id)
-        if wasActive {
-            // Stay in the same profile when it still has a space.
-            let next = owner.flatMap { spaces(listedIn: $0).first } ?? spaces[0]
-            activeSpaceID = next.id
-            activeProfileID = next.profileID
-            lastActiveSpaceByProfile[activeOwningProfileID] = activeSpaceID
-            selectedItemID = restoredSelection(for: activeSpaceID)
-        }
+        if wasActive { leaveSpace(ownedBy: owningProfileID(of: target.profileID)) }
         notifyMutation(.deleteSpace(id: id))
         return true
+    }
+
+    /// The active space left the lists (deleted or archived): stay in the same
+    /// profile when it still has a space, else go to the first listed one.
+    func leaveSpace(ownedBy owner: Profile.ID) {
+        guard let next = spaces(listedIn: owner).first ?? visibleSpaces.first else { return }
+        activeSpaceID = next.id
+        activeProfileID = next.profileID
+        lastActiveSpaceByProfile[activeOwningProfileID] = activeSpaceID
+        selectedItemID = restoredSelection(for: activeSpaceID)
     }
 
     private func dropSpaceState(_ id: Space.ID) {
@@ -455,7 +472,7 @@ public final class SidebarStore {
     }
 
     public func selectSpace(_ id: Space.ID) {
-        guard id != activeSpaceID, spaces.contains(where: { $0.id == id }) else { return }
+        guard id != activeSpaceID, listedSpace(withID: id) != nil else { return }
         if let selected = selectedItemID {
             selectionBySpace[activeSpaceID] = selected
         }
@@ -985,11 +1002,18 @@ public final class SidebarStore {
     public func focusTab(_ id: Tab.ID) -> Bool {
         guard tab(withID: id) != nil else { return false }
         if let splitLoc = splitContaining(tabID: id) {
+            guard listedSpace(withID: splitLoc.spaceID) != nil else { return false }
             if activeSpaceID != splitLoc.spaceID { selectSpace(splitLoc.spaceID) }
             selectSplit(splitLoc.split.id, focusTabID: id)
             return true
         }
         guard let location = locate(id) else { return false }
+        switch location {
+        case .pinned(let spaceID), .today(let spaceID):
+            // A tab in an archived space waits there; nothing brings the space back but Restore.
+            if listedSpace(withID: spaceID) == nil { return false }
+        default: break
+        }
         switch location {
         case .favorite:
             if let owner = favoriteOwner(of: id), owner != activeProfileID { selectProfile(owner) }
@@ -1553,10 +1577,14 @@ public final class SidebarStore {
             }
         }
         selectionBySpace = snapshot.selectionBySpace
-        if spaces.contains(where: { $0.id == snapshot.activeSpaceID }) {
-            activeSpaceID = snapshot.activeSpaceID
+        // Two Macs can each archive the other's last listed space: one comes back.
+        if visibleSpaces.isEmpty { spaces[0].archivedAt = nil }
+        if let active = listedSpace(withID: snapshot.activeSpaceID) {
+            activeSpaceID = active.id
         } else {
-            activeSpaceID = spaces[0].id
+            let owner = space(withID: snapshot.activeSpaceID).map { owningProfileID(of: $0.profileID) }
+            activeSpaceID = (owner.flatMap { spaces(listedIn: $0).first } ?? visibleSpaces[0]).id
+            activeProfileID = space(withID: activeSpaceID)?.profileID ?? activeProfileID
         }
         if let selected = snapshot.selectedItemID,
            displayEntries().contains(where: { $0.id == selected }) {

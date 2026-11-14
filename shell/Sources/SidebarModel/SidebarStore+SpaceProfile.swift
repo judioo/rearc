@@ -25,7 +25,7 @@ extension SidebarStore {
     public func space(forNewTabIn profileID: Profile.ID, preferring preferred: Space.ID? = nil) -> Space.ID? {
         // Storage, not listing: a container's pages stay in the container's space.
         ([preferred, activeSpaceID].compactMap { $0 } + spaces.map(\.id))
-            .first { space(withID: $0)?.profileID == profileID }
+            .first { listedSpace(withID: $0)?.profileID == profileID }
     }
 
     /// Why `changeProfile(ofSpace:to:)` would refuse, or nil when it can run.

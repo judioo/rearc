@@ -254,7 +254,9 @@ extension SidebarStore {
         let plan = bookmarkImportPlan(nodes, sourceID: sourceID, arcProfileDirectory: arcProfileDirectory, profileID: profileID)
         guard !plan.isEmpty else { return nil }
         if let id = plan.existingSpaceID, let space = space(withID: id) {
-            return (space, appendBookmarks(plan.nodes, to: id))
+            // New links for an archived space bring it back, as an Arc re-import does.
+            if space.isArchived { restoreArchivedSpace(id) }
+            return (self.space(withID: id) ?? space, appendBookmarks(plan.nodes, to: id))
         }
         let name = spaceName.trimmingCharacters(in: .whitespacesAndNewlines)
         let space = addSpace(name: name.isEmpty ? "Imported" : name, theme: SpaceTheme.presets[spaces.count % SpaceTheme.presets.count],

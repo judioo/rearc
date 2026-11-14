@@ -336,6 +336,11 @@ public struct Space: Identifiable, Hashable, Codable {
     /// Boosts run in this space's tabs (Arc's per-space boost policy). Under
     /// the profile's master switch: off here wins, on defers to it.
     public var boostsEnabled: Bool
+    /// When Archive Space took it out of every list of spaces; nil while
+    /// listed. Everything else about the space stays as it was.
+    public var archivedAt: Date? = nil
+
+    public var isArchived: Bool { archivedAt != nil }
 
     public init(
         id: UUID = UUID(),
@@ -365,7 +370,7 @@ public struct Space: Identifiable, Hashable, Codable {
         case arcSourceID, arcImportedItemIDs, arcItemMapping, bookmarkSourceID
         case id, name, theme, iconName
         case pinnedContainerID, unpinnedContainerID, unpinnedShared
-        case profileID, sortRank, boostsEnabled
+        case profileID, sortRank, boostsEnabled, archivedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -384,9 +389,11 @@ public struct Space: Identifiable, Hashable, Codable {
         profileID = try c.decodeIfPresent(UUID.self, forKey: .profileID) ?? UUID()
         sortRank = try c.decodeIfPresent(String.self, forKey: .sortRank) ?? ""
         boostsEnabled = try c.decodeIfPresent(Bool.self, forKey: .boostsEnabled) ?? true
+        archivedAt = try c.decodeIfPresent(Date.self, forKey: .archivedAt)
     }
 
-    /// `boostsEnabled` is written only when off, so a space encodes (and syncs) exactly as before.
+    /// `boostsEnabled` is written only when off and `archivedAt` only when set,
+    /// so a space encodes (and syncs) exactly as before.
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(arcItemMapping, forKey: .arcItemMapping)
@@ -403,5 +410,6 @@ public struct Space: Identifiable, Hashable, Codable {
         try c.encode(profileID, forKey: .profileID)
         try c.encode(sortRank, forKey: .sortRank)
         if !boostsEnabled { try c.encode(false, forKey: .boostsEnabled) }
+        try c.encodeIfPresent(archivedAt, forKey: .archivedAt)
     }
 }
