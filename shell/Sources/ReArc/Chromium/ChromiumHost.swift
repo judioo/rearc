@@ -371,7 +371,7 @@ final class ChromiumShell: NSObject, BrowserWindowPresenting, NSWindowDelegate {
             guard let self, let model, let menu = NSApp.mainMenu else { return }
             self.menuKeyEquivalents.apply(model.shortcutOverrides, to: menu)
         }
-        if model.appIcon != .standard { model.appIcon.apply() }
+        model.appIcon.apply()
         model.profileKeepsDataOnDelete = { [runtime] id in runtime.keepsDataOnDelete(id) }
         model.onProfileDeleted = { [weak self, runtime] id, littleArcs in
             // EngineHost already dropped the profile's engines. Its private windows and

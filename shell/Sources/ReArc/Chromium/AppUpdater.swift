@@ -164,6 +164,21 @@ final class AppUpdater: NSObject, SPUUpdaterDelegate, SPUStandardUserDriverDeleg
         return true
     }
 
+    /// A delta checks the bundle it patches against the build it was made
+    /// from, so Settings › Icon's custom icon is off ReArc.app while Sparkle
+    /// extracts; it goes back once that is done, or the update fails.
+    func updater(_ updater: SPUUpdater, willExtractUpdate item: SUAppcastItem) {
+        AppBundleIcon.shared.removeForUpdate()
+    }
+
+    func updater(_ updater: SPUUpdater, didExtractUpdate item: SUAppcastItem) {
+        AppBundleIcon.shared.apply(.load(from: .standard))
+    }
+
+    func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        AppBundleIcon.shared.apply(.load(from: .standard))
+    }
+
     @objc(updater:userDidMakeChoice:forUpdate:state:)
     func updater(_ updater: SPUUpdater, userDidMake choice: SPUUserUpdateChoice, forUpdate updateItem: SUAppcastItem,
                  state: SPUUserUpdateState) {

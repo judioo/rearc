@@ -12,7 +12,7 @@ struct ReArcApp: App {
                 .onAppear {
                     // The Settings scene opens through AppKit's action (macOS 14).
                     model.presentSettings = { _ in NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) }
-                    if model.appIcon != .standard { model.appIcon.apply() }
+                    model.appIcon.apply()
                     if appDelegate.model == nil { model.removeUnusedProfileAvatarImages() }
                     appDelegate.model = model
                     appDelegate.startOnboardingIfNeeded()

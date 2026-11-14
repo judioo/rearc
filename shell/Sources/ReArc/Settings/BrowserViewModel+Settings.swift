@@ -56,9 +56,8 @@ final class WebKitSearchEngineSettings: SearchEngineSettings {
 /// which the bundle scripts copy into the app.
 ///
 /// `NSApp.applicationIconImage` changes the running app's Dock tile and
-/// window icons only. Finder, Launchpad and the Dock while ReArc is not
-/// running keep the bundle's ReArc.icns: changing those means rewriting the
-/// bundle, which breaks a signed app's seal.
+/// window icons; `AppBundleIcon` gives ReArc.app itself the same icon, as
+/// Arc does, for Finder, Spotlight and the Dock while ReArc is not running.
 ///
 /// A choice saved by an earlier build that no longer exists (Sextant,
 /// Compass…) loads as the standard icon.
@@ -156,7 +155,12 @@ enum AppIconChoice: String, CaseIterable, Identifiable {
     /// At launch and on change; the standard icon restores the bundle's.
     func apply() {
         let image = fileName == nil ? nil : image
-        MainActor.assumeIsolated { NSApp?.applicationIconImage = image }
+        MainActor.assumeIsolated {
+            NSApp?.applicationIconImage = image
+            // The engine's download-progress tile draws the app icon in a view of its own.
+            NSApp?.dockTile.display()
+        }
+        AppBundleIcon.shared.apply(self)
     }
 
     static func load(from defaults: UserDefaults) -> AppIconChoice {
@@ -166,6 +170,88 @@ enum AppIconChoice: String, CaseIterable, Identifiable {
     func save(to defaults: UserDefaults) {
         defaults.set(rawValue, forKey: Self.defaultsKey)
     }
+}
+
+/// ReArc.app's own icon: the custom icon Finder shows for a folder
+/// (`NSWorkspace.setIcon`, an `Icon\r` file and the FinderInfo flag in the
+/// bundle's root), which Finder, Spotlight, Launchpad and the Dock use for
+/// the app while it is not running. The signed contents are untouched.
+///
+/// Applied on change and at every launch, so a Sparkle update, which
+/// replaces the bundle, gets it back. The bundle is written only when it is
+/// out of step, off the main thread, and quietly not at all when it is not
+/// writable (a root-owned copy). A bundle `scripts/release.sh` is verifying,
+/// and a launch on a throwaway `REARC_DATA_DIR`, read the person's choice
+/// too, so they leave the bundle alone: the one verified is the one shipped
+/// (`REARC_BUNDLE_ICON=1` lets a QA launch write it anyway).
+final class AppBundleIcon: @unchecked Sendable {
+    static let shared = AppBundleIcon(bundlePath: Bundle.main.bundlePath, writes: defaultWrites())
+    static let recordKey = "rearc.appIcon.bundle"
+    static let environmentKey = "REARC_BUNDLE_ICON"
+
+    let bundlePath: String
+    let writes: Bool
+    private let defaults: UserDefaults
+    private let queue = DispatchQueue(label: "rearc.appBundleIcon", qos: .utility)
+    /// Writes the icon (nil: removes it); `NSWorkspace.setIcon` but in tests.
+    private let setIcon: @Sendable (URL?, String) -> Bool
+
+    init(bundlePath: String, writes: Bool, defaults: UserDefaults = .standard,
+         setIcon: @escaping @Sendable (URL?, String) -> Bool = AppBundleIcon.workspaceSetIcon) {
+        self.bundlePath = bundlePath
+        self.writes = writes && bundlePath.hasSuffix(".app")
+        self.defaults = defaults
+        self.setIcon = setIcon
+    }
+
+    static func defaultWrites(environment: [String: String] = ProcessInfo.processInfo.environment,
+                              infoDictionary: [String: Any]? = Bundle.main.infoDictionary) -> Bool {
+        if environment[environmentKey] == "1" { return true }
+        if ShippedBuild.isVerificationBundle(infoDictionary: infoDictionary) { return false }
+        return environment[ShellDataLocation.environmentKey]?.isEmpty ?? true
+    }
+
+    static func workspaceSetIcon(_ imageURL: URL?, _ path: String) -> Bool {
+        guard FileManager.default.isWritableFile(atPath: path) else { return false }
+        if let imageURL {
+            guard let image = NSImage(contentsOf: imageURL) else { return false }
+            return NSWorkspace.shared.setIcon(image, forFile: path, options: [])
+        }
+        return NSWorkspace.shared.setIcon(nil, forFile: path, options: [])
+    }
+
+    /// The `Icon\r` file a custom folder icon keeps in the bundle's root.
+    var hasCustomIcon: Bool { FileManager.default.fileExists(atPath: bundlePath + "/Icon\r") }
+
+    /// What `apply` writes: nothing (nil), the choice's image, or `.some(nil)` to remove it.
+    func pendingWrite(for choice: AppIconChoice, imageURL: URL?) -> URL?? {
+        if choice == .standard || imageURL == nil { return hasCustomIcon ? .some(nil) : nil }
+        let written = defaults.string(forKey: Self.recordKey) == choice.rawValue
+        return hasCustomIcon && written ? nil : .some(imageURL)
+    }
+
+    func apply(_ choice: AppIconChoice) {
+        guard writes else { return }
+        let imageURL = choice.imageURL
+        queue.async { [self] in
+            guard let write = pendingWrite(for: choice, imageURL: imageURL) else { return }
+            if setIcon(write, bundlePath) {
+                defaults.set(write == nil ? nil : choice.rawValue, forKey: Self.recordKey)
+            }
+        }
+    }
+
+    /// Before Sparkle applies a delta, which checks the bundle it patches
+    /// file by file: the bundle as shipped. `apply` puts the icon back.
+    func removeForUpdate() {
+        guard writes else { return }
+        queue.sync {
+            if hasCustomIcon { _ = setIcon(nil, bundlePath) }
+        }
+    }
+
+    /// Waits for the writes queued so far (tests).
+    func waitForWrites() { queue.sync {} }
 }
 
 /// Wave 35: the native Settings window's actions (ARC-RECORDING-2026-11-06 §6.4).

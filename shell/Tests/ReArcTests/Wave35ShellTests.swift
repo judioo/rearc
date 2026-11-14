@@ -304,6 +304,76 @@ final class Wave35ShellTests: XCTestCase {
         XCTAssertFalse(AppIconChoice.allCases.contains { $0.caption.isEmpty })
     }
 
+    func testBundleIconFollowsTheChoiceAndComesBackAfterAnUpdate() throws {
+        let bundle = FileManager.default.temporaryDirectory.appendingPathComponent("rearc-icon-\(UUID().uuidString).app")
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bundle) }
+        let defaults = UserDefaults(suiteName: "rearc-w35-bundle-icon-\(UUID().uuidString)")!
+        let calls = BundleIconCalls()
+        let icon = AppBundleIcon(bundlePath: bundle.path, writes: true, defaults: defaults) { url, path in
+            calls.append(url)
+            // What NSWorkspace.setIcon leaves in the bundle's root.
+            let file = path + "/Icon\r"
+            if url == nil { try? FileManager.default.removeItem(atPath: file) } else { FileManager.default.createFile(atPath: file, contents: Data()) }
+            return true
+        }
+        let neon = URL(fileURLWithPath: "/icons/neon.png")
+        let prism = URL(fileURLWithPath: "/icons/prism.png")
+
+        // The standard icon on a plain bundle: nothing to write.
+        XCTAssertNil(icon.pendingWrite(for: .standard, imageURL: nil))
+        XCTAssertEqual(icon.pendingWrite(for: .neon, imageURL: neon), .some(neon))
+        // An alternate missing from the bundle counts as the standard icon.
+        XCTAssertNil(icon.pendingWrite(for: .neon, imageURL: nil))
+
+        // Neon written to the bundle.
+        FileManager.default.createFile(atPath: bundle.path + "/Icon\r", contents: Data())
+        defaults.set(AppIconChoice.neon.rawValue, forKey: AppBundleIcon.recordKey)
+        // Already on the bundle: a launch writes nothing; another choice is written.
+        XCTAssertNil(icon.pendingWrite(for: .neon, imageURL: neon))
+        XCTAssertEqual(icon.pendingWrite(for: .prism, imageURL: prism), .some(prism))
+        // The standard icon removes the custom one (setIcon with nil).
+        XCTAssertEqual(icon.pendingWrite(for: .standard, imageURL: nil), .some(nil))
+
+        // Sparkle's update: removed before extraction; the next launch's apply writes it again.
+        calls.removeAll()
+        icon.removeForUpdate()
+        XCTAssertFalse(icon.hasCustomIcon)
+        XCTAssertEqual(calls.urls, [nil])
+        XCTAssertEqual(icon.pendingWrite(for: .neon, imageURL: neon), .some(neon))
+
+        // Through apply: the standard icon on a bundle with none writes nothing.
+        calls.removeAll()
+        icon.apply(.standard)
+        icon.waitForWrites()
+        XCTAssertEqual(calls.urls, [])
+    }
+
+    func testBundleIconIsLeftAloneWhileReleaseVerifiesOrOnAThrowawayDataDir() {
+        let release: [String: Any] = [ShippedBuild.releaseKey: true]
+        let verifying: [String: Any] = [ShippedBuild.releaseKey: true, ShippedBuild.verificationKey: true]
+        XCTAssertTrue(AppBundleIcon.defaultWrites(environment: [:], infoDictionary: release))
+        XCTAssertTrue(AppBundleIcon.defaultWrites(environment: [:], infoDictionary: nil))
+        XCTAssertFalse(AppBundleIcon.defaultWrites(environment: [:], infoDictionary: verifying))
+        XCTAssertFalse(AppBundleIcon.defaultWrites(environment: ["REARC_DATA_DIR": "/tmp/x"], infoDictionary: nil))
+        XCTAssertTrue(AppBundleIcon.defaultWrites(environment: ["REARC_BUNDLE_ICON": "1"], infoDictionary: verifying))
+        // Only an app bundle is written: never a build folder or the test bundle.
+        let calls = BundleIconCalls()
+        let folder = AppBundleIcon(bundlePath: "/tmp/build/debug", writes: true) { url, _ in calls.append(url); return true }
+        XCTAssertFalse(folder.writes)
+        folder.removeForUpdate()
+        XCTAssertEqual(calls.urls, [])
+    }
+
+    /// What a test's setIcon was asked to write (nil: remove).
+    private final class BundleIconCalls: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [URL?] = []
+        var urls: [URL?] { lock.withLock { stored } }
+        func append(_ url: URL?) { lock.withLock { stored.append(url) } }
+        func removeAll() { lock.withLock { stored.removeAll() } }
+    }
+
     private static var appIconsDirectory: String {
         URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Resources/AppIcons").path
