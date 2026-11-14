@@ -501,13 +501,12 @@ private struct SiteControlsHoverLabel: View {
 /// on its pin button; `+`: on the last tile), so the hover states can be
 /// looked at without moving the pointer. The preview has its own pins, the
 /// extension IDs in `--rearc-site-controls-preview-pins=ID,ID`: the
-/// person's are neither shown nor changed. Like the self-test it runs only
+/// person's are neither shown nor changed, and they are kept in memory only. Like the self-test it runs only
 /// where verification may (a development build, or a verification bundle
 /// with `REARC_RELEASE_VERIFICATION=1`); a shipped bundle ignores the flags.
 enum SiteControlsPreview {
     static let flagPrefix = "--rearc-site-controls-preview="
     static let pinsFlagPrefix = "--rearc-site-controls-preview-pins="
-    static let pinsSuite = "rearc-site-controls-preview"
     static let requested: String? = requestedTile()
 
     static func requestedTile(arguments: [String] = CommandLine.arguments,
@@ -530,11 +529,7 @@ enum SiteControlsPreview {
     static func openWhenReady(in model: BrowserViewModel) async {
         guard requested != nil, !hasOpened else { return }
         hasOpened = true
-        if let scratch = UserDefaults(suiteName: pinsSuite) {
-            scratch.removePersistentDomain(forName: pinsSuite)
-            requestedPins().save(to: scratch)
-            model.extensions.defaults = scratch
-        }
+        model.extensions.usePinsInMemory(requestedPins())
         while SiteControlCenter.site(for: model.store.selectedTab?.url) == nil {
             try? await Task.sleep(for: .milliseconds(500))
             if Task.isCancelled { return }

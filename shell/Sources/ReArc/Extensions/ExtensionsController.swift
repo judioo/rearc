@@ -73,7 +73,15 @@ final class ExtensionsController {
 
     func togglePin(_ extensionID: String) {
         pins.toggle(extensionID)
-        pins.save(to: defaults)
+        if savesPins { pins.save(to: defaults) }
+    }
+
+    @ObservationIgnored private var savesPins = true
+
+    /// Pins that are never written anywhere (the site controls preview).
+    func usePinsInMemory(_ pins: ExtensionPins) {
+        savesPins = false
+        self.pins = pins
     }
 }
 

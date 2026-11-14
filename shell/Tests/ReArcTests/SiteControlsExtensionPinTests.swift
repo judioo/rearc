@@ -71,7 +71,21 @@ final class SiteControlsExtensionPinTests: XCTestCase {
         // Its pins are the flag's, never the person's.
         XCTAssertEqual(SiteControlsPreview.requestedPins(arguments: flag + [SiteControlsPreview.pinsFlagPrefix + "aaaa,bbbb"]).pinnedIDs, ["aaaa", "bbbb"])
         XCTAssertTrue(SiteControlsPreview.requestedPins(arguments: flag).pinnedIDs.isEmpty)
-        XCTAssertNotEqual(SiteControlsPreview.pinsSuite, Bundle.main.bundleIdentifier)
+    }
+
+    /// The preview's pins live in memory only: nothing reaches a defaults file (AA-02).
+    @MainActor
+    func testPreviewPinsAreNeverSaved() {
+        let suite = "rearc-preview-pins-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        ExtensionPins(pinnedIDs: ["mine"]).save(to: defaults)
+        let controller = ExtensionsController(defaults: defaults)
+        controller.usePinsInMemory(ExtensionPins(pinnedIDs: ["aaaa"]))
+        XCTAssertEqual(controller.pins.pinnedIDs, ["aaaa"])
+        controller.togglePin("bbbb")
+        XCTAssertEqual(controller.pins.pinnedIDs, ["aaaa", "bbbb"])
+        XCTAssertEqual(ExtensionPins.load(from: defaults).pinnedIDs, ["mine"], "the person's pins are untouched")
     }
 
     /// Pixels at Arc's places: the disc is centred 4 pt inside the tile's
