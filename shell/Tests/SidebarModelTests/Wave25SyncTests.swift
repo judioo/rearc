@@ -968,3 +968,87 @@ final class SyncedScriptApprovalTests: XCTestCase {
         XCTAssertNotEqual(original, BoostLibraryOps.scriptApprovalHash(package))
     }
 }
+
+/// Archive Space: the archived state syncs in `SidebarSpaceArchiveRecord`,
+/// alive only while the space is archived; the space record keeps its shape,
+/// so a Mac that rewrites it (an older build, or any rename) never brings the
+/// space back.
+@MainActor
+final class ArchiveSpaceSyncTests: XCTestCase {
+    private var server: InMemorySyncServer!
+    private var clock: TestClock!
+
+    override func setUp() async throws {
+        server = InMemorySyncServer()
+        clock = TestClock()
+    }
+
+    /// Home and Work, Work with a pinned tab; both Macs in step.
+    private func pair() async -> (a: Device, b: Device, work: Space.ID) {
+        let a = Device("A", server: server, clock: clock)
+        _ = a.store.renameSpace(a.store.spaces[0].id, to: "Home")
+        let work = a.store.addSpace(name: "Work", theme: SpaceTheme.presets[2], iconName: "briefcase.fill").id
+        _ = a.store.addTab(kind: .pinned, title: "Docs", url: url("docs"), in: work)
+        await a.sync()
+        let b = Device("B", server: server, clock: clock)
+        await b.sync()
+        return (a, b, work)
+    }
+
+    func testArchiveAndRestoreReachTheOtherMac() async {
+        let (a, b, work) = await pair()
+        XCTAssertNil(a.store.archiveSpace(work))
+        a.edited()
+        await a.sync()
+        await b.sync()
+        XCTAssertNotNil(b.store.space(withID: work)?.archivedAt)
+        XCTAssertNil(b.store.listedSpace(withID: work))
+        XCTAssertEqual(b.pinnedTitles("Work"), ["Docs"], "its pinned rows stay with it")
+        assertSameRecords(a, b)
+        let again = await a.sync()
+        XCTAssertEqual(again.pushed, 0, "quiescent")
+
+        XCTAssertNil(b.store.restoreArchivedSpace(work))
+        b.edited()
+        await b.sync()
+        await a.sync()
+        XCTAssertNotNil(a.store.listedSpace(withID: work))
+        XCTAssertNil(a.records[SyncRecordKind.spaceArchive.recordName(for: work)])
+        XCTAssertEqual(a.store.spacesInActiveProfile.map(\.name), ["Home", "Work"], "back in its place")
+        assertSameRecords(a, b)
+    }
+
+    func testRewritingTheSpaceRecordElsewhereKeepsItArchived() async {
+        let (a, b, work) = await pair()
+        XCTAssertNil(a.store.archiveSpace(work))
+        a.edited()
+        // Meanwhile the other Mac renames it: a write to every field of the space record.
+        _ = b.store.renameSpace(work, to: "Work 2")
+        b.store.setSpaceIcon(work, iconName: "star.fill")
+        b.edited()
+        await a.sync()
+        await b.sync()
+        await a.sync()
+        for device in [a, b] {
+            XCTAssertNotNil(device.store.space(withID: work)?.archivedAt, device.name)
+            XCTAssertEqual(device.store.space(withID: work)?.name, "Work 2", device.name)
+        }
+        XCTAssertNil(b.records[SyncRecordKind.space.recordName(for: work)]?.values["archivedAt"])
+        assertSameRecords(a, b)
+    }
+
+    func testDeletingAnArchivedSpaceRemovesItEverywhere() async {
+        let (a, b, work) = await pair()
+        XCTAssertNil(a.store.archiveSpace(work))
+        a.edited()
+        await a.sync()
+        await b.sync()
+        XCTAssertTrue(b.store.removeSpace(work))
+        b.edited()
+        await b.sync()
+        await a.sync()
+        XCTAssertNil(a.store.space(withID: work))
+        XCTAssertNil(a.records[SyncRecordKind.spaceArchive.recordName(for: work)])
+        assertSameRecords(a, b)
+    }
+}

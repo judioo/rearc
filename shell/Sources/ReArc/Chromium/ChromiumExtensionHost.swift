@@ -190,7 +190,7 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
             return engine.tabID
         }
         var windows: [ExtensionLogicalWindow] = []
-        for space in [active] + store.spaces.map(\.id).filter({ $0 != active }) {
+        for space in [active] + store.visibleSpaces.map(\.id).filter({ $0 != active }) {
             let tabs = store.displayTabs(in: space).compactMap(bridgeTab)
             let selected = store.selectedTab(inSpace: space).flatMap(bridgeTab)
             windows.append(ExtensionLogicalWindow(key: space, tabs: tabs, activeTab: selected,
@@ -241,7 +241,7 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
         reconcileWindows()
         let windowSpace = request.windowID > 0 ? reporter.key(forWindowID: request.windowID).flatMap { store.space(withID: $0)?.id } : nil
         let active = store.activeSpaceID
-        let order = [active] + store.spaces.map(\.id).filter { $0 != active }
+        let order = [active] + store.visibleSpaces.map(\.id).filter { $0 != active }
         // An import's new extension: its welcome page waits in the background.
         let quiet = runtime.capabilities.extensionBackgroundTabs && model.quietExtensionInstalls.isQuiet(request.extensionID)
         let placement = ExtensionTabPlacement.resolve(
@@ -345,7 +345,7 @@ final class ChromiumExtensionHost: ExtensionToolbarBackend {
         }
         let active = store.activeSpaceID
         let space = sourceTab.flatMap(store.spaceContaining(tabID:)).flatMap { inProfile($0) ? $0 : nil }
-            ?? ([active] + store.spaces.map(\.id)).first(where: inProfile)
+            ?? ([active] + store.visibleSpaces.map(\.id)).first(where: inProfile)
         ChromiumLog.info("link open \(event.requestID): disposition \(event.disposition) -> \(placement)")
         // A private window's link opens as another private window of the same session, as its
         // popups do; the engine then navigates it with the page as initiator (F-06).

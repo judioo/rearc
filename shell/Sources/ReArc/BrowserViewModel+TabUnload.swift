@@ -75,7 +75,7 @@ extension BrowserViewModel {
     /// panes too), and the peeked page's tab is not one of them.
     var visibleTabIDs: Set<Tab.ID> {
         var visible: Set<Tab.ID> = []
-        for space in store.spaces {
+        for space in store.visibleSpaces {
             guard let id = store.selectedItemID(inSpace: space.id) else { continue }
             if let split = store.split(withID: id) {
                 split.tabs.forEach { visible.insert($0.id) }

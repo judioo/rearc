@@ -229,14 +229,14 @@ public enum WindowSessionFile {
 }
 
 extension SidebarStore {
-    /// The space a restored window shows: its saved space if it still exists,
+    /// The space a restored window shows: its saved space if it is still listed,
     /// else its profile's last active space (or first space), else nil (the
     /// window starts on the key window's space, as a new window does).
     public func restoredSpaceID(saved spaceID: Space.ID?, profileID: Profile.ID?) -> Space.ID? {
-        if let spaceID, space(withID: spaceID) != nil { return spaceID }
+        if let spaceID, listedSpace(withID: spaceID) != nil { return spaceID }
         guard let profileID, profile(withID: profileID) != nil else { return nil }
         let owner = owningProfileID(of: profileID)
-        if let last = lastActiveSpaceByProfile[owner], space(withID: last) != nil { return last }
+        if let last = lastActiveSpaceByProfile[owner], listedSpace(withID: last) != nil { return last }
         return spaces(listedIn: owner).first?.id
     }
 }

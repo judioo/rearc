@@ -314,7 +314,7 @@ struct MoveToProfileMenu: View {
 }
 
 /// The space menu on the sidebar header and in the space switcher
-/// (Arc `spaceHeaderContextMenu`: rename, edit theme, boosts, delete).
+/// (Arc `spaceHeaderContextMenu`: rename, edit theme, boosts, delete; ReArc adds archive).
 struct SpaceContextMenu: View {
     let model: BrowserViewModel
     let space: Space
@@ -357,6 +357,9 @@ struct SpaceContextMenu: View {
         ))
         .disabled(!model.store.boostLibrary(for: space.profileID).masterEnabled)
         Divider()
+        // ReArc's own: back from Settings › Profiles › Archived Spaces.
+        Button("Archive Space") { model.archiveSpace(space.id) }
+            .disabled(!model.canArchiveSpace(space.id))
         Button("Delete Space…", role: .destructive) { model.pendingDeletion = .space(space.id) }
             .disabled(!model.canDeleteSpaces)
     }

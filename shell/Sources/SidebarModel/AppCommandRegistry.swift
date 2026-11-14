@@ -82,6 +82,8 @@ public enum AppCommandAction: Equatable, Hashable {
     case editSpaceTheme
     /// Arc's Appearance menu (`automaticMode`, `lightMode`, `darkMode`) for the active space.
     case setSpaceAppearance(SpaceAppearance)
+    /// Archive Space (ReArc): the active space leaves the lists, kept as it was.
+    case archiveSpace
     case deleteSpace
     case newFolder
     case expandAllFolders
@@ -282,8 +284,10 @@ public struct AppCommand: Equatable, Identifiable {
             return store.activeSpace.theme.appearance != appearance
         case .renameSpace, .editSpaceTheme, .newFolder, .viewArchive:
             return true
+        case .archiveSpace:
+            return store.archiveBlocker(forSpace: store.activeSpaceID) == nil
         case .deleteSpace:
-            return store.spaces.count > 1
+            return store.visibleSpaces.count > 1
         case .expandPinnedSection, .collapsePinnedSection:
             return !store.content(for: store.activeSpaceID).pinned.isEmpty
         case .expandAllFolders, .collapseAllFolders:
@@ -951,6 +955,7 @@ public enum AppCommandRegistry {
             minQueryLength: 2,
             action: .editSpaceTheme
         ),
+        AppCommand(id: "archive-space", title: "Archive Space", keywords: ["space", "archive", "hide", "put away"], minQueryLength: 3, action: .archiveSpace),
         AppCommand(id: "delete-space", title: "Delete Space…", keywords: ["space", "delete", "remove"], minQueryLength: 3, action: .deleteSpace),
         AppCommand(id: "new-folder", title: "New Folder", keywords: ["folder", "new", "group"], minQueryLength: 2, action: .newFolder),
         AppCommand(

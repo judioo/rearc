@@ -52,7 +52,7 @@ extension CommandBarSearch {
                                tier, recency))
             }
             for (index, tab) in store.favorites.enumerated() { add(tab, nil, tier: 0, recency: index) }
-            for space in store.spaces {
+            for space in store.visibleSpaces {
                 let content = store.content(for: space.id)
                 for (index, entry) in content.pinned.enumerated() {
                     for tab in CommandBarSearch.tabs(in: entry) { add(tab, space, tier: 1, recency: index) }

@@ -423,6 +423,7 @@ struct ProfilesSettingsPane: View {
                 SettingsLabeledRow(label: "Download location") { Button("Download Settings…") { open(.downloadSettings, in: profile) } }
             }
         }
+        ArchivedSpacesGroup(model: model, profileID: profile.id)
         // Arc's icons and colours.
         let dataRows: [(BrowserInternalPage, String, Color)] = [
             (.privacy, "lock.fill", .blue),

@@ -338,6 +338,10 @@ enum ShellMenus {
             [
                 ShellMenuItem("Move Space Left") { model.moveActiveSpace(by: -1) },
                 ShellMenuItem("Move Space Right") { model.moveActiveSpace(by: 1) },
+                ShellMenuItem("Archive Space") {
+                    guard model.canArchiveSpace(model.store.activeSpaceID) else { return }
+                    model.archiveSpace(model.store.activeSpaceID)
+                },
                 ShellMenuItem("Delete Space…") {
                     guard model.canDeleteSpaces else { return }
                     model.pendingDeletion = .space(model.store.activeSpaceID)

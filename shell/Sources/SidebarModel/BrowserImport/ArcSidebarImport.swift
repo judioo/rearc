@@ -160,6 +160,9 @@ extension SidebarStore {
                 $0.profileID == target && $0.arcSourceID == nil && $0.name == arcSpace.name &&
                 !incoming.isEmpty && arcEntriesMatch(incoming, content(for: $0.id).pinned)
             }
+            // Importing an Arc space again brings its archived ReArc space back:
+            // imported rows never land in a space nothing lists.
+            if let prior, prior.isArchived { restoreArchivedSpace(prior.id) }
             // The id follows from the Arc space, like its rows' ids: two Macs
             // importing it make one space, which sync then knows as one.
             let space = prior ?? addSpace(name: arcSpace.name, theme: arcSpace.theme ?? .arcDefault,

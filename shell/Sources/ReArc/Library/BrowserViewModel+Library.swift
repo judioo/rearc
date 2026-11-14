@@ -105,7 +105,7 @@ extension BrowserViewModel {
     /// Easels and notes in every space, for the Easels & Notes page.
     func libraryDocumentRows(filter: LibraryDocumentFilter, query: String) -> [LibraryDocumentRow] {
         _ = easelMutationRevision
-        let refs = store.spaces.flatMap { space in
+        let refs = store.visibleSpaces.flatMap { space in
             (store.content(for: space.id).pinned + store.content(for: space.id).today).compactMap { entry -> (SidebarEaselRef, String)? in
                 if case .easel(let ref) = entry { return (ref, space.name) }
                 return nil

@@ -539,7 +539,10 @@ extension BrowserViewModel {
         case .profile(let id):
             let profile = store.profile(withID: id)
             let count = store.spaces(listedIn: id).count
+            // Archived spaces go too; the dialog counts them.
+            let archived = store.archivedSpaces(in: id).count
             let spaces = "\(count) space\(count == 1 ? "" : "s")"
+                + (archived == 0 ? "" : ", \(archived) archived space\(archived == 1 ? "" : "s")")
             // Its containers go with it; the dialog names them by their spaces.
             let containers = store.containers(of: id).map { "“\(store.spaces(in: $0.id).first?.name ?? $0.name)”" }
             let alongside = containers.isEmpty ? "" : containers.count == 1
@@ -677,7 +680,46 @@ extension BrowserViewModel {
         showToast("Space deleted", systemImage: "trash")
     }
 
-    var canDeleteSpaces: Bool { store.spaces.count > 1 }
+    var canDeleteSpaces: Bool { store.visibleSpaces.count > 1 }
+
+    // MARK: - Archive Space
+
+    /// Archive Space: the space leaves every list, kept exactly as it was, and
+    /// its pages close as a deleted space's do. Undo puts it back and returns to it.
+    func archiveSpace(_ id: Space.ID) {
+        let wasActive = store.activeSpaceID == id
+        guard store.archiveSpace(id) == nil else { return }
+        reconcileEngineOwnership()
+        loadSelectedIfNeeded()
+        showUndoToast("Space archived", systemImage: "archivebox") { [weak self] in
+            self?.restoreArchivedSpace(id, switching: wasActive)
+        }
+    }
+
+    func canArchiveSpace(_ id: Space.ID) -> Bool {
+        store.archiveBlocker(forSpace: id) == nil
+    }
+
+    /// Settings › Profiles › Archived Spaces › Restore, and the toast's Undo.
+    func restoreArchivedSpace(_ id: Space.ID, switching: Bool = true) {
+        guard store.restoreArchivedSpace(id) == nil else { return }
+        if switching { selectSpace(id) }
+    }
+
+    /// Settings › Profiles › Archived Spaces › Delete…, once confirmed.
+    func deleteArchivedSpace(_ id: Space.ID) {
+        guard store.space(withID: id)?.isArchived == true, store.removeSpace(id) else { return }
+        showToast("Space deleted", systemImage: "trash")
+    }
+
+    /// Why Archive Space is unavailable, in the command bar's words.
+    static func archiveRefusal(_ error: SpaceArchiveError) -> String {
+        switch error {
+        case .lastSpace: return "The last space cannot be archived"
+        case .containerSpace: return "A container's space cannot be archived"
+        case .alreadyArchived, .notArchived, .spaceNotFound: return "This space cannot be archived"
+        }
+    }
 
     // MARK: - Archive
 

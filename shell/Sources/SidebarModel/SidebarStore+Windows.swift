@@ -16,7 +16,7 @@ extension SidebarStore {
 
     /// A new window starts on the key window's space.
     public func registerWindow(_ window: SidebarWindowID, spaceID: Space.ID? = nil) {
-        let space = spaceID.flatMap { space(withID: $0)?.id } ?? activeSpaceID
+        let space = spaceID.flatMap { listedSpace(withID: $0)?.id } ?? activeSpaceID
         focusedSpaceByWindow[window] = space
         if keyWindowID == nil { keyWindowID = window }
     }
@@ -29,17 +29,17 @@ extension SidebarStore {
     /// The window became key: its space becomes the active space (and its
     /// profile the active profile), with that space's remembered selection.
     public func windowBecameKey(_ window: SidebarWindowID) {
-        let target = focusedSpaceByWindow[window].flatMap { space(withID: $0)?.id } ?? activeSpaceID
+        let target = focusedSpaceByWindow[window].flatMap { listedSpace(withID: $0)?.id } ?? activeSpaceID
         keyWindowID = window
         if target != activeSpaceID { selectSpace(target) }
         focusedSpaceByWindow[window] = activeSpaceID
     }
 
     /// The space a window shows. Unknown windows, the key window and windows
-    /// whose space was deleted show the active space.
+    /// whose space was deleted or archived show the active space.
     public func focusedSpaceID(in window: SidebarWindowID?) -> Space.ID {
         guard let window, window != keyWindowID,
-              let id = focusedSpaceByWindow[window], space(withID: id) != nil else { return activeSpaceID }
+              let id = focusedSpaceByWindow[window], listedSpace(withID: id) != nil else { return activeSpaceID }
         return id
     }
 
