@@ -19,6 +19,19 @@ that adds the entry, so write it as the last commit before the release, with
 Merged since the last release and not yet in a build. The next release's entry takes these
 lines and this section starts empty again.
 
+## ReArc 2026.1114.767 — 2026-11-14
+
+**Fixes**
+- The icon you pick in Settings › Icon is now ReArc's icon everywhere: in Finder,
+  Applications, Spotlight, Launchpad and the Dock while ReArc is closed. Before, only the
+  Dock icon of the running app changed. ReArc puts your icon back after each update. If
+  ReArc is installed where your account can't write (an app folder owned by another
+  account), only the running app's icon changes, as before.
+
+**Known**
+- The Dock may keep showing the old icon for a ReArc tile kept in the Dock until you
+  log out or restart.
+
 ## ReArc 2026.1113.765 — 2026-11-13
 
 **Fixes**
