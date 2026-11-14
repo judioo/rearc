@@ -19,6 +19,13 @@ that adds the entry, so write it as the last commit before the release, with
 Merged since the last release and not yet in a build. The next release's entry takes these
 lines and this section starts empty again.
 
+**Security**
+- The engine now has the fix for CVE-2026-121203, a memory-safety bug in how pages watch
+  elements change size. Chrome fixed it in 157; ReArc's engine line, 156, did not have it.
+- ReArc turns off an engine memory optimisation that could be misused through preloaded pages
+  (CVE-2026-121035). Tabs that are not loaded use slightly more memory until the engine
+  carries Chrome's own fix.
+
 ## ReArc 2026.1114.772 — 2026-11-14
 
 **New**

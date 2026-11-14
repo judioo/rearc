@@ -305,6 +305,8 @@ and `IdbSqliteOnDiskRollout`, so local storage and IndexedDB went back from SQLi
 profiles from 500 to 564 read both as empty, and each site's IndexedDB data was deleted on its
 first visit. The engine is built with the testing config again, and the shell passes
 `--disable-features=SafeBrowsingLocalListsUseSBv5` (`ChromiumLaunchArguments.disabledEngineFeatures`).
+Since 2026-11-14 that list also turns off `LazyBrowserInterfaceBroker`, a security mitigation
+for CVE-2026-121035 that changes no stored data.
 
 The rule: a build is safe for an existing profile only when every engine feature that was on
 when the profile was written is still on. Never change the engine's feature set, a GN flag that

@@ -246,7 +246,7 @@ final class ReleaseLaunchSecurityTests: XCTestCase {
         let feature = ChromiumLaunchArguments.persistedProfileFeatures
         let disabled = ChromiumLaunchArguments.disabledEngineFeatures
         XCTAssertTrue(feature.contains("PrepopulatedEnginesMigration") && feature.contains("ApplySearchEngineTypeMigration"))
-        XCTAssertEqual(disabled, "--disable-features=SafeBrowsingLocalListsUseSBv5")
+        XCTAssertEqual(disabled, "--disable-features=SafeBrowsingLocalListsUseSBv5,LazyBrowserInterfaceBroker")
         // Development, the bundle release.sh is verifying, and the shipped bundle.
         for (isRelease, isShipped) in [(false, false), (true, false), (true, true)] {
             for argv in [["ReArc"], ["ReArc", "--enable-features=Other", "--disable-features=PrepopulatedEnginesMigration"]] {

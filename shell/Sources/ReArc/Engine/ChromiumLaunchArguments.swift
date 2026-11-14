@@ -23,10 +23,16 @@ enum ChromiumLaunchArguments {
     /// the testing config again, so these are on anyway; they stay listed so that a later
     /// engine without it cannot repeat 602. Never remove a feature from this list.
     static let persistedProfileFeatures = "--enable-features=PrepopulatedEnginesMigration,ApplySearchEngineTypeMigration"
-    /// The one testing-config feature ReArc turns off: Safe Browsing's v5 list protocol, which
-    /// Google answers with 404 for ReArc's key, so no threat list would ever arrive (544, 564).
-    /// It writes nothing an older build reads; the v4 lists live in the same folder.
-    static let disabledEngineFeatureNames = ["SafeBrowsingLocalListsUseSBv5"]
+    /// The engine features ReArc turns off. Neither writes anything an older build reads.
+    /// - `SafeBrowsingLocalListsUseSBv5`, from the testing config: Safe Browsing's v5 list
+    ///   protocol, which Google answers with 404 for ReArc's key, so no threat list would ever
+    ///   arrive (544, 564). The v4 lists live in the same folder.
+    /// - `LazyBrowserInterfaceBroker`, on by default in Chromium 156: with it, a frame's
+    ///   interface broker can be destroyed while a prerendering page still holds callbacks
+    ///   into it (CVE-2026-121035, fixed upstream in 157 by 403a04e98, not in 156). Off, the
+    ///   broker lives as long as its frame, as it did before the feature. Remove it when the
+    ///   engine has that fix.
+    static let disabledEngineFeatureNames = ["SafeBrowsingLocalListsUseSBv5", "LazyBrowserInterfaceBroker"]
     static let disabledEngineFeatures = "--disable-features=" + disabledEngineFeatureNames.joined(separator: ",")
 
     enum KeychainMode: Equatable {
@@ -79,7 +85,7 @@ enum ChromiumLaunchArguments {
     }
 
     /// What every launch hands the engine: `browserArguments`, then the features each profile
-    /// needs on (`persistedProfileFeatures`) and the one ReArc turns off (`disabledEngineFeatures`),
+    /// needs on (`persistedProfileFeatures`) and the ones ReArc turns off (`disabledEngineFeatures`),
     /// in release and development builds alike. Chromium keeps only the last `--enable-features`
     /// and the last `--disable-features`, so these come after anything argv carried.
     static func engineArguments(
