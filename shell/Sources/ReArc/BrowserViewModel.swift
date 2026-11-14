@@ -1368,9 +1368,10 @@ final class BrowserViewModel {
     }
 
     private func reconcileEngineOwnershipNow() {
-        themeColors.retain(spaces: store.spaces)
+        themeColors.retain(spaces: store.visibleSpaces)
         var tabKeys = Set<EngineHost.TabEngineKey>()
-        for space in store.spaces {
+        // An archived space's pages close as a deleted space's do.
+        for space in store.visibleSpaces {
             for tab in store.displayTabs(in: space.id) {
                 tabKeys.insert(EngineHost.TabEngineKey(tabID: tab.id, profileID: profileID(for: tab)))
             }
@@ -1410,7 +1411,7 @@ final class BrowserViewModel {
         if let tab {
             candidates = [tab]
         } else {
-            candidates = store.spaces.flatMap { store.displayTabs(in: $0.id) }
+            candidates = store.visibleSpaces.flatMap { store.displayTabs(in: $0.id) }
         }
         for candidate in candidates {
             let state = mediaState(for: candidate.id)
@@ -2335,6 +2336,9 @@ final class BrowserViewModel {
             spaceEditorID = store.activeSpaceID
         case .setSpaceAppearance(let appearance):
             setSpaceAppearance(appearance)
+        case .archiveSpace:
+            if let blocker = store.archiveBlocker(forSpace: store.activeSpaceID) { return Self.archiveRefusal(blocker) }
+            archiveSpace(store.activeSpaceID)
         case .deleteSpace:
             guard canDeleteSpaces else { return "The last space cannot be deleted" }
             pendingDeletion = .space(store.activeSpaceID)

@@ -36,11 +36,11 @@ struct ArchiveLibraryFilterMenu: View {
         Menu {
             Picker("Space", selection: $model.archiveFilter.spaceID) {
                 Text("All Spaces").tag(Optional<Space.ID>.none)
-                ForEach(model.store.spaces) { space in
+                ForEach(model.store.visibleSpaces) { space in
                     Text(space.name).tag(Optional(space.id))
                 }
-                if let id = model.archiveFilter.spaceID, model.store.space(withID: id) == nil {
-                    Text("Deleted Space").tag(Optional(id))
+                if let id = model.archiveFilter.spaceID, model.store.listedSpace(withID: id) == nil {
+                    Text(model.store.space(withID: id) == nil ? "Deleted Space" : "Archived Space").tag(Optional(id))
                 }
             }
             Picker("Date", selection: $model.archiveFilter.date) {
