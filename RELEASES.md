@@ -19,6 +19,20 @@ that adds the entry, so write it as the last commit before the release, with
 Merged since the last release and not yet in a build. The next release's entry takes these
 lines and this section starts empty again.
 
+## ReArc 2026.1114.785 — 2026-11-14
+
+**New**
+- Archive Space. Put a space away without deleting it: right-click the space and choose
+  Archive Space, or use the Spaces menu or the command bar. It leaves the sidebar, the space
+  switcher and ⌃1–9, and keeps its pinned tabs, folders, Today tabs, theme and icon exactly as
+  they were. An Undo button shows straight after, in case you didn't mean it.
+- Find archived spaces in Settings › Profiles under Archived Spaces. Restore puts a space back
+  where it was and switches to it; Delete… removes it for good.
+
+**Known**
+- Archived spaces don't sync to your other Macs yet; they will once iCloud's server is
+  updated for them. Macs on an older ReArc show archived spaces as ordinary spaces.
+
 ## ReArc 2026.1114.778 — 2026-11-14
 
 **Security**
