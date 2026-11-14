@@ -19,10 +19,18 @@ that adds the entry, so write it as the last commit before the release, with
 Merged since the last release and not yet in a build. The next release's entry takes these
 lines and this section starts empty again.
 
+## ReArc 2026.1114.772 — 2026-11-14
+
+**New**
 - A space in a container is now easy to spot: its icon sits in a ring of the container's
   colour, and its profile picture has the same ring with a larger container badge. The ring
   and badge stay visible on every space colour, in light and dark; before, the badge took the
   space's own colour and disappeared into the sidebar.
+- Site controls: pinned extensions have a blue pin button on their tile, as in Arc. Point at
+  an extension that isn't pinned and a pale pin button appears; click it to pin the extension
+  to the toolbar, and click a pinned extension's button to unpin it.
+- Site controls: point at an extension to see its name. Manage shows when you point at the
+  Extensions section, as in Arc.
 
 ## ReArc 2026.1114.767 — 2026-11-14
 
