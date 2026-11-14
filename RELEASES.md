@@ -19,9 +19,18 @@ that adds the entry, so write it as the last commit before the release, with
 Merged since the last release and not yet in a build. The next release's entry takes these
 lines and this section starts empty again.
 
-## ReArc 2026.1114.775 — 2026-11-14
+## ReArc 2026.1114.778 — 2026-11-14
 
 **Security**
+- Deleting a profile "from This Mac and iCloud" now removes an iCloud profile only when all of
+  its spaces belong to the profile you are deleting. When that iCloud profile came from another
+  Mac or an earlier install, the confirmation names it and lists its spaces. An iCloud profile
+  that only shares some spaces with one of this Mac's profiles is listed under "In iCloud only"
+  with its own Delete from iCloud…, and the profile on this Mac offers Put in iCloud….
+- If iCloud's copy changes between the question and your answer so that it no longer belongs to
+  the profile, nothing is deleted and ReArc says why.
+- After a page keeps ReArc open at quit, quitting again within 30 seconds quits without asking.
+  Any later quit asks "Leave site?" again and lets pages finish their work as usual.
 - The engine now has the fix for CVE-2026-121203, a memory-safety bug in how pages watch
   elements change size. Chrome fixed it in 157; ReArc's engine line, 156, did not have it.
 - ReArc turns off an engine memory optimisation that could be misused through preloaded pages
