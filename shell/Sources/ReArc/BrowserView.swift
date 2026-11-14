@@ -135,6 +135,7 @@ struct BrowserView: View {
             }
         }
         .overlay(alignment: .topLeading) { BrowserProbeMarkers(model: model, pager: pager) }
+        .task { await SiteControlsPreview.openWhenReady(in: model) }
         .tint(model.themeColor(in: windowID))
         .environment(\.themeChrome, themeChrome)
         .environment(\.sidebarWindow, windowID)

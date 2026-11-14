@@ -29,6 +29,60 @@ final class SiteControlsPanelTests: XCTestCase {
         XCTAssertEqual(SiteControlCenter.extensionColumns, 4)
     }
 
+    func testTilesKeepTheirPlaceWhilePinnedOrUnpinnedInTheOpenPanel() {
+        let actions = ["a", "b", "c", "d"].map { ExtensionActionItem(id: $0, name: $0.uppercased()) }
+        var pins = ExtensionPins(pinnedIDs: ["c"])
+        let opened = pins
+        // The pin button on D, then on C: both stay where the pointer is.
+        pins.toggle("d")
+        pins.toggle("c")
+        let open = SiteControlCenter.extensionTiles(actions, pins: pins, order: opened)
+        XCTAssertEqual(open.map(\.id), ["c", "a", "b", "d", "+"])
+        XCTAssertEqual(open[0], .action(actions[2], pinned: false))
+        XCTAssertEqual(open[3], .action(actions[3], pinned: true))
+        // The next opening sorts them: the toolbar's first.
+        let reopened = SiteControlCenter.extensionTiles(actions, pins: pins)
+        XCTAssertEqual(reopened.map(\.id), ["d", "a", "b", "c", "+"])
+        XCTAssertEqual(reopened[0], .action(actions[3], pinned: true))
+        XCTAssertEqual(reopened[3], .action(actions[2], pinned: false))
+    }
+
+    func testPinButtonIsSolidWhenPinnedAndOfferedUnderThePointer() {
+        let item = ExtensionActionItem(id: "a", name: "Ad Blocker")
+        let pinned = SiteControlCenter.ExtensionTile.action(item, pinned: true)
+        let unpinned = SiteControlCenter.ExtensionTile.action(item, pinned: false)
+        XCTAssertEqual(pinned.pinBadge(hovered: false), .pinned)
+        XCTAssertEqual(pinned.pinBadge(hovered: true), .pinned)
+        XCTAssertNil(unpinned.pinBadge(hovered: false), "no button until the pointer is on the tile")
+        XCTAssertEqual(unpinned.pinBadge(hovered: true), .offered)
+        XCTAssertNil(SiteControlCenter.ExtensionTile.add.pinBadge(hovered: true))
+        XCTAssertEqual(SiteControlCenter.PinBadge.pinned.title, "Unpin extension")
+        XCTAssertEqual(SiteControlCenter.PinBadge.offered.title, "Pin extension")
+    }
+
+    func testHoverLabelNamesTheExtensionOrWhatThePinButtonDoes() {
+        let item = ExtensionActionItem(id: "a", name: "Ad Blocker", title: "Ad Blocker: 3 blocked")
+        let pinned = SiteControlCenter.ExtensionTile.action(item, pinned: true)
+        let unpinned = SiteControlCenter.ExtensionTile.action(item, pinned: false)
+        XCTAssertEqual(pinned.hoverLabel(onPin: false), "Ad Blocker")
+        XCTAssertEqual(unpinned.hoverLabel(onPin: false), "Ad Blocker")
+        XCTAssertEqual(pinned.hoverLabel(onPin: true), "Unpin extension")
+        XCTAssertEqual(unpinned.hoverLabel(onPin: true), "Pin extension")
+        XCTAssertEqual(SiteControlCenter.ExtensionTile.add.hoverLabel(onPin: false), "Chrome Web Store")
+        XCTAssertLessThan(SiteControlCenter.hoverLabelDelay, 1, "sooner than a system tooltip")
+    }
+
+    func testPreviewPointerFindsATileByNameOrID() {
+        let actions = [ExtensionActionItem(id: "aaaa", name: "Ad Blocker"), ExtensionActionItem(id: "bbbb", name: "Notes: Quick")]
+        let tiles = SiteControlCenter.extensionTiles(actions, pins: ExtensionPins(pinnedIDs: ["aaaa"]))
+        XCTAssertEqual(SiteControlCenter.previewHover("ad blocker", in: tiles), .init(id: "aaaa"))
+        XCTAssertEqual(SiteControlCenter.previewHover("bbbb:pin", in: tiles), .init(id: "bbbb", onPin: true))
+        XCTAssertEqual(SiteControlCenter.previewHover("Notes: Quick", in: tiles), .init(id: "bbbb"))
+        XCTAssertEqual(SiteControlCenter.previewHover("Notes: Quick:pin", in: tiles), .init(id: "bbbb", onPin: true))
+        XCTAssertEqual(SiteControlCenter.previewHover("+", in: tiles), .init(id: "+"))
+        XCTAssertNil(SiteControlCenter.previewHover("Gone", in: tiles))
+    }
+
     func testPermissionRowsLeadWithLocationAndFollowTheEngine() {
         let blocked = SitePermissionStore.Entry(decision: .deny, remembered: true, date: now)
         let once = SitePermissionStore.Entry(decision: .allow, remembered: false, date: now)

@@ -123,7 +123,7 @@ extension BrowserViewModel {
 
 /// Arc's site controls popover from the toolbar (Arc `ARC_SiteControlCenter`):
 /// Share, Boost, Capture and Capture Full Page; every extension, pinned ones
-/// first with a pin badge; the site's settings; the connection and a ⋯ menu.
+/// first with a pin button; the site's settings; the connection and a ⋯ menu.
 /// Built only while open: the toolbar reads none of this.
 struct SiteControlCenterView: View {
     let model: BrowserViewModel
@@ -131,9 +131,13 @@ struct SiteControlCenterView: View {
     let site: SiteControlCenter.Site
     /// The toolbar button: extension popups open under it once the panel closes.
     var anchor: NSView?
+    /// A preview's pointer, by tile (`SiteControlsPreview`).
+    var preview: String? = SiteControlsPreview.requested
     let dismiss: () -> Void
     @Environment(\.sidebarWindow) private var window
     @Environment(\.colorScheme) private var colorScheme
+    /// The pointer is over the Extensions section: Manage shows.
+    @State private var isOverExtensions = false
 
     static let tile = CGSize(width: 48, height: 32)
     static let spacing: CGFloat = 8
@@ -146,27 +150,34 @@ struct SiteControlCenterView: View {
         VStack(alignment: .leading, spacing: 0) {
             quickActions
             if controller.isAvailable {
-                HStack(alignment: .firstTextBaseline) {
-                    header("Extensions")
-                    Spacer()
-                    // Arc has no visible control for this (2026-11-06 capture);
-                    // chrome://extensions/ in a tab, as the tiles' menus.
-                    Button("Manage", action: manageExtensions)
-                        .buttonStyle(.link)
-                        .font(.system(size: 11))
-                        .help("Manage Extensions")
-                        .accessibilityLabel("Manage Extensions")
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(alignment: .firstTextBaseline) {
+                        header("Extensions", top: 10, bottom: 9)
+                        Spacer()
+                        // Arc shows it while the pointer is over the section
+                        // (2026-11-14 captures); chrome://extensions/ in a
+                        // tab, as the tiles' menus.
+                        Button("Manage", action: manageExtensions)
+                            .buttonStyle(.plain)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .opacity(isOverExtensions || preview != nil ? 1 : 0)
+                            .help("Manage Extensions")
+                            .accessibilityLabel("Manage Extensions")
+                    }
+                    SiteControlsExtensionGrid(model: model, engine: engine, preview: preview, manage: manageExtensions) { id in
+                        dismiss()
+                        // The popup opens once the panel has closed.
+                        DispatchQueue.main.async { controller.run(id, for: engine, anchor: anchor) }
+                    } add: {
+                        dismiss()
+                        model.openChromeWebStore()
+                    }
                 }
-                SiteControlsExtensionGrid(model: model, engine: engine, manage: manageExtensions) { id in
-                    dismiss()
-                    // The popup opens once the panel has closed.
-                    DispatchQueue.main.async { controller.run(id, for: engine, anchor: anchor) }
-                } add: {
-                    dismiss()
-                    model.openChromeWebStore()
-                }
+                .onHover { isOverExtensions = $0 }
+                .animation(.easeOut(duration: 0.12), value: isOverExtensions)
             }
-            header("Settings")
+            header("Settings", top: 16, bottom: 8)
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(model.siteControlSettingRows(for: engine, site: site)) { row in
                     SiteControlsSettingRowView(row: row, isDark: colorScheme == .dark) { action in
@@ -227,12 +238,14 @@ struct SiteControlCenterView: View {
             .accessibilityLabel(action.title)
     }
 
-    private func header(_ title: String) -> some View {
+    /// Arc's section titles: 14 pt, their capitals 14 pt under the buttons
+    /// and 19 pt under the grid (2026-11-14 captures).
+    private func header(_ title: String, top: CGFloat, bottom: CGFloat) -> some View {
         Text(title)
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(.primary.opacity(0.75))
-            .padding(.top, 14)
-            .padding(.bottom, 8)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundStyle(.primary.opacity(0.8))
+            .padding(.top, top)
+            .padding(.bottom, bottom)
     }
 
     // MARK: Secure and ⋯
@@ -286,79 +299,249 @@ private struct SiteControlsTileBackground: View {
     }
 }
 
-/// The Extensions grid, four across; pinned extensions carry Arc's brown pin
-/// badge and right-click pins or unpins. + opens the Chrome Web Store;
-/// every tile's menu has Manage Extensions… (chrome://extensions/).
+/// The Extensions grid, four across. A pinned extension carries Arc's blue
+/// pin button on its tile's corner; an unpinned one shows it faintly under
+/// the pointer, and a click on it pins or unpins (as does a right-click).
+/// The tile under the pointer names its extension. + opens the Chrome Web
+/// Store; every tile's menu has Manage Extensions… (chrome://extensions/).
 struct SiteControlsExtensionGrid: View {
     let model: BrowserViewModel
     let engine: (any WebEngine)?
+    /// A preview's pointer, by tile (`SiteControlsPreview`).
+    var preview: String?
     let manage: () -> Void
     let run: (String) -> Void
     let add: () -> Void
     @Environment(\.displayScale) private var displayScale
+    /// The pins when the grid opened: its tiles keep that order while it is open.
+    @State private var order: ExtensionPins?
+    /// The tile under the pointer, and the one whose label shows.
+    @State private var hover: SiteControlCenter.TileHover?
+    @State private var labelled: SiteControlCenter.TileHover?
 
     private let columns = Array(repeating: GridItem(.fixed(SiteControlCenterView.tile.width), spacing: SiteControlCenterView.spacing),
                                 count: SiteControlCenter.extensionColumns)
 
     var body: some View {
         let controller = model.extensions
+        let tiles = SiteControlCenter.extensionTiles(controller.actions(for: engine), pins: controller.pins, order: order)
+        let previewed = preview.flatMap { SiteControlCenter.previewHover($0, in: tiles) }
+        let pointer = hover ?? previewed
         LazyVGrid(columns: columns, alignment: .leading, spacing: SiteControlCenterView.spacing) {
-            ForEach(SiteControlCenter.extensionTiles(controller.actions(for: engine), pins: controller.pins)) { tile in
-                switch tile {
-                case .action(let action, let pinned):
-                    Button { run(action.id) } label: {
-                        ExtensionIcon(action: action, size: 16)
-                            .overlay(alignment: .bottomTrailing) {
-                                if pinned { SiteControlsPinBadge().offset(x: 6, y: 5) }
-                            }
-                            .frame(width: SiteControlCenterView.tile.width, height: SiteControlCenterView.tile.height)
-                            .background(SiteControlsTileBackground(raised: false))
-                            .contentShape(Rectangle())
+            ForEach(tiles) { tile in
+                SiteControlsExtensionTileView(tile: tile, pointer: pointer?.id == tile.id ? pointer : nil, manage: manage) {
+                    switch tile {
+                    case .action(let action, _): run(action.id)
+                    case .add: add()
                     }
-                    .buttonStyle(.plain)
-                    .disabled(!action.isEnabled)
-                    .opacity(action.isEnabled ? 1 : 0.45)
-                    .help(action.tooltip)
-                    .accessibilityLabel(action.name)
-                    .contextMenu {
-                        Button("Manage Extensions…", action: manage)
-                        Divider()
-                        Button(pinned ? "Unpin \(action.name)" : "Pin \(action.name)") { controller.togglePin(action.id) }
-                    }
-                case .add:
-                    Button(action: add) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.primary.opacity(0.7))
-                            .frame(width: SiteControlCenterView.tile.width, height: SiteControlCenterView.tile.height)
-                            .background(SiteControlsTileBackground(raised: false))
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Chrome Web Store")
-                    .accessibilityLabel("Add Extensions")
-                    .contextMenu { Button("Manage Extensions…", action: manage) }
+                } togglePin: {
+                    controller.togglePin(tile.id)
+                } pointerMoved: { now in
+                    // The next tile's arrival can come before this one's leave.
+                    if let now { hover = now } else if hover?.id == tile.id { hover = nil }
                 }
             }
         }
+        .overlay(alignment: .topLeading) {
+            if let shown = labelled ?? previewed, let index = tiles.firstIndex(where: { $0.id == shown.id }) {
+                SiteControlsHoverLabel(text: tiles[index].hoverLabel(onPin: shown.onPin), tileIndex: index)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.1), value: labelled != nil)
+        .onAppear { order = controller.pins }
         // The list is the tab's last answer. Asked again on opening, so an
         // extension that loaded after the tab first asked shows up (QA 2026-11-08 #20).
         .task { controller.refresh(engine, scale: displayScale) }
+        .task(id: hover) {
+            if hover == nil {
+                // Crossing the gap between two tiles keeps the label up.
+                try? await Task.sleep(for: .milliseconds(120))
+            } else if labelled == nil {
+                try? await Task.sleep(for: .seconds(SiteControlCenter.hoverLabelDelay))
+            }
+            if !Task.isCancelled { labelled = hover }
+        }
     }
 }
 
-/// Arc's pin badge: a small brown disc with a white pin.
-struct SiteControlsPinBadge: View {
-    static let fill = Color(.sRGB, red: 0.42, green: 0.33, blue: 0.27)
+/// One tile: a click runs the extension (or opens the Web Store), a click
+/// on the pin button at its corner pins or unpins.
+private struct SiteControlsExtensionTileView: View {
+    let tile: SiteControlCenter.ExtensionTile
+    /// The pointer, while it is on this tile.
+    let pointer: SiteControlCenter.TileHover?
+    let manage: () -> Void
+    let click: () -> Void
+    let togglePin: () -> Void
+    /// Nil: the pointer left.
+    let pointerMoved: (SiteControlCenter.TileHover?) -> Void
+    @State private var isOverTile = false
+    @State private var isOverPin = false
+
+    /// The pin button takes clicks a little past its disc, short of the next tile.
+    private static let pinTarget: CGFloat = 20
 
     var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            switch tile {
+            case .action(let action, let pinned):
+                Button(action: click) {
+                    ExtensionIcon(action: action, size: 16)
+                        .frame(width: SiteControlCenterView.tile.width, height: SiteControlCenterView.tile.height)
+                        .background(SiteControlsTileBackground(raised: false))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!action.isEnabled)
+                .opacity(action.isEnabled ? 1 : 0.45)
+                .accessibilityLabel(action.name)
+                if let badge = tile.pinBadge(hovered: pointer != nil) {
+                    Button(action: togglePin) {
+                        SiteControlsPinBadge(badge: badge)
+                            .frame(width: Self.pinTarget, height: Self.pinTarget)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { isOverPin = $0 }
+                    // Arc's disc is centred 4 pt inside the tile's corner.
+                    .offset(x: Self.pinTarget / 2 - 4, y: Self.pinTarget / 2 - 4)
+                    .accessibilityLabel(pinned ? "Unpin \(action.name)" : "Pin \(action.name)")
+                }
+            case .add:
+                Button(action: click) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.primary.opacity(0.7))
+                        .frame(width: SiteControlCenterView.tile.width, height: SiteControlCenterView.tile.height)
+                        .background(SiteControlsTileBackground(raised: false))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Add Extensions")
+            }
+        }
+        .frame(width: SiteControlCenterView.tile.width, height: SiteControlCenterView.tile.height)
+        .onHover { isOverTile = $0 }
+        .onChange(of: [isOverTile, isOverPin]) { _, _ in
+            pointerMoved(isOverTile || isOverPin ? SiteControlCenter.TileHover(id: tile.id, onPin: isOverPin) : nil)
+        }
+        .contextMenu {
+            Button("Manage Extensions…", action: manage)
+            if case .action(let action, let pinned) = tile {
+                Divider()
+                Button(pinned ? "Unpin \(action.name)" : "Pin \(action.name)", action: togglePin)
+            }
+        }
+    }
+}
+
+/// Arc's pin button: a 14 pt disc in Arc's blue with a pale pin, the disc
+/// at a third of its strength while it only offers to pin.
+struct SiteControlsPinBadge: View {
+    var badge: SiteControlCenter.PinBadge = .pinned
+
+    /// #1F2AFF, read off Arc's (2026-11-14 captures).
+    static let fill = Color(.sRGB, red: 0.122, green: 0.165, blue: 1)
+    static let diameter: CGFloat = 14
+
+    var body: some View {
+        // Arc's pin takes the tile's grey (a cut-out, or drawn in it): white, a little short of full.
         Image(systemName: "pin.fill")
-            .font(.system(size: 6.5, weight: .bold))
+            .font(.system(size: 8.5, weight: .bold))
             .rotationEffect(.degrees(45))
+            .foregroundStyle(.white.opacity(0.92))
+            .frame(width: Self.diameter, height: Self.diameter)
+            .background(Self.fill.opacity(badge == .pinned ? 1 : 0.33), in: Circle())
+    }
+}
+
+/// The label over the tile under the pointer: small, dark and rounded, as
+/// Arc's own tooltips (`ArcTooltip`), and much sooner than a system one.
+/// Centred over its tile, kept inside the panel.
+private struct SiteControlsHoverLabel: View {
+    let text: String
+    let tileIndex: Int
+    @Environment(\.colorScheme) private var colorScheme
+
+    private static let font = NSFont.systemFont(ofSize: 11, weight: .medium)
+    private static let height: CGFloat = 20
+    private static let inset: CGFloat = 7
+    /// How far past the grid's sides it may reach (the panel's inset is 10).
+    private static let overhang: CGFloat = 6
+
+    var body: some View {
+        let pitch = CGSize(width: SiteControlCenterView.tile.width + SiteControlCenterView.spacing,
+                           height: SiteControlCenterView.tile.height + SiteControlCenterView.spacing)
+        let column = CGFloat(tileIndex % SiteControlCenter.extensionColumns)
+        let row = CGFloat(tileIndex / SiteControlCenter.extensionColumns)
+        let limit = SiteControlCenterView.width + 2 * Self.overhang
+        let width = min(ceil((text as NSString).size(withAttributes: [.font: Self.font]).width) + 2 * Self.inset, limit)
+        let centre = column * pitch.width + SiteControlCenterView.tile.width / 2
+        let x = min(max(centre - width / 2, -Self.overhang), SiteControlCenterView.width + Self.overhang - width)
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        Text(text)
+            .font(Font(Self.font))
             .foregroundStyle(.white)
-            .frame(width: 13, height: 13)
-            .background(Self.fill, in: Circle())
-            .overlay(Circle().strokeBorder(Color.white.opacity(0.9), lineWidth: 1))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.horizontal, Self.inset)
+            .frame(width: width, height: Self.height)
+            .background(Color(white: colorScheme == .dark ? 0.30 : 0.15), in: shape)
+            .overlay(shape.strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.12 : 0), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.22), radius: 3, y: 1)
+            .offset(x: x, y: row * pitch.height - Self.height - 4)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+/// `--rearc-site-controls-preview=NAME` opens the site controls on the first
+/// web page, as if the pointer rested on that extension's tile (`NAME:pin`:
+/// on its pin button; `+`: on the last tile), so the hover states can be
+/// looked at without moving the pointer. The preview has its own pins, the
+/// extension IDs in `--rearc-site-controls-preview-pins=ID,ID`: the
+/// person's are neither shown nor changed. Like the self-test it runs only
+/// where verification may (a development build, or a verification bundle
+/// with `REARC_RELEASE_VERIFICATION=1`); a shipped bundle ignores the flags.
+enum SiteControlsPreview {
+    static let flagPrefix = "--rearc-site-controls-preview="
+    static let pinsFlagPrefix = "--rearc-site-controls-preview-pins="
+    static let pinsSuite = "rearc-site-controls-preview"
+    static let requested: String? = requestedTile()
+
+    static func requestedTile(arguments: [String] = CommandLine.arguments,
+                              environment: [String: String] = ProcessInfo.processInfo.environment,
+                              infoDictionary: [String: Any]? = Bundle.main.infoDictionary) -> String? {
+        guard let argument = arguments.dropFirst().last(where: { $0.hasPrefix(flagPrefix) }),
+              EngineLaunchOptions.allowsVerification(infoDictionary: infoDictionary, environment: environment) else { return nil }
+        return String(argument.dropFirst(flagPrefix.count))
+    }
+
+    static func requestedPins(arguments: [String] = CommandLine.arguments) -> ExtensionPins {
+        let list = arguments.dropFirst().last { $0.hasPrefix(pinsFlagPrefix) }?.dropFirst(pinsFlagPrefix.count) ?? ""
+        return ExtensionPins(pinnedIDs: list.split(separator: ",").map(String.init))
+    }
+
+    @MainActor private static var hasOpened = false
+
+    /// Opens the panel once, when the window shows a web page.
+    @MainActor
+    static func openWhenReady(in model: BrowserViewModel) async {
+        guard requested != nil, !hasOpened else { return }
+        hasOpened = true
+        if let scratch = UserDefaults(suiteName: pinsSuite) {
+            scratch.removePersistentDomain(forName: pinsSuite)
+            requestedPins().save(to: scratch)
+            model.extensions.defaults = scratch
+        }
+        while SiteControlCenter.site(for: model.store.selectedTab?.url) == nil {
+            try? await Task.sleep(for: .milliseconds(500))
+            if Task.isCancelled { return }
+        }
+        // The toolbar and the tab's extension list need a moment more.
+        try? await Task.sleep(for: .seconds(2))
+        if !Task.isCancelled { model.showSiteControlCenter() }
     }
 }
 

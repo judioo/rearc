@@ -99,16 +99,88 @@ extension SiteControlCenter {
             case .add: return "+"
             }
         }
+
+        /// The tile's pin button: always on a pinned extension, on an
+        /// unpinned one only while the pointer is over the tile, never on +.
+        public func pinBadge(hovered: Bool) -> PinBadge? {
+            switch self {
+            case .action(_, pinned: true): return .pinned
+            case .action(_, pinned: false): return hovered ? .offered : nil
+            case .add: return nil
+            }
+        }
+
+        /// The small label over the tile under the pointer: the extension's
+        /// name, or what its pin button does while the pointer is on that.
+        public func hoverLabel(onPin: Bool) -> String {
+            switch self {
+            case .action(let item, let pinned):
+                return onPin ? (pinned ? PinBadge.pinned : .offered).title : item.name
+            case .add:
+                return "Chrome Web Store"
+            }
+        }
+    }
+
+    /// The round pin button on a tile's bottom-right corner (Arc
+    /// `SiteControlCenterExtensionPinButton`). A click pins or unpins.
+    public enum PinBadge: Equatable, Sendable {
+        /// Solid blue: the extension is in the toolbar.
+        case pinned
+        /// Faint blue, under the pointer: a click puts it there.
+        case offered
+
+        /// Arc's tooltips for the button.
+        public var title: String {
+            switch self {
+            case .pinned: return "Unpin extension"
+            case .offered: return "Pin extension"
+            }
+        }
+    }
+
+    /// Where the pointer is in the Extensions grid: on a tile, or on that
+    /// tile's pin button.
+    public struct TileHover: Equatable, Sendable {
+        public var id: String
+        public var onPin: Bool
+
+        public init(id: String, onPin: Bool = false) {
+            self.id = id
+            self.onPin = onPin
+        }
+    }
+
+    /// How long the pointer rests on a tile before its label shows. Once
+    /// one shows, the next tile's shows at once, as system tooltips do.
+    public static let hoverLabelDelay: TimeInterval = 0.5
+
+    /// A preview's pointer (`--rearc-site-controls-preview=NAME`, or
+    /// `NAME:pin` for the tile's pin button): the tile by extension name or
+    /// ID, `+` for the last one.
+    public static func previewHover(_ value: String, in tiles: [ExtensionTile]) -> TileHover? {
+        let pinSuffix = ":pin"
+        let onPin = value.hasSuffix(pinSuffix)
+        let name = onPin ? String(value.dropLast(pinSuffix.count)) : value
+        let tile = tiles.first { tile in
+            if case .action(let item, _) = tile, item.name.caseInsensitiveCompare(name) == .orderedSame { return true }
+            return tile.id == name
+        }
+        return tile.map { TileHover(id: $0.id, onPin: onPin) }
     }
 
     public static let extensionColumns = 4
 
     /// Pinned extensions first, in the toolbar's order, then the rest in
     /// the engine's order, then +. Arc's grid starts with the toolbar's icons.
-    public static func extensionTiles(_ actions: [ExtensionActionItem], pins: ExtensionPins) -> [ExtensionTile] {
-        let pinned = pins.pinned(actions)
-        let rest = actions.filter { !pins.isPinned($0.id) }
-        return pinned.map { .action($0, pinned: true) } + rest.map { .action($0, pinned: false) } + [.add]
+    /// `order`: the pins when the panel opened. A tile pinned or unpinned
+    /// while it is open stays under the pointer, so its badge changes in
+    /// place and a second click undoes the first; it moves on the next opening.
+    public static func extensionTiles(_ actions: [ExtensionActionItem], pins: ExtensionPins, order: ExtensionPins? = nil) -> [ExtensionTile] {
+        let order = order ?? pins
+        let first = order.pinned(actions)
+        let rest = actions.filter { !order.isPinned($0.id) }
+        return (first + rest).map { .action($0, pinned: pins.isPinned($0.id)) } + [.add]
     }
 
     /// What a Settings row's menu can do.
