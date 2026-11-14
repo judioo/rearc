@@ -401,12 +401,8 @@ private struct SpaceIconButton: View {
                         .transition(morph)
                 }
             }
-            // A container's space, where its icon (or the current space's dot) shows.
-            .overlay(alignment: .bottomTrailing) {
-                if isCircle || appearance != .dot, let container = model.containerLabel(forSpace: space.id) {
-                    ContainerChip(label: container, style: .badge).scaleEffect(0.8).offset(x: 5, y: 4)
-                }
-            }
+            // A container's space: the ring around its icon or its dot.
+            .containerMark(model.containerLabel(forSpace: space.id), ring: containerRing, badge: isCircle ? 10 : nil)
             .frame(width: width, height: 24)
             .background(isTargeted ? Color.accentColor.opacity(0.35) : .clear, in: RoundedRectangle(cornerRadius: 5))
             .contentShape(Rectangle())
@@ -421,6 +417,16 @@ private struct SpaceIconButton: View {
             return SidebarDragPayload.itemProvider(for: space.id)
         }
         .onDrop(of: [.plainText], delegate: SpaceIconDropDelegate(icon: self, isTargeted: $isTargeted))
+    }
+
+    /// A coloured circle has the current space's ring, so it keeps a badge.
+    private var containerRing: ContainerRing {
+        if isCircle { return .badgeOnly(SpaceCircles.diameter) }
+        switch appearance {
+        case .icon: return .roundedSquare(19)
+        case .largeDot: return .circle(13)
+        case .dot: return .circle(8.5)
+        }
     }
 
     private var circleInk: Color {
@@ -527,7 +533,7 @@ private struct SpaceListView: View {
                     HStack(spacing: 8) {
                         SpaceIconView(iconName: space.iconName)
                             .frame(width: 18)
-                            .containerBadge(model.containerLabel(forSpace: space.id), offset: 2)
+                            .containerMark(model.containerLabel(forSpace: space.id), ring: .roundedSquare(22), badge: nil, surface: .window)
                         Text(space.name)
                             .lineLimit(1)
                         Spacer()

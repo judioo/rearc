@@ -59,7 +59,7 @@ struct SidebarToolbarView: View {
                         }
                     } label: {
                         ProfileAvatarView(profile: profile, diameter: 18, sidebarBadge: chrome.badge)
-                            .containerBadge(model.containerLabel(forSpace: model.space(in: window).id))
+                            .containerMark(model.containerLabel(forSpace: model.space(in: window).id), ring: .circle(24))
                     }
                         // A plain button draws the badge as is (the borderless style dims it).
                         .menuStyle(.button)

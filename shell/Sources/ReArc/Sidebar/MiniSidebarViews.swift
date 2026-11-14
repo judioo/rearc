@@ -455,6 +455,8 @@ struct MiniSpaceHeaderView: View {
             SpaceIconView(iconName: space.iconName, size: 15)
                 .foregroundStyle(chrome.accent)
                 .frame(width: 18, height: 18)
+                // A container's space: the ring around the icon, under the profile's avatar.
+                .containerMark(model.containerLabel(forSpace: space.id), ring: .roundedSquare(24), badge: nil)
                 .overlay(alignment: .topTrailing) {
                     if let badge {
                         Circle().fill(badge).frame(width: 6, height: 6).offset(x: 4, y: -3)
@@ -464,12 +466,6 @@ struct MiniSpaceHeaderView: View {
                     if model.store.listedProfiles.count > 1, let profile {
                         ProfileAvatarView(profile: profile, diameter: 11, sidebarBadge: chrome.badge)
                             .offset(x: 6, y: 5)
-                    }
-                }
-                // A container's space: the badge at the icon's other corner.
-                .overlay(alignment: .bottomLeading) {
-                    if let container = model.containerLabel(forSpace: space.id) {
-                        ContainerChip(label: container, style: .badge).offset(x: -4, y: 5)
                     }
                 }
                 .frame(width: CGFloat(MiniSidebarLayout.highlight), height: SidebarMetrics.headerHeight)

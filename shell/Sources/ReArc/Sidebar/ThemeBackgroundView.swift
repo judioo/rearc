@@ -158,6 +158,9 @@ struct ThemeChromeColors: Equatable {
     var badge: SidebarBadgeInk
     /// The update notice's pill, warning ink and card (`UpdateNoticeInk`).
     var updateNotice: UpdateNoticeInk
+    /// What the sidebar's chrome is drawn on: a container's ring and badge
+    /// are fitted to it by their own colour (`ContainerMarkInk`).
+    var backdrop: SidebarBackdrop
 
     /// `dark` picks the chrome's roles; text and glyphs are then fitted to
     /// the sidebar's backdrop in the window's appearance (`backdrop`, by
@@ -193,6 +196,7 @@ struct ThemeChromeColors: Equatable {
         isWindowDark = windowDark ?? dark
         badge = SidebarBadgeInk(chrome: chrome, dark: dark)
         updateNotice = UpdateNoticeInk(backdrop: backdrop, lightInk: dark, accent: chrome.accent)
+        self.backdrop = backdrop
     }
 
     static let fallback = ThemeChromeColors(theme: .arcDefault, dark: false)

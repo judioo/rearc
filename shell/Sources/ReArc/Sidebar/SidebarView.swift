@@ -318,7 +318,7 @@ struct SpaceHeaderView: View {
             SpaceIconView(iconName: space.iconName, size: 15)
                 .foregroundStyle(chrome.accent)
                 .frame(width: 18, height: 18)
-                .containerBadge(model.containerLabel(forSpace: space.id), offset: 2)
+                .containerMark(model.containerLabel(forSpace: space.id), ring: .roundedSquare(24), badge: nil)
                 .padding(.leading, SidebarMetrics.iconLeading - 1)
                 .padding(.trailing, SidebarMetrics.iconToText - 1)
             Group {
@@ -364,15 +364,15 @@ struct SpaceHeaderView: View {
                 .padding(.trailing, 8)
                 .help("Space options")
             }
-            // The space's profile, its parent for a container's space; the badge is an
-            // overlay, so the avatar keeps its place.
+            // The space's profile, its parent for a container's space; the ring and badge
+            // are overlays, so the avatar keeps its place.
             if let profile = model.store.profile(withID: model.store.owningProfileID(of: space.profileID)) {
                 let container = model.containerLabel(forSpace: space.id)
                 Menu {
                     SpaceProfileChoices(model: model, space: space, heading: "Switch Space to Profile")
                 } label: {
                     ProfileAvatarView(profile: profile, diameter: 18, sidebarBadge: chrome.badge)
-                        .containerBadge(container)
+                        .containerMark(container, ring: .circle(24))
                 }
                     // A plain button draws the badge as is (the borderless style dims it).
                     .menuStyle(.button)

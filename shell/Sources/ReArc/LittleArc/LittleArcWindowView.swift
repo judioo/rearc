@@ -290,7 +290,7 @@ struct LittleArcWindowView: View {
                 ProfileMenuChoices(store: model.store, active: record.profileID, includesContainers: true) { model.changeLittleArcProfile(windowID, to: $0) }
             } label: {
                 ProfileAvatarView(profile: profile, diameter: 20)
-                    .containerBadge(container)
+                    .containerMark(container, ring: .circle(26), surface: .window)
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
